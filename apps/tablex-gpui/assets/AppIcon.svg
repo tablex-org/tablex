@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- TableX app icon: a table drawn in one white line on a dark ground, its header row the
+       only colour. macOS grid: an 824 px rounded square centred on a 1024 canvas. Rendered to
+       AppIcon.png (1024 px) for scripts/bundle-macos.sh with:
+       rsvg-convert -w 1024 -h 1024 AppIcon.svg -o AppIcon.png -->
+  <defs>
+    <linearGradient id="ground" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2A3142"/>
+      <stop offset="1" stop-color="#12151D"/>
+    </linearGradient>
+    <clipPath id="table">
+      <rect x="272" y="302" width="480" height="420" rx="72"/>
+    </clipPath>
+  </defs>
+
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#ground)"/>
+  <rect x="101" y="101" width="822" height="822" rx="184" fill="none" stroke="#FFFFFF" stroke-opacity="0.08" stroke-width="2"/>
+
+  <!-- Header row -->
+  <rect x="272" y="302" width="480" height="132" fill="#5B8CFF" clip-path="url(#table)"/>
+
+  <!-- The table in one line weight -->
+  <g fill="none" stroke="#FFFFFF" stroke-width="34" stroke-linecap="round">
+    <rect x="272" y="302" width="480" height="420" rx="72"/>
+    <line x1="272" y1="434" x2="752" y2="434"/>
+    <line x1="272" y1="578" x2="752" y2="578"/>
+    <line x1="432" y1="434" x2="432" y2="722"/>
+  </g>
+</svg>
