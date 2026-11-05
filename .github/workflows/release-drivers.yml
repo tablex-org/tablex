@@ -373,9 +373,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # Never "latest": that label belongs to the app release (release-app.yml), which
+          # is what a visitor of the Releases page wants.
           gh release view "${RELEASE_TAG}" >/dev/null 2>&1 || \
-            gh release create "${RELEASE_TAG}" --title "${RELEASE_TAG}" \
-              --notes "Driver release ${RELEASE_TAG}"
+            gh release create "${RELEASE_TAG}" --title "Drivers ${RELEASE_TAG#drivers-v}" --latest=false \
+              --notes "Driver plugins and tools for TableX, installed by the app from Driver Manager (this is not the app)."
           shopt -s nullglob
           assets=(
             dist/drivers/libdbengine_*.dylib.zip
