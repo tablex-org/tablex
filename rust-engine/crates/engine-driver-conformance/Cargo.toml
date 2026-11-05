@@ -1,0 +1,12 @@
+[package]
+name = "engine-driver-conformance"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Black-box conformance suite for SQL drivers: loads a driver dylib through the host and checks every rule of engine_driver_api::sql"
+
+[dependencies]
+engine-driver-api = { path = "../engine-driver-api" }
+engine-driver-host = { path = "../engine-driver-host" }
+serde_json = "1.0"
+tempfile = "3.14"

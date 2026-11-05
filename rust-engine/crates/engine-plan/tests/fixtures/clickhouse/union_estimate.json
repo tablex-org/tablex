@@ -1,0 +1,413 @@
+-- server: ClickHouse 26.9.12.8
+-- statement: EXPLAIN json = 1, actions = 1, indexes = 1 SELECT id, name FROM plan_t1 WHERE val < 10 UNION DISTINCT SELECT id, name FROM plan_t1 WHERE grp = 3
+[
+  {
+    "Plan": {
+      "Node Type": "Distinct",
+      "Node Id": "Distinct_11",
+      "Columns": ["id", "name"],
+      "Plans": [
+        {
+          "Node Type": "Union",
+          "Node Id": "Union_10",
+          "Plans": [
+            {
+              "Node Type": "Expression",
+              "Node Id": "Expression_13",
+              "Description": "(Project names + Projection)",
+              "Expression": {
+                "Inputs": [
+                  {
+                    "Name": "__table2.id",
+                    "Type": "UInt32"
+                  },
+                  {
+                    "Name": "__table2.name",
+                    "Type": "String"
+                  }
+                ],
+                "Actions": [
+                  {
+                    "Node Type": "INPUT",
+                    "Result Type": "UInt32",
+                    "Result Name": "__table2.id",
+                    "Arguments": [0],
+                    "Removed Arguments": [],
+                    "Result": 0
+                  },
+                  {
+                    "Node Type": "INPUT",
+                    "Result Type": "String",
+                    "Result Name": "__table2.name",
+                    "Arguments": [1],
+                    "Removed Arguments": [],
+                    "Result": 1
+                  },
+                  {
+                    "Node Type": "ALIAS",
+                    "Result Type": "UInt32",
+                    "Result Name": "id",
+                    "Arguments": [0],
+                    "Removed Arguments": [0],
+                    "Result": 2
+                  },
+                  {
+                    "Node Type": "ALIAS",
+                    "Result Type": "String",
+                    "Result Name": "name",
+                    "Arguments": [1],
+                    "Removed Arguments": [1],
+                    "Result": 0
+                  }
+                ],
+                "Outputs": [
+                  {
+                    "Name": "id",
+                    "Type": "UInt32"
+                  },
+                  {
+                    "Name": "name",
+                    "Type": "String"
+                  }
+                ],
+                "Positions": [2, 0]
+              },
+              "Plans": [
+                {
+                  "Node Type": "Expression",
+                  "Node Id": "Expression_16",
+                  "Description": "(WHERE + Change column names to column identifiers)",
+                  "Expression": {
+                    "Inputs": [
+                      {
+                        "Name": "id",
+                        "Type": "UInt32"
+                      },
+                      {
+                        "Name": "name",
+                        "Type": "String"
+                      }
+                    ],
+                    "Actions": [
+                      {
+                        "Node Type": "INPUT",
+                        "Result Type": "UInt32",
+                        "Result Name": "id",
+                        "Arguments": [0],
+                        "Removed Arguments": [],
+                        "Result": 0
+                      },
+                      {
+                        "Node Type": "INPUT",
+                        "Result Type": "String",
+                        "Result Name": "name",
+                        "Arguments": [1],
+                        "Removed Arguments": [],
+                        "Result": 1
+                      },
+                      {
+                        "Node Type": "ALIAS",
+                        "Result Type": "UInt32",
+                        "Result Name": "__table2.id",
+                        "Arguments": [0],
+                        "Removed Arguments": [0],
+                        "Result": 2
+                      },
+                      {
+                        "Node Type": "ALIAS",
+                        "Result Type": "String",
+                        "Result Name": "__table2.name",
+                        "Arguments": [1],
+                        "Removed Arguments": [1],
+                        "Result": 0
+                      }
+                    ],
+                    "Outputs": [
+                      {
+                        "Name": "__table2.id",
+                        "Type": "UInt32"
+                      },
+                      {
+                        "Name": "__table2.name",
+                        "Type": "String"
+                      }
+                    ],
+                    "Positions": [2, 0]
+                  },
+                  "Plans": [
+                    {
+                      "Node Type": "ReadFromMergeTree",
+                      "Node Id": "ReadFromMergeTree_0",
+                      "Description": "tablex.plan_t1",
+                      "Read Type": "Default",
+                      "Parts": 1,
+                      "Granules": 1,
+                      "Prewhere info": {
+                        "Need filter": true,
+                        "Prewhere filter": {
+                          "Prewhere filter column": "less(__table2.val, 10_UInt8)",
+                          "Prewhere filter remove filter column": true,
+                          "Prewhere filter expression": {
+                            "Inputs": [
+                              {
+                                "Name": "val",
+                                "Type": "UInt32"
+                              }
+                            ],
+                            "Actions": [
+                              {
+                                "Node Type": "INPUT",
+                                "Result Type": "UInt32",
+                                "Result Name": "val",
+                                "Arguments": [0],
+                                "Removed Arguments": [],
+                                "Result": 0
+                              },
+                              {
+                                "Node Type": "COLUMN",
+                                "Result Type": "UInt8",
+                                "Result Name": "10_UInt8",
+                                "Column": "Const(UInt8)",
+                                "Arguments": [],
+                                "Removed Arguments": [],
+                                "Result": 1
+                              },
+                              {
+                                "Node Type": "FUNCTION",
+                                "Result Type": "UInt8",
+                                "Result Name": "less(__table2.val, 10_UInt8)",
+                                "Function": "less",
+                                "Compiled": false,
+                                "Arguments": [0, 1],
+                                "Removed Arguments": [0, 1],
+                                "Result": 2
+                              }
+                            ],
+                            "Outputs": [
+                              {
+                                "Name": "less(__table2.val, 10_UInt8)",
+                                "Type": "UInt8"
+                              }
+                            ],
+                            "Positions": [2]
+                          }
+                        }
+                      },
+                      "Indexes": [
+                        {
+                          "Type": "PrimaryKey",
+                          "Condition": "true",
+                          "Initial Parts": 1,
+                          "Selected Parts": 1,
+                          "Initial Granules": 1,
+                          "Selected Granules": 1
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "Node Type": "Expression",
+              "Node Id": "Expression_15",
+              "Description": "(Project names + Projection)",
+              "Expression": {
+                "Inputs": [
+                  {
+                    "Name": "__table4.id",
+                    "Type": "UInt32"
+                  },
+                  {
+                    "Name": "__table4.name",
+                    "Type": "String"
+                  }
+                ],
+                "Actions": [
+                  {
+                    "Node Type": "INPUT",
+                    "Result Type": "UInt32",
+                    "Result Name": "__table4.id",
+                    "Arguments": [0],
+                    "Removed Arguments": [],
+                    "Result": 0
+                  },
+                  {
+                    "Node Type": "INPUT",
+                    "Result Type": "String",
+                    "Result Name": "__table4.name",
+                    "Arguments": [1],
+                    "Removed Arguments": [],
+                    "Result": 1
+                  },
+                  {
+                    "Node Type": "ALIAS",
+                    "Result Type": "UInt32",
+                    "Result Name": "id",
+                    "Arguments": [0],
+                    "Removed Arguments": [0],
+                    "Result": 2
+                  },
+                  {
+                    "Node Type": "ALIAS",
+                    "Result Type": "String",
+                    "Result Name": "name",
+                    "Arguments": [1],
+                    "Removed Arguments": [1],
+                    "Result": 0
+                  }
+                ],
+                "Outputs": [
+                  {
+                    "Name": "id",
+                    "Type": "UInt32"
+                  },
+                  {
+                    "Name": "name",
+                    "Type": "String"
+                  }
+                ],
+                "Positions": [2, 0]
+              },
+              "Plans": [
+                {
+                  "Node Type": "Expression",
+                  "Node Id": "Expression_17",
+                  "Description": "(WHERE + Change column names to column identifiers)",
+                  "Expression": {
+                    "Inputs": [
+                      {
+                        "Name": "id",
+                        "Type": "UInt32"
+                      },
+                      {
+                        "Name": "name",
+                        "Type": "String"
+                      }
+                    ],
+                    "Actions": [
+                      {
+                        "Node Type": "INPUT",
+                        "Result Type": "UInt32",
+                        "Result Name": "id",
+                        "Arguments": [0],
+                        "Removed Arguments": [],
+                        "Result": 0
+                      },
+                      {
+                        "Node Type": "INPUT",
+                        "Result Type": "String",
+                        "Result Name": "name",
+                        "Arguments": [1],
+                        "Removed Arguments": [],
+                        "Result": 1
+                      },
+                      {
+                        "Node Type": "ALIAS",
+                        "Result Type": "UInt32",
+                        "Result Name": "__table4.id",
+                        "Arguments": [0],
+                        "Removed Arguments": [0],
+                        "Result": 2
+                      },
+                      {
+                        "Node Type": "ALIAS",
+                        "Result Type": "String",
+                        "Result Name": "__table4.name",
+                        "Arguments": [1],
+                        "Removed Arguments": [1],
+                        "Result": 0
+                      }
+                    ],
+                    "Outputs": [
+                      {
+                        "Name": "__table4.id",
+                        "Type": "UInt32"
+                      },
+                      {
+                        "Name": "__table4.name",
+                        "Type": "String"
+                      }
+                    ],
+                    "Positions": [2, 0]
+                  },
+                  "Plans": [
+                    {
+                      "Node Type": "ReadFromMergeTree",
+                      "Node Id": "ReadFromMergeTree_5",
+                      "Description": "tablex.plan_t1",
+                      "Read Type": "Default",
+                      "Parts": 1,
+                      "Granules": 1,
+                      "Prewhere info": {
+                        "Need filter": true,
+                        "Prewhere filter": {
+                          "Prewhere filter column": "equals(__table4.grp, 3_UInt8)",
+                          "Prewhere filter remove filter column": true,
+                          "Prewhere filter expression": {
+                            "Inputs": [
+                              {
+                                "Name": "grp",
+                                "Type": "UInt32"
+                              }
+                            ],
+                            "Actions": [
+                              {
+                                "Node Type": "INPUT",
+                                "Result Type": "UInt32",
+                                "Result Name": "grp",
+                                "Arguments": [0],
+                                "Removed Arguments": [],
+                                "Result": 0
+                              },
+                              {
+                                "Node Type": "COLUMN",
+                                "Result Type": "UInt8",
+                                "Result Name": "3_UInt8",
+                                "Column": "Const(UInt8)",
+                                "Arguments": [],
+                                "Removed Arguments": [],
+                                "Result": 1
+                              },
+                              {
+                                "Node Type": "FUNCTION",
+                                "Result Type": "UInt8",
+                                "Result Name": "equals(__table4.grp, 3_UInt8)",
+                                "Function": "equals",
+                                "Compiled": false,
+                                "Arguments": [0, 1],
+                                "Removed Arguments": [0, 1],
+                                "Result": 2
+                              }
+                            ],
+                            "Outputs": [
+                              {
+                                "Name": "equals(__table4.grp, 3_UInt8)",
+                                "Type": "UInt8"
+                              }
+                            ],
+                            "Positions": [2]
+                          }
+                        }
+                      },
+                      "Indexes": [
+                        {
+                          "Type": "PrimaryKey",
+                          "Condition": "true",
+                          "Initial Parts": 1,
+                          "Selected Parts": 1,
+                          "Initial Granules": 1,
+                          "Selected Granules": 1
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  }
+]

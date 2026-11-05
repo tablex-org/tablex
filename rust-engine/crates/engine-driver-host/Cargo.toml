@@ -1,0 +1,26 @@
+[package]
+name = "engine-driver-host"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+arrow-array = { version = "53", features = ["ffi"] }
+arrow-buffer = "53"
+arrow-data = "53"
+base64 = "0.22"
+ed25519-dalek = { version = "2.2", default-features = false }
+engine-driver-api = { path = "../engine-driver-api" }
+libc = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["raw_value"] }
+sha2 = "0.10"
+thiserror = "2.0"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_LibraryLoader"] }
+
+[dev-dependencies]
+arrow-schema = "53"
+futures = "0.3"
+sha2 = "0.10"
+tempfile = "3.14"

@@ -1,0 +1,22 @@
+[package]
+name = "tablex-sqruff"
+version = "0.1.0"
+edition = "2021"
+description = "The optional SQL formatter tool: sqruff's layout and keyword-case rules, run out of process."
+
+[lib]
+name = "tablex_sqruff"
+
+[[bin]]
+name = "tablex-sqruff"
+path = "src/main.rs"
+
+[dependencies]
+engine-driver-api = { path = "../engine-driver-api" }
+# Apache-2.0 (https://github.com/quarylabs/sqruff). Pinned: the linter's rule names and defaults are
+# the contract of `config`. Linked into this executable only, never into the app.
+sqruff-lib = "=0.42.0"
+
+[dev-dependencies]
+engine-driver-host = { path = "../engine-driver-host" }
+engine-driver-kit = { path = "../engine-driver-kit" }

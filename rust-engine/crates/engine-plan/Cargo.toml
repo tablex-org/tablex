@@ -1,0 +1,12 @@
+[package]
+name = "engine-plan"
+version = "0.1.0"
+edition = "2021"
+description = "Per-dialect EXPLAIN statement builder and plan parser (pure, no I/O)"
+
+[dependencies]
+# The lexer the drivers use: executable comments, dollar quotes, escape modes.
+engine-driver-kit = { path = "../engine-driver-kit" }
+# preserve_order keeps JSON keys in document order, so `props` order is stable.
+serde_json = { version = "1.0", features = ["preserve_order"] }
+thiserror = "2.0"

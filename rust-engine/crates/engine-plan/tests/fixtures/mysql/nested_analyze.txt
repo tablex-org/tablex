@@ -1,0 +1,7 @@
+-- server: MySQL 8.4.11
+-- statement: EXPLAIN ANALYZE SELECT t1.name, t2.amount FROM plan_t1 t1 JOIN plan_t2 t2 ON t2.t1_id = t1.id WHERE t1.id < 20
+-> Nested loop inner join  (cost=30.3 rows=75) (actual time=0.602..0.663 rows=76 loops=1)
+    -> Filter: (t1.id < 20)  (cost=4.06 rows=19) (actual time=0.5..0.509 rows=19 loops=1)
+        -> Index range scan on t1 using PRIMARY over (id < 20)  (cost=4.06 rows=19) (actual time=0.49..0.497 rows=19 loops=1)
+    -> Index lookup on t2 using plan_t2_t1_idx (t1_id=t1.id)  (cost=1.01 rows=3.95) (actual time=0.00663..0.00688 rows=4 loops=19)
+

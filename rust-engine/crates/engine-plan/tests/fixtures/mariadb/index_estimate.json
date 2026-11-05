@@ -1,0 +1,25 @@
+-- server: MariaDB 11.8.9
+-- statement: EXPLAIN FORMAT=JSON SELECT * FROM plan_t2 WHERE t1_id = 42
+{
+  "query_block": {
+    "select_id": 1,
+    "cost": 0.00889648,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "plan_t2",
+          "access_type": "ref",
+          "possible_keys": ["plan_t2_t1_idx"],
+          "key": "plan_t2_t1_idx",
+          "key_length": "4",
+          "used_key_parts": ["t1_id"],
+          "ref": ["const"],
+          "loops": 1,
+          "rows": 4,
+          "cost": 0.00889648,
+          "filtered": 100
+        }
+      }
+    ]
+  }
+}

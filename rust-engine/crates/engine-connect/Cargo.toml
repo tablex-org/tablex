@@ -1,0 +1,40 @@
+[package]
+name = "engine-connect"
+version = "0.1.0"
+edition = "2021"
+description = "UI-free \"open a saved connection\" for TableX: records, credentials, SSH tunnel rules, driver trust and loading, connection profile and the Connector shared by the app and tablex-mcp"
+
+[features]
+# Test doubles (in-memory credential store, scripted tunnel opener, record fixtures) for the
+# app's own tests and UI scenarios. Never in a shipped build.
+testing = []
+# Trusts the development manifest key (always on in debug builds). Never enabled by release CI:
+# an official build must not trust a key whose private half is held outside the repository.
+dev-keys = []
+
+[dependencies]
+engine-agent = { path = "../engine-agent" }
+engine-driver-api = { path = "../engine-driver-api" }
+engine-driver-host = { path = "../engine-driver-host" }
+engine-net = { path = "../engine-net" }
+engine-storage = { path = "../engine-storage" }
+dirs = "5"
+keyring = "4"
+percent-encoding = "2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+thiserror = "2.0"
+url = "2"
+zeroize = "1"
+uuid = { version = "0.8", features = ["v4"] }
+
+[dev-dependencies]
+# The integration tests use the test doubles of this very crate.
+engine-connect = { path = ".", features = ["testing"] }
+tempfile = "3.14"
+
+# Opt-in Keychain test: proves items written through Security.framework (the old
+# backend, the Swift app) stay readable through `keyring`.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+security-framework = "3.7"

@@ -1,0 +1,257 @@
+-- server: ClickHouse 26.9.12.8
+-- statement: EXPLAIN json = 1, actions = 1, indexes = 1 SELECT * FROM plan_t2 WHERE t1_id = 42
+[
+  {
+    "Plan": {
+      "Node Type": "Expression",
+      "Node Id": "Expression_6",
+      "Description": "(Project names + Projection)",
+      "Expression": {
+        "Inputs": [
+          {
+            "Name": "__table1.id",
+            "Type": "UInt32"
+          },
+          {
+            "Name": "__table1.t1_id",
+            "Type": "UInt32"
+          },
+          {
+            "Name": "__table1.amount",
+            "Type": "Float64"
+          }
+        ],
+        "Actions": [
+          {
+            "Node Type": "INPUT",
+            "Result Type": "UInt32",
+            "Result Name": "__table1.id",
+            "Arguments": [0],
+            "Removed Arguments": [],
+            "Result": 0
+          },
+          {
+            "Node Type": "INPUT",
+            "Result Type": "UInt32",
+            "Result Name": "__table1.t1_id",
+            "Arguments": [1],
+            "Removed Arguments": [],
+            "Result": 1
+          },
+          {
+            "Node Type": "INPUT",
+            "Result Type": "Float64",
+            "Result Name": "__table1.amount",
+            "Arguments": [2],
+            "Removed Arguments": [],
+            "Result": 2
+          },
+          {
+            "Node Type": "ALIAS",
+            "Result Type": "UInt32",
+            "Result Name": "id",
+            "Arguments": [0],
+            "Removed Arguments": [0],
+            "Result": 3
+          },
+          {
+            "Node Type": "ALIAS",
+            "Result Type": "UInt32",
+            "Result Name": "t1_id",
+            "Arguments": [1],
+            "Removed Arguments": [1],
+            "Result": 0
+          },
+          {
+            "Node Type": "ALIAS",
+            "Result Type": "Float64",
+            "Result Name": "amount",
+            "Arguments": [2],
+            "Removed Arguments": [2],
+            "Result": 1
+          }
+        ],
+        "Outputs": [
+          {
+            "Name": "id",
+            "Type": "UInt32"
+          },
+          {
+            "Name": "t1_id",
+            "Type": "UInt32"
+          },
+          {
+            "Name": "amount",
+            "Type": "Float64"
+          }
+        ],
+        "Positions": [3, 0, 1]
+      },
+      "Plans": [
+        {
+          "Node Type": "Expression",
+          "Node Id": "Expression_7",
+          "Description": "(WHERE + Change column names to column identifiers)",
+          "Expression": {
+            "Inputs": [
+              {
+                "Name": "id",
+                "Type": "UInt32"
+              },
+              {
+                "Name": "t1_id",
+                "Type": "UInt32"
+              },
+              {
+                "Name": "amount",
+                "Type": "Float64"
+              }
+            ],
+            "Actions": [
+              {
+                "Node Type": "INPUT",
+                "Result Type": "UInt32",
+                "Result Name": "id",
+                "Arguments": [0],
+                "Removed Arguments": [],
+                "Result": 0
+              },
+              {
+                "Node Type": "INPUT",
+                "Result Type": "Float64",
+                "Result Name": "amount",
+                "Arguments": [2],
+                "Removed Arguments": [],
+                "Result": 1
+              },
+              {
+                "Node Type": "INPUT",
+                "Result Type": "UInt32",
+                "Result Name": "t1_id",
+                "Arguments": [1],
+                "Removed Arguments": [],
+                "Result": 2
+              },
+              {
+                "Node Type": "ALIAS",
+                "Result Type": "UInt32",
+                "Result Name": "__table1.id",
+                "Arguments": [0],
+                "Removed Arguments": [0],
+                "Result": 3
+              },
+              {
+                "Node Type": "ALIAS",
+                "Result Type": "Float64",
+                "Result Name": "__table1.amount",
+                "Arguments": [1],
+                "Removed Arguments": [1],
+                "Result": 0
+              },
+              {
+                "Node Type": "ALIAS",
+                "Result Type": "UInt32",
+                "Result Name": "__table1.t1_id",
+                "Arguments": [2],
+                "Removed Arguments": [2],
+                "Result": 1
+              }
+            ],
+            "Outputs": [
+              {
+                "Name": "__table1.id",
+                "Type": "UInt32"
+              },
+              {
+                "Name": "__table1.t1_id",
+                "Type": "UInt32"
+              },
+              {
+                "Name": "__table1.amount",
+                "Type": "Float64"
+              }
+            ],
+            "Positions": [3, 1, 0]
+          },
+          "Plans": [
+            {
+              "Node Type": "ReadFromMergeTree",
+              "Node Id": "ReadFromMergeTree_0",
+              "Description": "tablex.plan_t2",
+              "Read Type": "Default",
+              "Parts": 1,
+              "Granules": 1,
+              "Prewhere info": {
+                "Need filter": true,
+                "Prewhere filter": {
+                  "Prewhere filter column": "equals(__table1.t1_id, 42_UInt8)",
+                  "Prewhere filter remove filter column": true,
+                  "Prewhere filter expression": {
+                    "Inputs": [
+                      {
+                        "Name": "t1_id",
+                        "Type": "UInt32"
+                      }
+                    ],
+                    "Actions": [
+                      {
+                        "Node Type": "INPUT",
+                        "Result Type": "UInt32",
+                        "Result Name": "t1_id",
+                        "Arguments": [0],
+                        "Removed Arguments": [],
+                        "Result": 0
+                      },
+                      {
+                        "Node Type": "COLUMN",
+                        "Result Type": "UInt8",
+                        "Result Name": "42_UInt8",
+                        "Column": "Const(UInt8)",
+                        "Arguments": [],
+                        "Removed Arguments": [],
+                        "Result": 1
+                      },
+                      {
+                        "Node Type": "FUNCTION",
+                        "Result Type": "UInt8",
+                        "Result Name": "equals(__table1.t1_id, 42_UInt8)",
+                        "Function": "equals",
+                        "Compiled": false,
+                        "Arguments": [0, 1],
+                        "Removed Arguments": [1],
+                        "Result": 2
+                      }
+                    ],
+                    "Outputs": [
+                      {
+                        "Name": "t1_id",
+                        "Type": "UInt32"
+                      },
+                      {
+                        "Name": "equals(__table1.t1_id, 42_UInt8)",
+                        "Type": "UInt8"
+                      }
+                    ],
+                    "Positions": [0, 2]
+                  }
+                }
+              },
+              "Indexes": [
+                {
+                  "Type": "PrimaryKey",
+                  "Keys": ["t1_id"],
+                  "Condition": "(t1_id in [42, 42])",
+                  "Search Algorithm": "binary search",
+                  "Initial Parts": 1,
+                  "Selected Parts": 1,
+                  "Initial Granules": 2,
+                  "Selected Granules": 1
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  }
+]

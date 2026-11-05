@@ -1,0 +1,8 @@
+-- server: SQLite 3.45.3 (python sqlite3 module: the sqlite3 CLI renders EQP as a tree, not rows)
+-- columns: id, parent, notused, detail (tab separated)
+-- statement: EXPLAIN QUERY PLAN SELECT id, name FROM plan_t1 WHERE val < 10 UNION SELECT id, name FROM plan_t1 WHERE grp = 3
+1	0	0	COMPOUND QUERY
+2	1	0	LEFT-MOST SUBQUERY
+5	2	0	SCAN plan_t1
+14	1	0	UNION USING TEMP B-TREE
+16	14	0	SCAN plan_t1

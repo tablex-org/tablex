@@ -1,0 +1,423 @@
+name: Release Drivers
+
+# Builds, verifies, packages, signs and publishes the seven driver plugins
+# (postgresql mysql mariadb sqlite mongodb redis clickhouse) with the same
+# scripts dev packaging uses (rust-engine/scripts, see its README.md), and the
+# standalone MCP server `tablex-mcp` (installed from Driver Manager > Tools) and the
+# MongoDB Shell plugin `tablex-mongo-shell` (an add-on of the MongoDB driver, installed
+# from its row in the Driver Manager; a tool entry with `requires: mongodb >= <driver version>`) and
+# the SQL formatter `tablex-sqruff` (sqruff in its own process, a free-standing tool of the Tools
+# section; its entry names the Apache-2.0 licence and the sqruff repository):
+#   build job (matrix, NO secrets)  -> build-driver.sh + verify-driver.sh -> artifact
+#                                      (library + the host's inspect JSON, per target)
+#                                   -> cargo build --profile dist -p tablex-mcp
+#                                      (`--version` smoke on the runner's own build)
+#                                   -> rust-engine/scripts/build-plugin.sh [--crate tablex-sqruff]
+#                                      (hello-frame smoke on the runner's own build)
+#   release job (secrets, `release` environment, one runner)
+#                                   -> package-driver.sh --target <matrix target>
+#                                      (macOS: codesign + zip + dlopen verify;
+#                                       Linux / Windows: the bare library, the
+#                                       inspect JSON of its own runner)
+#                                   -> tablex-mcp: codesign (macOS), then
+#                                      driver_manifest.py tool-entry (size + SHA-256
+#                                      of the final file)
+#                                   -> tablex-mongo-shell: package-plugin.sh (codesign on
+#                                      macOS, tool entry that requires the mongodb driver of
+#                                      this checkout)
+#                                   -> tablex-sqruff: package-plugin.sh --tool tablex-sqruff (the same,
+#                                      no driver requirement)
+#                                   -> driver_manifest.py merge --release
+#                                   -> driver_manifest.py sign (LAST)
+#                                   -> GitHub Release assets
+#
+# The tool's version is the `version` in apps/tablex-mcp/Cargo.toml and the app
+# offers an update when it differs from the installed one: bump it in the
+# commit that changes the server. The plugin's is the `version` of
+# rust-engine/crates/tablex-mongo-shell; the oldest driver it works with is the
+# `version` of rust-engine/crates/dbengine-mongo in the same checkout (the driver
+# that has the `mongo.command` op), so bump the driver's version when its ops change. The
+# formatter's is the `version` of rust-engine/crates/tablex-sqruff.
+#
+# Run it from a `drivers-v*` tag only: push the tag, or "Run workflow" with the
+# tag selected as the ref. Never add pull_request / pull_request_target here.
+on:
+  push:
+    tags:
+      - "drivers-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-drivers-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    # Forks skip: RELEASE_OWNER is a repository variable (Settings > Variables).
+    if: github.repository_owner == vars.RELEASE_OWNER && github.ref_type == 'tag' && startsWith(github.ref_name, 'drivers-v')
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: macos-aarch64
+            os: macos-14
+            experimental: false
+          # package-driver.sh --target now packages it on the arm64 release job
+          # from this runner's inspect JSON; flip `experimental` once a tag run
+          # has shown the signed x86_64 zip installs on an Intel Mac.
+          - target: macos-x86_64
+            os: macos-15-intel
+            experimental: true
+          # The scripts emit .so / .dll here, but the app's Linux / Windows
+          # driver loading is not finished: these jobs must not block the
+          # release, and a failing one simply publishes nothing for its target.
+          - target: linux-x86_64
+            os: ubuntu-24.04
+            experimental: true
+          - target: linux-aarch64
+            os: ubuntu-24.04-arm
+            experimental: true
+          - target: windows-x86_64
+            os: windows-2022
+            experimental: true
+    defaults:
+      run:
+        shell: bash
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
+      - name: Build and verify all drivers
+        run: |
+          set -euo pipefail
+          source rust-engine/scripts/driver-registry.sh
+          mkdir -p out
+          for id in ${ALL_DRIVER_IDS}; do
+            dylib="$(rust-engine/scripts/build-driver.sh "${id}")"
+            # The inspect JSON is what the release job packages from for a target
+            # it cannot load (package-driver.sh --inspect).
+            rust-engine/scripts/verify-driver.sh "${dylib}" --json "out/${id}.inspect.json"
+            cp "${dylib}" out/
+          done
+          ls -l out
+      # The MCP server (root cargo workspace, `dist` profile: fat LTO, stripped).
+      # It is built unsigned here and signed by the release job. On the
+      # experimental targets a failure here only drops that target's server.
+      - name: Build tablex-mcp
+        continue-on-error: ${{ matrix.experimental }}
+        run: |
+          set -euo pipefail
+          cargo build --profile dist --locked -p tablex-mcp
+          exe="target/dist/tablex-mcp"
+          [[ "${{ matrix.target }}" == windows-* ]] && exe="${exe}.exe"
+          # Our own just-built binary on a runner that has no secrets; it prints
+          # its version and exits (no server, no connection, no network).
+          "./${exe}" --version
+          name="tablex-mcp-${{ matrix.target }}"
+          [[ "${{ matrix.target }}" == windows-* ]] && name="${name}.exe"
+          cp "${exe}" "out/${name}"
+          ls -l out/tablex-mcp-*
+      # The MongoDB Shell plugin: one executable (QuickJS compiled by `cc`), built like a driver
+      # (release profile, strip policy of build-driver.sh) and signed by the release job. A
+      # failure on an experimental target only drops that target's plugin.
+      - name: Build the MongoDB Shell plugin
+        continue-on-error: ${{ matrix.experimental }}
+        run: |
+          set -euo pipefail
+          exe="$(rust-engine/scripts/build-plugin.sh)"
+          # Our own just-built executable on a runner that has no secrets: it says hello (the
+          # first frame, a length and JSON) and ends when its stdin does; it runs no script.
+          hello="$("${exe}" < /dev/null 2>/dev/null | head -c 64 | tr -d '\000-\010\013-\037' || true)"
+          case "${hello}" in *'"hello"'*) ;; *) echo "the plugin did not say hello: ${hello}" >&2; exit 1 ;; esac
+          name="tablex-mongo-shell-${{ matrix.target }}"
+          [[ "${{ matrix.target }}" == windows-* ]] && name="${name}.exe"
+          cp "${exe}" "out/${name}"
+          ls -l out/tablex-mongo-shell-*
+      # The SQL formatter tool (sqruff, pure Rust): built and smoke-tested like the plugin above,
+      # and signed by the release job. A failure on an experimental target only drops that
+      # target's formatter.
+      - name: Build the SQL formatter (sqruff)
+        continue-on-error: ${{ matrix.experimental }}
+        run: |
+          set -euo pipefail
+          exe="$(rust-engine/scripts/build-plugin.sh --crate tablex-sqruff)"
+          # Our own just-built executable on a runner that has no secrets: it says hello and ends
+          # when its stdin does; it formats nothing.
+          hello="$("${exe}" < /dev/null 2>/dev/null | head -c 64 | tr -d '\000-\010\013-\037' || true)"
+          case "${hello}" in *'"hello"'*) ;; *) echo "the formatter did not say hello: ${hello}" >&2; exit 1 ;; esac
+          name="tablex-sqruff-${{ matrix.target }}"
+          [[ "${{ matrix.target }}" == windows-* ]] && name="${name}.exe"
+          cp "${exe}" "out/${name}"
+          ls -l out/tablex-sqruff-*
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dylibs-${{ matrix.target }}
+          path: out/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  release:
+    name: sign and publish
+    needs: build
+    if: github.repository_owner == vars.RELEASE_OWNER && github.ref_type == 'tag' && startsWith(github.ref_name, 'drivers-v')
+    runs-on: macos-14
+    # Required reviewers + protected-tag restriction are configured on this
+    # environment (README: "Release CI"). Secrets live only here.
+    environment: release
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+      ARTIFACT_BASE_URL: https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
+      # Every target that built: dylibs/dylibs-<target>/ (a failed experimental
+      # target has no artifact and is skipped below).
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: dylibs-*
+          path: dylibs
+
+      # Without the Apple secrets the release is ad hoc signed: macOS builds get an
+      # ad-hoc signature and an empty Team ID in the signed manifest, which the
+      # host accepts there (the manifest's SHA-256 pins every file). The app
+      # downloads drivers and tools itself, so Gatekeeper never assesses them.
+      - name: Import Developer ID certificate
+        env:
+          APPLE_CERT_P12_BASE64: ${{ secrets.APPLE_CERT_P12_BASE64 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${APPLE_CERT_P12_BASE64}" ]]; then
+            echo "::notice::No Developer ID certificate: the macOS builds are ad hoc signed."
+            echo "TABLEX_AD_HOC_SIGNING=1" >> "${GITHUB_ENV}"
+            exit 0
+          fi
+          umask 077
+          keychain="${RUNNER_TEMP}/release-signing.keychain-db"
+          keychain_password="$(uuidgen)"
+          printf '%s' "${APPLE_CERT_P12_BASE64}" | base64 --decode > "${RUNNER_TEMP}/developer-id.p12"
+          security create-keychain -p "${keychain_password}" "${keychain}"
+          security set-keychain-settings -lut 3600 "${keychain}"
+          security unlock-keychain -p "${keychain_password}" "${keychain}"
+          security import "${RUNNER_TEMP}/developer-id.p12" -k "${keychain}" \
+            -P "${APPLE_CERT_PASSWORD}" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "${keychain_password}" "${keychain}" >/dev/null
+          security list-keychains -d user -s "${keychain}" $(security list-keychains -d user | tr -d '"')
+          identity="$(security find-identity -v -p codesigning "${keychain}" \
+            | sed -n "s/.*\"\(Developer ID Application: .*(${APPLE_TEAM_ID})\)\"/\1/p" | head -1)"
+          if [[ -z "${identity}" ]]; then
+            echo "No Developer ID Application identity for the configured team in the certificate" >&2
+            exit 1
+          fi
+          echo "KEYCHAIN_PATH=${keychain}" >> "${GITHUB_ENV}"
+          echo "SIGNING_IDENTITY=${identity}" >> "${GITHUB_ENV}"
+
+      - name: Package drivers (codesign, dlopen verify, manifest entries)
+        env:
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          source rust-engine/scripts/driver-registry.sh
+          test -d dylibs/dylibs-macos-aarch64  # the release target must have built
+          for dir in dylibs/dylibs-*; do
+            target="${dir#dylibs/dylibs-}"
+            for id in ${ALL_DRIVER_IDS}; do
+              resolve_driver "${id}"
+              version="$(crate_version rust-engine "${CRATE}")"
+              library="${dir}/$(library_file_name "${CRATE}" "${target}")"
+              # Only the host target can be dlopen-verified here; every other
+              # target is packaged from the inspect JSON its own runner wrote.
+              inspect=()
+              if [[ "${target}" != "$(host_target)" ]]; then
+                inspect=(--inspect "${dir}/${DRIVER_ID}.inspect.json")
+              fi
+              rust-engine/scripts/package-driver.sh --target "${target}" \
+                ${inspect[@]+"${inspect[@]}"} "${DRIVER_ID}" "${version}" "${library}"
+            done
+          done
+          # TODO: notarization is not implemented by the scripts; not faked here.
+
+      # The MCP server is one bare executable per target (no archive). macOS
+      # builds are Developer ID signed (hardened runtime) BEFORE the manifest
+      # entry is made, so the SHA-256 in the signed manifest is that of the
+      # file users download. The code-signing identifier is fixed (otherwise it
+      # becomes the asset's file name, which carries the target). Notarization
+      # is not done yet: a bare executable can be submitted zipped but cannot be
+      # stapled, so Gatekeeper would check online; the app downloads the file
+      # itself, so it carries no quarantine flag and is not assessed at launch.
+      # A target without a build (a failed experimental one) is skipped.
+      - name: Package tablex-mcp (codesign, manifest entries)
+        run: |
+          set -euo pipefail
+          version="$(awk -F'"' '/^\[package\]/ {p=1; next} /^\[/ {p=0} p && /^version[[:space:]]*=/ {print $2; exit}' apps/tablex-mcp/Cargo.toml)"
+          test -n "${version}"
+          test -f dylibs/dylibs-macos-aarch64/tablex-mcp-macos-aarch64  # the release target must have built
+          mkdir -p dist/tools
+          for dir in dylibs/dylibs-*; do
+            target="${dir#dylibs/dylibs-}"
+            name="tablex-mcp-${target}"
+            [[ "${target}" == windows-* ]] && name="${name}.exe"
+            if [[ ! -f "${dir}/${name}" ]]; then
+              echo "no tablex-mcp build for ${target}; skipped"
+              continue
+            fi
+            cp "${dir}/${name}" "dist/tools/${name}"
+            if [[ "${target}" == macos-* && -n "${SIGNING_IDENTITY:-}" ]]; then
+              codesign --force --options runtime --timestamp --identifier org.tablex.tablex-mcp \
+                --sign "${SIGNING_IDENTITY}" "dist/tools/${name}"
+              codesign --verify --strict "dist/tools/${name}"
+            elif [[ "${target}" == macos-* ]]; then
+              codesign --force --identifier org.tablex.tablex-mcp --sign - "dist/tools/${name}"
+              codesign --verify --strict "dist/tools/${name}"
+            fi
+            python3 scripts/driver_manifest.py tool-entry \
+              --binary "dist/tools/${name}" --version "${version}" --target "${target}" \
+              --url "${ARTIFACT_BASE_URL}/${name}" \
+              --out "dist/drivers/tablex-mcp-${target}-tool-entry.json"
+          done
+
+      # The MongoDB Shell plugin: a bare executable per target like the MCP server. macOS builds
+      # are Developer ID signed (package-plugin.sh) BEFORE the entry is made. The entry says it
+      # needs the mongodb driver of this checkout or newer; the app refuses to install it
+      # without one and offers the driver first. A target without a build is skipped.
+      - name: Package the MongoDB Shell plugin (codesign, tool entries)
+        env:
+          # Never run a downloaded executable here: the signing keychain is unlocked in this job.
+          # The build job ran the hello smoke on this very build, on a runner without secrets.
+          PLUGIN_SKIP_SMOKE: "1"
+        run: |
+          set -euo pipefail
+          source rust-engine/scripts/driver-registry.sh
+          version="$(crate_version rust-engine tablex-mongo-shell)"
+          test -n "${version}"
+          test -f dylibs/dylibs-macos-aarch64/tablex-mongo-shell-macos-aarch64  # the release target must have built
+          for dir in dylibs/dylibs-*; do
+            target="${dir#dylibs/dylibs-}"
+            name="tablex-mongo-shell-${target}"
+            [[ "${target}" == windows-* ]] && name="${name}.exe"
+            if [[ ! -f "${dir}/${name}" ]]; then
+              echo "no tablex-mongo-shell build for ${target}; skipped"
+              continue
+            fi
+            rust-engine/scripts/package-plugin.sh --target "${target}" "${version}" "${dir}/${name}"
+          done
+
+      # The SQL formatter tool: the same, as a free-standing tool (no `requires`). Its entry carries
+      # its licence (Apache-2.0) and the sqruff repository, which the Driver Manager shows.
+      - name: Package the SQL formatter (codesign, tool entries)
+        env:
+          PLUGIN_SKIP_SMOKE: "1"
+        run: |
+          set -euo pipefail
+          source rust-engine/scripts/driver-registry.sh
+          version="$(crate_version rust-engine tablex-sqruff)"
+          test -n "${version}"
+          test -f dylibs/dylibs-macos-aarch64/tablex-sqruff-macos-aarch64  # the release target must have built
+          for dir in dylibs/dylibs-*; do
+            target="${dir#dylibs/dylibs-}"
+            name="tablex-sqruff-${target}"
+            [[ "${target}" == windows-* ]] && name="${name}.exe"
+            if [[ ! -f "${dir}/${name}" ]]; then
+              echo "no tablex-sqruff build for ${target}; skipped"
+              continue
+            fi
+            rust-engine/scripts/package-plugin.sh --tool tablex-sqruff --target "${target}" "${version}" "${dir}/${name}"
+          done
+
+      - name: Merge release manifest
+        run: |
+          set -euo pipefail
+          python3 scripts/driver_manifest.py merge --release \
+            --out dist/drivers/drivers-manifest.json \
+            dist/drivers/*-manifest-entry.json \
+            dist/drivers/*-tool-entry.json
+
+      # LAST step that touches the manifest: any later rewrite invalidates the
+      # signature. The key reaches the signer through an environment variable and
+      # then the signer's standard input (never echoed, never on a command line,
+      # never written to disk), and the signer is built with `cargo --locked`.
+      - name: Sign manifest
+        env:
+          DRIVER_MANIFEST_SIGNING_KEY: ${{ secrets.DRIVER_MANIFEST_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          python3 scripts/driver_manifest.py sign \
+            --manifest dist/drivers/drivers-manifest.json \
+            --key-env DRIVER_MANIFEST_SIGNING_KEY
+          test -s dist/drivers/drivers-manifest.json.sig
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release view "${RELEASE_TAG}" >/dev/null 2>&1 || \
+            gh release create "${RELEASE_TAG}" --title "${RELEASE_TAG}" \
+              --notes "Driver release ${RELEASE_TAG}"
+          shopt -s nullglob
+          assets=(
+            dist/drivers/libdbengine_*.dylib.zip
+            dist/drivers/libdbengine_*.so
+            dist/drivers/dbengine_*.dll
+            dist/tools/tablex-mcp-*
+            dist/tools/tablex-mongo-shell-*
+            dist/tools/tablex-sqruff-*
+            dist/drivers/drivers-manifest.json
+            dist/drivers/drivers-manifest.json.sig
+          )
+          # A versioned asset is never replaced: a re-run of a tag must not swap a
+          # binary for one with another hash. If the release already holds one of
+          # these names, stop (delete the release assets by hand, deliberately, to redo).
+          existing="$(gh release view "${RELEASE_TAG}" --json assets --jq '.assets[].name')"
+          for asset in "${assets[@]}"; do
+            if grep -Fxq -- "$(basename "${asset}")" <<<"${existing}"; then
+              echo "${RELEASE_TAG} already has ${asset##*/}; refusing to overwrite a published asset" >&2
+              exit 1
+            fi
+          done
+          gh release upload "${RELEASE_TAG}" "${assets[@]}"
+
+      # The app reads the catalog from the fixed `drivers-catalog` release
+      # (DEFAULT_MANIFEST_SOURCE in apps/tablex-gpui/src/drivers.rs), never from
+      # `releases/latest`, which app releases take. Runs after the versioned
+      # upload so the catalog never points at artifacts that are not there yet.
+      - name: Publish the catalog
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release view drivers-catalog >/dev/null 2>&1 || \
+            gh release create drivers-catalog --title "Driver catalog" --latest=false \
+              --notes "Signed driver manifest read by TableX. Refreshed by every drivers-v* release."
+          gh release upload drivers-catalog --clobber \
+            dist/drivers/drivers-manifest.json dist/drivers/drivers-manifest.json.sig
+
+      - name: Remove signing material
+        if: always()
+        run: |
+          rm -f "${RUNNER_TEMP}/developer-id.p12"
+          if [[ -n "${KEYCHAIN_PATH:-}" ]]; then
+            security delete-keychain "${KEYCHAIN_PATH}" || true
+          fi

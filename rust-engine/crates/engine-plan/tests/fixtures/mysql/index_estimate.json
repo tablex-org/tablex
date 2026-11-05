@@ -1,0 +1,39 @@
+-- server: MySQL 8.4.11
+-- statement: EXPLAIN FORMAT=JSON SELECT * FROM plan_t2 WHERE t1_id = 42
+{
+  "query_block": {
+    "select_id": 1,
+    "cost_info": {
+      "query_cost": "1.40"
+    },
+    "table": {
+      "table_name": "plan_t2",
+      "access_type": "ref",
+      "possible_keys": [
+        "plan_t2_t1_idx"
+      ],
+      "key": "plan_t2_t1_idx",
+      "used_key_parts": [
+        "t1_id"
+      ],
+      "key_length": "4",
+      "ref": [
+        "const"
+      ],
+      "rows_examined_per_scan": 4,
+      "rows_produced_per_join": 4,
+      "filtered": "100.00",
+      "cost_info": {
+        "read_cost": "1.00",
+        "eval_cost": "0.40",
+        "prefix_cost": "1.40",
+        "data_read_per_join": "64"
+      },
+      "used_columns": [
+        "id",
+        "t1_id",
+        "amount"
+      ]
+    }
+  }
+}

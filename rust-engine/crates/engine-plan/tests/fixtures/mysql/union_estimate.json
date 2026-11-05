@@ -1,0 +1,72 @@
+-- server: MySQL 8.4.11
+-- statement: EXPLAIN FORMAT=JSON SELECT id, name FROM plan_t1 WHERE val < 10 UNION SELECT id, name FROM plan_t1 WHERE grp = 3
+{
+  "query_block": {
+    "union_result": {
+      "using_temporary_table": true,
+      "select_id": 3,
+      "table_name": "<union1,2>",
+      "access_type": "ALL",
+      "query_specifications": [
+        {
+          "dependent": false,
+          "cacheable": true,
+          "query_block": {
+            "select_id": 1,
+            "cost_info": {
+              "query_cost": "503.75"
+            },
+            "table": {
+              "table_name": "plan_t1",
+              "access_type": "ALL",
+              "rows_examined_per_scan": 5000,
+              "rows_produced_per_join": 1666,
+              "filtered": "33.33",
+              "cost_info": {
+                "read_cost": "337.10",
+                "eval_cost": "166.65",
+                "prefix_cost": "503.75",
+                "data_read_per_join": "286K"
+              },
+              "used_columns": [
+                "id",
+                "val",
+                "name"
+              ],
+              "attached_condition": "(`tablex`.`plan_t1`.`val` < 10)"
+            }
+          }
+        },
+        {
+          "dependent": false,
+          "cacheable": true,
+          "query_block": {
+            "select_id": 2,
+            "cost_info": {
+              "query_cost": "503.75"
+            },
+            "table": {
+              "table_name": "plan_t1",
+              "access_type": "ALL",
+              "rows_examined_per_scan": 5000,
+              "rows_produced_per_join": 500,
+              "filtered": "10.00",
+              "cost_info": {
+                "read_cost": "453.75",
+                "eval_cost": "50.00",
+                "prefix_cost": "503.75",
+                "data_read_per_join": "85K"
+              },
+              "used_columns": [
+                "id",
+                "grp",
+                "name"
+              ],
+              "attached_condition": "(`tablex`.`plan_t1`.`grp` = 3)"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

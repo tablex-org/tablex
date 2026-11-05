@@ -1,0 +1,10 @@
+-- server: MySQL 8.4.11
+-- statement: EXPLAIN ANALYZE SELECT t1.grp, count(*) AS n, sum(t2.amount) AS total FROM plan_t1 t1 JOIN plan_t2 t2 ON t2.t1_id = t1.id WHERE t1.val < 500 GROUP BY t1.grp ORDER BY total DESC
+-> Sort: total DESC  (actual time=14..14 rows=50 loops=1)
+    -> Table scan on <temporary>  (actual time=12.1..12.2 rows=50 loops=1)
+        -> Aggregate using temporary table  (actual time=12.1..12.1 rows=50 loops=1)
+            -> Nested loop inner join  (cost=2795 rows=6547) (actual time=2.74..8.9 rows=10000 loops=1)
+                -> Filter: (t1.val < 500)  (cost=504 rows=1666) (actual time=1.62..2.29 rows=2500 loops=1)
+                    -> Table scan on t1  (cost=504 rows=5000) (actual time=1.6..2.1 rows=5000 loops=1)
+                -> Index lookup on t2 using plan_t2_t1_idx (t1_id=t1.id)  (cost=0.982 rows=3.93) (actual time=0.00185..0.00205 rows=4 loops=2500)
+

@@ -1,0 +1,27 @@
+[package]
+name = "mock-driver"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+default = ["full"]
+full = []
+readonly = []
+missing-mutate = []
+short-tables = []
+legacy-cells = []
+malformed-cells = []
+drop-barrier = []
+init-marker = []
+# Advertises metadata.table_properties and exports dbengine_describe_object.
+describe = []
+# Advertises metadata.table_properties but exports no dbengine_describe_object.
+describe-missing-symbol = []
+
+[dependencies]
+libc = "0.2"

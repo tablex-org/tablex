@@ -1,0 +1,40 @@
+-- server: MariaDB 11.8.9
+-- statement: EXPLAIN FORMAT=JSON SELECT t1.name, t2.amount FROM plan_t1 t1 JOIN plan_t2 t2 ON t2.t1_id = t1.id WHERE t1.id < 20
+{
+  "query_block": {
+    "select_id": 1,
+    "cost": 0.17020049,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "t1",
+          "access_type": "range",
+          "possible_keys": ["PRIMARY"],
+          "key": "PRIMARY",
+          "key_length": "4",
+          "used_key_parts": ["id"],
+          "loops": 1,
+          "rows": 19,
+          "cost": 0.00608257,
+          "filtered": 100,
+          "attached_condition": "t1.`id` < 20"
+        }
+      },
+      {
+        "table": {
+          "table_name": "t2",
+          "access_type": "ref",
+          "possible_keys": ["plan_t2_t1_idx"],
+          "key": "plan_t2_t1_idx",
+          "key_length": "4",
+          "used_key_parts": ["t1_id"],
+          "ref": ["tablex.t1.id"],
+          "loops": 19,
+          "rows": 4,
+          "cost": 0.16411792,
+          "filtered": 100
+        }
+      }
+    ]
+  }
+}

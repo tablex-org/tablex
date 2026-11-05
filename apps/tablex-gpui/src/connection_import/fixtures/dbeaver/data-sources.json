@@ -1,0 +1,112 @@
+{
+	"folders": {
+		"Prod": {}
+	},
+	"connections": {
+		"postgres-jdbc-18c1": {
+			"provider": "postgresql",
+			"driver": "postgres-jdbc",
+			"name": "Local Postgres",
+			"save-password": true,
+			"folder": "Prod",
+			"configuration": {
+				"host": "localhost",
+				"port": "5432",
+				"database": "appdb",
+				"url": "jdbc:postgresql://localhost:5432/appdb",
+				"configurationType": "MANUAL",
+				"type": "dev",
+				"auth-model": "native"
+			}
+		},
+		"postgres-jdbc-dup": {
+			"provider": "postgresql",
+			"driver": "postgres-jdbc",
+			"name": "Local Postgres",
+			"configuration": {
+				"host": "localhost",
+				"port": "5432",
+				"database": "appdb"
+			}
+		},
+		"mysql8-2": {
+			"provider": "mysql",
+			"driver": "mysql8",
+			"name": "Reporting MySQL",
+			"save-password": true,
+			"configuration": {
+				"host": "mysql.example.com",
+				"port": 3306,
+				"url": "jdbc:mysql://mysql.example.com:3306/",
+				"auth-model": "native"
+			}
+		},
+		"mariadb-3": {
+			"provider": "mariaDB",
+			"driver": "mariaDB",
+			"name": "Maria from URL",
+			"configuration": {
+				"url": "jdbc:mariadb://maria.example.com:3307/inventory"
+			}
+		},
+		"sqlite_jdbc-4": {
+			"provider": "sqlite",
+			"driver": "sqlite_jdbc",
+			"name": "Local file",
+			"configuration": {
+				"database": "/Users/me/data/app.db",
+				"url": "jdbc:sqlite:/Users/me/data/app.db"
+			}
+		},
+		"mongo-5": {
+			"provider": "mongodb",
+			"driver": "mongo",
+			"name": "Mongo cluster",
+			"configuration": {
+				"host": "a.example.com",
+				"port": "27017",
+				"url": "mongodb://a.example.com:27017,b.example.com:27017/app?replicaSet=rs0"
+			}
+		},
+		"mysql8-6": {
+			"provider": "mysql",
+			"driver": "mysql8",
+			"name": "Legacy inline",
+			"configuration": {
+				"host": "legacy.example.com",
+				"port": "3306",
+				"database": "old",
+				"user": "legacy",
+				"password": "inline-secret"
+			}
+		},
+		"oracle_thin-7": {
+			"provider": "oracle",
+			"driver": "oracle_thin",
+			"name": "Finance Oracle",
+			"configuration": {
+				"host": "ora.example.com",
+				"port": "1521",
+				"database": "FIN"
+			}
+		},
+		"acme-8": {
+			"provider": "generic",
+			"driver": "acme-custom",
+			"name": "Unknown thing",
+			"configuration": {
+				"url": "jdbc:acme://acme.example.com/db"
+			}
+		},
+		"clickhouse-9": {
+			"provider": "clickhouse",
+			"driver": "yandex_clickhouse",
+			"name": "Analytics ClickHouse",
+			"configuration": {
+				"host": "ch.example.com",
+				"port": "8123",
+				"database": "events"
+			}
+		}
+	}
+}

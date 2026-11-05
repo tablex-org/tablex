@@ -1,0 +1,25 @@
+[package]
+name = "tablex-mongo-shell"
+version = "0.1.0"
+edition = "2021"
+description = "The optional MongoDB Shell plugin: mongosh-style scripts on embedded QuickJS, run out of process."
+
+[lib]
+name = "tablex_mongo_shell"
+
+[[bin]]
+name = "tablex-mongo-shell"
+path = "src/main.rs"
+
+[dependencies]
+engine-driver-api = { path = "../engine-driver-api" }
+bson = "2.13"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order", "raw_value"] }
+thiserror = "2.0"
+regex = "1.10"
+base64 = "0.22"
+rquickjs = "=0.14.0"
+
+[dev-dependencies]
+engine-driver-host = { path = "../engine-driver-host" }

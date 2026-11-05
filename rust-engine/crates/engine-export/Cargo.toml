@@ -1,0 +1,12 @@
+[package]
+name = "engine-export"
+version = "0.1.0"
+edition = "2021"
+
+# Client-free table export (CSV / JSON / XLSX / SQL INSERT writers). Shared by
+# the GPUI app and the Swift-side `dbengine`, which re-exports it.
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# `constant_memory`: a worksheet is written row by row to a temporary file, so an export holds one row, not the sheet.
+rust_xlsxwriter = { version = "0.89", features = ["constant_memory"] }
