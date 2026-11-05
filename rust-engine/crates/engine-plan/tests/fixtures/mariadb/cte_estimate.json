@@ -1,0 +1,85 @@
+-- server: MariaDB 11.8.9
+-- statement: EXPLAIN FORMAT=JSON WITH big AS (SELECT t1_id, sum(amount) AS s FROM plan_t2 GROUP BY t1_id) SELECT t1.name, big.s FROM plan_t1 t1 JOIN big ON big.t1_id = t1.id WHERE big.s > (SELECT avg(amount) FROM plan_t2) ORDER BY big.s DESC LIMIT 20
+{
+  "query_block": {
+    "select_id": 1,
+    "cost": 30.98097021,
+    "nested_loop": [
+      {
+        "read_sorted_file": {
+          "filesort": {
+            "sort_key": "big.s desc",
+            "table": {
+              "table_name": "<derived2>",
+              "access_type": "ALL",
+              "loops": 1,
+              "rows": 5000,
+              "cost": 26.49648221,
+              "filtered": 100,
+              "attached_condition": "big.s > (subquery#3)",
+              "materialized": {
+                "query_block": {
+                  "select_id": 2,
+                  "cost": 0.011431528,
+                  "filesort": {
+                    "sort_key": "plan_t2.t1_id",
+                    "temporary_table": {
+                      "nested_loop": [
+                        {
+                          "table": {
+                            "table_name": "plan_t2",
+                            "access_type": "ALL",
+                            "possible_keys": ["plan_t2_t1_idx"],
+                            "loops": 1,
+                            "rows": 20000,
+                            "cost": 3.3529156,
+                            "filtered": 100
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "table": {
+          "table_name": "t1",
+          "access_type": "eq_ref",
+          "possible_keys": ["PRIMARY"],
+          "key": "PRIMARY",
+          "key_length": "4",
+          "used_key_parts": ["id"],
+          "ref": ["big.t1_id"],
+          "loops": 5000,
+          "rows": 1,
+          "cost": 4.484488,
+          "filtered": 100
+        }
+      }
+    ],
+    "subqueries": [
+      {
+        "query_block": {
+          "select_id": 3,
+          "cost": 3.3529156,
+          "nested_loop": [
+            {
+              "table": {
+                "table_name": "plan_t2",
+                "access_type": "ALL",
+                "loops": 1,
+                "rows": 20000,
+                "cost": 3.3529156,
+                "filtered": 100
+              }
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

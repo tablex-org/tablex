@@ -1,0 +1,42 @@
+[package]
+name = "dbengine-mysql"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+name = "dbengine_mysql"
+
+[features]
+default = []
+# ABI v2 driver on engine-driver-kit. Without it the crate exports the ABI 1
+# symbols the Swift app loads.
+abi-v2 = ["dep:engine-driver-kit"]
+
+[dependencies]
+engine-driver-kit = { path = "../engine-driver-kit", optional = true }
+engine-ffi-util = { path = "../engine-ffi-util" }
+arrow = { version = "53", features = ["ffi"] }
+arrow-array = "53"
+# TLS: rustls on the `ring` provider (one TLS stack for every driver; no OpenSSL,
+# no native-tls, no aws-lc/cmake). `flate2` uses its pure-Rust backend. 0.34's
+# rustls feature pulled aws-lc through rustls' default features; 0.37 lets the
+# provider be chosen.
+mysql_async = { version = "0.37", default-features = false, features = ["rustls-tls", "ring", "tls12", "minimal-rust"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8"
+percent-encoding = "2"
+tokio = { version = "1.42", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+lazy_static = "1.5"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+engine-driver-api = { path = "../engine-driver-api" }
+engine-driver-host = { path = "../engine-driver-host" }
+libc = "0.2"
+tempfile = "3.14"
+# Offline TLS tests build certificates and a throwaway TLS listener (ring backend: no aws-lc).
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }

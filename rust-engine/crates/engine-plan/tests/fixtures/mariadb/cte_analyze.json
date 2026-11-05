@@ -1,0 +1,140 @@
+-- server: MariaDB 11.8.9
+-- statement: ANALYZE FORMAT=JSON WITH big AS (SELECT t1_id, sum(amount) AS s FROM plan_t2 GROUP BY t1_id) SELECT t1.name, big.s FROM plan_t1 t1 JOIN big ON big.t1_id = t1.id WHERE big.s > (SELECT avg(amount) FROM plan_t2) ORDER BY big.s DESC LIMIT 20
+{
+  "query_optimization": {
+    "r_total_time_ms": 0.194305583
+  },
+  "query_block": {
+    "select_id": 1,
+    "cost": 30.98097021,
+    "r_loops": 1,
+    "r_total_time_ms": 5.759001581,
+    "nested_loop": [
+      {
+        "read_sorted_file": {
+          "r_rows": 20,
+          "filesort": {
+            "sort_key": "big.s desc",
+            "r_loops": 1,
+            "r_total_time_ms": 1.883266277,
+            "r_used_priority_queue": false,
+            "r_output_rows": 5000,
+            "r_buffer_size": "156KiB",
+            "r_sort_mode": "sort_key,rowid",
+            "table": {
+              "table_name": "<derived2>",
+              "access_type": "ALL",
+              "loops": 1,
+              "r_loops": 1,
+              "rows": 5000,
+              "r_rows": 5000,
+              "cost": 26.49648221,
+              "r_table_time_ms": 0.098910077,
+              "r_other_time_ms": 0.778268335,
+              "filtered": 100,
+              "r_total_filtered": 100,
+              "attached_condition": "big.s > (subquery#3)",
+              "r_filtered": 100,
+              "materialized": {
+                "query_block": {
+                  "select_id": 2,
+                  "cost": 0.011431528,
+                  "r_loops": 1,
+                  "r_total_time_ms": 3.801720106,
+                  "filesort": {
+                    "sort_key": "plan_t2.t1_id",
+                    "r_loops": 1,
+                    "r_total_time_ms": 0.223258956,
+                    "r_used_priority_queue": false,
+                    "r_output_rows": 5000,
+                    "r_buffer_size": "97KiB",
+                    "r_sort_mode": "sort_key,rowid",
+                    "temporary_table": {
+                      "nested_loop": [
+                        {
+                          "table": {
+                            "table_name": "plan_t2",
+                            "access_type": "ALL",
+                            "possible_keys": ["plan_t2_t1_idx"],
+                            "loops": 1,
+                            "r_loops": 1,
+                            "rows": 20000,
+                            "r_rows": 20000,
+                            "cost": 3.3529156,
+                            "r_table_time_ms": 1.078345777,
+                            "r_other_time_ms": 2.142633268,
+                            "r_engine_stats": {
+                              "pages_accessed": 43
+                            },
+                            "filtered": 100,
+                            "r_total_filtered": 100,
+                            "r_filtered": 100
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "table": {
+          "table_name": "t1",
+          "access_type": "eq_ref",
+          "possible_keys": ["PRIMARY"],
+          "key": "PRIMARY",
+          "key_length": "4",
+          "used_key_parts": ["id"],
+          "ref": ["big.t1_id"],
+          "loops": 5000,
+          "r_loops": 20,
+          "rows": 1,
+          "r_rows": 1,
+          "cost": 4.484488,
+          "r_table_time_ms": 0.043430059,
+          "r_other_time_ms": 0.007656745,
+          "r_engine_stats": {
+            "pages_accessed": 40
+          },
+          "filtered": 100,
+          "r_total_filtered": 100,
+          "r_filtered": 100
+        }
+      }
+    ],
+    "subqueries": [
+      {
+        "query_block": {
+          "select_id": 3,
+          "cost": 3.3529156,
+          "r_loops": 1,
+          "r_total_time_ms": 1.336875965,
+          "nested_loop": [
+            {
+              "table": {
+                "table_name": "plan_t2",
+                "access_type": "ALL",
+                "loops": 1,
+                "r_loops": 1,
+                "rows": 20000,
+                "r_rows": 20000,
+                "cost": 3.3529156,
+                "r_table_time_ms": 0.591912377,
+                "r_other_time_ms": 0.741365336,
+                "r_engine_stats": {
+                  "pages_accessed": 43
+                },
+                "filtered": 100,
+                "r_total_filtered": 100,
+                "r_filtered": 100
+              }
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

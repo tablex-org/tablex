@@ -1,0 +1,49 @@
+[package]
+name = "tablex-mcp"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Standalone MCP server (stdio) for TableX: the engine-agent tool layer over the saved connections, shipped as a separate download"
+
+[lib]
+name = "tablex_mcp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tablex-mcp"
+path = "src/main.rs"
+
+[features]
+# TEST BUILDS ONLY: the binary uses an empty in-memory credential store instead of the OS keychain,
+# so the subprocess tests never touch the developer's keychain. Enabled only by the dev-dependency
+# on this crate below (i.e. while building tests); a non-debug build with it is a compile error.
+test-credentials = []
+
+[dependencies]
+engine-agent = { path = "../../rust-engine/crates/engine-agent" }
+engine-connect = { path = "../../rust-engine/crates/engine-connect" }
+engine-driver-host = { path = "../../rust-engine/crates/engine-driver-host" }
+engine-storage = { path = "../../rust-engine/crates/engine-storage" }
+# Server side of MCP over any async byte pipe. No client, no HTTP / SSE transports, no macros
+# (the tool list is `ToolLayer::tools()` at runtime, not a declaration), no auth. `elicitation`
+# is how a write is put to the user (`approver.rs`); it adds the `url` crate (already in the tree).
+rmcp = { version = "2.2", default-features = false, features = ["server", "elicitation"] }
+serde_json = "1"
+thiserror = "2"
+# Only what rmcp already needs plus the standard streams and signals: a current-thread runtime
+# (see `main.rs`), no `rt-multi-thread`, no `net`, no `fs`, no `process`.
+tokio = { version = "1", features = ["rt", "macros", "io-std", "io-util", "signal", "sync", "time"] }
+tokio-util = "0.7"
+
+[dev-dependencies]
+# Switches on `test-credentials` for the test build (resolver 2 does not unify dev-dependency
+# features into `cargo build`), the same trick `engine-connect` uses for its `testing` feature.
+tablex-mcp = { path = ".", features = ["test-credentials"] }
+# The client half of rmcp drives the server end to end in the tests; never in the shipped binary.
+rmcp = { version = "2.2", default-features = false, features = ["server", "client", "elicitation"] }
+# A CommonMark parser (already in the lock file through gpui-component): the tests check that a
+# statement in an approval question is one literal code block.
+markdown = "1"
+sha2 = "0.10"
+tempfile = "3"
+tokio = { version = "1", features = ["rt", "macros", "io-util", "time", "sync"] }

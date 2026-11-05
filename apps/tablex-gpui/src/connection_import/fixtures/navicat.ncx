@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Connections Ver="1.5">
+  <Connection ConnectionName="Local MySQL" ConnType="MYSQL" ServiceProvider="Default" Host="127.0.0.1" Port="3306" UserName="root" Password="93C3116A8A7050BB3A7981C3075FC1B7" SavePassword="true" Database="shop" SSH="false" SSL="false" />
+  <Connection ConnectionName="Local MySQL" ConnType="MYSQL" ServiceProvider="Default" Host="127.0.0.1" Port="3306" UserName="root" Password="93C3116A8A7050BB3A7981C3075FC1B7" SavePassword="true" Database="shop" SSH="false" SSL="false" />
+  <Connection ConnectionName="Prod PG" ConnType="POSTGRESQL" ServiceProvider="Default" Host="pg.example.com" Port="5432" UserName="app" Password="93C3116A8A7050BB3A7981C3075FC1B7" Database="orders" SSL="true" SSH="true" SSH_Host="bastion.example.com" SSH_Port="2222" SSH_UserName="deploy" SSH_AuthenMethod="PUBLICKEY" SSH_PrivateKey="/keys/id_ed25519" SSH_Password="D2843183A61DB143951F074BDAE39E1B" />
+  <Connection ConnectionName="Notes" ConnType="SQLITE" DatabaseFileName="/Users/me/notes.sqlite" />
+  <Connection ConnectionName="Maria" ConnType="MARIADB" Host="maria.example.com" Port="3307" UserName="maria" />
+  <Connection ConnectionName="Replica" ConnType="MONGODB" Host="localhost" Port="27017" UserName="reader" Password="93C3116A8A7050BB3A7981C3075FC1B7" AuthSource="admin" ReplicaSetName="rs0" ReadPreference="SecondaryPreferred" RetryWrites="true" SSL="true" AdvanceDatabase="app">
+    <Member Hostname="m1.example.com" Port="27017" />
+    <Member Hostname="m2.example.com" Port="27018" />
+  </Connection>
+  <Connection ConnectionName="Ledger" ConnType="ORACLE" Host="ora.example.com" Port="1521" UserName="system" />
+  <Connection ConnectionName="Warehouse" ConnType="SQLSERVER" Host="mssql.example.com" Port="1433" UserName="sa" />
+  <Connection ConnectionName="Cache" ConnType="REDIS" Host="redis.example.com" Port="6379" />
+  <Connection ConnectionName="File server" ConnType="SFTP" Host="files.example.com" Port="22" UserName="ops" />
+</Connections>

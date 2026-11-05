@@ -1,0 +1,133 @@
+-- server: MySQL 8.4.11
+-- statement: EXPLAIN FORMAT=JSON WITH big AS (SELECT t1_id, sum(amount) AS s FROM plan_t2 GROUP BY t1_id) SELECT t1.name, big.s FROM plan_t1 t1 JOIN big ON big.t1_id = t1.id WHERE big.s > (SELECT avg(amount) FROM plan_t2) ORDER BY big.s DESC LIMIT 20
+{
+  "query_block": {
+    "select_id": 1,
+    "cost_info": {
+      "query_cost": "4503.79"
+    },
+    "ordering_operation": {
+      "using_filesort": true,
+      "nested_loop": [
+        {
+          "table": {
+            "table_name": "big",
+            "access_type": "ALL",
+            "rows_examined_per_scan": 19643,
+            "rows_produced_per_join": 6547,
+            "filtered": "33.33",
+            "cost_info": {
+              "read_cost": "248.04",
+              "eval_cost": "654.70",
+              "prefix_cost": "2212.34",
+              "data_read_per_join": "204K"
+            },
+            "used_columns": [
+              "t1_id",
+              "s"
+            ],
+            "attached_condition": "(`big`.`s` > (/* select#3 */ select avg(`tablex`.`plan_t2`.`amount`) from `tablex`.`plan_t2`))",
+            "attached_subqueries": [
+              {
+                "dependent": false,
+                "cacheable": true,
+                "query_block": {
+                  "select_id": 3,
+                  "cost_info": {
+                    "query_cost": "1988.55"
+                  },
+                  "table": {
+                    "table_name": "plan_t2",
+                    "access_type": "ALL",
+                    "rows_examined_per_scan": 19643,
+                    "rows_produced_per_join": 19643,
+                    "filtered": "100.00",
+                    "cost_info": {
+                      "read_cost": "24.25",
+                      "eval_cost": "1964.30",
+                      "prefix_cost": "1988.55",
+                      "data_read_per_join": "306K"
+                    },
+                    "used_columns": [
+                      "amount"
+                    ]
+                  }
+                }
+              }
+            ],
+            "materialized_from_subquery": {
+              "using_temporary_table": true,
+              "dependent": false,
+              "cacheable": true,
+              "query_block": {
+                "select_id": 2,
+                "cost_info": {
+                  "query_cost": "1988.55"
+                },
+                "grouping_operation": {
+                  "using_filesort": false,
+                  "table": {
+                    "table_name": "plan_t2",
+                    "access_type": "index",
+                    "possible_keys": [
+                      "plan_t2_t1_idx"
+                    ],
+                    "key": "plan_t2_t1_idx",
+                    "used_key_parts": [
+                      "t1_id"
+                    ],
+                    "key_length": "4",
+                    "rows_examined_per_scan": 19643,
+                    "rows_produced_per_join": 19643,
+                    "filtered": "100.00",
+                    "cost_info": {
+                      "read_cost": "24.25",
+                      "eval_cost": "1964.30",
+                      "prefix_cost": "1988.55",
+                      "data_read_per_join": "306K"
+                    },
+                    "used_columns": [
+                      "id",
+                      "t1_id",
+                      "amount"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "table": {
+            "table_name": "t1",
+            "access_type": "eq_ref",
+            "possible_keys": [
+              "PRIMARY"
+            ],
+            "key": "PRIMARY",
+            "used_key_parts": [
+              "id"
+            ],
+            "key_length": "4",
+            "ref": [
+              "big.t1_id"
+            ],
+            "rows_examined_per_scan": 1,
+            "rows_produced_per_join": 6547,
+            "filtered": "100.00",
+            "cost_info": {
+              "read_cost": "1636.75",
+              "eval_cost": "654.70",
+              "prefix_cost": "4503.79",
+              "data_read_per_join": "1M"
+            },
+            "used_columns": [
+              "id",
+              "name"
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

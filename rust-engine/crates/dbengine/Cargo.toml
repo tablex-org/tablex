@@ -1,0 +1,43 @@
+[package]
+name = "dbengine"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["staticlib", "cdylib", "rlib"]
+name = "dbengine"
+
+[dependencies]
+engine-export = { path = "../engine-export" }
+engine-mongo-script = { path = "../engine-mongo-script" }
+engine-ffi-util = { path = "../engine-ffi-util" }
+engine-storage = { path = "../engine-storage" }
+engine-syntax = { path = "../engine-syntax" }
+mongodb = "3.1"
+bson = "2.13"
+arrow = { version = "53", features = ["ffi"] }
+arrow-array = "53"
+tokio = { version = "1.42", features = ["full"] }
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-0_8"] }
+mysql_async = "0.34"
+postgres-types = { version = "0.2", features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-0_8"] }
+rust_decimal = { version = "1", features = ["db-tokio-postgres"] }
+uuid = { version = "0.8" }
+sqlparser = { version = "0.52", features = ["visitor"] }
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+json5 = "0.4"
+regex = "1.10"
+base64 = "0.22"
+async-trait = "0.1"
+futures = "0.3"
+lazy_static = "1.5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rusqlite = { version = "0.39", features = ["bundled", "load_extension", "column_decltype"] }
+chrono = { version = "0.4", features = ["serde"] }
+tree-sitter = "=0.26.13"
+tree-sitter-json = "0.24.8"
+tree-sitter-javascript = "0.23.1"
+tree-sitter-sequel = "0.3.8"

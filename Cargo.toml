@@ -1,0 +1,21 @@
+[workspace]
+members = ["apps/tablex-gpui", "apps/tablex-mcp"]
+resolver = "2"
+# Faster, smaller dev/test builds: dependencies carry no debug info, our
+# crates keep line tables (panics and backtraces still show file:line).
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+# Distribution build (`cargo build --profile dist -p tablex-gpui`, output in
+# target/dist/): what ships to users. Whole-program LTO and one codegen unit
+# remove dead code across crates; symbols are stripped. Kept apart from
+# `release` so day-to-day release builds stay fast. Size is tracked by
+# scripts/size-report.sh against scripts/size-budget.json.
+[profile.dist]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+strip = "symbols"

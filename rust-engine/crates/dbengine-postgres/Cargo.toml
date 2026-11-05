@@ -1,0 +1,51 @@
+[package]
+name = "dbengine-postgres"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+name = "dbengine_postgres"
+
+[features]
+default = []
+# ABI v2 driver on engine-driver-kit. Without it the crate keeps exporting the
+# ABI v1 `dbengine_*` symbols used by the Swift app (dbengine-mongo pattern).
+abi-v2 = [
+    "dep:engine-driver-kit", "dep:arrow-schema", "dep:futures-util", "dep:bytes",
+    "dep:rustls", "dep:tokio-rustls", "dep:rustls-native-certs", "dep:sha2", "dep:percent-encoding",
+]
+
+[dependencies]
+engine-ffi-util = { path = "../engine-ffi-util" }
+arrow = { version = "53", features = ["ffi"] }
+arrow-array = "53"
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+lazy_static = "1.5"
+rust_decimal = { version = "1", features = ["db-tokio-postgres"] }
+engine-export = { path = "../engine-export" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sqlparser = { version = "0.52", features = ["visitor"] }
+tokio = { version = "1.42", features = ["full"] }
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-0_8"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "0.8" }
+engine-driver-kit = { path = "../engine-driver-kit", optional = true }
+arrow-schema = { version = "53", optional = true }
+futures-util = { version = "0.3", optional = true }
+bytes = { version = "1", optional = true }
+# TLS (abi-v2): rustls on the `ring` provider only (no OpenSSL, no aws-lc/cmake); see v2/tls.rs.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"], optional = true }
+rustls-native-certs = { version = "0.8", optional = true }
+sha2 = { version = "0.10", optional = true }
+percent-encoding = { version = "2", optional = true }
+
+[dev-dependencies]
+engine-driver-host = { path = "../engine-driver-host" }
+tempfile = "3.14"
+# Offline TLS tests build their own certificates (ring backend: no aws-lc).
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }

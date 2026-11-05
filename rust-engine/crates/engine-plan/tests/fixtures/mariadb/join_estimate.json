@@ -1,0 +1,42 @@
+-- server: MariaDB 11.8.9
+-- statement: EXPLAIN FORMAT=JSON SELECT t1.grp, count(*) AS n, sum(t2.amount) AS total FROM plan_t1 t1 JOIN plan_t2 t2 ON t2.t1_id = t1.id WHERE t1.val < 500 GROUP BY t1.grp ORDER BY total DESC
+{
+  "query_block": {
+    "select_id": 1,
+    "cost": 12.929134,
+    "filesort": {
+      "sort_key": "sum(t2.amount) desc",
+      "temporary_table": {
+        "nested_loop": [
+          {
+            "table": {
+              "table_name": "t1",
+              "access_type": "ALL",
+              "possible_keys": ["PRIMARY"],
+              "loops": 1,
+              "rows": 5000,
+              "cost": 0.837822,
+              "filtered": 50,
+              "attached_condition": "t1.val < 500"
+            }
+          },
+          {
+            "table": {
+              "table_name": "t2",
+              "access_type": "ref",
+              "possible_keys": ["plan_t2_t1_idx"],
+              "key": "plan_t2_t1_idx",
+              "key_length": "4",
+              "used_key_parts": ["t1_id"],
+              "ref": ["tablex.t1.id"],
+              "loops": 2500,
+              "rows": 4,
+              "cost": 12.091312,
+              "filtered": 100
+            }
+          }
+        ]
+      }
+    }
+  }
+}

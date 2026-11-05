@@ -1,0 +1,4 @@
+-- server: SQLite 3.45.3 (python sqlite3 module: the sqlite3 CLI renders EQP as a tree, not rows)
+-- columns: id, parent, notused, detail (tab separated)
+-- statement: EXPLAIN QUERY PLAN SELECT * FROM plan_t2 WHERE t1_id = 42
+3	0	0	SEARCH plan_t2 USING INDEX plan_t2_t1_idx (t1_id=?)

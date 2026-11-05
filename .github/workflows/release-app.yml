@@ -1,0 +1,120 @@
+name: Release App
+# Builds TableX.app for macOS (Apple silicon and Intel) from a `v*` tag, packs each
+# into a .dmg (scripts/bundle-macos.sh + scripts/dmg-macos.sh) and publishes them as
+# the GitHub Release of that tag, marked latest. The tag must be the app version of
+# apps/tablex-gpui/Cargo.toml (`v0.1.0` for 0.1.0).
+#
+# There is no Developer ID: the app is ad-hoc signed and not notarized, so macOS asks
+# the user to confirm the first launch (the release notes say how). Drivers are not
+# in the app: it installs them from the signed driver catalog (release-drivers.yml).
+#
+# No secrets are used. Never add pull_request / pull_request_target here.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-app-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  build:
+    name: build (${{ matrix.arch }})
+    # Forks skip: RELEASE_OWNER is a repository variable (Settings > Variables).
+    if: github.repository_owner == vars.RELEASE_OWNER && github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    runs-on: macos-14
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: apple-silicon
+            target: aarch64-apple-darwin
+          - arch: intel
+            target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: The tag names the app version
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' apps/tablex-gpui/Cargo.toml | head -n 1)"
+          if [[ "${GITHUB_REF_NAME}" != "v${version}" ]]; then
+            echo "tag ${GITHUB_REF_NAME} does not match the app version ${version}" >&2
+            exit 1
+          fi
+          echo "VERSION=${version}" >> "${GITHUB_ENV}"
+
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - name: Build (dist profile)
+        run: cargo build --locked --profile dist -p tablex-gpui --target ${{ matrix.target }}
+
+      - name: Bundle and pack
+        run: |
+          set -euo pipefail
+          scripts/bundle-macos.sh --binary "target/${{ matrix.target }}/dist/tablex-gpui"
+          scripts/dmg-macos.sh target/release/bundle/TableX.app \
+            "dist/TableX-${VERSION}-macos-${{ matrix.arch }}.dmg"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dmg-${{ matrix.arch }}
+          path: dist/*.dmg
+          if-no-files-found: error
+
+  release:
+    name: publish
+    needs: build
+    if: github.repository_owner == vars.RELEASE_OWNER && github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: dmg-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          cat > notes.md <<EOF
+          TableX ${version} for macOS 12 or later.
+
+          | Mac | Download |
+          | --- | --- |
+          | Apple silicon (M1 and later) | \`TableX-${version}-macos-apple-silicon.dmg\` |
+          | Intel | \`TableX-${version}-macos-intel.dmg\` |
+
+          Open the .dmg and drag TableX to Applications. The app is not notarized by Apple yet, so
+          the first launch needs a confirmation: right-click TableX in Applications and choose
+          **Open**, or run \`xattr -dr com.apple.quarantine /Applications/TableX.app\`.
+
+          Database drivers are installed from the app: **Driver Manager** lists PostgreSQL,
+          MySQL, MariaDB, SQLite, MongoDB, Redis and ClickHouse.
+          EOF
+          sed -i 's/^          //' notes.md
+          gh release create "${TAG}" --title "TableX ${version}" --notes-file notes.md --latest \
+            dist/*.dmg

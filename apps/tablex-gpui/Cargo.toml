@@ -1,0 +1,113 @@
+[package]
+name = "tablex-gpui"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[features]
+default = ["ui"]
+ui = ["dep:gpui", "dep:gpui_platform", "dep:gpui-component", "gpui-component/tree-sitter-sql", "gpui-component/tree-sitter-javascript", "dep:tree-sitter-sequel", "dep:lsp-types"]
+ui-scenarios = ["ui", "engine-connect/testing"]
+# Dev-only: GPUI's headless `BenchContext` + Criterion harness for the ignored
+# render benchmark (`src/app/tests/grid_bench_context.rs`). Never default.
+bench = ["ui", "gpui/bench-support", "gpui_platform/bench-support", "dep:criterion"]
+# Dev-only: GPUI foreground-journal hang detector. When combined with a UI
+# scenario run, hang incidents are appended to the scenario telemetry stream.
+# Never default; off in release builds.
+perf-diagnostics = ["ui", "gpui/profiler"]
+# Trusts the development manifest key (always on in debug builds). Never enabled
+# by release CI: an official build must not trust a key whose private half is
+# held outside the repository by developers.
+dev-keys = ["engine-connect/dev-keys"]
+
+[dependencies]
+arrow-array = "53"
+# The grid's display fallback for the Arrow types it has no exact arm for (already linked
+# through engine-driver-kit: no new code in the binary).
+arrow-cast = "53"
+arrow-schema = "53"
+bson = "2.13"
+chrono = "0.4"
+regex = "1"
+# Format SQL (token based, guarded by `sql_format`: the built-in formatter). Its only dependencies are `winnow` and
+# `unicode_categories`.
+sqlformat = "0.5"
+# The AI assistant: the tool layer it calls and the provider / conversation core (no HTTP client
+# of its own: `ai::transport` implements its transport on `zed_reqwest`).
+engine-agent = { path = "../../rust-engine/crates/engine-agent" }
+engine-ai = { path = "../../rust-engine/crates/engine-ai" }
+engine-driver-host = { path = "../../rust-engine/crates/engine-driver-host" }
+engine-driver-api = { path = "../../rust-engine/crates/engine-driver-api" }
+engine-export = { path = "../../rust-engine/crates/engine-export" }
+# SSH tunnels (russh, ring backend): the connect flow opens one per driver session.
+engine-net = { path = "../../rust-engine/crates/engine-net" }
+# Explain plan viewer: the per-dialect EXPLAIN statement builder and plan parser (pure, no I/O).
+engine-plan = { path = "../../rust-engine/crates/engine-plan" }
+# The dialect-aware SQL classifier (`sql::classify`) the drivers decide "pure read" with: Explain Analyze is
+# offered on the same answer (already linked through engine-driver-host's tree and engine-plan).
+engine-driver-kit = { path = "../../rust-engine/crates/engine-driver-kit" }
+# Opening a saved connection without a window (records, credentials, tunnel rules, driver trust and
+# loading, connection profile, the Connector); shared with the standalone tablex-mcp.
+engine-connect = { path = "../../rust-engine/crates/engine-connect" }
+engine-mongo-script = { path = "../../rust-engine/crates/engine-mongo-script" }
+engine-storage = { path = "../../rust-engine/crates/engine-storage" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+smol = "2"
+url = "2"
+percent-encoding = "2"
+uuid = { version = "0.8", features = ["v4"] }
+
+dirs = "5"
+gpui = { package = "gpui-pre", version = "=0.3.11", optional = true }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.11", optional = true, features = ["font-kit"] }
+gpui-component = { version = "=0.9.0", optional = true }
+# CompletionItem types of the editor's CompletionProvider (already in the tree via gpui-component).
+lsp-types = { version = "0.97.0", optional = true }
+resvg = { version = "=0.46.0", default-features = false, features = ["text", "system-fonts", "memmap-fonts", "raster-images"] }
+# No `http2` / `charset` (on by default): the app talks to GitHub and AI provider endpoints, which all speak HTTP/1.1,
+# and reads UTF-8 bodies only. Leaving them out drops `h2` (~130 KiB of code) from the release binary.
+zed_reqwest = { package = "zed-reqwest", version = "0.12.15-zed", default-features = false, features = ["blocking", "default-tls", "macos-system-configuration"] }
+tree-sitter-sequel = { version = "0.3.8", optional = true }
+criterion = { version = "0.8.2", default-features = false, optional = true }
+# Connection importers (Navicat / DBeaver / DataGrip / DBX): XML, the AES-CBC
+# the other tools use for stored passwords, and the PBKDF2 + AES-GCM envelope
+# of a DBX config export.
+roxmltree = "0.21"
+aes = "0.8"
+cbc = "0.1"
+base64 = "0.22"
+hex = "0.4"
+pbkdf2 = "0.12"
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
+sha2 = "0.10"
+# SASLprep (RFC 4013) of a PostgreSQL password, as the server and libpq do it before hashing it: the SCRAM verifier made here has to be the
+# one the server would make (the crate tokio-postgres' SCRAM uses; its tables are the RFC 3454 ones).
+stringprep = "=0.1.5"
+# File names that a file system cannot tell apart (a transfer writes one file per table): Unicode normalization. Already in the tree
+# through `url` / `idna`.
+icu_normalizer = "2"
+
+# Cancelling a native backup tool stops its whole process group (a parallel pg_dump has workers).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# Linux windowing backends: the platform crate pulls `gpui_linux` without default
+# features, so Wayland and X11 have to be requested here.
+[target.'cfg(target_os = "linux")'.dependencies]
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.11", optional = true, features = ["wayland", "x11"] }
+
+[dev-dependencies]
+arrow-array = "53"
+arrow-schema = "53"
+gpui = { package = "gpui-pre", version = "=0.3.11", features = ["test-support"] }
+image = { version = "=0.25.10", default-features = false, features = ["png"] }
+# Live DDL tests (`sql_ddl::live`, ignored without TABLEX_TEST_*_URI): the same
+# harness the driver crates use to load a driver and talk to a test server.
+engine-driver-conformance = { path = "../../rust-engine/crates/engine-driver-conformance" }
+tempfile = "3"
+# Signs the test manifests of the Strict-policy Driver Manager tests (already in the tree through
+# `engine-driver-host`, which verifies with it).
+ed25519-dalek = { version = "2.2", default-features = false }
+# The credential, tunnel and record test doubles of the connect crate.
+engine-connect = { path = "../../rust-engine/crates/engine-connect", features = ["testing"] }

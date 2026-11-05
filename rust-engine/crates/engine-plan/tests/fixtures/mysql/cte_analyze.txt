@@ -1,0 +1,15 @@
+-- server: MySQL 8.4.11
+-- statement: EXPLAIN ANALYZE WITH big AS (SELECT t1_id, sum(amount) AS s FROM plan_t2 GROUP BY t1_id) SELECT t1.name, big.s FROM plan_t1 t1 JOIN big ON big.t1_id = t1.id WHERE big.s > (SELECT avg(amount) FROM plan_t2) ORDER BY big.s DESC LIMIT 20
+-> Limit: 20 row(s)  (cost=13798 rows=20) (actual time=31.4..31.5 rows=20 loops=1)
+    -> Nested loop inner join  (cost=13798 rows=5000) (actual time=31.4..31.5 rows=20 loops=1)
+        -> Sort: big.s DESC  (cost=11662..11662 rows=5000) (actual time=31.4..31.4 rows=20 loops=1)
+            -> Filter: (big.s > (select #3))  (cost=4453..5018 rows=5000) (actual time=19.7..20.5 rows=5000 loops=1)
+                -> Table scan on big  (cost=4453..4518 rows=5000) (actual time=16.1..16.5 rows=5000 loops=1)
+                    -> Materialize CTE big  (cost=4453..4453 rows=5000) (actual time=16.1..16.1 rows=5000 loops=1)
+                        -> Group aggregate: sum(plan_t2.amount)  (cost=3953 rows=5000) (actual time=2.11..10.5 rows=5000 loops=1)
+                            -> Index scan on plan_t2 using plan_t2_t1_idx  (cost=1989 rows=19643) (actual time=2.1..9.36 rows=20000 loops=1)
+                -> Select #3 (subquery in condition; run only once)
+                    -> Aggregate: avg(plan_t2.amount)  (cost=3953 rows=1) (actual time=2.94..2.94 rows=1 loops=1)
+                        -> Table scan on plan_t2  (cost=1989 rows=19643) (actual time=1.18..2.22 rows=20000 loops=1)
+        -> Single-row index lookup on t1 using PRIMARY (id=big.t1_id)  (cost=0.25 rows=1) (actual time=0.00482..0.00483 rows=1 loops=20)
+

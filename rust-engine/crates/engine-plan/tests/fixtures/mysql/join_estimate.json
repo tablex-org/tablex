@@ -1,0 +1,74 @@
+-- server: MySQL 8.4.11
+-- statement: EXPLAIN FORMAT=JSON SELECT t1.grp, count(*) AS n, sum(t2.amount) AS total FROM plan_t1 t1 JOIN plan_t2 t2 ON t2.t1_id = t1.id WHERE t1.val < 500 GROUP BY t1.grp ORDER BY total DESC
+{
+  "query_block": {
+    "select_id": 1,
+    "cost_info": {
+      "query_cost": "2795.20"
+    },
+    "ordering_operation": {
+      "using_filesort": true,
+      "grouping_operation": {
+        "using_temporary_table": true,
+        "using_filesort": false,
+        "nested_loop": [
+          {
+            "table": {
+              "table_name": "t1",
+              "access_type": "ALL",
+              "possible_keys": [
+                "PRIMARY"
+              ],
+              "rows_examined_per_scan": 5000,
+              "rows_produced_per_join": 1666,
+              "filtered": "33.33",
+              "cost_info": {
+                "read_cost": "337.10",
+                "eval_cost": "166.65",
+                "prefix_cost": "503.75",
+                "data_read_per_join": "286K"
+              },
+              "used_columns": [
+                "id",
+                "grp",
+                "val"
+              ],
+              "attached_condition": "(`tablex`.`t1`.`val` < 500)"
+            }
+          },
+          {
+            "table": {
+              "table_name": "t2",
+              "access_type": "ref",
+              "possible_keys": [
+                "plan_t2_t1_idx"
+              ],
+              "key": "plan_t2_t1_idx",
+              "used_key_parts": [
+                "t1_id"
+              ],
+              "key_length": "4",
+              "ref": [
+                "tablex.t1.id"
+              ],
+              "rows_examined_per_scan": 3,
+              "rows_produced_per_join": 6547,
+              "filtered": "100.00",
+              "cost_info": {
+                "read_cost": "1636.75",
+                "eval_cost": "654.70",
+                "prefix_cost": "2795.20",
+                "data_read_per_join": "102K"
+              },
+              "used_columns": [
+                "id",
+                "t1_id",
+                "amount"
+              ]
+            }
+          }
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,39 @@
+-- server: MariaDB 11.8.9
+-- statement: ANALYZE FORMAT=JSON SELECT * FROM plan_t2 WHERE t1_id = 42
+{
+  "query_optimization": {
+    "r_total_time_ms": 0.075354082
+  },
+  "query_block": {
+    "select_id": 1,
+    "cost": 0.00889648,
+    "r_loops": 1,
+    "r_total_time_ms": 0.024183598,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "plan_t2",
+          "access_type": "ref",
+          "possible_keys": ["plan_t2_t1_idx"],
+          "key": "plan_t2_t1_idx",
+          "key_length": "4",
+          "used_key_parts": ["t1_id"],
+          "ref": ["const"],
+          "loops": 1,
+          "r_loops": 1,
+          "rows": 4,
+          "r_rows": 4,
+          "cost": 0.00889648,
+          "r_table_time_ms": 0.017740217,
+          "r_other_time_ms": 0.004016653,
+          "r_engine_stats": {
+            "pages_accessed": 12
+          },
+          "filtered": 100,
+          "r_total_filtered": 100,
+          "r_filtered": 100
+        }
+      }
+    ]
+  }
+}

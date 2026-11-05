@@ -1,0 +1,21 @@
+[package]
+name = "engine-net"
+version = "0.1.0"
+edition = "2021"
+description = "Pure-Rust network plumbing for TableX: SSH local port-forward tunnels (russh, ring backend)."
+
+[dependencies]
+# `ring` instead of the default `aws-lc-rs`: ring is already in the lock file and needs no cmake / C++ toolchain.
+# No `flate2`: compression of a tunnel that carries already-compressed or encrypted database traffic buys little.
+russh = { version = "0.64", default-features = false, features = ["ring", "rsa"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros"] }
+thiserror = "2"
+zeroize = "1"
+# Same major versions as russh uses, so they add no extra packages. Needed for hashed known_hosts entries.
+hmac = "0.13"
+sha1 = "0.11"
+base64 = "0.22"
+getrandom = "0.4"
+
+[dev-dependencies]
+tempfile = "3"

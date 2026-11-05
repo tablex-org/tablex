@@ -1,0 +1,11 @@
+[package]
+name = "engine-syntax"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+tree-sitter = "=0.26.13"
+
+[dev-dependencies]
+tree-sitter-json = "0.24.8"

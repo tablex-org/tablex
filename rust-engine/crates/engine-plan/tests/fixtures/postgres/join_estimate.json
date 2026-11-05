@@ -1,0 +1,86 @@
+-- server: PostgreSQL 17.10 (Debian 17.10-1.pgdg13+1) aarch64
+-- statement: EXPLAIN (FORMAT JSON) SELECT t1.grp, count(*) AS n, sum(t2.amount) AS total FROM plan_t1 t1 JOIN plan_t2 t2 ON t2.t1_id = t1.id WHERE t1.val < 500 GROUP BY t1.grp ORDER BY total DESC
+[
+  {
+    "Plan": {
+      "Node Type": "Sort",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Startup Cost": 564.33,
+      "Total Cost": 564.46,
+      "Plan Rows": 50,
+      "Plan Width": 44,
+      "Sort Key": ["(sum(t2.amount)) DESC"],
+      "Plans": [
+        {
+          "Node Type": "Aggregate",
+          "Strategy": "Hashed",
+          "Partial Mode": "Simple",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Startup Cost": 562.29,
+          "Total Cost": 562.92,
+          "Plan Rows": 50,
+          "Plan Width": 44,
+          "Group Key": ["t1.grp"],
+          "Planned Partitions": 0,
+          "Plans": [
+            {
+              "Node Type": "Hash Join",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Join Type": "Inner",
+              "Startup Cost": 125.75,
+              "Total Cost": 487.29,
+              "Plan Rows": 10000,
+              "Plan Width": 10,
+              "Inner Unique": true,
+              "Hash Cond": "(t2.t1_id = t1.id)",
+              "Plans": [
+                {
+                  "Node Type": "Seq Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Relation Name": "plan_t2",
+                  "Alias": "t2",
+                  "Startup Cost": 0.00,
+                  "Total Cost": 309.00,
+                  "Plan Rows": 20000,
+                  "Plan Width": 10
+                },
+                {
+                  "Node Type": "Hash",
+                  "Parent Relationship": "Inner",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Startup Cost": 94.50,
+                  "Total Cost": 94.50,
+                  "Plan Rows": 2500,
+                  "Plan Width": 8,
+                  "Plans": [
+                    {
+                      "Node Type": "Seq Scan",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "plan_t1",
+                      "Alias": "t1",
+                      "Startup Cost": 0.00,
+                      "Total Cost": 94.50,
+                      "Plan Rows": 2500,
+                      "Plan Width": 8,
+                      "Filter": "(val < 500)"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  }
+]

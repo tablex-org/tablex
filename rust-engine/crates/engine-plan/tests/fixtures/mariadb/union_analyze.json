@@ -1,0 +1,78 @@
+-- server: MariaDB 11.8.9
+-- statement: ANALYZE FORMAT=JSON SELECT id, name FROM plan_t1 WHERE val < 10 UNION SELECT id, name FROM plan_t1 WHERE grp = 3
+{
+  "query_optimization": {
+    "r_total_time_ms": 0.061881558
+  },
+  "query_block": {
+    "union_result": {
+      "table_name": "<union1,2>",
+      "access_type": "ALL",
+      "r_loops": 1,
+      "r_rows": 150,
+      "query_specifications": [
+        {
+          "query_block": {
+            "select_id": 1,
+            "cost": 0.837822,
+            "r_loops": 1,
+            "r_total_time_ms": 0.457187146,
+            "nested_loop": [
+              {
+                "table": {
+                  "table_name": "plan_t1",
+                  "access_type": "ALL",
+                  "loops": 1,
+                  "r_loops": 1,
+                  "rows": 5000,
+                  "r_rows": 5000,
+                  "cost": 0.837822,
+                  "r_table_time_ms": 0.336687559,
+                  "r_other_time_ms": 0.117738137,
+                  "r_engine_stats": {
+                    "pages_accessed": 15
+                  },
+                  "filtered": 1,
+                  "r_total_filtered": 1,
+                  "attached_condition": "plan_t1.val < 10",
+                  "r_filtered": 1
+                }
+              }
+            ]
+          }
+        },
+        {
+          "query_block": {
+            "select_id": 2,
+            "operation": "UNION",
+            "cost": 0.837822,
+            "r_loops": 1,
+            "r_total_time_ms": 0.348486477,
+            "nested_loop": [
+              {
+                "table": {
+                  "table_name": "plan_t1",
+                  "access_type": "ALL",
+                  "loops": 1,
+                  "r_loops": 1,
+                  "rows": 5000,
+                  "r_rows": 5000,
+                  "cost": 0.837822,
+                  "r_table_time_ms": 0.258320988,
+                  "r_other_time_ms": 0.089454207,
+                  "r_engine_stats": {
+                    "pages_accessed": 15
+                  },
+                  "filtered": 2,
+                  "r_total_filtered": 2,
+                  "attached_condition": "plan_t1.grp = 3",
+                  "r_filtered": 2
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

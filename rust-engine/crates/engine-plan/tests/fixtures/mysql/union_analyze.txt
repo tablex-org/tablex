@@ -1,0 +1,9 @@
+-- server: MySQL 8.4.11
+-- statement: EXPLAIN ANALYZE SELECT id, name FROM plan_t1 WHERE val < 10 UNION SELECT id, name FROM plan_t1 WHERE grp = 3
+-> Table scan on <union temporary>  (cost=1224..1254 rows=2166) (actual time=6.78..6.79 rows=150 loops=1)
+    -> Union materialize with deduplication  (cost=1224..1224 rows=2166) (actual time=6.78..6.78 rows=150 loops=1)
+        -> Filter: (plan_t1.val < 10)  (cost=504 rows=1666) (actual time=2.44..2.96 rows=50 loops=1)
+            -> Table scan on plan_t1  (cost=504 rows=5000) (actual time=2.43..2.85 rows=5000 loops=1)
+        -> Filter: (plan_t1.grp = 3)  (cost=504 rows=500) (actual time=2.7..3.14 rows=100 loops=1)
+            -> Table scan on plan_t1  (cost=504 rows=5000) (actual time=2.7..3.02 rows=5000 loops=1)
+

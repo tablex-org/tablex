@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="dataSourceStorageLocal" created-in="DB-243.1">
+    <data-source name="prod-postgres" uuid="11111111-0000-4000-8000-000000000001">
+      <database-info product="PostgreSQL" version="8.0" jdbc-version="4.2" driver-name="driver" driver-version="1.0" dbms="POSTGRESQL" exact-version="8.0" />
+      <user-name>deploy</user-name>
+    </data-source>
+    <data-source name="local-mysql" uuid="11111111-0000-4000-8000-000000000002">
+      <database-info product="MySQL" version="8.0" jdbc-version="4.2" driver-name="driver" driver-version="1.0" dbms="MYSQL" exact-version="8.0" />
+      <user-name>root</user-name>
+    </data-source>
+    <data-source name="maria" uuid="11111111-0000-4000-8000-000000000003">
+      <database-info product="MariaDB" version="8.0" jdbc-version="4.2" driver-name="driver" driver-version="1.0" dbms="MARIADB" exact-version="8.0" />
+      <user-name>maria</user-name>
+    </data-source>
+    <data-source name="custom-driver-mysql" uuid="11111111-0000-4000-8000-000000000006">
+      <database-info product="MySQL" version="8.0" jdbc-version="4.2" driver-name="driver" driver-version="1.0" dbms="MYSQL" exact-version="8.0" />
+      <user-name>custom</user-name>
+    </data-source>
+  </component>
+</project>

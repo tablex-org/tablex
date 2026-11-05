@@ -1,0 +1,7 @@
+-- server: SQLite 3.45.3 (python sqlite3 module: the sqlite3 CLI renders EQP as a tree, not rows)
+-- columns: id, parent, notused, detail (tab separated)
+-- statement: EXPLAIN QUERY PLAN SELECT t1.grp, count(*) AS n, sum(t2.amount) AS total FROM plan_t1 t1 JOIN plan_t2 t2 ON t2.t1_id = t1.id WHERE t1.val < 500 GROUP BY t1.grp ORDER BY total DESC
+9	0	0	SCAN t1
+13	0	0	SEARCH t2 USING INDEX plan_t2_t1_idx (t1_id=?)
+18	0	0	USE TEMP B-TREE FOR GROUP BY
+61	0	0	USE TEMP B-TREE FOR ORDER BY

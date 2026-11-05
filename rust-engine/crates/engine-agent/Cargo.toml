@@ -1,0 +1,23 @@
+[package]
+name = "engine-agent"
+version = "0.1.0"
+edition = "2021"
+description = "UI-free agent tool layer for TableX: typed tools, access policy, limits, schema context and audit log shared by the MCP server and the in-app assistant"
+
+[dependencies]
+engine-driver-api = { path = "../engine-driver-api" }
+engine-driver-host = { path = "../engine-driver-host" }
+engine-driver-kit = { path = "../engine-driver-kit" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+zeroize = "1"
+
+[target.'cfg(unix)'.dependencies]
+# O_NOFOLLOW for the audit file (already in the lock file).
+libc = "0.2"
+
+[dev-dependencies]
+# Pins the mirrored Redis command classifier to the driver's own.
+dbengine-redis = { path = "../dbengine-redis" }
+tempfile = "3.14"

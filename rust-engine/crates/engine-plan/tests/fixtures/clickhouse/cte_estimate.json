@@ -1,0 +1,585 @@
+-- server: ClickHouse 26.9.12.8
+-- statement: EXPLAIN json = 1, actions = 1, indexes = 1 WITH big AS (SELECT t1_id, sum(amount) AS s FROM plan_t2 GROUP BY t1_id) SELECT t1.name, big.s FROM plan_t1 t1 JOIN big ON big.t1_id = t1.id WHERE big.s > (SELECT avg(amount) FROM plan_t2) ORDER BY big.s DESC LIMIT 20
+[
+  {
+    "Plan": {
+      "Node Type": "Expression",
+      "Node Id": "Expression_23",
+      "Description": "Project names",
+      "Expression": {
+        "Inputs": [
+          {
+            "Name": "__table2.s",
+            "Type": "Float64"
+          },
+          {
+            "Name": "__table1.name",
+            "Type": "String"
+          }
+        ],
+        "Actions": [
+          {
+            "Node Type": "INPUT",
+            "Result Type": "Float64",
+            "Result Name": "__table2.s",
+            "Arguments": [0],
+            "Removed Arguments": [],
+            "Result": 0
+          },
+          {
+            "Node Type": "INPUT",
+            "Result Type": "String",
+            "Result Name": "__table1.name",
+            "Arguments": [1],
+            "Removed Arguments": [],
+            "Result": 1
+          },
+          {
+            "Node Type": "ALIAS",
+            "Result Type": "Float64",
+            "Result Name": "s",
+            "Arguments": [0],
+            "Removed Arguments": [0],
+            "Result": 2
+          },
+          {
+            "Node Type": "ALIAS",
+            "Result Type": "String",
+            "Result Name": "name",
+            "Arguments": [1],
+            "Removed Arguments": [1],
+            "Result": 0
+          }
+        ],
+        "Outputs": [
+          {
+            "Name": "name",
+            "Type": "String"
+          },
+          {
+            "Name": "s",
+            "Type": "Float64"
+          }
+        ],
+        "Positions": [0, 2]
+      },
+      "Plans": [
+        {
+          "Node Type": "Limit",
+          "Node Id": "Limit_22",
+          "Description": "preliminary LIMIT",
+          "Limit": 20,
+          "Offset": 0,
+          "With Ties": false,
+          "Reads All Data": false,
+          "Plans": [
+            {
+              "Node Type": "Sorting",
+              "Node Id": "Sorting_21",
+              "Description": "Sorting for ORDER BY",
+              "Sort Description": [
+                {
+                  "Column": "__table2.s",
+                  "Ascending": false,
+                  "With Fill": false
+                }
+              ],
+              "Limit": 20,
+              "Plans": [
+                {
+                  "Node Type": "Expression",
+                  "Node Id": "Expression_39",
+                  "Description": "((Before ORDER BY + (Projection + )) + Post Join Actions)",
+                  "Expression": {
+                    "Inputs": [
+                      {
+                        "Name": "__table1.name",
+                        "Type": "String"
+                      },
+                      {
+                        "Name": "__table2.s",
+                        "Type": "Float64"
+                      }
+                    ],
+                    "Actions": [
+                      {
+                        "Node Type": "INPUT",
+                        "Result Type": "String",
+                        "Result Name": "__table1.name",
+                        "Arguments": [0],
+                        "Removed Arguments": [0],
+                        "Result": 0
+                      },
+                      {
+                        "Node Type": "INPUT",
+                        "Result Type": "Float64",
+                        "Result Name": "__table2.s",
+                        "Arguments": [1],
+                        "Removed Arguments": [1],
+                        "Result": 1
+                      }
+                    ],
+                    "Outputs": [
+                      {
+                        "Name": "__table2.s",
+                        "Type": "Float64"
+                      },
+                      {
+                        "Name": "__table1.name",
+                        "Type": "String"
+                      }
+                    ],
+                    "Positions": [1, 0]
+                  },
+                  "Plans": [
+                    {
+                      "Node Type": "Join",
+                      "Node Id": "Join_37",
+                      "Description": "JOIN FillRightFirst",
+                      "Type": "INNER",
+                      "Strictness": "ALL",
+                      "Algorithm": "SpillingHashJoin(HashJoin)",
+                      "Clauses": "[(__table1.id) = (__table2.t1_id)]",
+                      "Plans": [
+                        {
+                          "Node Type": "Expression",
+                          "Node Id": "Expression_35",
+                          "Description": "Left Pre Join Actions",
+                          "Expression": {
+                            "Inputs": [
+                              {
+                                "Name": "__table1.id",
+                                "Type": "UInt32"
+                              },
+                              {
+                                "Name": "__table1.name",
+                                "Type": "String"
+                              }
+                            ],
+                            "Actions": [
+                              {
+                                "Node Type": "INPUT",
+                                "Result Type": "UInt32",
+                                "Result Name": "__table1.id",
+                                "Arguments": [0],
+                                "Removed Arguments": [0],
+                                "Result": 0
+                              },
+                              {
+                                "Node Type": "INPUT",
+                                "Result Type": "String",
+                                "Result Name": "__table1.name",
+                                "Arguments": [1],
+                                "Removed Arguments": [1],
+                                "Result": 1
+                              }
+                            ],
+                            "Outputs": [
+                              {
+                                "Name": "__table1.id",
+                                "Type": "UInt32"
+                              },
+                              {
+                                "Name": "__table1.name",
+                                "Type": "String"
+                              }
+                            ],
+                            "Positions": [0, 1]
+                          },
+                          "Plans": [
+                            {
+                              "Node Type": "Expression",
+                              "Node Id": "Expression_41",
+                              "Description": "(Apply runtime join filter + Change column names to column identifiers)",
+                              "Expression": {
+                                "Inputs": [
+                                  {
+                                    "Name": "name",
+                                    "Type": "String"
+                                  },
+                                  {
+                                    "Name": "id",
+                                    "Type": "UInt32"
+                                  }
+                                ],
+                                "Actions": [
+                                  {
+                                    "Node Type": "INPUT",
+                                    "Result Type": "String",
+                                    "Result Name": "name",
+                                    "Arguments": [0],
+                                    "Removed Arguments": [],
+                                    "Result": 0
+                                  },
+                                  {
+                                    "Node Type": "INPUT",
+                                    "Result Type": "UInt32",
+                                    "Result Name": "id",
+                                    "Arguments": [1],
+                                    "Removed Arguments": [],
+                                    "Result": 1
+                                  },
+                                  {
+                                    "Node Type": "ALIAS",
+                                    "Result Type": "String",
+                                    "Result Name": "__table1.name",
+                                    "Arguments": [0],
+                                    "Removed Arguments": [0],
+                                    "Result": 2
+                                  },
+                                  {
+                                    "Node Type": "ALIAS",
+                                    "Result Type": "UInt32",
+                                    "Result Name": "__table1.id",
+                                    "Arguments": [1],
+                                    "Removed Arguments": [1],
+                                    "Result": 0
+                                  }
+                                ],
+                                "Outputs": [
+                                  {
+                                    "Name": "__table1.name",
+                                    "Type": "String"
+                                  },
+                                  {
+                                    "Name": "__table1.id",
+                                    "Type": "UInt32"
+                                  }
+                                ],
+                                "Positions": [2, 0]
+                              },
+                              "Plans": [
+                                {
+                                  "Node Type": "ReadFromMergeTree",
+                                  "Node Id": "ReadFromMergeTree_8",
+                                  "Description": "tablex.plan_t1",
+                                  "Read Type": "Default",
+                                  "Parts": 1,
+                                  "Granules": 1,
+                                  "Prewhere info": {
+                                    "Need filter": true,
+                                    "Prewhere filter": {
+                                      "Prewhere filter column": "__applyFilter(_runtime_filter_8916706592523301130, __table1.id)",
+                                      "Prewhere filter remove filter column": true,
+                                      "Prewhere filter expression": {
+                                        "Inputs": [
+                                          {
+                                            "Name": "id",
+                                            "Type": "UInt32"
+                                          }
+                                        ],
+                                        "Actions": [
+                                          {
+                                            "Node Type": "INPUT",
+                                            "Result Type": "UInt32",
+                                            "Result Name": "id",
+                                            "Arguments": [0],
+                                            "Removed Arguments": [],
+                                            "Result": 0
+                                          },
+                                          {
+                                            "Node Type": "COLUMN",
+                                            "Result Type": "String",
+                                            "Result Name": "_runtime_filter_8916706592523301130",
+                                            "Column": "Const(String)",
+                                            "Arguments": [],
+                                            "Removed Arguments": [],
+                                            "Result": 1
+                                          },
+                                          {
+                                            "Node Type": "FUNCTION",
+                                            "Result Type": "UInt8",
+                                            "Result Name": "__applyFilter(_runtime_filter_8916706592523301130, __table1.id)",
+                                            "Function": "__applyFilter",
+                                            "Compiled": false,
+                                            "Arguments": [1, 0],
+                                            "Removed Arguments": [1],
+                                            "Result": 2
+                                          }
+                                        ],
+                                        "Outputs": [
+                                          {
+                                            "Name": "id",
+                                            "Type": "UInt32"
+                                          },
+                                          {
+                                            "Name": "__applyFilter(_runtime_filter_8916706592523301130, __table1.id)",
+                                            "Type": "UInt8"
+                                          }
+                                        ],
+                                        "Positions": [0, 2]
+                                      }
+                                    }
+                                  },
+                                  "Indexes": [
+                                    {
+                                      "Type": "PrimaryKey",
+                                      "Condition": "true",
+                                      "Initial Parts": 1,
+                                      "Selected Parts": 1,
+                                      "Initial Granules": 1,
+                                      "Selected Granules": 1
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "Node Type": "Expression",
+                          "Node Id": "Expression_36",
+                          "Description": "Right Pre Join Actions",
+                          "Expression": {
+                            "Inputs": [
+                              {
+                                "Name": "__table2.t1_id",
+                                "Type": "UInt32"
+                              },
+                              {
+                                "Name": "__table2.s",
+                                "Type": "Float64"
+                              }
+                            ],
+                            "Actions": [
+                              {
+                                "Node Type": "INPUT",
+                                "Result Type": "UInt32",
+                                "Result Name": "__table2.t1_id",
+                                "Arguments": [0],
+                                "Removed Arguments": [0],
+                                "Result": 0
+                              },
+                              {
+                                "Node Type": "INPUT",
+                                "Result Type": "Float64",
+                                "Result Name": "__table2.s",
+                                "Arguments": [1],
+                                "Removed Arguments": [1],
+                                "Result": 1
+                              }
+                            ],
+                            "Outputs": [
+                              {
+                                "Name": "__table2.t1_id",
+                                "Type": "UInt32"
+                              },
+                              {
+                                "Name": "__table2.s",
+                                "Type": "Float64"
+                              }
+                            ],
+                            "Positions": [0, 1]
+                          },
+                          "Plans": [
+                            {
+                              "Node Type": "BuildRuntimeFilter",
+                              "Node Id": "BuildRuntimeFilter_33",
+                              "Description": "Build runtime join filter on __table2.t1_id",
+                              "Plans": [
+                                {
+                                  "Node Type": "Filter",
+                                  "Node Id": "Filter_29",
+                                  "Description": "(WHERE + (Change column names to column identifiers + (Project names + Projection)))",
+                                  "Filter Column": "greater(__table2.s, _CAST(160.6925_Nullable(Float64), 'Nullable(Float64)'_String))",
+                                  "Removes Filter": true,
+                                  "Expression": {
+                                    "Inputs": [
+                                      {
+                                        "Name": "sum(__table3.amount)",
+                                        "Type": "Float64"
+                                      },
+                                      {
+                                        "Name": "__table3.t1_id",
+                                        "Type": "UInt32"
+                                      }
+                                    ],
+                                    "Actions": [
+                                      {
+                                        "Node Type": "INPUT",
+                                        "Result Type": "Float64",
+                                        "Result Name": "sum(__table3.amount)",
+                                        "Arguments": [0],
+                                        "Removed Arguments": [],
+                                        "Result": 0
+                                      },
+                                      {
+                                        "Node Type": "INPUT",
+                                        "Result Type": "UInt32",
+                                        "Result Name": "__table3.t1_id",
+                                        "Arguments": [1],
+                                        "Removed Arguments": [],
+                                        "Result": 1
+                                      },
+                                      {
+                                        "Node Type": "COLUMN",
+                                        "Result Type": "Nullable(Float64)",
+                                        "Result Name": "_CAST(160.6925_Nullable(Float64), 'Nullable(Float64)'_String)",
+                                        "Column": "Const(Nullable(Float64))",
+                                        "Arguments": [],
+                                        "Removed Arguments": [],
+                                        "Result": 2
+                                      },
+                                      {
+                                        "Node Type": "ALIAS",
+                                        "Result Type": "Float64",
+                                        "Result Name": "__table2.s",
+                                        "Arguments": [0],
+                                        "Removed Arguments": [],
+                                        "Result": 3
+                                      },
+                                      {
+                                        "Node Type": "ALIAS",
+                                        "Result Type": "UInt32",
+                                        "Result Name": "__table2.t1_id",
+                                        "Arguments": [1],
+                                        "Removed Arguments": [1],
+                                        "Result": 4
+                                      },
+                                      {
+                                        "Node Type": "FUNCTION",
+                                        "Result Type": "Nullable(UInt8)",
+                                        "Result Name": "greater(__table2.s, _CAST(160.6925_Nullable(Float64), 'Nullable(Float64)'_String))",
+                                        "Function": "greater",
+                                        "Compiled": false,
+                                        "Arguments": [0, 2],
+                                        "Removed Arguments": [0, 2],
+                                        "Result": 1
+                                      }
+                                    ],
+                                    "Outputs": [
+                                      {
+                                        "Name": "greater(__table2.s, _CAST(160.6925_Nullable(Float64), 'Nullable(Float64)'_String))",
+                                        "Type": "Nullable(UInt8)"
+                                      },
+                                      {
+                                        "Name": "__table2.s",
+                                        "Type": "Float64"
+                                      },
+                                      {
+                                        "Name": "__table2.t1_id",
+                                        "Type": "UInt32"
+                                      }
+                                    ],
+                                    "Positions": [1, 3, 4]
+                                  },
+                                  "Plans": [
+                                    {
+                                      "Node Type": "Aggregating",
+                                      "Node Id": "Aggregating_13",
+                                      "Keys": ["__table3.t1_id"],
+                                      "Aggregates": [
+                                        {
+                                          "Name": "sum(__table3.amount)",
+                                          "Function": {
+                                            "Name": "sum",
+                                            "Argument Types": ["Float64"],
+                                            "Result Type": "Float64"
+                                          },
+                                          "Arguments": ["__table3.amount"]
+                                        }
+                                      ],
+                                      "Skip merging": false,
+                                      "Plans": [
+                                        {
+                                          "Node Type": "Expression",
+                                          "Node Id": "Expression_24",
+                                          "Description": "(Before GROUP BY + Change column names to column identifiers)",
+                                          "Expression": {
+                                            "Inputs": [
+                                              {
+                                                "Name": "t1_id",
+                                                "Type": "UInt32"
+                                              },
+                                              {
+                                                "Name": "amount",
+                                                "Type": "Float64"
+                                              }
+                                            ],
+                                            "Actions": [
+                                              {
+                                                "Node Type": "INPUT",
+                                                "Result Type": "UInt32",
+                                                "Result Name": "t1_id",
+                                                "Arguments": [0],
+                                                "Removed Arguments": [],
+                                                "Result": 0
+                                              },
+                                              {
+                                                "Node Type": "INPUT",
+                                                "Result Type": "Float64",
+                                                "Result Name": "amount",
+                                                "Arguments": [1],
+                                                "Removed Arguments": [],
+                                                "Result": 1
+                                              },
+                                              {
+                                                "Node Type": "ALIAS",
+                                                "Result Type": "UInt32",
+                                                "Result Name": "__table3.t1_id",
+                                                "Arguments": [0],
+                                                "Removed Arguments": [0],
+                                                "Result": 2
+                                              },
+                                              {
+                                                "Node Type": "ALIAS",
+                                                "Result Type": "Float64",
+                                                "Result Name": "__table3.amount",
+                                                "Arguments": [1],
+                                                "Removed Arguments": [1],
+                                                "Result": 0
+                                              }
+                                            ],
+                                            "Outputs": [
+                                              {
+                                                "Name": "__table3.t1_id",
+                                                "Type": "UInt32"
+                                              },
+                                              {
+                                                "Name": "__table3.amount",
+                                                "Type": "Float64"
+                                              }
+                                            ],
+                                            "Positions": [2, 0]
+                                          },
+                                          "Plans": [
+                                            {
+                                              "Node Type": "ReadFromMergeTree",
+                                              "Node Id": "ReadFromMergeTree_10",
+                                              "Description": "tablex.plan_t2",
+                                              "Read Type": "Default",
+                                              "Parts": 1,
+                                              "Granules": 2,
+                                              "Indexes": [
+                                                {
+                                                  "Type": "PrimaryKey",
+                                                  "Condition": "true",
+                                                  "Initial Parts": 1,
+                                                  "Selected Parts": 1,
+                                                  "Initial Granules": 2,
+                                                  "Selected Granules": 2
+                                                }
+                                              ]
+                                            }
+                                          ]
+                                        }
+                                      ]
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  }
+]

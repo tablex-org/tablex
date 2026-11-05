@@ -1,0 +1,27 @@
+[package]
+name = "dbengine-clickhouse"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+name = "dbengine_clickhouse"
+
+[dependencies]
+arrow-array = { version = "53", features = ["ffi"] }
+arrow-buffer = "53"
+arrow-cast = "53"
+arrow-ipc = "53"
+arrow-schema = "53"
+arrow-select = "53"
+dirs = "5"
+engine-driver-kit = { path = "../engine-driver-kit" }
+percent-encoding = "2"
+serde_json = "1.0"
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+url = "2"
+
+[dev-dependencies]
+engine-driver-conformance = { path = "../engine-driver-conformance" }
+engine-driver-api = { path = "../engine-driver-api" }
+engine-driver-host = { path = "../engine-driver-host" }

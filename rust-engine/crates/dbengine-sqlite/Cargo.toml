@@ -1,0 +1,16 @@
+[package]
+name = "dbengine-sqlite"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+name = "dbengine_sqlite"
+
+[dependencies]
+arrow-array = { version = "53", features = ["ffi"] }
+arrow-buffer = "53"
+arrow-schema = "53"
+engine-driver-kit = { path = "../engine-driver-kit" }
+rusqlite = { version = "0.39", features = ["bundled", "hooks", "load_extension"] }
+serde_json = "1.0"

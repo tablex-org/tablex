@@ -1,0 +1,214 @@
+name: CI
+
+# Cross-platform build + test check for pull requests and main. No secrets,
+# no write permissions, no pull_request_target: safe to run for fork PRs.
+#
+#   workspace   (ubuntu / windows / macos-14)
+#       cargo check --workspace --all-targets      (root workspace: apps/tablex-gpui)
+#       cargo test -p tablex-gpui
+#   engine      (ubuntu / windows / macos-14)
+#       cargo test --manifest-path rust-engine/Cargo.toml --workspace
+#   size        (macos-14, pushes to main only)
+#       cargo build --profile dist -p tablex-gpui; scripts/size_report.py --check
+#   audit       (ubuntu, pushes to main only, report-only)
+#       cargo audit for both lock files
+#   scripts     (ubuntu / macos-14)
+#       python3 -m unittest discover -s scripts/tests
+#
+# Display: no xvfb. The app tests use GPUI's `test-support` platform, which is
+# headless on every OS (Zed's own CI runs gpui tests on Linux/Windows without a
+# display). The Linux packages below are only needed to COMPILE the Wayland/X11
+# backends, fontconfig, vulkan and the keyring (libsecret/dbus) crates.
+#
+# Known-unfinished pieces (`experimental: true` below): the app's Linux / Windows
+# driver loading and Authenticode verification are typed stubs, and the crate
+# has not been compiled on Linux / Windows before this workflow. So on those two
+# OSes `cargo check` still FAILS the job loudly, while the TEST steps are
+# allowed to fail (continue-on-error) until a first green run flips the flag.
+# macOS (the only fully supported platform) is strict everywhere.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_NET_RETRY: "10"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  rust:
+    name: rust (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-arm64
+            os: macos-14
+            experimental: false
+          - name: linux
+            os: ubuntu-latest
+            experimental: true
+          - name: windows
+            os: windows-latest
+            experimental: true
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # Deep cargo registry / target paths exceed MAX_PATH on Windows.
+      - name: Enable long paths (Windows)
+        if: runner.os == 'Windows'
+        run: git config --system core.longpaths true
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          # Subset of Zed's script/linux that GPUI (wayland + x11 + font-kit +
+          # vulkan) needs, plus openssl/sqlite (driver crates) and
+          # libsecret/dbus (keyring).
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang cmake pkg-config \
+            libfontconfig-dev libssl-dev libsqlite3-dev libzstd-dev \
+            libglib2.0-dev libvulkan-dev \
+            libwayland-dev libx11-xcb-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libsecret-1-dev libdbus-1-dev \
+            zsh fish dash
+
+      # The shells the MCP command quoting is tested in (sh, bash, zsh, fish, dash; macOS has all but fish).
+      - name: Install fish (macOS)
+        if: runner.os == 'macOS'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: brew install fish
+
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
+
+      # One cache per OS covering both cargo workspaces (separate target dirs).
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: ci-${{ runner.os }}
+          workspaces: |
+            . -> target
+            rust-engine -> target
+
+      - name: cargo check (root workspace)
+        run: cargo check --workspace --all-targets
+
+      - name: cargo test -p tablex-gpui
+        continue-on-error: ${{ matrix.experimental }}
+        # The debug-build window render (`AppRoot::render` + `render_navigator`) has ~1 MiB of stack
+        # frames; with the rest of the draw chain that is ~2 MiB on macOS and more on MSVC, so the
+        # 2 MiB default test-thread stack overflows on Windows. The stack is reserved, not committed.
+        env:
+          RUST_MIN_STACK: "16777216"
+        run: cargo test -p tablex-gpui
+
+      # Builds the SQLite driver itself (a nested cargo build into rust-engine/target/test-drivers)
+      # and uses an in-memory credential store, so it needs no installed drivers and no keychain.
+      - name: cargo test -p tablex-mcp
+        continue-on-error: ${{ matrix.experimental }}
+        run: cargo test -p tablex-mcp
+
+      # Live-database tests are #[ignore]d, so they are skipped by default.
+      - name: cargo test (rust-engine workspace)
+        continue-on-error: ${{ matrix.experimental }}
+        run: cargo test --manifest-path rust-engine/Cargo.toml --workspace
+
+  scripts:
+    name: scripts (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: python unittest
+        run: python3 -m unittest discover -s scripts/tests
+
+  # Shipped size of the app (the `dist` profile: fat LTO, stripped). Runs on
+  # pushes to main only: the LTO build is slow and a PR cannot change the
+  # budget without the change being visible in scripts/size-budget.json. The
+  # table lands in the job summary; exceeding the budget fails the job.
+  size:
+    name: size (macos-arm64)
+    if: github.event_name == 'push'
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
+      - name: cargo build --profile dist
+        run: cargo build --profile dist -p tablex-gpui
+      - name: size report
+        run: |
+          python3 scripts/size_report.py --markdown >> "$GITHUB_STEP_SUMMARY"
+          python3 scripts/size_report.py --check
+      # The MongoDB Shell plugin is built like a driver (rust-engine workspace, release profile,
+      # `strip -x`), so it is measured from the file the build script writes.
+      - name: size report (MongoDB Shell plugin)
+        run: |
+          plugin="$(rust-engine/scripts/build-plugin.sh)"
+          python3 scripts/size_report.py --package tablex-mongo-shell --binary "${plugin}" --markdown >> "$GITHUB_STEP_SUMMARY"
+          python3 scripts/size_report.py --package tablex-mongo-shell --binary "${plugin}" --check
+      # The SQL formatter tool (sqruff, out of process) is built the same way. sqruff is linked into
+      # this executable only: the app's own size report above is what shows it never reached the app.
+      - name: size report (SQL Formatter, sqruff)
+        run: |
+          tool="$(rust-engine/scripts/build-plugin.sh --crate tablex-sqruff)"
+          python3 scripts/size_report.py --package tablex-sqruff --binary "${tool}" --markdown >> "$GITHUB_STEP_SUMMARY"
+          python3 scripts/size_report.py --package tablex-sqruff --binary "${tool}" --check
+
+  # Known vulnerabilities in the dependency trees (RustSec advisory database).
+  # Report-only until its first run is triaged: an advisory published upstream
+  # must not turn main red by surprise. RUSTSEC-2023-0071 (rsa "Marvin" timing)
+  # is ignored on purpose: the pre-release `rsa` comes from russh, has no fixed
+  # release, and is only used to sign with a user's RSA key file (see
+  # docs/plans/2026-10-11-ssh-tunnel.md).
+  audit:
+    name: audit (cargo audit)
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: cargo audit (app workspace)
+        run: cargo audit --ignore RUSTSEC-2023-0071
+      # Reported even when the app workspace above has findings.
+      - name: cargo audit (rust-engine workspace)
+        if: ${{ !cancelled() }}
+        run: cargo audit --file rust-engine/Cargo.lock --ignore RUSTSEC-2023-0071

@@ -1,0 +1,10 @@
+-- server: SQLite 3.45.3 (python sqlite3 module: the sqlite3 CLI renders EQP as a tree, not rows)
+-- columns: id, parent, notused, detail (tab separated)
+-- statement: EXPLAIN QUERY PLAN WITH big AS (SELECT t1_id, sum(amount) AS s FROM plan_t2 GROUP BY t1_id) SELECT t1.name, big.s FROM plan_t1 t1 JOIN big ON big.t1_id = t1.id WHERE big.s > (SELECT avg(amount) FROM plan_t2) ORDER BY big.s DESC LIMIT 20
+2	0	0	CO-ROUTINE big
+9	2	0	SCAN plan_t2 USING INDEX plan_t2_t1_idx
+44	0	0	SCAN big
+50	0	0	SCALAR SUBQUERY 2
+55	50	0	SCAN plan_t2
+66	0	0	SEARCH t1 USING INTEGER PRIMARY KEY (rowid=?)
+79	0	0	USE TEMP B-TREE FOR ORDER BY

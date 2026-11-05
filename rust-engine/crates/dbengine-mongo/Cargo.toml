@@ -1,0 +1,36 @@
+[package]
+name = "dbengine-mongo"
+version = "0.2.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+name = "dbengine_mongo"
+
+[features]
+default = []
+abi-v2 = []
+
+[dependencies]
+engine-driver-api = { path = "../engine-driver-api" }
+engine-ffi-util = { path = "../engine-ffi-util" }
+mongodb = "3.1"
+bson = "2.13"
+arrow = { version = "53", features = ["ffi"] }
+arrow-array = "53"
+tokio = { version = "1.42", features = ["full"] }
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+json5 = "0.4"
+regex = "1.10"
+base64 = "0.22"
+futures = "0.3"
+lazy_static = "1.5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+chrono = { version = "0.4", features = ["serde"] }
+engine-export = { path = "../engine-export" }
+engine-mongo-script = { path = "../engine-mongo-script" }
+tree-sitter = "=0.26.13"
+tree-sitter-javascript = "0.23.1"

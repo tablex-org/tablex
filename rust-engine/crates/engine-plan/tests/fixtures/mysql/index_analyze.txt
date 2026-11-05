@@ -1,0 +1,4 @@
+-- server: MySQL 8.4.11
+-- statement: EXPLAIN ANALYZE SELECT * FROM plan_t2 WHERE t1_id = 42
+-> Index lookup on plan_t2 using plan_t2_t1_idx (t1_id=42)  (cost=1.4 rows=4) (actual time=0.021..0.0223 rows=4 loops=1)
+

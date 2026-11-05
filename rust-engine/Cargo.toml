@@ -1,0 +1,59 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/engine-agent",
+    "crates/engine-ai",
+    "crates/engine-connect",
+    "crates/engine-driver-api",
+    "crates/engine-driver-conformance",
+    "crates/engine-driver-host",
+    "crates/engine-driver-kit",
+    "crates/engine-export",
+    "crates/engine-ffi-util",
+    "crates/engine-mongo-script",
+    "crates/engine-net",
+    "crates/engine-plan",
+    "crates/engine-storage",
+    "crates/engine-syntax",
+    "crates/tablex-mongo-shell",
+    "crates/tablex-sqruff",
+    "crates/dbengine-core",
+    "crates/dbengine-postgres",
+    "crates/dbengine-mongo",
+    "crates/dbengine-sqlite",
+    "crates/dbengine-mysql",
+    "crates/dbengine-mariadb",
+    "crates/dbengine-redis",
+    "crates/dbengine-clickhouse",
+    "crates/dbengine",
+]
+
+# Faster, smaller dev/test builds: dependencies carry no debug info, our
+# crates keep line tables (panics and backtraces still show file:line).
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+# The formatter tool's tests run sqruff over a corpus: unoptimised, starting sqruff (compiling its
+# dialects' regexes) takes over a second, optimised it takes milliseconds. These overrides are
+# workspace-wide, for the dev (and test) profile only: every crate that uses regex, regex-automata,
+# regex-syntax, aho-corasick or hashbrown gets them in a debug build, not just the tool. Release builds
+# are not affected.
+[profile.dev.package.sqruff-lib]
+opt-level = 3
+[profile.dev.package.sqruff-lib-core]
+opt-level = 3
+[profile.dev.package.sqruff-lib-dialects]
+opt-level = 3
+[profile.dev.package.regex]
+opt-level = 3
+[profile.dev.package.regex-automata]
+opt-level = 3
+[profile.dev.package.regex-syntax]
+opt-level = 3
+[profile.dev.package.aho-corasick]
+opt-level = 3
+[profile.dev.package.hashbrown]
+opt-level = 3

@@ -1,0 +1,66 @@
+# Rust
+rust-engine/target/
+/target/
+# Nested build directories (test fixture crates build into their own target/)
+**/target/
+# Locally packaged drivers and their manifest (file:// paths of this machine)
+/dist/
+/rust-engine/dist/
+__pycache__/
+**/*.rs.bk
+
+# AI Agents
+.agents/
+skills-lock.json
+.opencode/
+opencode.json
+.codegraph/
+
+# Documentation
+docs/
+
+# Xcode
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+DerivedData/
+*.swiftpm/
+*.dylib
+*.dSYM/
+build/
+
+# macOS
+.DS_Store
+
+# Worktrees
+.worktrees/
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# Benchmark
+*.profraw
+TableLeaf/bench/fixtures/
+TableLeafTests/benchmark-data.bson
+scripts/node_modules/
+scripts/package-lock.json
+benchmark-results/
+
+# Build artifacts
+build/
+
+# Benchmark results
+benchmark-results/
+
+# Sensitive data - NEVER commit
+.env
+.env.*
+*.env
+*.bson
+*.json.gz
+credentials/
+secrets/

@@ -1,0 +1,67 @@
+{
+  "comment": "Maximum shipped size per target, checked by scripts/size_report.py --check: `targets` is the app (target/dist/tablex-gpui), `packages.<name>.targets` every other executable (--package <name>). Raise a number only in the change that explains what grew. A target without an entry is measured but never failed.",
+  "targets": {
+    "macos-arm64": {
+      "binary_max_bytes": 52750000,
+      "compressed_max_bytes": 21880000
+    }
+  },
+  "packages": {
+    "tablex-mcp": {
+      "targets": {
+        "macos-arm64": {
+          "binary_max_bytes": 7530000,
+          "compressed_max_bytes": 3540000
+        }
+      },
+      "baseline": {
+        "macos-arm64": {
+          "date": "2026-10-13",
+          "binary_bytes": 7185408,
+          "compressed_bytes": 3366102,
+          "note": "dist profile, after H2 / P1 (rmcp 2.2 server feature only, tokio current_thread); the budget is ~5% above"
+        }
+      }
+    },
+    "tablex-mongo-shell": {
+      "targets": {
+        "macos-arm64": {
+          "binary_max_bytes": 3804000,
+          "compressed_max_bytes": 1567000
+        }
+      },
+      "baseline": {
+        "macos-arm64": {
+          "date": "2026-10-16",
+          "binary_bytes": 3622512,
+          "compressed_bytes": 1491554,
+          "note": "release profile built by rust-engine/scripts/build-plugin.sh (CARGO_PROFILE_RELEASE_STRIP=none, then `strip -x` and an ad hoc re-sign), packaged by package-plugin.sh; QuickJS-ng (rquickjs 0.14.0) is most of it. Measured with `size_report.py --package tablex-mongo-shell --binary <packaged file>` (the plugin is built in the rust-engine workspace, which has no `dist` profile). The budget is ~5% above."
+        }
+      }
+    },
+    "tablex-sqruff": {
+      "targets": {
+        "macos-arm64": {
+          "binary_max_bytes": 16500000,
+          "compressed_max_bytes": 6380000
+        }
+      },
+      "baseline": {
+        "macos-arm64": {
+          "date": "2026-10-22",
+          "binary_bytes": 15711408,
+          "compressed_bytes": 6070000,
+          "note": "release profile built by rust-engine/scripts/build-plugin.sh --crate tablex-sqruff (CARGO_PROFILE_RELEASE_STRIP=none, then `strip -x` and an ad hoc re-sign), packaged by package-plugin.sh --tool tablex-sqruff; sqruff-lib 0.42.0 with its dialects is almost all of it (linked into this executable only, never into the app). Measured with `size_report.py --package tablex-sqruff --binary <packaged file>`. The budget is ~5% above."
+        }
+      }
+    }
+  },
+  "baseline": {
+    "macos-arm64": {
+      "date": "2026-11-04",
+      "binary_bytes": 50236064,
+      "compressed_bytes": 20838317,
+      "note": "dist profile (fat LTO, 1 codegen unit, stripped), after the features of 2026-10-16 to 2026-11-04 (SSH jump hosts and proxies, Explain, the Mongo shell add-on, the table structure editor, TLS settings, scripts and Format SQL, manual transactions, the record view and binary values, navigator objects and their actions, Import, Data Transfer, Run SQL File, Backup and restore, Users and privileges, Charts, editing a Mongo document as JSON) and gpui-kit 0.9.0 / gpui-pre 0.3.11: +10.76 MB / +3.93 MB over the 39.48 / 16.91 MB below. The kit upgrade alone is +0.37 / +0.20 MB (0488d76 on gpui-kit 0.8.0 measured 49.87 / 20.64 MB). By cargo-bloat (.text, 35.3 MiB in total): tablex_gpui 7.2 MiB (4.4 MiB at A1), gpui 5.7 MiB, std 4.2 MiB, gpui_component 1.8 MiB (1.2 MiB at A1), gpui_base 1.5 MiB (1.3 MiB at A1), arrow_cast 1.3 MiB, arrow_array 808 KiB, rust_xlsxwriter 504 KiB, arrow_select 412 KiB, russh 408 KiB. The budget is ~5% above the new baseline. Before: dist profile (fat LTO, 1 codegen unit, stripped), after A1 added the AI assistant: +1.41 MB / +0.66 MB over the 38.07 / 16.25 MB below. By cargo-bloat (.text): the Markdown text view of gpui-component that the panel renders answers with (gpui_base 1.3 MiB and gpui_component 1.2 MiB in total now, the `markdown` parser 177 KiB, `html5ever` 114 KiB which the view links for its HTML mode although the panel never renders HTML), the whole engine-agent tool layer (268 KiB; before only its access lattice was linked), engine-ai (under 110 KiB) and the panel itself in tablex_gpui (4.4 MiB in total). The budget is ~5% above the new baseline. Before A1: dist profile (fat LTO, 1 codegen unit, stripped), after M0 moved the connection-opening logic into the engine-connect crate and added the Agent access controls: +0.23 MB / +0.08 MB over the 37.84 / 16.17 MB below, from linking engine-agent's access lattice (engine-agent, engine-driver-kit, arrow-cast and its number parsers: +13 packages in the normal tree, 838 -> 857 lines of `cargo tree | sort -u`) and the new settings controls; the moved code itself is size-neutral. Before M0: binary 37.84 MB, compressed 16.17 MB (after T2 linked engine-net: russh 0.64, ring backend, pure-Rust RustCrypto set, 709 -> 838 packages; the budget is ~5% above that). Before T2 (after P6): 34.81 / 14.80 MB. Before P6: 40.81 / 17.56 MB"
+    }
+  }
+}

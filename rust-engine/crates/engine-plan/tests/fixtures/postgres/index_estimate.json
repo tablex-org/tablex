@@ -1,0 +1,32 @@
+-- server: PostgreSQL 17.10 (Debian 17.10-1.pgdg13+1) aarch64
+-- statement: EXPLAIN (FORMAT JSON) SELECT * FROM plan_t2 WHERE t1_id = 42
+[
+  {
+    "Plan": {
+      "Node Type": "Bitmap Heap Scan",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Relation Name": "plan_t2",
+      "Alias": "plan_t2",
+      "Startup Cost": 4.32,
+      "Total Cost": 18.07,
+      "Plan Rows": 4,
+      "Plan Width": 14,
+      "Recheck Cond": "(t1_id = 42)",
+      "Plans": [
+        {
+          "Node Type": "Bitmap Index Scan",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Index Name": "plan_t2_t1_idx",
+          "Startup Cost": 0.00,
+          "Total Cost": 4.32,
+          "Plan Rows": 4,
+          "Plan Width": 0,
+          "Index Cond": "(t1_id = 42)"
+        }
+      ]
+    }
+  }
+]

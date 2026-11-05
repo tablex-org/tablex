@@ -1,0 +1,119 @@
+{
+  "connections": [
+    {
+      "id": "7d9f0c6e-0001-4000-8000-000000000001",
+      "name": "Prod PG",
+      "db_type": "postgres",
+      "driver_profile": "postgres",
+      "driver_label": "PostgreSQL",
+      "host": "pg.example.com",
+      "port": 5432,
+      "username": "app",
+      "password": "pg-pass",
+      "database": "orders",
+      "ssl": true,
+      "transport_layers": [
+        {
+          "type": "ssh",
+          "id": "t1",
+          "enabled": true,
+          "host": "bastion.example.com",
+          "port": 2222,
+          "user": "deploy",
+          "password": "ssh-pass",
+          "key_path": "/keys/id_ed25519",
+          "auth_method": "key"
+        }
+      ]
+    },
+    {
+      "id": "7d9f0c6e-0001-4000-8000-000000000002",
+      "name": "Reporting",
+      "db_type": "mysql",
+      "driver_profile": "mysql",
+      "host": "mysql.example.com",
+      "port": 3306,
+      "username": "report",
+      "password": "",
+      "database": "analytics"
+    },
+    {
+      "id": "7d9f0c6e-0001-4000-8000-000000000003",
+      "name": "Maria",
+      "db_type": "mysql",
+      "driver_profile": "mariadb",
+      "driver_label": "MariaDB",
+      "host": "maria.example.com",
+      "port": 3307,
+      "username": "maria",
+      "password": "maria-pass"
+    },
+    {
+      "id": "7d9f0c6e-0001-4000-8000-000000000004",
+      "name": "Notes",
+      "db_type": "sqlite",
+      "host": "/Users/me/app.db",
+      "port": 0,
+      "username": "",
+      "password": ""
+    },
+    {
+      "id": "7d9f0c6e-0001-4000-8000-000000000005",
+      "name": "Replica set",
+      "db_type": "mongodb",
+      "driver_profile": "mongodb",
+      "host": "a.example.com",
+      "port": 27017,
+      "username": "",
+      "password": "",
+      "connection_string": "mongodb://root:s3cr%3At@a.example.com:27017,b.example.com:27017/app?replicaSet=rs0"
+    },
+    {
+      "id": "7d9f0c6e-0001-4000-8000-000000000006",
+      "name": "Events",
+      "db_type": "clickhouse",
+      "driver_profile": "clickhouse",
+      "host": "ch.example.com",
+      "port": 8123,
+      "username": "default",
+      "password": "ch-pass",
+      "database": "events",
+      "ssl": false
+    },
+    {
+      "id": "7d9f0c6e-0001-4000-8000-000000000007",
+      "name": "Ledger",
+      "db_type": "oracle",
+      "driver_profile": "oracle",
+      "driver_label": "Oracle",
+      "host": "ora.example.com",
+      "port": 1521,
+      "username": "system",
+      "password": "ora-pass",
+      "oracle_connection_type": "service_name"
+    },
+    {
+      "id": "7d9f0c6e-0001-4000-8000-000000000008",
+      "name": "Cache",
+      "db_type": "redis",
+      "driver_profile": "redis",
+      "host": "redis.example.com",
+      "port": 6379,
+      "username": "",
+      "password": ""
+    },
+    {
+      "id": "7d9f0c6e-0001-4000-8000-000000000009",
+      "name": "Warehouse",
+      "db_type": "sqlserver",
+      "driver_profile": "sqlserver",
+      "driver_label": "SQL Server",
+      "host": "mssql.example.com",
+      "port": 1433,
+      "username": "sa",
+      "password": "mssql-pass"
+    }
+  ],
+  "layout": { "groups": [], "order": [] },
+  "tunnelProfiles": []
+}

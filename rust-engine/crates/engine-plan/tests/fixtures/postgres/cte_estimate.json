@@ -1,0 +1,138 @@
+-- server: PostgreSQL 17.10 (Debian 17.10-1.pgdg13+1) aarch64
+-- statement: EXPLAIN (FORMAT JSON) WITH big AS (SELECT t1_id, sum(amount) AS s FROM plan_t2 GROUP BY t1_id) SELECT t1.name, big.s FROM plan_t1 t1 JOIN big ON big.t1_id = t1.id WHERE big.s > (SELECT avg(amount) FROM plan_t2) ORDER BY big.s DESC LIMIT 20
+[
+  {
+    "Plan": {
+      "Node Type": "Limit",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Startup Cost": 1020.01,
+      "Total Cost": 1020.06,
+      "Plan Rows": 20,
+      "Plan Width": 40,
+      "Plans": [
+        {
+          "Node Type": "Aggregate",
+          "Strategy": "Plain",
+          "Partial Mode": "Simple",
+          "Parent Relationship": "InitPlan",
+          "Subplan Name": "InitPlan 1",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Startup Cost": 359.00,
+          "Total Cost": 359.01,
+          "Plan Rows": 1,
+          "Plan Width": 32,
+          "Plans": [
+            {
+              "Node Type": "Seq Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Relation Name": "plan_t2",
+              "Alias": "plan_t2_1",
+              "Startup Cost": 0.00,
+              "Total Cost": 309.00,
+              "Plan Rows": 20000,
+              "Plan Width": 6
+            }
+          ]
+        },
+        {
+          "Node Type": "Sort",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Startup Cost": 661.00,
+          "Total Cost": 665.17,
+          "Plan Rows": 1667,
+          "Plan Width": 40,
+          "Sort Key": ["big.s DESC"],
+          "Plans": [
+            {
+              "Node Type": "Hash Join",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Join Type": "Inner",
+              "Startup Cost": 521.51,
+              "Total Cost": 616.64,
+              "Plan Rows": 1667,
+              "Plan Width": 40,
+              "Inner Unique": true,
+              "Hash Cond": "(t1.id = big.t1_id)",
+              "Plans": [
+                {
+                  "Node Type": "Seq Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Relation Name": "plan_t1",
+                  "Alias": "t1",
+                  "Startup Cost": 0.00,
+                  "Total Cost": 82.00,
+                  "Plan Rows": 5000,
+                  "Plan Width": 12
+                },
+                {
+                  "Node Type": "Hash",
+                  "Parent Relationship": "Inner",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Startup Cost": 500.67,
+                  "Total Cost": 500.67,
+                  "Plan Rows": 1667,
+                  "Plan Width": 36,
+                  "Plans": [
+                    {
+                      "Node Type": "Subquery Scan",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Alias": "big",
+                      "Startup Cost": 409.00,
+                      "Total Cost": 500.67,
+                      "Plan Rows": 1667,
+                      "Plan Width": 36,
+                      "Plans": [
+                        {
+                          "Node Type": "Aggregate",
+                          "Strategy": "Hashed",
+                          "Partial Mode": "Simple",
+                          "Parent Relationship": "Subquery",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Startup Cost": 409.00,
+                          "Total Cost": 484.00,
+                          "Plan Rows": 1667,
+                          "Plan Width": 36,
+                          "Group Key": ["plan_t2.t1_id"],
+                          "Filter": "(sum(plan_t2.amount) > (InitPlan 1).col1)",
+                          "Planned Partitions": 0,
+                          "Plans": [
+                            {
+                              "Node Type": "Seq Scan",
+                              "Parent Relationship": "Outer",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Relation Name": "plan_t2",
+                              "Alias": "plan_t2",
+                              "Startup Cost": 0.00,
+                              "Total Cost": 309.00,
+                              "Plan Rows": 20000,
+                              "Plan Width": 10
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  }
+]
