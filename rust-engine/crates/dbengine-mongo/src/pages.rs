@@ -494,9 +494,9 @@ impl BsonPageCache {
             &page.documents,
             &column_names,
             row_start,
-            row_start + row_count,
+            row_start.saturating_add(row_count),
             column_start,
-            column_start + column_count,
+            column_start.saturating_add(column_count),
             DEFAULT_MAX_BYTES_PER_CELL,
         );
         Some(RenderedCellBatch {
