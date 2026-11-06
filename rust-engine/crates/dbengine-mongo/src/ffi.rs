@@ -33,8 +33,9 @@ pub extern "C" fn dbengine_abi_version() -> u32 {
 #[cfg(feature = "abi-v2")]
 #[no_mangle]
 pub extern "C" fn dbengine_capabilities() -> *mut c_char {
-    string_to_c_ptr(
-        r#"{
+    guarded("capabilities.internal", || {
+        string_to_c_ptr(
+            r#"{
         "abi_version": 2,
         "driver": "mongodb",
         "display_name": "MongoDB",
@@ -52,7 +53,8 @@ pub extern "C" fn dbengine_capabilities() -> *mut c_char {
          "navigator_kinds": ["database", "collection"],
         "single_connection_pool": true
     }"#,
-    )
+        )
+    })
 }
 
 #[cfg(feature = "abi-v2")]
@@ -69,12 +71,23 @@ pub unsafe extern "C" fn dbengine_acquire_page(
     _row_start: u64,
     _row_count: u64,
 ) -> CPageLease {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        acquire_page_unguarded(connection_id, page_id, _row_start, _row_count)
+    }))
+    .unwrap_or_else(|_| empty_page_lease())
+}
+
+#[cfg(feature = "abi-v2")]
+unsafe fn acquire_page_unguarded(
+    connection_id: u64,
+    page_id: u64,
+    _row_start: u64,
+    _row_count: u64,
+) -> CPageLease {
     let Some(mtx) = SESSION.get() else {
         return empty_page_lease();
     };
-    let Ok(mut session) = mtx.lock() else {
-        return empty_page_lease();
-    };
+    let mut session = lock_session(mtx);
     if connection_id == 0 || !session.drivers.contains_key(&connection_id) {
         return empty_page_lease();
     }
@@ -114,9 +127,16 @@ enum FindInput {
     },
 }
 
+/// The session even after a panic poisoned its lock: the maps it guards are only ever
+/// mutated by whole inserts/removes, so a panicking request leaves them consistent, and
+/// refusing every later call on every connection would be worse than going on.
+fn lock_session(mtx: &Mutex<Session>) -> std::sync::MutexGuard<'_, Session> {
+    mtx.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn driver_snapshot(connection_id: u64) -> Result<(Arc<MongoDriver>, u64), &'static str> {
     let mtx = SESSION.get().ok_or("session not initialized")?;
-    let session = mtx.lock().map_err(|_| "session lock poisoned")?;
+    let session = lock_session(mtx);
     let driver = session
         .drivers
         .get(&connection_id)
@@ -132,13 +152,18 @@ fn driver_snapshot(connection_id: u64) -> Result<(Arc<MongoDriver>, u64), &'stat
 
 fn revision_is_current(connection_id: u64, revision: u64) -> Result<bool, &'static str> {
     let mtx = SESSION.get().ok_or("session not initialized")?;
-    let session = mtx.lock().map_err(|_| "session lock poisoned")?;
+    let session = lock_session(mtx);
     Ok(session.revisions.get(&connection_id).copied() == Some(revision))
 }
 
 #[cfg(feature = "abi-v2")]
 #[no_mangle]
 pub extern "C" fn dbengine_init() -> *mut c_char {
+    guarded("init.internal", || init_unguarded())
+}
+
+#[cfg(feature = "abi-v2")]
+fn init_unguarded() -> *mut c_char {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -158,13 +183,17 @@ pub extern "C" fn dbengine_init() -> *mut c_char {
 #[cfg(feature = "abi-v2")]
 #[no_mangle]
 pub extern "C" fn dbengine_shutdown() -> *mut c_char {
+    guarded("shutdown.internal", || shutdown_unguarded())
+}
+
+#[cfg(feature = "abi-v2")]
+fn shutdown_unguarded() -> *mut c_char {
     cancel_connection_operations(None);
     if let Some(mtx) = SESSION.get() {
-        if let Ok(mut session) = mtx.lock() {
-            session.drivers.clear();
-            session.revisions.clear();
-            session.pages.clear();
-        }
+        let mut session = lock_session(mtx);
+        session.drivers.clear();
+        session.revisions.clear();
+        session.pages.clear();
     }
     string_to_c_ptr(r#"{"ok":true,"value":{}}"#)
 }
@@ -172,6 +201,11 @@ pub extern "C" fn dbengine_shutdown() -> *mut c_char {
 #[cfg(feature = "abi-v2")]
 #[no_mangle]
 pub unsafe extern "C" fn dbengine_connect(request_json: *const c_char) -> *mut c_char {
+    guarded("connect.internal", || unsafe { connect_unguarded(request_json) })
+}
+
+#[cfg(feature = "abi-v2")]
+unsafe fn connect_unguarded(request_json: *const c_char) -> *mut c_char {
     let request = match request_string(request_json, "request_json") {
         Ok(value) => value,
         Err(error) => return error_envelope("connect.bad_request", &error),
@@ -191,9 +225,7 @@ pub unsafe extern "C" fn dbengine_connect(request_json: *const c_char) -> *mut c
     let Some(mtx) = SESSION.get() else {
         return error_envelope("connect.not_initialized", "session not initialized");
     };
-    let Ok(mut session) = mtx.lock() else {
-        return error_envelope("connect.lock_failed", "session lock poisoned");
-    };
+    let mut session = lock_session(mtx);
     session.drivers.insert(id, Arc::new(driver));
     session.revisions.insert(id, 0);
     success_json(serde_json::json!({ "connection_id": id }))
@@ -202,13 +234,17 @@ pub unsafe extern "C" fn dbengine_connect(request_json: *const c_char) -> *mut c
 #[cfg(feature = "abi-v2")]
 #[no_mangle]
 pub extern "C" fn dbengine_disconnect(connection_id: u64) -> *mut c_char {
+    guarded("disconnect.internal", || disconnect_unguarded(connection_id))
+}
+
+#[cfg(feature = "abi-v2")]
+fn disconnect_unguarded(connection_id: u64) -> *mut c_char {
     cancel_connection_operations(Some(connection_id));
     if let Some(mtx) = SESSION.get() {
-        if let Ok(mut session) = mtx.lock() {
-            session.drivers.remove(&connection_id);
-            session.revisions.remove(&connection_id);
-            session.pages.clear_connection(connection_id);
-        }
+        let mut session = lock_session(mtx);
+        session.drivers.remove(&connection_id);
+        session.revisions.remove(&connection_id);
+        session.pages.clear_connection(connection_id);
     }
     string_to_c_ptr(r#"{"ok":true,"value":{}}"#)
 }
@@ -216,6 +252,14 @@ pub extern "C" fn dbengine_disconnect(connection_id: u64) -> *mut c_char {
 #[cfg(feature = "abi-v2")]
 #[no_mangle]
 pub unsafe extern "C" fn dbengine_list_nav_nodes(
+    connection_id: u64,
+    request_json: *const c_char,
+) -> *mut c_char {
+    guarded("navigator.internal", || unsafe { list_nav_nodes_unguarded(connection_id, request_json) })
+}
+
+#[cfg(feature = "abi-v2")]
+unsafe fn list_nav_nodes_unguarded(
     connection_id: u64,
     request_json: *const c_char,
 ) -> *mut c_char {
@@ -245,6 +289,14 @@ pub unsafe extern "C" fn dbengine_list_nav_nodes(
 #[cfg(feature = "abi-v2")]
 #[no_mangle]
 pub unsafe extern "C" fn dbengine_open_query(
+    connection_id: u64,
+    request_json: *const c_char,
+) -> *mut c_char {
+    guarded("query.internal", || unsafe { open_query_unguarded(connection_id, request_json) })
+}
+
+#[cfg(feature = "abi-v2")]
+unsafe fn open_query_unguarded(
     connection_id: u64,
     request_json: *const c_char,
 ) -> *mut c_char {
@@ -387,9 +439,7 @@ pub unsafe extern "C" fn dbengine_open_query(
     let Some(mtx) = SESSION.get() else {
         return error_envelope("query.not_connected", "session not initialized");
     };
-    let Ok(mut session) = mtx.lock() else {
-        return error_envelope("query.lock_failed", "session lock poisoned");
-    };
+    let mut session = lock_session(mtx);
     if session.revisions.get(&connection_id).copied() != Some(revision) {
         return error_envelope("query.stale", "connection changed during query");
     }
@@ -436,9 +486,7 @@ fn list_indexes_page(connection_id: u64, request: &QueryRequest) -> *mut c_char 
     let Some(mtx) = SESSION.get() else {
         return error_envelope("query.not_connected", "session not initialized");
     };
-    let Ok(mut session) = mtx.lock() else {
-        return error_envelope("query.lock_failed", "session lock poisoned");
-    };
+    let mut session = lock_session(mtx);
     if session.revisions.get(&connection_id).copied() != Some(revision) {
         return error_envelope("query.stale", "connection changed during query");
     }
@@ -919,9 +967,7 @@ fn aggregate_page(connection_id: u64, request: &QueryRequest) -> *mut c_char {
     let Some(mtx) = SESSION.get() else {
         return error_envelope("query.not_connected", "session not initialized");
     };
-    let Ok(mut session) = mtx.lock() else {
-        return error_envelope("query.lock_failed", "session lock poisoned");
-    };
+    let mut session = lock_session(mtx);
     if session.revisions.get(&connection_id).copied() != Some(revision) {
         return error_envelope("query.stale", "connection changed during query");
     }
@@ -959,6 +1005,35 @@ pub unsafe extern "C" fn dbengine_render_cell_batch(
     out_batch: *mut *mut CCellTextBatch,
     out_error: *mut *mut c_char,
 ) -> c_int {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        render_cell_batch_unguarded(
+            page_id,
+            row_start,
+            row_count,
+            column_start,
+            column_count,
+            out_batch,
+            out_error,
+        )
+    }));
+    outcome.unwrap_or_else(|_| {
+        if !out_error.is_null() {
+            unsafe { *out_error = error_envelope("render.internal", "internal driver error") };
+        }
+        1
+    })
+}
+
+#[cfg(feature = "abi-v2")]
+unsafe fn render_cell_batch_unguarded(
+    page_id: u64,
+    row_start: u64,
+    row_count: u64,
+    column_start: u64,
+    column_count: u64,
+    out_batch: *mut *mut CCellTextBatch,
+    out_error: *mut *mut c_char,
+) -> c_int {
     if out_batch.is_null() {
         if !out_error.is_null() {
             unsafe { *out_error = error_envelope("render.bad_request", "null output batch") };
@@ -973,12 +1048,7 @@ pub unsafe extern "C" fn dbengine_render_cell_batch(
         }
         return 1;
     };
-    let Ok(session) = mtx.lock() else {
-        if !out_error.is_null() {
-            unsafe { *out_error = error_envelope("render.lock_failed", "session lock poisoned") };
-        }
-        return 1;
-    };
+    let session = lock_session(mtx);
     let Some(rendered) = session.pages.render_cells(
         page_id,
         row_start as usize,
@@ -1018,12 +1088,15 @@ pub unsafe extern "C" fn dbengine_render_cell_batch(
 #[cfg(feature = "abi-v2")]
 #[no_mangle]
 pub extern "C" fn dbengine_inspect_row(page_id: u64, row_index: u64) -> *mut c_char {
+    guarded("inspect.internal", || inspect_row_unguarded(page_id, row_index))
+}
+
+#[cfg(feature = "abi-v2")]
+fn inspect_row_unguarded(page_id: u64, row_index: u64) -> *mut c_char {
     let Some(mtx) = SESSION.get() else {
         return error_envelope("inspect.not_connected", "session not initialized");
     };
-    let Ok(session) = mtx.lock() else {
-        return error_envelope("inspect.lock_failed", "session lock poisoned");
-    };
+    let session = lock_session(mtx);
     let Some(row) = session.pages.inspect_row(page_id, row_index as usize) else {
         return error_envelope("inspect.row_not_found", "unknown page or row");
     };
@@ -1033,6 +1106,14 @@ pub extern "C" fn dbengine_inspect_row(page_id: u64, row_index: u64) -> *mut c_c
 #[cfg(feature = "abi-v2")]
 #[no_mangle]
 pub unsafe extern "C" fn dbengine_mutate(
+    connection_id: u64,
+    request_json: *const c_char,
+) -> *mut c_char {
+    guarded("mutation.internal", || unsafe { mutate_unguarded(connection_id, request_json) })
+}
+
+#[cfg(feature = "abi-v2")]
+unsafe fn mutate_unguarded(
     connection_id: u64,
     request_json: *const c_char,
 ) -> *mut c_char {
@@ -1086,9 +1167,7 @@ pub unsafe extern "C" fn dbengine_mutate(
             "invalidated_page_ids": [],
         }));
     };
-    let Ok(mut session) = mtx.lock() else {
-        return error_envelope("mutation.lock_failed", "session lock poisoned");
-    };
+    let mut session = lock_session(mtx);
     if let Some(revision) = session.revisions.get_mut(&connection_id) {
         *revision = revision.wrapping_add(1);
     }
@@ -1111,12 +1190,15 @@ pub unsafe extern "C" fn dbengine_mutate(
 #[cfg(feature = "abi-v2")]
 #[no_mangle]
 pub extern "C" fn dbengine_release_page(page_id: u64) -> *mut c_char {
+    guarded("release.internal", || release_page_unguarded(page_id))
+}
+
+#[cfg(feature = "abi-v2")]
+fn release_page_unguarded(page_id: u64) -> *mut c_char {
     let Some(mtx) = SESSION.get() else {
         return error_envelope("release.not_connected", "session not initialized");
     };
-    let Ok(mut session) = mtx.lock() else {
-        return error_envelope("release.lock_failed", "session lock poisoned");
-    };
+    let mut session = lock_session(mtx);
     if !session.pages.release(page_id) {
         return error_envelope("release.page_not_found", "unknown page");
     }
