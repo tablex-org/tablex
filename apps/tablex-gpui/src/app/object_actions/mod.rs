@@ -17,6 +17,7 @@
 //! one's reload. A tab with staged edits, a pending structure draft or an open transaction is never
 //! closed behind the user's back: it stays and the next load says what is missing.
 
+mod generate_sql;
 mod host;
 mod menu;
 mod name_dialog;
@@ -470,7 +471,7 @@ impl AppRoot {
     fn close_tabs_of_object(&mut self, origin: &TableOrigin, object: &str, cx: &mut Context<Self>) -> usize {
         let (stay, close): (Vec<u64>, Vec<u64>) = self.tabs_of_object(origin, object).into_iter().partition(|id| self.tab_has_unsaved_work(*id, cx));
         if !close.is_empty() {
-            self.close_tabs_now(&close, None, cx);
+            self.close_tabs_with(&close, None, false, cx);
         }
         stay.len()
     }
@@ -494,7 +495,7 @@ impl AppRoot {
             }
         }
         if !sources.is_empty() {
-            self.close_tabs_now(&sources, None, cx);
+            self.close_tabs_with(&sources, None, false, cx);
         }
         let renamed = TableOrigin { object: to.to_owned(), ..origin.clone() };
         self.refresh_table_tabs_after_apply(&renamed, cx);

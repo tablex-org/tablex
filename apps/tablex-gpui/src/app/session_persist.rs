@@ -44,7 +44,7 @@ fn resolve_path(scenario_enabled: bool) -> Option<PathBuf> {
     }
 }
 
-fn is_data_tab(tab: &Tab) -> bool {
+pub(super) fn is_data_tab(tab: &Tab) -> bool {
     tab.kind == TabKind::Query
         && (tab.query_mode.is_table_data()
             || tab.query_mode.is_mongo_find()
@@ -96,7 +96,7 @@ impl AppRoot {
                             .map(|tab| tab.id)
                             .collect();
                         for id in unpinned {
-                            self.close_tab(id, cx);
+                            self.close_tab_unremembered(id, cx);
                         }
                         if self.workspace.tabs().is_empty() {
                             self.workspace.open_welcome_tab();

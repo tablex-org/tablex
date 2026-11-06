@@ -9,6 +9,9 @@ pub(super) struct ShellState {
     /// Painted bounds of the panes (directional focus).
     pub(super) pane_bounds: super::panes_ui::PaneBounds,
     pub(super) session: super::session_persist::SessionPersist,
+    /// Tabs closed most recently, oldest first, for "Reopen Closed Tab" (touched only on close
+    /// and reopen).
+    pub(super) closed_tabs: std::collections::VecDeque<crate::gpui_session::SessionTab>,
     /// Last title given to the OS window (set only when it changes).
     pub(super) window_title: SharedString,
     /// Scenario windows keep the title the capture tool finds them by.
@@ -27,6 +30,7 @@ impl Default for ShellState {
             tab_bar: Default::default(),
             pane_bounds: Default::default(),
             session: Default::default(),
+            closed_tabs: Default::default(),
             window_title: SharedString::default(),
             fixed_window_title: false,
             close_guarded: false,
@@ -476,6 +480,9 @@ impl Render for AppRoot {
             }))
             .on_action(cx.listener(|this, _: &CloseActiveTab, window, cx| {
                 this.close_active_tab_action(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ReopenClosedTab, _, cx| {
+                this.reopen_closed_tab(cx);
             }))
             .on_action(cx.listener(|this, _: &NextTabGroup, _, cx| {
                 this.step_tab_group(1, cx);

@@ -279,6 +279,7 @@ impl AppRoot {
         let file_run = (tab.kind == TabKind::SqlFile).then(|| self.file_runs.get(&tab_id).cloned()).flatten();
         let backup = matches!(tab.kind, TabKind::Backup | TabKind::Restore).then(|| self.backups.get(&tab_id).cloned()).flatten();
         let accounts = (tab.kind == TabKind::Accounts).then(|| self.accounts.get(&tab_id).cloned()).flatten();
+        let process_list = (tab.kind == TabKind::ProcessList).then(|| self.process_lists.get(&tab_id).cloned()).flatten();
         let connection_tab = (tab.kind == TabKind::Connection).then(|| tab.clone());
         let layout = self.results_layout(tab_id);
         let editor_only = layout == results::surface::ResultsLayout::EditorOnly;
@@ -409,6 +410,7 @@ impl AppRoot {
         let file_run = file_run.map(|view| div().flex_1().min_h_0().min_w_0().child(view));
         let backup = backup.map(|view| div().flex_1().min_h_0().min_w_0().child(view));
         let accounts = accounts.map(|view| div().flex_1().min_h_0().min_w_0().child(view));
+        let process_list = process_list.map(|view| div().flex_1().min_h_0().min_w_0().child(view));
         let driver_manager = if is_driver_manager {
             self.render_driver_manager(window, cx)
         } else {
@@ -444,6 +446,7 @@ impl AppRoot {
             .children(file_run)
             .children(backup)
             .children(accounts)
+            .children(process_list)
             .child(result_content)
             .children(drop_highlight)
             .into_any_element()

@@ -61,6 +61,7 @@ gpui::actions!(
         MongoFindEnter,
         MongoSortEnter,
         CloseActiveTab,
+        ReopenClosedTab,
         NextTabGroup,
         PreviousTabGroup,
         ToggleErrorLog,

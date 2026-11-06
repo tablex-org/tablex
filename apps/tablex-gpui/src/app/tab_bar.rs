@@ -396,6 +396,7 @@ impl AppRoot {
             TabKind::Backup => TabIcon::Plain("icons/download.svg"),
             TabKind::Restore => TabIcon::Plain("icons/upload.svg"),
             TabKind::Accounts => TabIcon::Plain("icons/key-round.svg"),
+            TabKind::ProcessList => TabIcon::Plain("icons/list-checks.svg"),
             // The sidebar's glyph of the kind of object it shows.
             TabKind::Source => TabIcon::Plain(
                 match tab.source.as_ref().map(|source| source.kind) {
@@ -453,7 +454,7 @@ fn tab_width(tab: &Tab, compact: bool) -> f32 {
         TabKind::Settings => 140.0,
         TabKind::Diagram => 200.0,
         TabKind::Source => 220.0,
-        TabKind::Import | TabKind::Transfer | TabKind::SqlFile | TabKind::Backup | TabKind::Restore | TabKind::Accounts => 220.0,
+        TabKind::Import | TabKind::Transfer | TabKind::SqlFile | TabKind::Backup | TabKind::Restore | TabKind::Accounts | TabKind::ProcessList => 220.0,
     };
     if compact {
         (full - 40.0f32).max(120.0)
@@ -879,9 +880,18 @@ impl AppRoot {
     }
 
     pub(super) fn close_tabs_now(&mut self, ids: &[u64], anchor: Option<u64>, cx: &mut Context<Self>) {
+        self.close_tabs_with(ids, anchor, true, cx);
+    }
+
+    /// [`Self::close_tabs_now`]; `remember` is whether the user closed them (see `close_tab_unremembered`).
+    pub(super) fn close_tabs_with(&mut self, ids: &[u64], anchor: Option<u64>, remember: bool, cx: &mut Context<Self>) {
         let active_before = self.workspace.active_tab().map(|tab| tab.id);
         for id in ids {
-            self.close_tab(*id, cx);
+            if remember {
+                self.close_tab(*id, cx);
+            } else {
+                self.close_tab_unremembered(*id, cx);
+            }
         }
         if let (Some(active), Some(anchor)) = (active_before, anchor) {
             if ids.contains(&active) && self.workspace.tab(anchor).is_some() {

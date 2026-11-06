@@ -1099,6 +1099,7 @@ impl AppRoot {
         for tab_id in stale {
             self.refresh_tab_when_seen(tab_id, cx);
         }
+        self.process_list_connection_reopened(connection, cx);
     }
 
     /// Runs the deferred re-run for the tab that was just activated.
@@ -1133,6 +1134,7 @@ impl AppRoot {
         keep_secrets: bool,
         cx: &mut Context<Self>,
     ) {
+        self.process_list_connection_released(connection_id, cx);
         if self.scenario_ui.service.is_some() {
             // No driver session to close: the fixture's session and tree go.
             self.tunnel_ui.release(connection_id, keep_secrets);
@@ -1419,7 +1421,7 @@ impl AppRoot {
             .map(|tab| tab.id)
             .collect();
         for tab_id in tabs {
-            self.close_tab(tab_id, cx);
+            self.close_tab_unremembered(tab_id, cx);
         }
         self.refresh_saved_connections(cx);
         if self.sidebar.error.is_none() {

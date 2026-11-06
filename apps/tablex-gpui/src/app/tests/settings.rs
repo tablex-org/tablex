@@ -742,6 +742,7 @@ fn restore_tabs_on_start_honours_none_and_pinned(cx: &mut TestAppContext) {
                 this.close_tab(id, cx);
             }
             this.workspace.open_welcome_tab();
+            this.shell.closed_tabs.clear();
             let mut next = (*this.settings).clone();
             next.navigation.restore_tabs = mode;
             this.settings = std::sync::Arc::new(next);
@@ -753,6 +754,8 @@ fn restore_tabs_on_start_honours_none_and_pinned(cx: &mut TestAppContext) {
         let mut want: Vec<String> = expected.iter().map(|title| title.to_string()).collect();
         want.sort();
         assert_eq!(got, want, "{mode:?}");
+        // The tabs the pinned-only start left out were not closed by the user.
+        assert!(app.read_with(visual, |this, _| this.shell.closed_tabs.is_empty()), "{mode:?}: nothing to reopen");
     }
     std::fs::remove_dir_all(dir).unwrap();
 }

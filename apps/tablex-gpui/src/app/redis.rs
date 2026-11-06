@@ -961,7 +961,7 @@ impl AppRoot {
             .map(|tab| tab.id)
             .collect();
         for tab_id in tabs {
-            self.close_tab(tab_id, cx);
+            self.close_tab_unremembered(tab_id, cx);
         }
     }
 

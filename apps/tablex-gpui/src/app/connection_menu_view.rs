@@ -1127,10 +1127,11 @@ pub(super) fn build_connection_menu(
                 error.map(str::to_string),
                 this.backup_supported(&connection_id),
                 this.accounts_supported(&connection_id),
+                this.process_list_supported(&connection_id),
             )
         })
         .unwrap_or_default();
-    let (can_create, history_loading, history_entries, history_error, can_backup, can_accounts) = snapshot;
+    let (can_create, history_loading, history_entries, history_error, can_backup, can_accounts, can_process_list) = snapshot;
 
     // First action reflects live state: Cancel while connecting, Close when
     // connected, Connect otherwise. Plain on_click with the captured id: menu
@@ -1349,6 +1350,25 @@ pub(super) fn build_connection_menu(
             },
             move |window, app| {
                 let _ = root.update(app, |this, cx| this.open_accounts(&id, window, cx));
+            },
+        ))
+    } else {
+        menu
+    };
+
+    // Process List of the server (PostgreSQL, MySQL, MariaDB, ClickHouse): hidden for the others.
+    let menu = if can_process_list {
+        let (root, id) = (menu_root.clone(), connection_id.clone());
+        menu.item(super::mongo_admin_view::entry_item(
+            super::mongo_admin_view::Entry {
+                selector: "connection-menu-process-list",
+                label: "Process List\u{2026}",
+                icon: Icon::empty().path("icons/list-checks.svg").size(px(12.0)),
+                disabled: None,
+                destructive: false,
+            },
+            move |window, app| {
+                let _ = root.update(app, |this, cx| this.open_process_list(&id, window, cx));
             },
         ))
     } else {

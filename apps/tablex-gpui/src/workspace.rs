@@ -51,6 +51,9 @@ pub enum TabKind {
     /// fields; the editor is an `AccountsView` entity of the app. Never persisted: it holds a read of the server and edits
     /// that must be reviewed, which a restart does not resume.
     Accounts,
+    /// The sessions running on a connection's server (one tab per connection): the connection is in the tab's identity fields; the
+    /// list is a `ProcessListView` entity of the app. Never persisted: it is a live read of the server.
+    ProcessList,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -569,6 +572,129 @@ pub enum TabCloseScope {
     Group,
 }
 
+/// The persisted form of `tab`; `None` for tabs the session leaves out (nothing to restore).
+fn session_tab(tab: &Tab) -> Option<crate::gpui_session::SessionTab> {
+    use crate::gpui_session::SessionTab;
+    let kind = match tab.kind {
+        TabKind::Welcome => "welcome",
+        TabKind::Query => "query",
+        TabKind::Connection => "connection",
+        TabKind::Diagram => "diagram",
+        // A source tab without its object has nothing to show.
+        TabKind::Source if tab.source.is_none() => return None,
+        TabKind::Source => "source",
+        // Singleton utility tab; reopened on demand.
+        TabKind::DriverManager | TabKind::Settings => return None,
+        // A wizard over a file and a load in flight: nothing to restore.
+        TabKind::Import | TabKind::Transfer | TabKind::SqlFile | TabKind::Backup | TabKind::Restore | TabKind::Accounts | TabKind::ProcessList => return None,
+    };
+    Some(SessionTab {
+        kind: kind.into(),
+        title: tab.title.clone(),
+        connection_id: tab.connection_id.clone(),
+        database: tab.database.clone(),
+        schema: tab.schema.clone(),
+        collection: tab.collection.clone(),
+        query_mode: tab.query_mode.clone(),
+        is_pinned: tab.is_pinned,
+        sql: tab.sql.clone(),
+        output_limit: tab.output_limit,
+        // The applied query is what persists; the draft only when
+        // it differs so relaunch restores unsent typing too.
+        table_where: tab.applied_where.clone(),
+        table_order_by: tab.applied_order_by.clone(),
+        table_where_draft: (tab.table_where != tab.applied_where)
+            .then(|| tab.table_where.clone()),
+        table_order_by_draft: (tab.table_order_by != tab.applied_order_by)
+            .then(|| tab.table_order_by.clone()),
+        table_filter_rules: tab.table_filter.rules.clone(),
+        table_filter_where: tab.table_filter.generated_where.clone(),
+        table_hidden_columns: tab.table_hidden_columns.clone(),
+        pinned_columns: tab.pinned_columns.clone(),
+        // Only the object: the text is fetched again when the tab opens.
+        source: tab.source.clone(),
+        // A path that is not UTF-8 cannot go into the JSON: that tab is saved unbound.
+        file_path: tab
+            .file
+            .as_ref()
+            .and_then(|file| file.path.to_str())
+            .map(str::to_owned),
+        // The text the file held, kept only while the tab differs from it.
+        file_saved: tab
+            .file
+            .as_ref()
+            .filter(|_| tab.has_unsaved_file())
+            .map(|file| file.saved.to_string()),
+        aggregate: tab.aggregate.as_ref().map(|draft| {
+            crate::gpui_session::SessionAggregate {
+                mode: draft.mode,
+                preview: draft.preview,
+                text: draft.text.clone(),
+                options: draft.stored_options(),
+                name: draft.name.clone(),
+                saved_id: draft.saved_id.clone(),
+            }
+        }),
+    })
+}
+
+/// The tab kind a saved tab restores as; `None` for one that cannot be restored.
+fn tab_kind_of(saved: &crate::gpui_session::SessionTab) -> Option<TabKind> {
+    match saved.kind.as_str() {
+        "welcome" => Some(TabKind::Welcome),
+        "connection" => Some(TabKind::Connection),
+        "diagram" => Some(TabKind::Diagram),
+        "source" if saved.source.is_some() => Some(TabKind::Source),
+        "query" => Some(TabKind::Query),
+        _ => None,
+    }
+}
+
+/// The tab a saved tab restores as (`kind` from [`tab_kind_of`]).
+fn tab_of(id: u64, kind: TabKind, saved: &crate::gpui_session::SessionTab) -> Tab {
+    let mut tab = Tab::new(id, kind, saved.title.clone());
+    tab.connection_id = saved.connection_id.clone();
+    tab.database = saved.database.clone();
+    tab.schema = saved.schema.clone();
+    tab.collection = saved.collection.clone();
+    tab.query_mode = saved.query_mode.clone();
+    tab.is_pinned = saved.is_pinned;
+    tab.sql = saved.sql.clone();
+    tab.output_limit = saved.output_limit;
+    tab.applied_where = saved.table_where.clone();
+    tab.applied_order_by = saved.table_order_by.clone();
+    tab.table_where = saved
+        .table_where_draft
+        .clone()
+        .unwrap_or_else(|| saved.table_where.clone());
+    tab.table_order_by = saved
+        .table_order_by_draft
+        .clone()
+        .unwrap_or_else(|| saved.table_order_by.clone());
+    tab.table_filter = crate::sql_filter::SqlFilterState::from_saved(
+        saved.table_filter_rules.clone(),
+        saved.table_filter_where.clone(),
+    );
+    tab.table_hidden_columns = saved.table_hidden_columns.clone();
+    tab.pinned_columns = saved.pinned_columns.clone();
+    tab.source = saved.source.clone();
+    tab.file = saved.file_path.as_ref().map(|path| SqlFile {
+        path: path.into(),
+        saved: saved.file_saved.as_deref().unwrap_or(&saved.sql).into(),
+    });
+    tab.aggregate = saved.aggregate.as_ref().map(|aggregate| {
+        crate::aggregate::AggregateDraft::restore(
+            &aggregate.text,
+            aggregate.options.clone(),
+            aggregate.mode,
+            aggregate.preview,
+            aggregate.name.clone(),
+            aggregate.saved_id.clone(),
+        )
+    });
+    tab
+}
+
 impl Default for WorkspaceState {
     fn default() -> Self {
         Self::new()
@@ -614,73 +740,11 @@ impl WorkspaceState {
 
     /// Captures what must survive a relaunch.
     pub fn snapshot(&self) -> crate::gpui_session::GpuiSession {
-        use crate::gpui_session::{GpuiSession, SessionGroup, SessionTab};
+        use crate::gpui_session::{GpuiSession, SessionGroup};
         let tabs = self
             .tabs
             .iter()
-            .filter_map(|tab| {
-                let kind = match tab.kind {
-                    TabKind::Welcome => "welcome",
-                    TabKind::Query => "query",
-                    TabKind::Connection => "connection",
-                    TabKind::Diagram => "diagram",
-                    // A source tab without its object has nothing to show.
-                    TabKind::Source if tab.source.is_none() => return None,
-                    TabKind::Source => "source",
-                    // Singleton utility tab; reopened on demand.
-                    TabKind::DriverManager | TabKind::Settings => return None,
-                    // A wizard over a file and a load in flight: nothing to restore.
-                    TabKind::Import | TabKind::Transfer | TabKind::SqlFile | TabKind::Backup | TabKind::Restore | TabKind::Accounts => return None,
-                };
-                Some(SessionTab {
-                    kind: kind.into(),
-                    title: tab.title.clone(),
-                    connection_id: tab.connection_id.clone(),
-                    database: tab.database.clone(),
-                    schema: tab.schema.clone(),
-                    collection: tab.collection.clone(),
-                    query_mode: tab.query_mode.clone(),
-                    is_pinned: tab.is_pinned,
-                    sql: tab.sql.clone(),
-                    output_limit: tab.output_limit,
-                    // The applied query is what persists; the draft only when
-                    // it differs so relaunch restores unsent typing too.
-                    table_where: tab.applied_where.clone(),
-                    table_order_by: tab.applied_order_by.clone(),
-                    table_where_draft: (tab.table_where != tab.applied_where)
-                        .then(|| tab.table_where.clone()),
-                    table_order_by_draft: (tab.table_order_by != tab.applied_order_by)
-                        .then(|| tab.table_order_by.clone()),
-                    table_filter_rules: tab.table_filter.rules.clone(),
-                    table_filter_where: tab.table_filter.generated_where.clone(),
-                    table_hidden_columns: tab.table_hidden_columns.clone(),
-                    pinned_columns: tab.pinned_columns.clone(),
-                    // Only the object: the text is fetched again when the tab opens.
-                    source: tab.source.clone(),
-                    // A path that is not UTF-8 cannot go into the JSON: that tab is saved unbound.
-                    file_path: tab
-                        .file
-                        .as_ref()
-                        .and_then(|file| file.path.to_str())
-                        .map(str::to_owned),
-                    // The text the file held, kept only while the tab differs from it.
-                    file_saved: tab
-                        .file
-                        .as_ref()
-                        .filter(|_| tab.has_unsaved_file())
-                        .map(|file| file.saved.to_string()),
-                    aggregate: tab.aggregate.as_ref().map(|draft| {
-                        crate::gpui_session::SessionAggregate {
-                            mode: draft.mode,
-                            preview: draft.preview,
-                            text: draft.text.clone(),
-                            options: draft.stored_options(),
-                            name: draft.name.clone(),
-                            saved_id: draft.saved_id.clone(),
-                        }
-                    }),
-                })
-            })
+            .filter_map(session_tab)
             .collect::<Vec<_>>();
         let persisted: Vec<u64> = self
             .tabs
@@ -737,59 +801,13 @@ impl WorkspaceState {
                 restored.push(None);
                 continue;
             }
-            let kind = match saved.kind.as_str() {
-                "welcome" => TabKind::Welcome,
-                "connection" => TabKind::Connection,
-                "diagram" => TabKind::Diagram,
-                "source" if saved.source.is_some() => TabKind::Source,
-                "query" => TabKind::Query,
-                _ => {
-                    restored.push(None);
-                    continue;
-                }
+            let Some(kind) = tab_kind_of(saved) else {
+                restored.push(None);
+                continue;
             };
             let id = self.next_tab_id;
             self.next_tab_id += 1;
-            let mut tab = Tab::new(id, kind, saved.title.clone());
-            tab.connection_id = saved.connection_id.clone();
-            tab.database = saved.database.clone();
-            tab.schema = saved.schema.clone();
-            tab.collection = saved.collection.clone();
-            tab.query_mode = saved.query_mode.clone();
-            tab.is_pinned = saved.is_pinned;
-            tab.sql = saved.sql.clone();
-            tab.output_limit = saved.output_limit;
-            tab.applied_where = saved.table_where.clone();
-            tab.applied_order_by = saved.table_order_by.clone();
-            tab.table_where = saved
-                .table_where_draft
-                .clone()
-                .unwrap_or_else(|| saved.table_where.clone());
-            tab.table_order_by = saved
-                .table_order_by_draft
-                .clone()
-                .unwrap_or_else(|| saved.table_order_by.clone());
-            tab.table_filter = crate::sql_filter::SqlFilterState::from_saved(
-                saved.table_filter_rules.clone(),
-                saved.table_filter_where.clone(),
-            );
-            tab.table_hidden_columns = saved.table_hidden_columns.clone();
-            tab.pinned_columns = saved.pinned_columns.clone();
-            tab.source = saved.source.clone();
-            tab.file = saved.file_path.as_ref().map(|path| SqlFile {
-                path: path.into(),
-                saved: saved.file_saved.as_deref().unwrap_or(&saved.sql).into(),
-            });
-            tab.aggregate = saved.aggregate.as_ref().map(|aggregate| {
-                crate::aggregate::AggregateDraft::restore(
-                    &aggregate.text,
-                    aggregate.options.clone(),
-                    aggregate.mode,
-                    aggregate.preview,
-                    aggregate.name.clone(),
-                    aggregate.saved_id.clone(),
-                )
-            });
+            let tab = tab_of(id, kind, saved);
             self.tabs.push(tab);
             self.runtimes.insert(id, TabRuntime::new());
             restored.push(Some(id));
@@ -813,6 +831,56 @@ impl WorkspaceState {
         }
         self.touch();
         self.normalize();
+    }
+
+    /// What "Reopen Closed Tab" needs to recreate `id`, in the session's form; `None` for tabs
+    /// the session leaves out (see [`session_tab`]).
+    pub fn closed_snapshot(&self, id: u64) -> Option<crate::gpui_session::SessionTab> {
+        self.tab(id).and_then(session_tab)
+    }
+
+    /// The open tab `saved` would duplicate, if any: one with the same file (a file is in one tab, or
+    /// saving either overwrites the other), the Welcome tab, or a tab of the same connection,
+    /// database, schema and object (and query mode, for data tabs). Plain SQL tabs may repeat.
+    pub fn open_twin(&self, saved: &crate::gpui_session::SessionTab) -> Option<u64> {
+        let kind = tab_kind_of(saved)?;
+        let data = saved.query_mode.is_table_data() || saved.query_mode.is_mongo_find() || saved.query_mode.is_redis_key();
+        self.tabs
+            .iter()
+            .find(|tab| {
+                if let Some(path) = &saved.file_path {
+                    return tab.file.as_ref().is_some_and(|file| file.path == std::path::Path::new(path));
+                }
+                let same_place = tab.connection_id == saved.connection_id && tab.database == saved.database && tab.schema == saved.schema;
+                tab.kind == kind
+                    && match kind {
+                        TabKind::Welcome => true,
+                        TabKind::Connection => tab.connection_id == saved.connection_id,
+                        TabKind::Diagram => same_place,
+                        TabKind::Source => tab.connection_id == saved.connection_id && tab.source == saved.source,
+                        TabKind::Query => data && same_place && tab.collection == saved.collection && tab.query_mode == saved.query_mode,
+                        _ => false,
+                    }
+            })
+            .map(|tab| tab.id)
+    }
+
+    /// Opens a saved tab in the focused pane and activates it (a fresh id and runtime, like
+    /// [`Self::restore_snapshot`]). `None` when the saved tab cannot be restored.
+    pub fn reopen_tab(&mut self, saved: &crate::gpui_session::SessionTab) -> Option<u64> {
+        let kind = tab_kind_of(saved)?;
+        let id = self.next_tab_id;
+        self.next_tab_id += 1;
+        let tab = tab_of(id, kind, saved);
+        let mut runtime = TabRuntime::new();
+        runtime.pagination = PaginationState::new(tab.output_limit);
+        self.tabs.push(tab);
+        self.runtimes.insert(id, runtime);
+        let pane = self.panes.focused();
+        self.panes.add_tab(pane, id, None);
+        self.touch();
+        self.normalize();
+        Some(id)
     }
 
     pub fn tabs(&self) -> &[Tab] {
@@ -1144,6 +1212,16 @@ impl WorkspaceState {
     /// Opens the Users & Privileges tab of a connection.
     pub fn open_accounts_tab(&mut self, connection_id: &str, title: &str) -> u64 {
         let id = self.open_tab_with_kind(TabKind::Accounts, title.to_string());
+        if let Some(tab) = self.active_tab_mut() {
+            tab.connection_id = connection_id.to_string();
+        }
+        self.normalize();
+        id
+    }
+
+    /// Opens the Process List tab of a connection.
+    pub fn open_process_list_tab(&mut self, connection_id: &str, title: &str) -> u64 {
+        let id = self.open_tab_with_kind(TabKind::ProcessList, title.to_string());
         if let Some(tab) = self.active_tab_mut() {
             tab.connection_id = connection_id.to_string();
         }

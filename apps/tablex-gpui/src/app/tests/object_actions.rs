@@ -251,6 +251,8 @@ fn drop_needs_the_acknowledgement_and_closes_the_tabs_without_unsaved_work(cx: &
     // The dropped table's tab closed, the other table's stays.
     assert_eq!(oa_tabs(&rig.app, rig.visual), [("items".to_owned(), "items".to_owned())]);
     assert!(rig.navigator_errors().is_empty(), "{:?}", rig.navigator_errors());
+    // The app closed that tab, not the user: Reopen Closed Tab does not bring it back.
+    ro_nothing_reopens(&rig.app, rig.visual);
 
     // A view is dropped the same way, from the Views group.
     let view = oa_table(&rig, "item_names");
