@@ -27,7 +27,7 @@ fn get_db_path() -> PathBuf {
 }
 
 fn ensure_db() -> Result<()> {
-    let mut db = HISTORY_DB.lock().unwrap();
+    let mut db = HISTORY_DB.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if db.is_none() {
         let path = get_db_path();
         eprintln!("[history] Opening DB at: {:?}", path);
@@ -120,12 +120,13 @@ pub fn save_entry(
         conn_uuid, database, collection, filter
     );
     ensure_db()?;
-    let db = HISTORY_DB.lock().unwrap();
+    let db = HISTORY_DB.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let conn = db.as_ref().unwrap();
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        // A clock before 1970 must not panic while a storage lock is held.
+        .unwrap_or_default()
         .as_secs_f64();
 
     let rows = conn.execute(
@@ -174,7 +175,7 @@ pub fn fetch_entries(
     limit: u32,
 ) -> Result<Vec<HistoryEntry>> {
     ensure_db()?;
-    let db = HISTORY_DB.lock().unwrap();
+    let db = HISTORY_DB.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let conn = db.as_ref().unwrap();
 
     let mut stmt = conn.prepare(
@@ -208,7 +209,7 @@ pub fn fetch_entries(
 
 pub fn delete_entry(id: i64) -> Result<()> {
     ensure_db()?;
-    let db = HISTORY_DB.lock().unwrap();
+    let db = HISTORY_DB.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let conn = db.as_ref().unwrap();
     conn.execute("DELETE FROM query_history WHERE id = ?1", params![id])?;
     Ok(())
@@ -216,7 +217,7 @@ pub fn delete_entry(id: i64) -> Result<()> {
 
 pub fn clear_entries(conn_uuid: &str, database: &str, collection: &str) -> Result<()> {
     ensure_db()?;
-    let db = HISTORY_DB.lock().unwrap();
+    let db = HISTORY_DB.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let conn = db.as_ref().unwrap();
     conn.execute(
         "DELETE FROM query_history WHERE conn_uuid = ?1 AND database = ?2 AND collection = ?3",

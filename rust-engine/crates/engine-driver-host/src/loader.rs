@@ -620,7 +620,7 @@ impl DriverHandle {
         let response = unsafe { (self.symbols.shutdown)() };
         let response = self.take_string(response)?;
         unwrap_envelope_value(&response)?;
-        *self.closed.lock().expect("driver handle lock poisoned") = true;
+        *self.closed.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = true;
         Ok(())
     }
 
@@ -637,7 +637,7 @@ impl DriverHandle {
     }
 
     fn ensure_open(&self) -> Result<(), LoaderError> {
-        if *self.closed.lock().expect("driver handle lock poisoned") {
+        if *self.closed.lock().unwrap_or_else(std::sync::PoisonError::into_inner) {
             Err(LoaderError::Shutdown)
         } else {
             Ok(())
@@ -842,7 +842,8 @@ impl Drop for DriverHandle {
                 .entry
                 .state
                 .lock()
-                .expect("driver registry lock poisoned");
+                // A panic must not turn into a second one here: `drop` can run while unwinding.
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let matches_generation = match &*state {
                 DriverEntryState::Ready { generation, .. }
                 | DriverEntryState::Retiring { generation } => {
@@ -857,7 +858,7 @@ impl Drop for DriverHandle {
             }
             matches_generation
         };
-        if !*self.closed.get_mut().expect("driver handle lock poisoned") {
+        if !*self.closed.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner) {
             // SAFETY: this is the last Arc owner, so no session or batch can call
             // into the driver while its runtime is being stopped.
             let response = unsafe { (self.symbols.shutdown)() };
@@ -873,7 +874,8 @@ impl Drop for DriverHandle {
                 .entry
                 .state
                 .lock()
-                .expect("driver registry lock poisoned");
+                // A panic must not turn into a second one here: `drop` can run while unwinding.
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if matches!(&*state, DriverEntryState::Retiring { generation } if Arc::ptr_eq(generation, &self.generation))
             {
                 *state = DriverEntryState::Empty;

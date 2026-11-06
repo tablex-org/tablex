@@ -106,7 +106,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
 }
 
 fn ensure_db() -> Result<()> {
-    let mut db = AI_CHAT_DB.lock().expect("ai chat db lock poisoned");
+    let mut db = AI_CHAT_DB.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if db.is_none() {
         let path = get_db_path();
         if let Some(parent) = path.parent() {
@@ -122,7 +122,7 @@ fn ensure_db() -> Result<()> {
 
 pub fn upsert_conversation(conversation: &AIConversationRecord) -> Result<()> {
     ensure_db()?;
-    let mut db = AI_CHAT_DB.lock().expect("ai chat db lock poisoned");
+    let mut db = AI_CHAT_DB.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let conn = db.as_mut().expect("ai chat db initialized");
     upsert_conversation_impl(conn, conversation)
 }
@@ -196,7 +196,7 @@ pub fn list_conversations(
     limit: i64,
 ) -> Result<Vec<AIConversationSummary>> {
     ensure_db()?;
-    let db = AI_CHAT_DB.lock().expect("ai chat db lock poisoned");
+    let db = AI_CHAT_DB.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let conn = db.as_ref().expect("ai chat db initialized");
     list_conversations_impl(conn, scope, limit)
 }
@@ -244,7 +244,7 @@ fn list_conversations_impl(
 
 pub fn get_conversation(id: &str) -> Result<Option<AIConversationRecord>> {
     ensure_db()?;
-    let db = AI_CHAT_DB.lock().expect("ai chat db lock poisoned");
+    let db = AI_CHAT_DB.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let conn = db.as_ref().expect("ai chat db initialized");
     get_conversation_impl(conn, id)
 }
@@ -300,7 +300,7 @@ fn get_conversation_impl(conn: &Connection, id: &str) -> Result<Option<AIConvers
 
 pub fn delete_conversation(id: &str) -> Result<()> {
     ensure_db()?;
-    let db = AI_CHAT_DB.lock().expect("ai chat db lock poisoned");
+    let db = AI_CHAT_DB.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let conn = db.as_ref().expect("ai chat db initialized");
     delete_conversation_impl(conn, id)
 }
