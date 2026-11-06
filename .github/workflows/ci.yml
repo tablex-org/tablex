@@ -3,16 +3,16 @@ name: CI
 # Cross-platform build + test check for pull requests and main. No secrets,
 # no write permissions, no pull_request_target: safe to run for fork PRs.
 #
-#   workspace   (ubuntu / windows / macos-14)
+#   workspace   (ubuntu / windows / macos-15)
 #       cargo check --workspace --all-targets      (root workspace: apps/tablex-gpui)
 #       cargo test -p tablex-gpui
-#   engine      (ubuntu / windows / macos-14)
+#   engine      (ubuntu / windows / macos-15)
 #       cargo test --manifest-path rust-engine/Cargo.toml --workspace
-#   size        (macos-14, pushes to main only)
+#   size        (macos-15, pushes to main only)
 #       cargo build --profile dist -p tablex-gpui; scripts/size_report.py --check
 #   audit       (ubuntu, pushes to main only, report-only)
 #       cargo audit for both lock files
-#   scripts     (ubuntu / macos-14)
+#   scripts     (ubuntu / macos-15)
 #       python3 -m unittest discover -s scripts/tests
 #
 # Display: no xvfb. The app tests use GPUI's `test-support` platform, which is
@@ -54,7 +54,7 @@ jobs:
       matrix:
         include:
           - name: macos-arm64
-            os: macos-14
+            os: macos-15
             experimental: false
           - name: linux
             os: ubuntu-latest
@@ -140,7 +140,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-14]
+        os: [ubuntu-latest, macos-15]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -155,7 +155,7 @@ jobs:
   size:
     name: size (macos-arm64)
     if: github.event_name == 'push'
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
