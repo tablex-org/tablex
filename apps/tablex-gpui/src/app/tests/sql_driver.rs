@@ -129,6 +129,32 @@ const ITEMS_SEED: &str = "CREATE TABLE items(id INTEGER PRIMARY KEY, name TEXT);
 const LONG_QUERY: &str = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c \
      WHERE x < 4000000000) SELECT count(*) FROM c";
 
+/// A copy of the built driver that one rig loads, deleted with the rig. The host caches one
+/// `DriverHandle` per path, so every rig on the shared artifact would share its operation count
+/// too: a test that ends with an operation still in flight (the rerun after an Apply, whose
+/// result nobody collects) would keep every other test's `wait_driver_idle` above 0 for as long
+/// as the process lives. A handle of its own makes the count this rig's alone.
+struct DriverCopy(std::path::PathBuf);
+
+impl DriverCopy {
+    fn of(dylib: &std::path::Path) -> Self {
+        let copy = std::env::temp_dir().join(format!(
+            "tablex-rig-driver-{}{}",
+            uuid::Uuid::new_v4(),
+            std::env::consts::DLL_SUFFIX
+        ));
+        std::fs::copy(dylib, &copy).expect("the rig's own copy of the driver");
+        Self(copy)
+    }
+}
+
+impl Drop for DriverCopy {
+    fn drop(&mut self) {
+        // Unlinking a loaded library is fine on unix; Windows refuses and the copy stays in temp.
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 /// A fixture app whose one tab runs SQL on a live driver session.
 struct SqlRig<'a> {
     app: gpui::Entity<AppRoot>,
@@ -137,6 +163,7 @@ struct SqlRig<'a> {
     key: String,
     session: std::sync::Arc<engine_driver_host::SharedDriverSession>,
     handle: std::sync::Arc<engine_driver_host::DriverHandle>,
+    _driver_copy: DriverCopy,
 }
 
 impl<'a> SqlRig<'a> {
@@ -146,7 +173,8 @@ impl<'a> SqlRig<'a> {
         (package, features): (&'static str, &'static str),
         uri: &str,
     ) -> Self {
-        let dylib = built_driver(package, features);
+        let driver_copy = DriverCopy::of(&built_driver(package, features));
+        let dylib = driver_copy.0.clone();
         cx.dispatcher.allow_parking();
         // Dialog open animations run on wall-clock time.
         cx.update(|cx| cx.set_reduce_motion(true));
@@ -212,6 +240,7 @@ impl<'a> SqlRig<'a> {
             key,
             session,
             handle,
+            _driver_copy: driver_copy,
         }
     }
 
