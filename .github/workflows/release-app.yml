@@ -32,7 +32,7 @@ jobs:
     name: build (${{ matrix.arch }})
     # Forks skip: RELEASE_OWNER is a repository variable (Settings > Variables).
     if: github.repository_owner == vars.RELEASE_OWNER && github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 60
     strategy:
       fail-fast: false

@@ -69,7 +69,7 @@ jobs:
       matrix:
         include:
           - target: macos-aarch64
-            os: macos-14
+            os: macos-15
             experimental: false
           # package-driver.sh --target now packages it on the arm64 release job
           # from this runner's inspect JSON; flip `experimental` once a tag run
@@ -174,7 +174,7 @@ jobs:
     name: sign and publish
     needs: build
     if: github.repository_owner == vars.RELEASE_OWNER && github.ref_type == 'tag' && startsWith(github.ref_name, 'drivers-v')
-    runs-on: macos-14
+    runs-on: macos-15
     # Required reviewers + protected-tag restriction are configured on this
     # environment (README: "Release CI"). Secrets live only here.
     environment: release
