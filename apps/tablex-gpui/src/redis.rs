@@ -94,11 +94,12 @@ impl KeyInfo {
         }
         let text = |name: &str| {
             let array = batch.column_by_name(name)?;
-            (!array.is_null(0)).then(|| array.as_string::<i32>().value(0).to_owned())
+            // `_opt`: a schema change in the driver reads as a missing value, not a panic on the UI thread.
+            array.as_string_opt::<i32>().filter(|a| !a.is_null(0)).map(|a| a.value(0).to_owned())
         };
         let number = |name: &str| {
             let array = batch.column_by_name(name)?;
-            (!array.is_null(0)).then(|| array.as_primitive::<Int64Type>().value(0))
+            array.as_primitive_opt::<Int64Type>().filter(|a| !a.is_null(0)).map(|a| a.value(0))
         };
         Some(Self {
             type_name: text("type")?,
