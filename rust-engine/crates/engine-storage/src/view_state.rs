@@ -11,7 +11,7 @@ fn get_db_path() -> PathBuf {
 }
 
 fn ensure_db() -> Result<()> {
-    let mut db = VIEW_STATE_DB.lock().unwrap();
+    let mut db = VIEW_STATE_DB.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if db.is_none() {
         let path = get_db_path();
         if let Some(parent) = path.parent() {
@@ -39,12 +39,13 @@ fn ensure_db() -> Result<()> {
 
 pub fn save_state(conn_uuid: &str, state_json: &str) -> Result<()> {
     ensure_db()?;
-    let db = VIEW_STATE_DB.lock().unwrap();
+    let db = VIEW_STATE_DB.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let conn = db.as_ref().unwrap();
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        // A clock before 1970 must not panic while a storage lock is held.
+        .unwrap_or_default()
         .as_secs_f64();
 
     conn.execute(
@@ -59,7 +60,7 @@ pub fn save_state(conn_uuid: &str, state_json: &str) -> Result<()> {
 
 pub fn load_state(conn_uuid: &str) -> Result<Option<String>> {
     ensure_db()?;
-    let db = VIEW_STATE_DB.lock().unwrap();
+    let db = VIEW_STATE_DB.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let conn = db.as_ref().unwrap();
 
     let mut stmt =
@@ -76,7 +77,7 @@ pub fn load_state(conn_uuid: &str) -> Result<Option<String>> {
 
 pub fn delete_state(conn_uuid: &str) -> Result<()> {
     ensure_db()?;
-    let db = VIEW_STATE_DB.lock().unwrap();
+    let db = VIEW_STATE_DB.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let conn = db.as_ref().unwrap();
 
     conn.execute(

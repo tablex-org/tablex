@@ -129,7 +129,7 @@ fn add_missing_columns(conn: &Connection) -> Result<()> {
 }
 
 fn ensure_db() -> Result<()> {
-    let mut db = CONNECTION_DB.lock().expect("lock connection db");
+    let mut db = CONNECTION_DB.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if db.is_none() {
         let path = get_db_path();
         if let Some(parent) = path.parent() {
@@ -145,35 +145,35 @@ fn ensure_db() -> Result<()> {
 
 pub fn list_connections() -> Result<Vec<SavedConnectionRecord>> {
     ensure_db()?;
-    let db = CONNECTION_DB.lock().expect("lock connection db");
+    let db = CONNECTION_DB.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let conn = db.as_ref().expect("connection db initialized");
     list_connections_impl(conn)
 }
 
 pub fn get_connection(id: &str) -> Result<Option<SavedConnectionRecord>> {
     ensure_db()?;
-    let db = CONNECTION_DB.lock().expect("lock connection db");
+    let db = CONNECTION_DB.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let conn = db.as_ref().expect("connection db initialized");
     get_connection_impl(conn, id)
 }
 
 pub fn upsert_connection(record: &SavedConnectionRecord) -> Result<()> {
     ensure_db()?;
-    let db = CONNECTION_DB.lock().expect("lock connection db");
+    let db = CONNECTION_DB.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let conn = db.as_ref().expect("connection db initialized");
     upsert_connection_impl(conn, record)
 }
 
 pub fn upsert_connections_batch(records: &[SavedConnectionRecord]) -> Result<()> {
     ensure_db()?;
-    let mut db = CONNECTION_DB.lock().expect("lock connection db");
+    let mut db = CONNECTION_DB.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let conn = db.as_mut().expect("connection db initialized");
     upsert_connections_batch_impl(conn, records)
 }
 
 pub fn delete_connection(id: &str) -> Result<()> {
     ensure_db()?;
-    let mut db = CONNECTION_DB.lock().expect("lock connection db");
+    let mut db = CONNECTION_DB.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let conn = db.as_mut().expect("connection db initialized");
     let tx = conn.transaction()?;
     tx.execute(
@@ -186,14 +186,14 @@ pub fn delete_connection(id: &str) -> Result<()> {
 
 pub fn delete_connections_batch(ids: &[String]) -> Result<()> {
     ensure_db()?;
-    let mut db = CONNECTION_DB.lock().expect("lock connection db");
+    let mut db = CONNECTION_DB.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let conn = db.as_mut().expect("connection db initialized");
     delete_connections_batch_impl(conn, ids)
 }
 
 pub fn list_project_connection_ids(project_id: &str) -> Result<Vec<String>> {
     ensure_db()?;
-    let db = CONNECTION_DB.lock().expect("lock connection db");
+    let db = CONNECTION_DB.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let conn = db.as_ref().expect("connection db initialized");
     let mut stmt = conn.prepare(
         "SELECT connection_id
@@ -207,7 +207,7 @@ pub fn list_project_connection_ids(project_id: &str) -> Result<Vec<String>> {
 
 pub fn add_project_connection(project_id: &str, connection_id: &str) -> Result<()> {
     ensure_db()?;
-    let db = CONNECTION_DB.lock().expect("lock connection db");
+    let db = CONNECTION_DB.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let conn = db.as_ref().expect("connection db initialized");
     conn.execute(
         "INSERT OR IGNORE INTO project_connection_memberships
@@ -220,7 +220,7 @@ pub fn add_project_connection(project_id: &str, connection_id: &str) -> Result<(
 
 pub fn remove_project_connection(project_id: &str, connection_id: &str) -> Result<()> {
     ensure_db()?;
-    let db = CONNECTION_DB.lock().expect("lock connection db");
+    let db = CONNECTION_DB.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let conn = db.as_ref().expect("connection db initialized");
     conn.execute(
         "DELETE FROM project_connection_memberships WHERE project_id = ?1 AND connection_id = ?2",
@@ -231,7 +231,7 @@ pub fn remove_project_connection(project_id: &str, connection_id: &str) -> Resul
 
 pub fn list_projects() -> Result<Vec<ProjectRecord>> {
     ensure_db()?;
-    let db = CONNECTION_DB.lock().expect("lock connection db");
+    let db = CONNECTION_DB.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let conn = db.as_ref().expect("connection db initialized");
     let mut stmt = conn.prepare(
         "SELECT id, name, path, uses_default_location, created_at, updated_at
@@ -244,7 +244,7 @@ pub fn list_projects() -> Result<Vec<ProjectRecord>> {
 
 pub fn upsert_project(record: &ProjectRecord) -> Result<()> {
     ensure_db()?;
-    let db = CONNECTION_DB.lock().expect("lock connection db");
+    let db = CONNECTION_DB.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let conn = db.as_ref().expect("connection db initialized");
     conn.execute(
         "INSERT INTO projects (id, name, path, uses_default_location, created_at, updated_at)
@@ -268,7 +268,7 @@ pub fn upsert_project(record: &ProjectRecord) -> Result<()> {
 
 pub fn delete_project(id: &str) -> Result<()> {
     ensure_db()?;
-    let mut db = CONNECTION_DB.lock().expect("lock connection db");
+    let mut db = CONNECTION_DB.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let conn = db.as_mut().expect("connection db initialized");
     let tx = conn.transaction()?;
     tx.execute(
@@ -281,7 +281,7 @@ pub fn delete_project(id: &str) -> Result<()> {
 
 pub fn rename_project(old_id: &str, record: &ProjectRecord) -> Result<()> {
     ensure_db()?;
-    let mut db = CONNECTION_DB.lock().expect("lock connection db");
+    let mut db = CONNECTION_DB.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let conn = db.as_mut().expect("connection db initialized");
     let tx = conn.transaction()?;
     tx.execute(
@@ -306,7 +306,7 @@ pub fn rename_project(old_id: &str, record: &ProjectRecord) -> Result<()> {
 
 pub fn touch_connection(id: &str, timestamp: f64) -> Result<()> {
     ensure_db()?;
-    let db = CONNECTION_DB.lock().expect("lock connection db");
+    let db = CONNECTION_DB.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let conn = db.as_ref().expect("connection db initialized");
     conn.execute(
         "UPDATE saved_connections SET last_connected = ?2, updated_at = ?2 WHERE id = ?1",
@@ -317,7 +317,7 @@ pub fn touch_connection(id: &str, timestamp: f64) -> Result<()> {
 
 pub fn set_connection_pinned(id: &str, is_pinned: bool) -> Result<()> {
     ensure_db()?;
-    let db = CONNECTION_DB.lock().expect("lock connection db");
+    let db = CONNECTION_DB.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let conn = db.as_ref().expect("connection db initialized");
     let now = now_secs();
     conn.execute(
