@@ -2066,8 +2066,8 @@ impl AppRoot {
                             }
                             let (group_root, group_id) = (menu_root.clone(), row_id.clone());
                             return base
-                                .context_menu(move |menu, _, cx| {
-                                    append_object_items(menu, group_root.clone(), &group_id, false, cx)
+                                .context_menu(move |menu, window, cx| {
+                                    append_object_items(menu, group_root.clone(), &group_id, false, window, cx)
                                 })
                                 .into_any_element();
                         }
@@ -2127,7 +2127,7 @@ impl AppRoot {
                                             this.copy_navigator_sql(&row_for_copy, cx);
                                         },
                                     ))
-                                    .context_menu(move |menu, _, cx| {
+                                    .context_menu(move |menu, window, cx| {
                                         let (ask_root, ask_id) = (ask_root.clone(), ask_id.clone());
                                         let menu = menu
                                             .menu("Open", Box::new(OpenNavigatorNode))
@@ -2166,7 +2166,7 @@ impl AppRoot {
                                                     }
                                                 }),
                                             );
-                                        append_object_items(menu, ask_root, &ask_id, true, cx)
+                                        append_object_items(menu, ask_root, &ask_id, true, window, cx)
                                     })
                                     .into_any_element();
                             }
@@ -2257,7 +2257,7 @@ impl AppRoot {
                             let diagram_root = menu_root.clone();
                             let object_id = row_id.clone();
                             return base
-                                .context_menu(move |menu, _, cx| {
+                                .context_menu(move |menu, window, cx| {
                                     let menu = menu.item(new_query_item());
                                     let menu = match diagram_id.clone() {
                                         Some(id) => {
@@ -2270,7 +2270,7 @@ impl AppRoot {
                                         }
                                         None => menu,
                                     };
-                                    append_object_items(menu, diagram_root.clone(), &object_id, true, cx)
+                                    append_object_items(menu, diagram_root.clone(), &object_id, true, window, cx)
                                 })
                                 .into_any_element();
                         }

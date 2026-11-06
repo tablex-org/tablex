@@ -1,5 +1,8 @@
 use super::*;
 
+/// How many closed tabs "Reopen Closed Tab" walks back through; the oldest is dropped first.
+const CLOSED_TABS_KEPT: usize = 20;
+
 #[derive(Default)]
 pub(super) struct WorkspaceEditors {
     /// Inactive editors stay alive with their cursor and undo history.
@@ -387,6 +390,7 @@ impl AppRoot {
         self.cancel_file_run_of_tab(tab_id);
         self.backups.remove(&tab_id);
         self.accounts.remove(&tab_id);
+        self.process_lists.remove(&tab_id);
         self.cancel_backup_of_tab(tab_id);
         self.transfer_create.remove(&tab_id);
         self.mongo_ui.expanded_find_editors.remove(&tab_id);
@@ -660,7 +664,22 @@ impl AppRoot {
         true
     }
 
+    /// The user closes a tab: it keeps what "Reopen Closed Tab" needs to bring it back.
     pub(super) fn close_tab(&mut self, tab_id: u64, cx: &mut Context<Self>) {
+        // Taken before anything is torn down: the unsaved text and staged filters are the tab's.
+        if let Some(saved) = self.workspace.closed_snapshot(tab_id) {
+            let closed = &mut self.shell.closed_tabs;
+            if closed.len() == CLOSED_TABS_KEPT {
+                closed.pop_front();
+            }
+            closed.push_back(saved);
+        }
+        self.close_tab_unremembered(tab_id, cx);
+    }
+
+    /// The app closes a tab the user did not (its object was dropped, its connection deleted, the
+    /// start-up restore keeps only pinned ones): "Reopen Closed Tab" does not bring it back.
+    pub(super) fn close_tab_unremembered(&mut self, tab_id: u64, cx: &mut Context<Self>) {
         self.auto_refresh.tasks.remove(&tab_id);
         self.query_tasks.started_at.remove(&tab_id);
         if self
@@ -693,6 +712,36 @@ impl AppRoot {
         self.aggregate_tab_removed(tab_id, cx);
         // The tab's whole result view (scroll, selection, find, editors) goes with it.
         self.tab_views.remove(&tab_id);
+    }
+
+    /// "Reopen Closed Tab": brings back the tab closed last, in the focused pane (or shows the open
+    /// tab it would duplicate). A tab whose connection is gone is dropped and the one closed before
+    /// it is tried. Nothing to reopen does nothing.
+    pub(super) fn reopen_closed_tab(&mut self, cx: &mut Context<Self>) {
+        while let Some(saved) = self.shell.closed_tabs.pop_back() {
+            if !saved.connection_id.is_empty()
+                && !self.saved_connections.iter().any(|connection| connection.matches_id(&saved.connection_id))
+            {
+                continue;
+            }
+            // Already open (the same file, Welcome, the same table...): that one, not a twin.
+            if let Some(open) = self.workspace.open_twin(&saved) {
+                self.activate_tab_ui(open, cx);
+                return;
+            }
+            let Some(tab_id) = self.workspace.reopen_tab(&saved) else {
+                continue;
+            };
+            // The data comes from the server again, never from the rows the tab held. SQL typed
+            // in an editor is not run: reopening must not execute a statement.
+            if self.workspace.tab(tab_id).is_some_and(session_persist::is_data_tab) {
+                self.run_tab_query_explicit(tab_id, cx);
+            } else if saved.kind == "source" {
+                self.ensure_source_loaded(tab_id, cx);
+            }
+            cx.notify();
+            return;
+        }
     }
 
     pub(super) fn finish_query_task(&mut self, tab_id: u64, run: crate::query::QueryRunId) {

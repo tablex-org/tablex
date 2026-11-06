@@ -78,6 +78,7 @@ mod navigator_ui;
 mod object_actions;
 mod panes_ui;
 mod params;
+mod process_list;
 mod redis;
 mod remote_search;
 mod results;
@@ -106,6 +107,7 @@ mod test_data;
 mod transaction;
 mod transaction_dialogs;
 mod tunnel_ui;
+mod updates;
 mod workspace;
 
 use actions::*;
@@ -200,6 +202,14 @@ pub struct AppRoot {
     /// Test double: where the Users & Privileges tabs read their catalogs from.
     #[cfg(test)]
     accounts_injected: Option<Arc<accounts::InjectedCatalog>>,
+    /// The tab of each connection's Process List.
+    process_lists: process_list::ProcessListViews,
+    /// Test double: where the Process List tabs get their session from.
+    #[cfg(test)]
+    process_list_injected: Option<Arc<process_list::InjectedSession>>,
+    /// Test probe: how often a Process List tab had to read its gate again.
+    #[cfg(test)]
+    process_list_gate_reads: std::cell::Cell<usize>,
     /// The cancel token of each backup or restore in flight, kept from the moment its worker starts.
     backup_controls: HashMap<u64, Arc<crate::backup::process::CancelToken>>,
     /// How many worker threads of backups and restores are alive (a quit waits for them to have cleaned up).
@@ -288,6 +298,8 @@ pub struct AppRoot {
     settings_ui: settings_state::SettingsUi,
     /// The AI assistant: tool layer, API key, models, the chat (see `assistant`).
     assistant: assistant::AssistantUi,
+    /// The update check and its notice (see `updates`).
+    update_ui: updates::UpdateUi,
 }
 
 struct ColumnResizeGhost;
@@ -418,6 +430,11 @@ impl AppRoot {
             accounts: HashMap::new(),
             #[cfg(test)]
             accounts_injected: None,
+            process_lists: HashMap::new(),
+            #[cfg(test)]
+            process_list_injected: None,
+            #[cfg(test)]
+            process_list_gate_reads: std::cell::Cell::new(0),
             backup_controls: HashMap::new(),
             backup_workers: Default::default(),
             backup_dirs: Default::default(),
@@ -483,6 +500,7 @@ impl AppRoot {
             ),
             settings_ui: settings_state::SettingsUi::new(settings_path),
             assistant,
+            update_ui: updates::UpdateUi::new(scenario_enabled || cfg!(test)),
         };
         // Every tab's cached results view is stale after a plain notification
         // of the root unless it was announced as chrome-only.
@@ -514,6 +532,11 @@ impl AppRoot {
         app.assistant.dock.width = app.navigator.preferences().resolve_assistant_width();
         app.assistant.dock.open = app.navigator.preferences().assistant_open;
         app.init_settings(cx);
+        // Tests call `start_launch_update_check` themselves, with a fetcher of their own.
+        #[cfg(not(test))]
+        if !scenario_enabled {
+            app.start_launch_update_check(cx);
+        }
         if scenario_enabled {
             app.apply_scenario_theme(cx);
         }
@@ -666,6 +689,7 @@ mod tests {
     include!("tests/properties.rs");
     include!("tests/properties_edit.rs");
     include!("tests/object_actions.rs");
+    include!("tests/generate_sql.rs");
     include!("tests/data_import.rs");
     include!("tests/data_transfer.rs");
     include!("tests/file_run.rs");
@@ -675,6 +699,10 @@ mod tests {
     mod accounts_ui {
         use super::*;
         include!("tests/accounts.rs");
+    }
+    mod process_list_ui {
+        use super::*;
+        include!("tests/process_list.rs");
     }
     include!("tests/properties_perf.rs");
     include!("tests/diagram.rs");
@@ -702,6 +730,8 @@ mod tests {
     include!("tests/settings.rs");
     include!("tests/assistant_panel.rs");
     include!("tests/shortcuts.rs");
+    include!("tests/reopen_tab.rs");
+    include!("tests/updates.rs");
     include!("tests/connection_types.rs");
     include!("tests/connection_tls.rs");
     include!("tests/ssh_tunnel.rs");

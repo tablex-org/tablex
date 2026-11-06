@@ -434,6 +434,8 @@ fn mongo_drop_collection_requires_the_exact_typed_name_and_closes_its_data_tab(
             .as_deref()
             .is_some_and(|notice| notice.contains("dropped") && notice.contains("1 script tab")));
     });
+    // The app closed that tab, not the user: Reopen Closed Tab has nothing to bring back.
+    ro_nothing_reopens(&app, visual);
 }
 
 #[gpui::test]

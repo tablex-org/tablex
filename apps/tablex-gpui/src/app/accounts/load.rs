@@ -91,8 +91,14 @@ fn failure(error: &engine_driver_host::LoaderError) -> ReadError {
     ReadError::from_server(super::super::data_import::message_of(&text))
 }
 
-impl CatalogSession for DriverCatalog {
-    fn rows(&mut self, sql: &str) -> Result<TextRows, ReadError> {
+impl DriverCatalog {
+    /// Opens the session `spec` describes (blocking: call it off the UI thread).
+    pub(in crate::app) fn open(spec: SessionSpec) -> Result<Self, ReadError> {
+        let (session, tunnel) = spec.open().map_err(ReadError::Failed)?;
+        Ok(Self { session, database: None, _tunnel: tunnel })
+    }
+
+    fn send(&mut self, sql: &str) -> Result<engine_driver_api::QueryPage, ReadError> {
         let operation = self.session.begin_operation().map_err(|error| failure(&error))?;
         let request = QueryRequest {
             kind: "sql".into(),
@@ -104,7 +110,20 @@ impl CatalogSession for DriverCatalog {
             payload: serde_json::json!({ "sql": sql, "confirmed": true }),
         };
         let json = serde_json::to_string(&request).map_err(|error| ReadError::Malformed(error.to_string()))?;
-        let page = self.session.open_query(&json).map_err(|error| failure(&error))?;
+        self.session.open_query(&json).map_err(|error| failure(&error))
+    }
+
+    /// Runs one statement and drops what it answers (a `KILL`, a `pg_cancel_backend`).
+    pub(in crate::app) fn run(&mut self, sql: &str) -> Result<(), ReadError> {
+        let page = self.send(sql)?;
+        let _ = self.session.release_page(page.page_id);
+        Ok(())
+    }
+}
+
+impl CatalogSession for DriverCatalog {
+    fn rows(&mut self, sql: &str) -> Result<TextRows, ReadError> {
+        let page = self.send(sql)?;
         let read = (|| {
             if page.flags.truncated {
                 return Err(ReadError::Failed(format!("The server has more than {ROW_LIMIT} rows here.")));

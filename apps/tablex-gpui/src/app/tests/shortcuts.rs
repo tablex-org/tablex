@@ -69,6 +69,7 @@ fn old_binding_table(cx: &gpui::App) -> Vec<gpui::KeyBinding> {
         shortcuts::key_binding(cx, "secondary-s", SaveActiveSql, None),
         shortcuts::key_binding(cx, "secondary-shift-e", ExplainPlan, None),
         shortcuts::key_binding(cx, "secondary-w", CloseActiveTab, None),
+        shortcuts::key_binding(cx, "secondary-shift-t", ReopenClosedTab, None),
         shortcuts::key_binding(cx, "secondary-shift-pagedown", NextTabGroup, None),
         shortcuts::key_binding(cx, "secondary-shift-pageup", PreviousTabGroup, None),
         shortcuts::key_binding(cx, "secondary-shift-]", NextTabGroup, None),

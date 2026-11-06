@@ -546,7 +546,7 @@ impl AppRoot {
             })
             .count();
         for id in self.mongo_data_tab_ids(connection, database, collection) {
-            self.close_tab(id, cx);
+            self.close_tab_unremembered(id, cx);
         }
         kept
     }

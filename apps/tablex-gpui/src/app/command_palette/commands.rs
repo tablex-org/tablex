@@ -21,6 +21,7 @@ pub(in crate::app) enum StaticAction {
     BackupDatabase,
     RestoreDatabase,
     UsersAndPrivileges,
+    ProcessList,
     FormatSql,
     ExplainPlan,
     ExplainPlanAnalyze,
@@ -30,6 +31,7 @@ pub(in crate::app) enum StaticAction {
     PendingTransactions,
     FindInResults,
     CloseTab,
+    ReopenClosedTab,
     DriverManager,
     Settings,
     ErrorLog,
@@ -49,11 +51,12 @@ pub(in crate::app) enum StaticAction {
     NextTabGroup,
     PreviousTabGroup,
     About,
+    CheckForUpdates,
     Quit,
 }
 
 impl StaticAction {
-    pub(super) const ALL: [Self; 38] = [
+    pub(super) const ALL: [Self; 41] = [
         Self::NewQuery,
         Self::NewConnection,
         Self::SaveQuery,
@@ -63,6 +66,7 @@ impl StaticAction {
         Self::BackupDatabase,
         Self::RestoreDatabase,
         Self::UsersAndPrivileges,
+        Self::ProcessList,
         Self::FormatSql,
         Self::ExplainPlan,
         Self::ExplainPlanAnalyze,
@@ -72,6 +76,7 @@ impl StaticAction {
         Self::PendingTransactions,
         Self::FindInResults,
         Self::CloseTab,
+        Self::ReopenClosedTab,
         Self::DriverManager,
         Self::Settings,
         Self::ErrorLog,
@@ -91,6 +96,7 @@ impl StaticAction {
         Self::NextTabGroup,
         Self::PreviousTabGroup,
         Self::About,
+        Self::CheckForUpdates,
         Self::Quit,
     ];
 
@@ -105,6 +111,7 @@ impl StaticAction {
             Self::BackupDatabase => "Backup Database",
             Self::RestoreDatabase => "Restore Database",
             Self::UsersAndPrivileges => "Users & Privileges",
+            Self::ProcessList => "Process List",
             Self::FormatSql => "Format SQL",
             Self::ExplainPlan => "Explain",
             Self::ExplainPlanAnalyze => "Explain Analyze",
@@ -114,6 +121,7 @@ impl StaticAction {
             Self::PendingTransactions => "Pending Transactions",
             Self::FindInResults => "Find in Results",
             Self::CloseTab => "Close Tab",
+            Self::ReopenClosedTab => "Reopen Closed Tab",
             Self::DriverManager => "Driver Manager",
             Self::Settings => "Settings",
             Self::ErrorLog => "Error Log",
@@ -133,6 +141,7 @@ impl StaticAction {
             Self::NextTabGroup => "Next Tab Group",
             Self::PreviousTabGroup => "Previous Tab Group",
             Self::About => "About TableX",
+            Self::CheckForUpdates => "Check for Updates",
             Self::Quit => "Quit TableX",
         }
     }
@@ -154,6 +163,7 @@ impl StaticAction {
             Self::RunSqlFile => "Run a .sql file of any size on a connection, without opening it".into(),
             Self::BackupDatabase => "Back a PostgreSQL, MySQL or MariaDB database up with pg_dump or mysqldump".into(),
             Self::RestoreDatabase => "Restore a backup with pg_restore, or an SQL script with Run SQL File".into(),
+            Self::ProcessList => "List the sessions running on the focused connection's server, and cancel a query or kill a session after a confirmation (PostgreSQL, MySQL, MariaDB, ClickHouse)".into(),
             Self::UsersAndPrivileges => "List, create, alter and drop the roles of PostgreSQL or the users of MySQL and MariaDB, and grant privileges, through a reviewed change-set".into(),
             Self::FormatSql => hinted("Re-lay out the selected statements, or the whole editor", "editor.format_sql"),
             Self::ExplainPlan => hinted("Show the execution plan of the statement", "editor.explain"),
@@ -170,6 +180,7 @@ impl StaticAction {
             Self::PendingTransactions => "List every open transaction, and commit or roll back each or the selected".into(),
             Self::FindInResults => hinted("Search the result grid", "results.find"),
             Self::CloseTab => hinted("Close the active tab", "workspace.close_tab"),
+            Self::ReopenClosedTab => hinted("Bring back the tab closed last", "workspace.reopen_closed_tab"),
             Self::DriverManager => "Install and manage database drivers".into(),
             Self::Settings => hinted("Open application settings", "workspace.open_settings"),
             Self::ErrorLog => hinted("Show the event and error log", "workspace.toggle_error_log"),
@@ -205,6 +216,7 @@ impl StaticAction {
                 hinted("Show the previous connection group of tabs", "workspace.previous_tab_group")
             }
             Self::About => "Show the application version".into(),
+            Self::CheckForUpdates => "Ask GitHub whether a newer version of TableX exists".into(),
             Self::Quit => hinted("Close TableX", "app.quit"),
         }
     }
@@ -220,6 +232,7 @@ impl StaticAction {
             Self::RunSqlFile => "execute large dump restore script file stream",
             Self::BackupDatabase => "dump export pg_dump mysqldump mariadb-dump save copy archive",
             Self::RestoreDatabase => "import load pg_restore archive dump recover",
+            Self::ProcessList => "processes sessions connections running queries activity kill cancel terminate processlist pg_stat_activity slow long blocking",
             Self::UsersAndPrivileges => "users roles accounts permissions privileges grant revoke password create user create role drop user security access",
             Self::FormatSql => "format beautify prettify indent reformat sql query",
             Self::ExplainPlan => "explain plan execution query cost estimate",
@@ -230,6 +243,7 @@ impl StaticAction {
             Self::PendingTransactions => "open transactions uncommitted commit rollback roll back pending tabs",
             Self::FindInResults => "search grid filter",
             Self::CloseTab => "dismiss",
+            Self::ReopenClosedTab => "restore undo closed recent",
             Self::DriverManager => "drivers plugins install",
             Self::Settings => "preferences options configuration appearance editor fonts",
             Self::ErrorLog => "errors warnings logs incidents",
@@ -249,6 +263,7 @@ impl StaticAction {
             Self::NextTabGroup => "switch connection chip cycle",
             Self::PreviousTabGroup => "switch connection chip cycle back",
             Self::About => "version info help",
+            Self::CheckForUpdates => "update upgrade new version release download latest",
             Self::Quit => "exit close application",
         }
     }
@@ -264,6 +279,7 @@ impl StaticAction {
             Self::BackupDatabase => "icons/download.svg",
             Self::RestoreDatabase => "icons/upload.svg",
             Self::UsersAndPrivileges => "icons/key-round.svg",
+            Self::ProcessList => "icons/list-checks.svg",
             Self::FormatSql => "icons/braces.svg",
             Self::ExplainPlan | Self::ExplainPlanAnalyze => "icons/network.svg",
             Self::CommitTransaction => "icons/check.svg",
@@ -271,6 +287,7 @@ impl StaticAction {
             Self::ToggleAutoCommit | Self::PendingTransactions => "icons/database.svg",
             Self::FindInResults => "icons/search.svg",
             Self::CloseTab => "icons/close.svg",
+            Self::ReopenClosedTab => "icons/undo-2.svg",
             Self::DriverManager => "icons/settings-2.svg",
             Self::Settings => "icons/settings.svg",
             Self::ErrorLog => "icons/triangle-alert.svg",
@@ -289,6 +306,7 @@ impl StaticAction {
             Self::NextTabGroup => "icons/chevrons-up-down.svg",
             Self::PreviousTabGroup => "icons/chevrons-up-down.svg",
             Self::About => "icons/info.svg",
+            Self::CheckForUpdates => "icons/refresh-cw.svg",
             Self::Quit => "icons/close.svg",
         };
         TabIcon::Plain(path)
@@ -310,6 +328,7 @@ impl StaticAction {
             Self::BackupDatabase => app.open_backup_from_context(super::super::backup::Mode::Backup, window, cx),
             Self::RestoreDatabase => app.open_backup_from_context(super::super::backup::Mode::Restore, window, cx),
             Self::UsersAndPrivileges => app.open_accounts_from_context(window, cx),
+            Self::ProcessList => app.open_process_list_from_context(window, cx),
             Self::FormatSql => app.format_sql(window, cx),
             Self::ExplainPlan => app.explain_active_tab(engine_plan::ExplainMode::Estimate, cx),
             Self::ExplainPlanAnalyze => app.explain_active_tab(engine_plan::ExplainMode::Analyze, cx),
@@ -319,6 +338,7 @@ impl StaticAction {
             Self::PendingTransactions => app.open_pending_transactions(window, cx),
             Self::FindInResults => app.open_active_grid_find(window, cx),
             Self::CloseTab => app.close_active_tab_action(window, cx),
+            Self::ReopenClosedTab => app.reopen_closed_tab(cx),
             Self::DriverManager => app.open_driver_manager(cx),
             Self::Settings => app.open_settings(window, cx),
             Self::ErrorLog => app.toggle_error_log(window, cx),
@@ -354,6 +374,7 @@ impl StaticAction {
             Self::NextTabGroup => app.step_tab_group(1, cx),
             Self::PreviousTabGroup => app.step_tab_group(-1, cx),
             Self::About => app.open_about(window, cx),
+            Self::CheckForUpdates => app.check_for_updates(cx),
             Self::Quit => {
                 if !app.request_quit(window, cx) {
                     cx.quit();

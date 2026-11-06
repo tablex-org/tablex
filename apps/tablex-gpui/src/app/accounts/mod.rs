@@ -23,9 +23,9 @@ use gpui::{Context, Entity, Window};
 
 use super::*;
 use crate::sql_account::AccountEngine;
-pub(in crate::app) use load::CatalogSource;
+pub(in crate::app) use load::{CatalogSource, DriverCatalog};
 #[cfg(test)]
-pub(in crate::app) use load::{DriverCatalog, InjectedCatalog, LoadJob};
+pub(in crate::app) use load::{InjectedCatalog, LoadJob};
 pub(in crate::app) use view::AccountsView;
 #[cfg(test)]
 pub(in crate::app) use view::{Panel, Snapshot};
@@ -107,7 +107,7 @@ impl AppRoot {
     }
 
     /// The connection the palette's command means: the active tab's, else the one of the row selected in the navigator.
-    fn accounts_connection_from_context(&self) -> Option<String> {
+    pub(in crate::app) fn accounts_connection_from_context(&self) -> Option<String> {
         let tab = self.workspace.active_tab().filter(|tab| !tab.connection_id.is_empty());
         if let Some(tab) = tab {
             return Some(tab.connection_id.clone());

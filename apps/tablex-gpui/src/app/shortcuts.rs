@@ -319,6 +319,14 @@ static DEFS: &[ShortcutDef] = &[
         &["secondary-w"],
         bind!(CloseActiveTab),
     ),
+    ShortcutDef::new(
+        "workspace.reopen_closed_tab",
+        "Tabs & Panes",
+        "Reopen Closed Tab",
+        ANY,
+        &["secondary-shift-t"],
+        bind!(ReopenClosedTab),
+    ),
     // Next / previous tab group of the focused pane. PageUp / PageDown
     // everywhere (Ctrl on Linux / Windows, Cmd on macOS); the Safari-style
     // bracket pair too, for macOS keyboards without page keys.

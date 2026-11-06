@@ -586,6 +586,12 @@ fn build_registry() -> Vec<SettingDescriptor> {
             |s, v| s.appearance.show_fps = v,
             d,
         ),
+        toggle(
+            place!("updates.check_automatically", Appearance, "Updates", "Check for updates automatically", "Once a day, when TableX starts, ask GitHub whether a newer version exists. Nothing but the request itself is sent. Check for Updates in the command palette works either way."),
+            |s| s.updates.check_automatically,
+            |s, v| s.updates.check_automatically = v,
+            d,
+        ),
         // ---- Editor ---------------------------------------------------------
         toggle(
             place!("editor.line_numbers", Editor, "Display", "Line numbers", "Show line numbers in the gutter."),

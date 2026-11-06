@@ -137,13 +137,32 @@ pub(in crate::app) fn append_object_items(
     root: WeakEntity<AppRoot>,
     id: &NavigatorNodeId,
     after_entries: bool,
-    cx: &mut gpui::App,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
 ) -> PopupMenu {
     let items = root.update(cx, |this, _| this.object_menu_items(id)).unwrap_or_default();
-    if items.is_empty() {
+    let generate = root.update(cx, |this, _| this.generate_sql_kinds(id)).unwrap_or_default();
+    if items.is_empty() && generate.is_empty() {
         return menu;
     }
     let menu = if after_entries { menu.separator() } else { menu };
+    // Generate SQL: a statement for the table (a SELECT for a view) in a new SQL tab.
+    let menu = if generate.is_empty() {
+        menu
+    } else {
+        let (generate_root, generate_id) = (root.clone(), id.clone());
+        menu.submenu("Generate SQL", window, cx, move |submenu, _, _| {
+            generate.iter().fold(submenu, |submenu, &kind| {
+                let (root, id) = (generate_root.clone(), generate_id.clone());
+                submenu.item(entry_item(
+                    Entry { selector: kind.selector(), label: kind.label(), icon: kind.icon(), disabled: None, destructive: false },
+                    move |_, app| {
+                        let _ = root.update(app, |this, cx| this.open_generated_sql(kind, &id, cx));
+                    },
+                ))
+            })
+        })
+    };
     items.into_iter().fold(menu, |menu, item| {
         let (root, id) = (root.clone(), id.clone());
         menu.item(entry_item(

@@ -675,6 +675,19 @@ impl AiSettings {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+pub struct Updates {
+    /// Ask GitHub once a day, on launch, whether a newer TableX exists.
+    pub check_automatically: bool,
+}
+
+impl Default for Updates {
+    fn default() -> Self {
+        Self { check_automatically: true }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Settings {
     pub schema_version: u32,
     pub appearance: Appearance,
@@ -683,6 +696,7 @@ pub struct Settings {
     pub query: QuerySettings,
     pub navigation: Navigation,
     pub ai: AiSettings,
+    pub updates: Updates,
     /// Development / Test / Production plus the user's own (see [`connection`]).
     pub connection_types: Vec<connection::ConnectionType>,
     /// Keyboard shortcut overrides: action id (`workspace.close_tab`) to its
@@ -702,6 +716,7 @@ impl Default for Settings {
             query: QuerySettings::default(),
             navigation: Navigation::default(),
             ai: AiSettings::default(),
+            updates: Updates::default(),
             connection_types: connection::ConnectionType::builtins(),
             shortcuts: BTreeMap::new(),
         }
@@ -883,6 +898,18 @@ mod tests {
         local.providers.openai.model = " ".into();
         local.normalize();
         assert_eq!(local.providers.openai.model, " ");
+    }
+
+    #[test]
+    fn the_update_check_is_on_by_default_and_the_choice_is_kept() {
+        let mut settings = Settings::default();
+        assert!(settings.updates.check_automatically);
+        // A file written before the setting existed keeps the default.
+        let old: Settings = serde_json::from_str(r#"{"editor": {"soft_wrap": true}}"#).unwrap();
+        assert!(old.updates.check_automatically);
+        settings.updates.check_automatically = false;
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert!(!back.updates.check_automatically);
     }
 
     #[test]

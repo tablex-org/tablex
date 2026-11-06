@@ -1043,6 +1043,8 @@ fn editing_through_the_dialogs_changes_the_server_and_the_view(cx: &mut TestAppC
     assert!(fixture_redis(&app, visual, |redis| redis.key(0, "user:ada").is_none()));
     assert!(app.read_with(visual, |this, _| !this.workspace.tabs().iter().any(|t| t.title == "user:ada@db0")));
     assert!(!redis_sidebar_labels(&app, visual).contains(&"ada".to_string()));
+    // The rename and the delete closed their tabs on their own: Reopen Closed Tab has nothing to bring back.
+    ro_nothing_reopens(&app, visual);
 }
 
 #[gpui::test]

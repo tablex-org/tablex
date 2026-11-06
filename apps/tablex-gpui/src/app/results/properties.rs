@@ -263,12 +263,22 @@ impl AppRoot {
             object: table.clone(),
             session: self.driver_runtime.connection_ids.get(&tab.connection_id).copied().unwrap_or(0),
         };
-        let deliver = move |this: &mut Self, result: Result<TableProperties, String>, cx: &mut Context<Self>| {
+        self.describe_table(key, cx, move |this, result, cx| {
             let columns = result.map(|properties| properties.columns.into_iter().map(|column| column.name).collect());
             if let Some(edit) = this.properties_edits.get(&tab_id).cloned() {
                 edit.update(cx, |edit, cx| edit.referenced_described(&table, columns, cx));
             }
-        };
+        });
+    }
+
+    /// Describes `key` the way the Properties does (the UI fixture's answer, or `describe_object` off
+    /// the UI thread) and hands the result to `deliver` on the UI thread.
+    pub(in crate::app) fn describe_table(
+        &mut self,
+        key: PropertiesKey,
+        cx: &mut Context<Self>,
+        deliver: impl FnOnce(&mut Self, Result<TableProperties, String>, &mut Context<Self>) + 'static,
+    ) {
         if let Some(service) = self.scenario_ui.service.as_ref() {
             let result = crate::ui_fixture_properties::table_properties(service.scenario().fixture, &key.connection, &key.schema, &key.object);
             cx.spawn(async move |this, cx| {

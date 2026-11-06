@@ -22,6 +22,7 @@ gpui::actions!(
     tablex_menu,
     [
         About,
+        CheckForUpdates,
         Quit,
         Hide,
         HideOtherApps,
@@ -127,6 +128,9 @@ fn register_actions(cx: &mut App) {
     on_app_root::<About>(cx, |app, window, cx| {
         StaticAction::About.run(app, window, cx)
     });
+    on_app_root::<CheckForUpdates>(cx, |app, window, cx| {
+        StaticAction::CheckForUpdates.run(app, window, cx)
+    });
     on_app_root::<NewConnection>(cx, |app, window, cx| {
         StaticAction::NewConnection.run(app, window, cx)
     });
@@ -164,6 +168,7 @@ pub(super) fn build() -> Vec<Menu> {
     vec![
         Menu::new(APP_NAME).items([
             MenuItem::action(format!("About {APP_NAME}"), About),
+            MenuItem::action("Check for Updates…", CheckForUpdates),
             MenuItem::separator(),
             MenuItem::action("Settings…", OpenSettings),
             MenuItem::action("Driver Manager…", DriverManager),
@@ -251,6 +256,7 @@ mod tests {
             names(&menus[0]),
             [
                 "About TableX",
+                "Check for Updates…",
                 "-",
                 "Settings…",
                 "Driver Manager…",
@@ -304,6 +310,7 @@ mod tests {
         assert_eq!(action_of(1, "Restore…"), "tablex_menu::RestoreDatabase");
         assert_eq!(action_of(1, "Pending Transactions…"), "tablex_menu::PendingTransactions");
         assert_eq!(action_of(0, "Settings…"), "tablex::OpenSettings");
+        assert_eq!(action_of(0, "Check for Updates…"), "tablex_menu::CheckForUpdates");
         assert_eq!(
             action_of(0, "Driver Manager…"),
             "tablex_menu::DriverManager"
