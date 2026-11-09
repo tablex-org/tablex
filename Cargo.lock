@@ -8403,7 +8403,7 @@ dependencies = [
 
 [[package]]
 name = "tablex-mcp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "engine-agent",
  "engine-connect",
