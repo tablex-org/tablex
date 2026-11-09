@@ -334,6 +334,13 @@ pub unsafe extern "C" fn dbengine_inspect_row(page_id: u64, row_index: u64) -> *
             r#"{"ok":false,"error":{"code":"inspect.row_not_found","message":"unknown page or row","retryable":false}}"#,
         );
     }
+    // Fixture: a page read from the object `inspect_fails` cannot be inspected
+    // (an internal error, not a stale page).
+    if PAGE_OBJECTS.lock().unwrap().iter().any(|(page, object)| *page == page_id && object == "inspect_fails") {
+        return alloc_string(
+            r#"{"ok":false,"error":{"code":"inspect.internal","message":"mock inspect failure","retryable":false}}"#,
+        );
+    }
     alloc_string(&format!(
         r#"{{"ok":true,"value":{{"page_id":{page_id},"row_index":{row_index},"fields":[{{"name":"_id","native_type":"object_id","display_text":"1","value":{{"$oid":"1"}},"editable":false}}],"mutation_identity":{{"_id":{{"$oid":"1"}}}}}}}}"#
     ))

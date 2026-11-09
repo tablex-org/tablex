@@ -590,22 +590,28 @@ impl AppRoot {
         let work = cx.background_executor().spawn(async move {
             smol::unblock(move || {
                 let mut stale = false;
+                // The first error that is not a stale page, for the error log.
+                let mut failure = None::<String>;
                 let rows = wanted
                     .into_iter()
                     .filter_map(|row| match session.inspect_row(page_id, row) {
                         Ok(fields) => Some((row, fields)),
                         Err(error) => {
-                            stale |= is_stale_driver_page(&error);
+                            if is_stale_driver_page(&error) {
+                                stale = true;
+                            } else if failure.is_none() {
+                                failure = Some(format!("Could not read row {} of the result: {error}", row + 1));
+                            }
                             None
                         }
                     })
                     .collect::<Vec<_>>();
-                (rows, stale)
+                (rows, stale, failure)
             })
             .await
         });
         cx.spawn(async move |this, cx| {
-            let (fetched, stale) = work.await;
+            let (fetched, stale, failure) = work.await;
             let _ = this.update(cx, |this, cx| {
                 let current = this
                     .workspace
@@ -620,6 +626,16 @@ impl AppRoot {
                             runtime.mongo.row_fields.read_failed(page_id, first, last);
                         }
                     }
+                }
+                if current {
+                    // One report per read (a selection is read at most twice);
+                    // identical consecutive reports collapse in the log.
+                    if let Some(failure) = failure {
+                        this.report_query_failure(tab_id, &failure);
+                    }
+                    // The panel was built at the click, before this read: it
+                    // showed the grid's text (`<object>` for a document).
+                    this.refresh_cell_detail_after_row_read(tab_id);
                 }
                 if current && stale {
                     this.refresh_stale_mongo_page(tab_id, page_id, cx);

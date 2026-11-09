@@ -660,6 +660,7 @@ mod tests {
     include!("tests/connection_menu_view.rs");
     include!("tests/mongo.rs");
     include!("tests/mongo_values.rs");
+    include!("tests/mongo_value_panel.rs");
     include!("tests/mongo_document_edit.rs");
     include!("tests/mongo_admin.rs");
     include!("tests/results.rs");

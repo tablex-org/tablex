@@ -12,6 +12,14 @@ use std::sync::{Arc, Mutex};
 
 const MAX_PREVIEW_BYTES: usize = 2048;
 
+/// A document / array cell stops writing members once its preview is this long
+/// (bytes), and nests at most [`DOCUMENT_PREVIEW_DEPTH`] levels, so the cost per
+/// visible cell is bounded whatever the document's size.
+const DOCUMENT_PREVIEW_BYTES: usize = 160;
+const DOCUMENT_PREVIEW_DEPTH: usize = 2;
+/// A string inside a document preview is cut after this many characters.
+const DOCUMENT_PREVIEW_STRING_CHARS: usize = 48;
+
 /// What a document without the column's field shows. mongosh leaves such a
 /// field out, so the cell is a dim dash: unlike `NULL` (a present null, drawn
 /// with the configured NULL text) and unlike the text `NULL` (a string).
@@ -117,7 +125,14 @@ impl GridSource for BsonGridSource {
         let slice = self.raw_slice(position.row)?;
         let document = RawDocument::from_bytes(slice.as_bytes()).ok()?;
         let value = document.get(&column.name).ok().flatten()?;
-        Some(value.display_text())
+        Some(match value {
+            // The whole value in shell syntax, never the cell's bounded preview
+            // (this is what the detail panel falls back on, and what is copied).
+            RawBsonRef::Document(_) | RawBsonRef::Array(_) => bson::Bson::try_from(value.to_raw_bson())
+                .map(|value| shell_value::to_shell(&value, false))
+                .unwrap_or_else(|_| value.display_text()),
+            value => value.display_text(),
+        })
     }
 
     fn cell_is_null(&self, position: CellPosition) -> bool {
@@ -300,11 +315,88 @@ fn quoted(text: &str) -> String {
 fn raw_value_preview(value: RawBsonRef<'_>, marked: bool) -> String {
     match value {
         RawBsonRef::String(value) => cap_preview(value),
+        RawBsonRef::Document(_) | RawBsonRef::Array(_) => {
+            let mut text = String::new();
+            write_document_preview(&mut text, value, 0);
+            text
+        }
         value => {
             let mut text = String::new();
             // Writing into a `String` cannot fail.
             let _ = value.write_display_in(&mut text, marked);
             cap_preview(&text)
+        }
+    }
+}
+
+/// A one-line shell-syntax preview of a document or array for a grid cell, in
+/// the notation of the detail panel (`{ "a": 1, "b": { "c": "x" } }`). Writing
+/// stops at [`DOCUMENT_PREVIEW_BYTES`] (`…`), sub-documents past
+/// [`DOCUMENT_PREVIEW_DEPTH`] levels are `{ … }` / `[ … ]`, and nothing outside
+/// the written part is read, so the cost does not grow with the document.
+fn write_document_preview(out: &mut String, value: RawBsonRef<'_>, depth: usize) {
+    fn members<'a>(
+        out: &mut String,
+        open: char,
+        close: char,
+        depth: usize,
+        items: impl Iterator<Item = (Option<&'a str>, RawBsonRef<'a>)>,
+    ) {
+        let mut items = items.peekable();
+        if items.peek().is_none() {
+            out.push(open);
+            out.push(close);
+            return;
+        }
+        if depth >= DOCUMENT_PREVIEW_DEPTH {
+            let _ = write!(out, "{open} … {close}");
+            return;
+        }
+        out.push(open);
+        out.push(' ');
+        for (index, (key, value)) in items.enumerate() {
+            if out.len() >= DOCUMENT_PREVIEW_BYTES {
+                out.push_str(if index == 0 { "…" } else { ", …" });
+                break;
+            }
+            if index > 0 {
+                out.push_str(", ");
+            }
+            if let Some(key) = key {
+                out.push_str(&quoted(key));
+                out.push_str(": ");
+            }
+            write_document_preview(out, value, depth + 1);
+        }
+        out.push(' ');
+        out.push(close);
+    }
+    match value {
+        RawBsonRef::Document(document) => members(
+            out,
+            '{',
+            '}',
+            depth,
+            document.iter().map_while(Result::ok).map(|(key, value)| (Some(key), value)),
+        ),
+        RawBsonRef::Array(array) => members(
+            out,
+            '[',
+            ']',
+            depth,
+            array.into_iter().map_while(Result::ok).map(|value| (None, value)),
+        ),
+        RawBsonRef::String(text) => {
+            let end = text.char_indices().nth(DOCUMENT_PREVIEW_STRING_CHARS).map(|(end, _)| end);
+            match end {
+                Some(end) => out.push_str(&quoted(&format!("{}…", &text[..end]))),
+                None => out.push_str(&quoted(text)),
+            }
+        }
+        RawBsonRef::Null => out.push_str("null"),
+        // Marked, so an Int64 / Date / ObjectId inside a document reads as one.
+        scalar => {
+            let _ = scalar.write_display_in(out, true);
         }
     }
 }
@@ -587,5 +679,60 @@ mod tests {
         assert_eq!(source.cell_text(at(2)).unwrap(), MISSING_TEXT);
         assert_ne!(MISSING_TEXT, "NULL");
         assert!(source.full_cell_text(at(2)).is_none(), "nothing to copy from a missing field");
+    }
+
+    fn preview(document: bson::Document) -> String {
+        let source = test_source(vec![document], &[("f", "document")]);
+        source.cell_text(CellPosition { row: 0, column: 0 }).unwrap().to_string()
+    }
+
+    #[test]
+    fn a_document_cell_is_a_one_line_shell_preview_and_copy_has_the_whole_value() {
+        let document = bson::doc! { "body": { "type": "refund", "n": 5, "ok": true, "none": bson::Bson::Null }, "tags": ["a", "b"] };
+        let text = preview(bson::doc! { "f": document.clone() });
+        assert_eq!(
+            text,
+            r#"{ "body": { "type": "refund", "n": 5, "ok": true, "none": null }, "tags": [ "a", "b" ] }"#
+        );
+        assert!(!text.contains('\n'));
+        let source = test_source(vec![bson::doc! { "f": document.clone() }], &[("f", "document")]);
+        let full = source.full_cell_text(CellPosition { row: 0, column: 0 }).unwrap();
+        assert_eq!(full, shell_value::to_shell(&bson::Bson::Document(document.clone()), false));
+        // The copied text reads back as the same document.
+        let back = shell_value::parse_document(&full, shell_value::NumberTyping::Mongosh).unwrap();
+        assert_eq!(back, document);
+    }
+
+    #[test]
+    fn empty_documents_and_arrays_and_arrays_of_documents_have_a_preview() {
+        assert_eq!(preview(bson::doc! { "f": bson::Document::new() }), "{}");
+        assert_eq!(preview(bson::doc! { "f": Vec::<bson::Bson>::new() }), "[]");
+        assert_eq!(
+            preview(bson::doc! { "f": [{ "itemId": "x", "price": 4_i64 }, { "itemId": "y" }] }),
+            r#"[ { "itemId": "x", "price": Long('4') }, { "itemId": "y" } ]"#
+        );
+    }
+
+    #[test]
+    fn a_deep_document_collapses_past_two_levels() {
+        let text = preview(bson::doc! { "f": { "a": { "b": { "c": 1 }, "e": [1, 2] } } });
+        assert_eq!(text, r#"{ "a": { "b": { … }, "e": [ … ] } }"#);
+    }
+
+    #[test]
+    fn a_long_document_stops_at_the_budget_and_ends_with_an_ellipsis() {
+        let mut big = bson::Document::new();
+        for index in 0..5000 {
+            big.insert(format!("field{index}"), "x".repeat(300));
+        }
+        let text = preview(bson::doc! { "f": big });
+        assert!(text.ends_with(", … }"), "{text}");
+        // The budget plus one member and the closer; never the 1.5 MB document.
+        assert!(text.len() <= DOCUMENT_PREVIEW_BYTES + 100, "{} bytes", text.len());
+        // One long string is cut inside its quotes.
+        let text = preview(bson::doc! { "f": { "s": "é".repeat(500) } });
+        assert!(text.len() < 150 && text.contains("…\""), "{text}");
+        let text = preview(bson::doc! { "f": (0..5000).collect::<Vec<i32>>() });
+        assert!(text.ends_with(", … ]") && text.len() <= DOCUMENT_PREVIEW_BYTES + 20, "{text}");
     }
 }

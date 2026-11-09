@@ -465,6 +465,20 @@ impl AppRoot {
         }
     }
 
+    /// A Mongo row read landed: rebuilds an open panel whose cell was built
+    /// before its row fields were cached, so it shows the field's value and
+    /// type instead of the grid's text.
+    pub(in crate::app) fn refresh_cell_detail_after_row_read(&mut self, tab_id: u64) {
+        let open_target = self
+            .workspace
+            .runtime(tab_id)
+            .filter(|runtime| runtime.cell_detail.open)
+            .and_then(|runtime| runtime.cell_detail.target);
+        if open_target.is_some() {
+            self.refresh_cell_detail(tab_id);
+        }
+    }
+
     pub(in crate::app) fn build_column_detail(
         &self,
         tab: &Tab,
