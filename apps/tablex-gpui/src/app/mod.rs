@@ -721,6 +721,7 @@ mod tests {
     include!("tests/explain.rs");
     include!("tests/sql_editor.rs");
     include!("tests/driver_manager.rs");
+    include!("tests/driver_manager_live.rs");
     include!("tests/sql_driver_edit.rs");
     include!("tests/sql_review_fixes.rs");
     include!("tests/sql_navigator.rs");
