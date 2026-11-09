@@ -569,6 +569,7 @@ impl AppRoot {
                 app.seed_driver_tools_fixture(true);
                 app.seed_sql_formatter_fixture(driver_manager::FormatterSeed::Available);
                 app.driver_ui.selected = None;
+                app.driver_ui.model.set_filter(driver_manager::DriverFilter::Tools);
             }
             Some(crate::ui_scenario::ScenarioKind::MissingDriver) => {
                 app.seed_driver_manager_scenario(true);

@@ -158,6 +158,18 @@ pub(super) fn badge_element(badge: &Badge) -> Div {
         .child(text)
 }
 
+/// `Tools 2`, with `· 1 update` when a tool has one (the Updates chip's count is the drivers').
+fn tools_chip_label<'a>(tools: impl Iterator<Item = &'a engine_driver_host::ToolCatalogItem>) -> String {
+    let (total, updates) = tools.fold((0, 0), |(total, updates), item| {
+        (total + 1, updates + usize::from(matches!(item.state, engine_driver_host::ToolCatalogState::UpdateAvailable { .. })))
+    });
+    match updates {
+        0 => format!("{} {total}", DriverFilter::Tools.label()),
+        1 => format!("{} {total} \u{00B7} 1 update", DriverFilter::Tools.label()),
+        _ => format!("{} {total} \u{00B7} {updates} updates", DriverFilter::Tools.label()),
+    }
+}
+
 impl AppRoot {
     /// Creates the search box on first use and keeps the model's query in step.
     fn ensure_driver_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -311,8 +323,10 @@ impl AppRoot {
             .selected
             .as_deref()
             .is_some_and(|id| self.driver_ui.model.row(id).is_some());
-        let show_detail =
-            has_selection && inner_width - DETAIL_WIDTH - 12.0 >= LIST_MIN_WIDTH_WITH_DETAIL;
+        let tools_tab = self.driver_ui.model.filter() == DriverFilter::Tools;
+        let show_detail = !tools_tab
+            && has_selection
+            && inner_width - DETAIL_WIDTH - 12.0 >= LIST_MIN_WIDTH_WITH_DETAIL;
         let list_width = if show_detail {
             inner_width - DETAIL_WIDTH - 12.0
         } else {
@@ -369,13 +383,19 @@ impl AppRoot {
                     })
             });
 
-        let banner = self.render_driver_banner(cx);
+        // The banner is about drivers (Update all, Cancel all): not on the Tools tab.
+        let banner = (!tools_tab).then(|| self.render_driver_banner(cx)).flatten();
         let developer_banner = self.render_developer_banner();
         let chips = div().flex().flex_wrap().gap(px(6.0)).children(DriverFilter::CHIPS.map(|filter| {
             let active = ui.model.filter() == filter;
+            let label = if filter == DriverFilter::Tools {
+                tools_chip_label(ui.tools.standalone())
+            } else {
+                format!("{} {}", filter.label(), ui.model.count(filter))
+            };
             Button::new(filter.selector())
                 .debug_selector(move || filter.selector().into())
-                .label(format!("{} {}", filter.label(), ui.model.count(filter)))
+                .label(label)
                 .compact()
                 .ghost()
                 .selected(active)
@@ -392,7 +412,9 @@ impl AppRoot {
                 .text_color(theme::danger())
                 .child(error.clone())
         });
-        let body: AnyElement = if ui.model.visible_len() == 0 {
+        let body: AnyElement = if tools_tab {
+            self.render_driver_tools(cx)
+        } else if ui.model.visible_len() == 0 {
             div()
                 .debug_selector(|| "driver-empty".into())
                 .text_color(theme::text_muted())
@@ -409,7 +431,6 @@ impl AppRoot {
         };
 
         let detail = show_detail.then(|| self.render_driver_detail(cx));
-        let tools = self.render_driver_tools(cx);
         let footer = self.render_driver_footer(cx);
         div()
             .debug_selector(|| "driver-manager".into())
@@ -442,7 +463,6 @@ impl AppRoot {
                     )
                     .children(detail),
             )
-            .child(tools)
             .child(footer)
             .into_any_element()
     }
@@ -1081,6 +1101,31 @@ mod tests {
         // Above / below the button band is the row, not the button.
         assert_eq!(row_hit(width, primary_x, 2.0, ACTION_WIDTH), RowHit::Row);
         assert_eq!(row_hit(width, primary_x, ROW_HEIGHT - 2.0, ACTION_WIDTH), RowHit::Row);
+    }
+
+    #[test]
+    fn the_tools_chip_counts_the_tools_and_names_their_updates() {
+        use engine_driver_host::{ToolCatalogItem, ToolCatalogState, ToolKind};
+        let tool = |state| ToolCatalogItem {
+            id: "t".into(),
+            kind: ToolKind::SqlFormatter,
+            display_name: "T".into(),
+            version: String::new(),
+            description: None,
+            state,
+            entry: None,
+            installed: None,
+            path: PathBuf::new(),
+            problem: None,
+        };
+        let update = || ToolCatalogState::UpdateAvailable { installed: "1".into(), latest: "2".into() };
+        assert_eq!(tools_chip_label([].iter()), "Tools 0");
+        let plain = [tool(ToolCatalogState::Available), tool(ToolCatalogState::Installed { version: "1".into() })];
+        assert_eq!(tools_chip_label(plain.iter()), "Tools 2");
+        let one = [tool(update()), tool(ToolCatalogState::Available)];
+        assert_eq!(tools_chip_label(one.iter()), "Tools 2 \u{00B7} 1 update");
+        let two = [tool(update()), tool(update())];
+        assert_eq!(tools_chip_label(two.iter()), "Tools 2 \u{00B7} 2 updates");
     }
 
     #[test]

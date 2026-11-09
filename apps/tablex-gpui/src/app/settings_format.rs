@@ -107,7 +107,11 @@ impl AppRoot {
                         .debug_selector(|| "format-tool-open-driver-manager".into())
                         .label("Open Driver Manager")
                         .compact()
-                        .on_click(cx.listener(|this, _, _, cx| this.open_driver_manager(cx))),
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            // The formatter is a tool: open the manager on its Tools tab.
+                            this.open_driver_manager(cx);
+                            this.driver_ui.model.set_filter(super::driver_manager::DriverFilter::Tools);
+                        })),
                 )
                 .into_any_element(),
             Some(FormatterToolState::Unusable(message)) => {

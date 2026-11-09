@@ -2286,6 +2286,11 @@ fn the_formatter_is_chosen_and_the_external_command_typed_then_applied(cx: &mut 
     assert!(rendered(visual, "setting-error-editor.formatter".into()));
     click(visual, "format-tool-open-driver-manager".into());
     assert_eq!(active_kind(&app, visual), Some(TabKind::DriverManager));
+    assert_eq!(
+        app.read_with(visual, |this, _| this.driver_ui.model.filter()),
+        crate::app::driver_manager::DriverFilter::Tools,
+        "the formatter is a tool: the manager opens on its Tools tab"
+    );
     open_settings_page(&app, visual);
     settings_nav(visual, "editor");
 

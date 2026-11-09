@@ -971,9 +971,11 @@ impl DmRig<'_> {
         names
     }
 
+    /// Opens the manager on its Tools tab (the tools are not listed under the drivers).
     fn open_manager_with_tool(&mut self) {
         self.open_manager();
         self.wait("the tool row", |this| this.driver_ui.tools.item().is_some());
+        self.click(DriverFilter::Tools.selector());
     }
 
     fn install_tool(&mut self) {
@@ -1198,6 +1200,7 @@ fn the_formatter_has_its_own_row_beside_the_mcp_server_and_installs_updates_and_
     rig.publish_formatter("0.1.0", &first);
     rig.open_manager();
     rig.wait("both tool rows", |this| this.driver_ui.tools.item().is_some() && this.driver_ui.tools.item_of("tablex-sqruff").is_some());
+    rig.click(DriverFilter::Tools.selector());
 
     // One row per catalog tool, each with its own controls; the add-on shell is not in this list.
     for selector in ["tool-row:tablex-mcp", "tool-row:tablex-sqruff", "tool-action-install:tablex-mcp", "tool-action-install:tablex-sqruff", "tool-note:tablex-sqruff"] {
@@ -1306,15 +1309,19 @@ fn a_tool_without_a_build_for_this_platform_is_unavailable_and_a_bad_entry_spare
     manifest["tools"][0]["artifacts"][0]["arch"] = "plan9-mips".into();
     std::fs::write(&path, manifest.to_string()).unwrap();
     rig.open_manager_with_tool();
-    assert!(rig.rendered("driver-row-sqlite"), "the drivers are listed");
     assert!(rig.rendered("tool-badge:tablex-mcp") && !rig.rendered("tool-action-install:tablex-mcp"), "nothing to install");
+    rig.click(DriverFilter::All.selector());
+    assert!(rig.rendered("driver-row-sqlite"), "the drivers are listed");
+    rig.click(DriverFilter::Tools.selector());
     assert!(matches!(rig.tool_state(), engine_driver_host::ToolCatalogState::Unavailable { reason } if reason.starts_with("No build for")));
 
     // A malformed entry fails that tool only.
     manifest["tools"][0]["artifacts"][0]["sha256"] = "not-a-hash".into();
     std::fs::write(&path, manifest.to_string()).unwrap();
     rig.check_for_updates();
-    assert!(rig.rendered("driver-row-sqlite") && rig.rendered("tool-badge:tablex-mcp"));
+    assert!(rig.rendered("tool-badge:tablex-mcp"));
+    rig.click(DriverFilter::All.selector());
+    assert!(rig.rendered("driver-row-sqlite"));
     assert!(matches!(rig.tool_state(), engine_driver_host::ToolCatalogState::Unavailable { reason } if reason.contains("SHA-256")));
     assert!(rig.read(|this| this.driver_ui.catalog_error.is_none()), "no catalog error for a bad tool");
 }
@@ -1429,6 +1436,7 @@ fn the_driver_manager_tools_scenario_shows_the_installed_tool(cx: &mut TestAppCo
         this.seed_driver_manager_scenario(false);
         this.seed_driver_tools_fixture(true);
         this.driver_ui.selected = None;
+        this.driver_ui.model.set_filter(DriverFilter::Tools);
         cx.notify();
     });
     settle(visual);
@@ -1437,6 +1445,86 @@ fn the_driver_manager_tools_scenario_shows_the_installed_tool(cx: &mut TestAppCo
         assert!(bounds.bottom() <= gpui::px(850.0) && bounds.right() <= gpui::px(1500.0), "{selector} {bounds:?}");
     }
     assert!(visual.debug_bounds("driver-footer").is_some(), "the footer is still shown under the section");
+}
+
+#[gpui::test]
+fn the_tools_chip_swaps_the_driver_list_for_the_tool_cards_search_filters_them_and_install_works(
+    cx: &mut TestAppContext,
+) {
+    let mut rig = DmRig::new(cx, TrustPolicy::Developer);
+    let bytes = tool_bytes(3);
+    rig.publish("1.0.0");
+    rig.publish_tool("0.1.0", &bytes);
+    rig.publish_formatter("0.1.0", &tool_bytes(4));
+    rig.open_manager();
+    rig.wait("both tools", |this| this.driver_ui.tools.item().is_some() && this.driver_ui.tools.item_of("tablex-sqruff").is_some());
+
+    // The drivers' tab: the list only, the tools are not under it.
+    assert!(rig.rendered("driver-list") && rig.rendered("driver-row-sqlite") && rig.rendered("driver-footer"));
+    assert!(!rig.rendered("driver-tools") && !rig.rendered("tool-row:tablex-mcp"));
+    assert_eq!(DriverFilter::CHIPS.last(), Some(&DriverFilter::Tools));
+    assert!(rig.rendered(DriverFilter::Tools.selector()), "the chip is the last of the row");
+    let all_before = rig.read(|this| this.driver_ui.model.count(DriverFilter::All));
+
+    // A real click on the chip: the cards, not the drivers or their detail pane; the footer stays.
+    rig.update(|this, cx| {
+        this.driver_ui.selected = Some("sqlite".into());
+        cx.notify();
+    });
+    settle(rig.visual);
+    assert!(rig.rendered("driver-detail"), "a selected driver has its detail pane on the drivers' tabs");
+    rig.click(DriverFilter::Tools.selector());
+    assert_eq!(rig.read(|this| this.driver_ui.model.filter()), DriverFilter::Tools);
+    for selector in ["driver-tools", "tool-row:tablex-mcp", "tool-row:tablex-sqruff", "driver-footer"] {
+        rig.assert_on_screen(selector);
+    }
+    assert!(!rig.rendered("driver-list") && !rig.rendered("driver-row-sqlite") && !rig.rendered("driver-detail"));
+    assert!(!rig.rendered("driver-empty"), "the tools tab is not an empty driver list");
+
+    // The search box filters the tools by name and by description.
+    let search = |rig: &mut DmRig, text: &str| {
+        let text = text.to_string();
+        rig.update(|this, cx| {
+            this.driver_ui.model.set_query(&text);
+            cx.notify();
+        });
+        settle(rig.visual);
+    };
+    search(&mut rig, "SQRUFF");
+    assert!(rig.rendered("tool-row:tablex-sqruff") && !rig.rendered("tool-row:tablex-mcp"));
+    search(&mut rig, "mcp clients");
+    assert!(rig.rendered("tool-row:tablex-mcp") && !rig.rendered("tool-row:tablex-sqruff"), "the description counts");
+    search(&mut rig, "nothing-matches");
+    assert!(rig.rendered("driver-tools-empty") && !rig.rendered("tool-row:tablex-mcp") && !rig.rendered("tool-row:tablex-sqruff"));
+    search(&mut rig, "");
+
+    // Install from the Tools tab.
+    rig.install_tool();
+    assert!(rig.rendered("tool-action-uninstall:tablex-mcp") && rig.rendered("tool-path:tablex-mcp"));
+    assert_eq!(std::fs::read(rig.tool_file()).unwrap(), bytes);
+
+    // Back to All: the drivers again, no tools, and the drivers' count did not move.
+    rig.click(DriverFilter::All.selector());
+    assert!(rig.rendered("driver-row-sqlite") && rig.rendered("driver-footer"));
+    assert!(!rig.rendered("driver-tools") && !rig.rendered("tool-row:tablex-mcp") && !rig.rendered("tool-row:tablex-sqruff"));
+    assert_eq!(rig.read(|this| this.driver_ui.model.count(DriverFilter::All)), all_before);
+}
+
+#[gpui::test]
+fn the_tools_tab_hides_the_driver_update_banner_and_the_drivers_tabs_keep_it(cx: &mut TestAppContext) {
+    let mut rig = DmRig::new(cx, TrustPolicy::Developer);
+    rig.publish("1.0.0");
+    rig.open_manager();
+    rig.update(|this, cx| {
+        this.driver_ui.updates_available = 1;
+        cx.notify();
+    });
+    settle(rig.visual);
+    assert!(rig.rendered("driver-banner"));
+    rig.click(DriverFilter::Tools.selector());
+    assert!(!rig.rendered("driver-banner"), "Update all is about drivers");
+    rig.click(DriverFilter::Installed.selector());
+    assert!(rig.rendered("driver-banner"));
 }
 
 // Pure texts of the two copy buttons.
@@ -1826,6 +1914,7 @@ fn publish_signed(rig: &DmRig<'_>, key: &ed25519_dalek::SigningKey, generated: &
 fn open_strict_manager(rig: &mut DmRig<'_>) {
     rig.update(|this, cx| this.open_driver_manager(cx));
     rig.wait("the catalog", |this| this.driver_ui.catalog_task.is_none() && this.driver_ui.tools.item().is_some());
+    rig.click(DriverFilter::Tools.selector());
 }
 
 #[gpui::test]
@@ -1865,7 +1954,10 @@ fn turning_developer_mode_off_withdraws_what_an_unsigned_manifest_offered(cx: &m
     rig.publish_tool("0.1.0", &tool_bytes(17));
     rig.update(|this, _| this.driver_ui.developer_mode = true);
     rig.open_manager_with_tool();
-    assert!(rig.rendered("tool-action-install:tablex-mcp") && rig.rendered("driver-action-sqlite"));
+    assert!(rig.rendered("tool-action-install:tablex-mcp"));
+    rig.click(DriverFilter::All.selector());
+    assert!(rig.rendered("driver-action-sqlite"));
+    rig.click(DriverFilter::Tools.selector());
     let sqlite = rig.read(|this| this.driver_ui.model.row("sqlite").and_then(|row| row.entry.clone())).expect("sqlite is offered");
     assert!(rig.read(|this| this.driver_ui.catalog_is_current()));
 
@@ -1874,7 +1966,9 @@ fn turning_developer_mode_off_withdraws_what_an_unsigned_manifest_offered(cx: &m
     rig.pick_toolbar_menu(1);
     rig.wait("the strict refresh", |this| this.driver_ui.catalog_task.is_none() && this.driver_ui.catalog_error.is_some());
     assert_eq!(rig.read(|this| this.driver_ui.policy), TrustPolicy::Strict);
-    assert!(!rig.rendered("tool-action-install:tablex-mcp") && !rig.rendered("driver-action-sqlite"), "nothing is offered");
+    assert!(!rig.rendered("tool-action-install:tablex-mcp"), "nothing is offered");
+    rig.click(DriverFilter::All.selector());
+    assert!(!rig.rendered("driver-action-sqlite"), "nothing is offered");
     assert!(rig.read(|this| this.driver_ui.tools.item().is_none() && this.driver_ui.model.rows().is_empty()));
     assert!(!rig.read(|this| this.driver_ui.catalog_is_current()));
     // And a direct call is refused too, with the entries a stale row could still hold.
@@ -1934,8 +2028,10 @@ fn a_policy_change_drops_queued_installs_and_cancels_running_ones_and_adopts_not
     let mut slow_tool = SlowArtifact::new(&tool_dir, bytes.clone());
     rig.publish_tool_at("0.1.0", &file_url(&slow_tool.path), &bytes, &tool_sha256(&bytes));
     rig.update(|this, _| this.driver_ui.developer_mode = true);
-    rig.open_manager_with_tool();
+    rig.open_manager();
+    rig.wait("the tool row", |this| this.driver_ui.tools.item().is_some());
     rig.click("driver-action-sqlite");
+    rig.click(DriverFilter::Tools.selector());
     rig.click("tool-action-install:tablex-mcp");
     rig.wait("both downloads under way", |this| {
         let running = |state: Option<&InstallState>| matches!(state, Some(InstallState::Downloading { bytes, .. }) if *bytes > 0);

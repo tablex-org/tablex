@@ -1,4 +1,4 @@
-//! The Tools section of the Driver Manager tab: one row per free-standing tool of the catalog (the
+//! The Tools tab of the Driver Manager (a filter chip beside the driver ones): one row per free-standing tool of the catalog (the
 //! MCP server, the SQL formatter; an add-on of a driver has its own row under that driver): name,
 //! what it is, installed / available version, Install / Update / Uninstall with the same progress,
 //! cancel and error presentation as a driver row, the licence and source when the catalog names them,
@@ -18,48 +18,52 @@ use engine_driver_host::MONGO_SHELL_TOOL_ID;
 use super::*;
 use engine_driver_host::{ToolCatalogItem, ToolCatalogState, ToolKind};
 use gpui_component::progress::Progress;
+use gpui_component::scroll::ScrollableElement;
 use gpui_component::text::TextView;
 
+/// Whether the search text (trimmed, lower-cased) is in the tool's name or description.
+fn tool_matches(item: &ToolCatalogItem, query: &str) -> bool {
+    query.is_empty()
+        || item.display_name.to_lowercase().contains(query)
+        || tool_description(item).to_lowercase().contains(query)
+}
+
 impl AppRoot {
+    /// The Tools tab: the tools matching the search text, scrollable.
     pub(super) fn render_driver_tools(&self, cx: &mut Context<Self>) -> AnyElement {
         let ui = &self.driver_ui;
+        let query = ui.model.query();
         let rows: Vec<AnyElement> = ui
             .tools
             .standalone()
+            .filter(|item| tool_matches(item, query))
             .enumerate()
             .map(|(position, item)| self.render_tool_item(position, item, ui.tools.job_of(&item.id), cx))
             .collect();
-        let body = if rows.is_empty() {
-            div()
+        if rows.is_empty() {
+            return div()
                 .debug_selector(|| "driver-tools-empty".into())
-                .text_size(px(12.0))
+                .pt(px(10.0))
                 .text_color(theme::text_muted())
                 .child(if !ui.installed_loaded || ui.catalog_task.is_some() {
                     "Loading tools\u{2026}"
-                } else {
+                } else if ui.tools.standalone().next().is_none() {
                     "No tools available"
+                } else {
+                    "No tools match"
                 })
-                .into_any_element()
-        } else {
-            div().flex().flex_col().gap(px(8.0)).children(rows).into_any_element()
-        };
+                .into_any_element();
+        }
         div()
             .debug_selector(|| "driver-tools".into())
-            .flex_shrink_0()
+            .flex_1()
+            .min_h_0()
             .flex()
             .flex_col()
             .gap(px(8.0))
             .pt(px(10.0))
-            .border_t_1()
-            .border_color(theme::border())
-            .child(
-                div()
-                    .text_size(px(13.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme::text())
-                    .child("Tools"),
-            )
-            .child(body)
+            .overflow_y_scrollbar()
+            .children(rows)
             .into_any_element()
     }
 

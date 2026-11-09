@@ -589,10 +589,13 @@ pub(in crate::app) enum DriverFilter {
     Installed,
     Updates,
     Category(DriverCategory),
+    /// Not a driver filter: the tab shows the tools instead of the driver list, so no driver row
+    /// passes it. The tools are counted by the view (they are not in the model).
+    Tools,
 }
 
 impl DriverFilter {
-    pub(in crate::app) const CHIPS: [Self; 7] = [
+    pub(in crate::app) const CHIPS: [Self; 8] = [
         Self::All,
         Self::Installed,
         Self::Updates,
@@ -600,6 +603,7 @@ impl DriverFilter {
         Self::Category(DriverCategory::Nosql),
         Self::Category(DriverCategory::Analytics),
         Self::Category(DriverCategory::KeyValue),
+        Self::Tools,
     ];
 
     pub(in crate::app) fn label(self) -> &'static str {
@@ -612,6 +616,7 @@ impl DriverFilter {
             Self::Category(DriverCategory::Analytics) => "Analytics",
             Self::Category(DriverCategory::KeyValue) => "Key-Value",
             Self::Category(DriverCategory::Other) => "Other",
+            Self::Tools => "Tools",
         }
     }
 
@@ -625,6 +630,7 @@ impl DriverFilter {
             Self::Category(DriverCategory::Analytics) => "driver-filter-analytics",
             Self::Category(DriverCategory::KeyValue) => "driver-filter-key-value",
             Self::Category(DriverCategory::Other) => "driver-filter-other",
+            Self::Tools => "driver-filter-tools",
         }
     }
 
@@ -634,6 +640,7 @@ impl DriverFilter {
             Self::Installed => row.is_installed(),
             Self::Updates => row.has_update(),
             Self::Category(category) => row.category == Some(category),
+            Self::Tools => false,
         }
     }
 }
@@ -690,6 +697,11 @@ impl CatalogModel {
 
     pub(in crate::app) fn filter(&self) -> DriverFilter {
         self.filter
+    }
+
+    /// The search text, trimmed and lower-cased.
+    pub(in crate::app) fn query(&self) -> &str {
+        &self.query
     }
 
     pub(in crate::app) fn visible_len(&self) -> usize {
@@ -1108,6 +1120,20 @@ mod tests {
         model.set_filter(DriverFilter::All);
         assert_eq!(model.visible_len(), 6);
         assert!(model.visible_row(6).is_none());
+    }
+
+    #[test]
+    fn the_tools_chip_is_the_last_one_and_admits_no_driver_row() {
+        let mut model = model();
+        assert_eq!(DriverFilter::CHIPS.last(), Some(&DriverFilter::Tools));
+        assert_eq!(model.count(DriverFilter::Tools), 0, "the view counts the tools");
+        model.set_filter(DriverFilter::Tools);
+        assert_eq!(model.visible_len(), 0);
+        assert_eq!(model.count(DriverFilter::All), 6, "the other chips still count the drivers");
+        model.set_query("  Mongo ");
+        assert_eq!(model.query(), "mongo");
+        model.set_filter(DriverFilter::All);
+        assert_eq!(model.visible_len(), 1);
     }
 
     #[test]
