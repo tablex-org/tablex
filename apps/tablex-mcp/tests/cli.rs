@@ -494,6 +494,60 @@ fn an_empty_or_relative_driver_dir_is_ignored_and_said_so_and_an_absolute_one_is
         .contains(&format!("using the driver directory {}", drivers.display())),);
 }
 
+/// A store in the place releases up to 0.1.0 used (`<platform data dir>/Drivers/v2`) is moved to
+/// `<platform data dir>/tablex/Drivers/v2` at start, with its record paths, and the move is said
+/// once on stderr. No `TABLEX_*` variable is set, so this is the default path of a real install.
+#[cfg(unix)]
+#[test]
+fn a_store_in_the_0_1_0_place_is_moved_into_the_app_folder_at_start() {
+    use engine_driver_host::{InstalledDriverRecord, InstalledDriverStore};
+    let home = tempfile::tempdir().unwrap();
+    let platform = if cfg!(target_os = "macos") {
+        home.path().join("Library/Application Support")
+    } else {
+        home.path().join("data")
+    };
+    let library = platform.join("Drivers/v2/sqlite/1.0.0/libdbengine_sqlite.dylib");
+    std::fs::create_dir_all(library.parent().unwrap()).unwrap();
+    std::fs::write(&library, "lib").unwrap();
+    InstalledDriverStore::new(&platform)
+        .save(InstalledDriverRecord {
+            id: "sqlite".into(),
+            version: "1.0.0".into(),
+            path: library,
+            ..Default::default()
+        })
+        .unwrap();
+    let mut command = command();
+    command
+        .env_remove("TABLEX_DATA_DIR")
+        .env_remove("TABLEX_DRIVER_DATA_DIR")
+        .env("HOME", home.path())
+        .env("XDG_DATA_HOME", home.path().join("data"));
+
+    for run in 0..2 {
+        let mut session = Session::spawn(&mut command);
+        session.close_stdin();
+        assert_eq!(session.wait_for_exit(), Some(0));
+        // Said by the first start only.
+        assert_eq!(
+            session.stderr().contains("Moved the driver store"),
+            run == 0
+        );
+    }
+
+    assert!(!platform.join("Drivers").exists());
+    let record = InstalledDriverStore::new(platform.join("tablex"))
+        .record("sqlite")
+        .unwrap()
+        .expect("record moved");
+    assert_eq!(
+        record.path,
+        platform.join("tablex/Drivers/v2/sqlite/1.0.0/libdbengine_sqlite.dylib")
+    );
+    assert!(record.path.is_file());
+}
+
 #[cfg(unix)]
 #[test]
 fn sigterm_ends_the_server_with_exit_zero() {

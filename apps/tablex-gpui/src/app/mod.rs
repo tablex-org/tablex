@@ -383,8 +383,13 @@ impl AppRoot {
         let settings_path =
             settings_state::resolve_settings_path(scenario_enabled, sidebar.path.as_deref());
         let workspace = WorkspaceState::default();
+        // A 0.1.0 store is moved into the app folder here, before anything opens the store.
         let driver_data_dir = if scenario_enabled {
-            std::path::PathBuf::from("__tablex_ui_scenario_driver_store_disabled__")
+            crate::drivers::DriverDataDir {
+                path: std::path::PathBuf::from("__tablex_ui_scenario_driver_store_disabled__"),
+                moved: None,
+                warning: None,
+            }
         } else {
             // Said once, at start (as `tablex-mcp` does): a relative value is not used.
             if std::env::var_os(crate::drivers::DRIVER_DATA_DIR_ENV).is_some_and(|v| !v.is_empty())
@@ -395,10 +400,12 @@ impl AppRoot {
                     crate::drivers::DRIVER_DATA_DIR_ENV
                 );
             }
-            crate::drivers::driver_data_dir()
+            crate::drivers::resolve_driver_data_dir()
         };
+        let (driver_store_moved, driver_store_warning) =
+            (driver_data_dir.moved, driver_data_dir.warning);
         let driver_store = Arc::new(engine_driver_host::InstalledDriverStore::new(
-            driver_data_dir,
+            driver_data_dir.path,
         ));
         let (mut tunnel_ui, tunnel_prompts) = tunnel_ui::TunnelUi::new(scenario_enabled);
         tunnel_ui.attach_agent(Arc::clone(&driver_store));
@@ -526,6 +533,19 @@ impl AppRoot {
             cx,
         );
         app.report_startup_problems();
+        if let Some(moved) = driver_store_moved {
+            app.report_event(
+                None,
+                crate::error_log::Report::new(
+                    crate::error_log::Severity::Info,
+                    Area::Driver,
+                    moved,
+                ),
+            );
+        }
+        if let Some(warning) = driver_store_warning {
+            app.report_warning(Area::Driver, None, warning);
+        }
         // Sidebar geometry: persisted width when valid, 260px default.
         // Applies to real and scenario constructions alike.
         app.shell.sidebar_width = app.navigator.preferences().resolve_sidebar_width();

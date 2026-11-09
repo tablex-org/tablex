@@ -7,7 +7,9 @@ use std::sync::Arc;
 
 use engine_agent::{AuditConfig, AuditLog, ToolLayer};
 use engine_connect::connect::{AgentConnections, Connector, RefusePrompts};
-use engine_connect::drivers::{driver_data_dir, driver_data_dir_override, DRIVER_DATA_DIR_ENV};
+use engine_connect::drivers::{
+    driver_data_dir_override, resolve_driver_data_dir, DRIVER_DATA_DIR_ENV,
+};
 use engine_connect::platform::audit_log_path;
 use engine_driver_host::InstalledDriverStore;
 use engine_storage::paths::{data_dir_override, DATA_DIR_ENV};
@@ -54,7 +56,12 @@ pub fn production_layer() -> Result<(ToolLayer, Arc<AuditLog>), SetupError> {
 }
 
 fn production_connector() -> Connector {
-    let connector = Connector::new(Arc::new(InstalledDriverStore::new(driver_data_dir())));
+    // The app resolves the store the same way (and moves a 0.1.0 store to the new place first).
+    let drivers = resolve_driver_data_dir();
+    for line in drivers.moved.iter().chain(drivers.warning.iter()) {
+        eprintln!("tablex-mcp: {line}");
+    }
+    let connector = Connector::new(Arc::new(InstalledDriverStore::new(drivers.path)));
     #[cfg(feature = "test-credentials")]
     let connector = connector.with_credentials(Arc::new(test_credentials::Nothing));
     connector

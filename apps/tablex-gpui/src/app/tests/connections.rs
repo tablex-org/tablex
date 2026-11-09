@@ -723,3 +723,24 @@ fn color_swatch_click_selects_and_none_clears(cx: &mut TestAppContext) {
     dialog_click(cx, "connection-custom-color");
     assert!(cx.debug_bounds("connection-custom-color").is_some());
 }
+
+#[gpui::test]
+fn the_driver_store_is_in_the_app_folder_like_the_one_tablex_mcp_opens(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    cx.update(gpui_component::init);
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        let view = cx.new(AppRoot::new_isolated);
+        gpui_component::Root::new(view, window, cx)
+    });
+    let app = cx.cx.read(|app| {
+        root.read(app)
+            .view()
+            .clone()
+            .downcast::<AppRoot>()
+            .expect("root should contain AppRoot")
+    });
+    let base = app.update(cx, |this, _| this.driver_ui.store.base_directory().to_path_buf());
+    // `tablex-mcp` resolves it with the same `engine_connect::drivers::resolve_driver_data_dir`.
+    assert_eq!(Some(base.clone()), crate::platform::app_data_dir());
+    assert!(base.ends_with("tablex"), "{}", base.display());
+}

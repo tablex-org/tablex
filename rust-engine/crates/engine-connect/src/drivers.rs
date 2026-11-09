@@ -7,8 +7,8 @@
 //! typed ([`DriverLoadError`]) so a front end can offer to install a missing driver.
 
 use engine_driver_host::{
-    DriverHandle, DriverLoader, DriverTarget, InstalledDriverStore, ManifestTrust,
-    ManifestTrustError, SignerConfig, TrustPolicy,
+    DriverHandle, DriverLoader, DriverTarget, InstalledDriverStore, LegacyMigration,
+    ManifestTrust, ManifestTrustError, SignerConfig, TrustPolicy,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -148,10 +148,82 @@ fn absolute_dir(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
     value.map(PathBuf::from).filter(|path| path.is_absolute())
 }
 
-pub fn driver_data_dir() -> PathBuf {
-    driver_data_dir_override()
-        .or_else(dirs::data_dir)
+/// Where the driver store is for this run (`<path>/Drivers/v2`), and what finding it did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DriverDataDir {
+    pub path: PathBuf,
+    /// The legacy store was moved to its new place just now (an Info line for the log).
+    pub moved: Option<String>,
+    /// The move failed and `path` is the legacy location for this run (a Warning line).
+    pub warning: Option<String>,
+}
+
+/// The base directory of the driver store: `TABLEX_DRIVER_DATA_DIR` when set, else
+/// `<data dir>/tablex` (the folder every other TableX file is in, `TABLEX_DATA_DIR` honoured).
+///
+/// Releases up to 0.1.0 kept the store in `<platform data dir>/Drivers/v2`; unless one of the two
+/// variables is set (then the run is isolated and must not take the real store along) a store of
+/// the current format there is moved to the new place first
+/// ([`InstalledDriverStore::migrate_legacy_location`]). Call it once at startup, before the store
+/// is opened; both front ends do, so they agree on the path.
+pub fn resolve_driver_data_dir() -> DriverDataDir {
+    resolve_with(
+        driver_data_dir_override(),
+        engine_storage::paths::data_dir_override(),
+        dirs::data_dir(),
+    )
+}
+
+fn resolve_with(
+    driver_override: Option<PathBuf>,
+    data_override: Option<PathBuf>,
+    platform_data_dir: Option<PathBuf>,
+) -> DriverDataDir {
+    let mut resolved = DriverDataDir {
+        path: PathBuf::new(),
+        moved: None,
+        warning: None,
+    };
+    if let Some(path) = driver_override {
+        resolved.path = path;
+        return resolved;
+    }
+    let new_base = data_override
+        .clone()
+        .or_else(|| platform_data_dir.clone())
         .unwrap_or_else(|| PathBuf::from("."))
+        .join(crate::platform::APP_DIR);
+    resolved.path = new_base.clone();
+    let (None, Some(legacy_base)) = (data_override, platform_data_dir) else {
+        return resolved;
+    };
+    match InstalledDriverStore::new(&new_base).migrate_legacy_location(&legacy_base) {
+        Ok(LegacyMigration::NotNeeded) => {}
+        Ok(LegacyMigration::Moved {
+            from,
+            to,
+            set_aside,
+            ..
+        }) => {
+            let aside = set_aside.map_or_else(String::new, |aside| {
+                format!(" (the folder that was there is now {})", aside.display())
+            });
+            resolved.moved = Some(format!(
+                "Moved the driver store from {} to {}{aside}",
+                from.display(),
+                to.display()
+            ));
+        }
+        Err(error) => {
+            resolved.warning = Some(format!(
+                "Could not move the driver store from {} to {}: {error}. Using the old location for this run.",
+                legacy_base.join("Drivers").display(),
+                new_base.join("Drivers").display(),
+            ));
+            resolved.path = legacy_base;
+        }
+    }
+    resolved
 }
 
 /// Developer mode only for the exact value `1`; anything else is strict.
@@ -328,6 +400,84 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).expect("create temp dir");
         (InstalledDriverStore::new(&dir), dir)
+    }
+
+    /// A platform data dir holding a store in the 0.1.0 place (`<platform>/Drivers/v2`).
+    fn platform_with_legacy_store() -> (tempfile::TempDir, PathBuf) {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let platform = temp.path().join("Application Support");
+        let library = platform.join("Drivers/v2/sqlite/1.0.0/libdbengine_sqlite.dylib");
+        std::fs::create_dir_all(library.parent().unwrap()).unwrap();
+        std::fs::write(&library, "lib").unwrap();
+        InstalledDriverStore::new(&platform)
+            .save(engine_driver_host::InstalledDriverRecord {
+                id: "sqlite".into(),
+                version: "1.0.0".into(),
+                path: library,
+                ..Default::default()
+            })
+            .unwrap();
+        (temp, platform)
+    }
+
+    #[test]
+    fn the_store_defaults_to_the_app_folder_and_a_0_1_0_store_is_moved_there() {
+        let (_temp, platform) = platform_with_legacy_store();
+
+        let resolved = resolve_with(None, None, Some(platform.clone()));
+
+        assert_eq!(resolved.path, platform.join("tablex"));
+        assert!(resolved.warning.is_none());
+        assert!(resolved.moved.is_some_and(|text| text.contains("Moved the driver store")));
+        assert!(!platform.join("Drivers").exists());
+        let store = InstalledDriverStore::new(&resolved.path);
+        let record = store.record("sqlite").unwrap().expect("record kept");
+        assert_eq!(
+            record.path,
+            platform.join("tablex/Drivers/v2/sqlite/1.0.0/libdbengine_sqlite.dylib")
+        );
+        assert!(record.path.is_file());
+        // Said once: the next start finds nothing to move.
+        let again = resolve_with(None, None, Some(platform.clone()));
+        assert_eq!((again.path, again.moved, again.warning), (resolved.path, None, None));
+    }
+
+    #[test]
+    fn an_override_variable_means_an_isolated_run_that_never_takes_the_real_store() {
+        let (_temp, platform) = platform_with_legacy_store();
+        let other = platform.parent().unwrap().join("portable");
+
+        let driver_dir = resolve_with(Some(other.clone()), None, Some(platform.clone()));
+        assert_eq!((driver_dir.path.as_path(), driver_dir.moved), (other.as_path(), None));
+
+        let data_dir = resolve_with(None, Some(other.clone()), Some(platform.clone()));
+        assert_eq!(data_dir.path, other.join("tablex"), "TABLEX_DATA_DIR moves the store too");
+        assert_eq!((data_dir.moved, data_dir.warning), (None, None));
+
+        assert!(platform.join("Drivers/v2/installed-drivers.json").is_file(), "untouched");
+        assert!(!other.exists(), "nothing created");
+    }
+
+    #[test]
+    fn a_move_that_fails_keeps_the_legacy_location_for_this_run_with_a_warning() {
+        let (_temp, platform) = platform_with_legacy_store();
+        // A file where the `tablex` folder should be.
+        std::fs::write(platform.join("tablex"), "in the way").unwrap();
+
+        let resolved = resolve_with(None, None, Some(platform.clone()));
+
+        assert_eq!(resolved.path, platform, "the store is still opened where it is");
+        assert!(resolved.moved.is_none());
+        assert!(resolved.warning.is_some_and(|text| text.contains("Using the old location")));
+        let record = InstalledDriverStore::new(&resolved.path).record("sqlite").unwrap().unwrap();
+        assert!(record.path.is_file());
+    }
+
+    #[test]
+    fn with_no_platform_data_dir_the_store_is_under_the_working_directory() {
+        let resolved = resolve_with(None, None, None);
+        assert_eq!(resolved.path, PathBuf::from(".").join("tablex"));
+        assert!(resolved.moved.is_none() && resolved.warning.is_none());
     }
 
     #[test]

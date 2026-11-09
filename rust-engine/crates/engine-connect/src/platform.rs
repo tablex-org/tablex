@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 
 /// Directory under the platform data dir that holds every TableX file.
-const APP_DIR: &str = "tablex";
+pub(crate) const APP_DIR: &str = "tablex";
 
 /// `~/Library/Application Support/tablex` on macOS, `$XDG_DATA_HOME/tablex`
 /// (default `~/.local/share/tablex`) on Linux, `%APPDATA%\tablex` on Windows.

@@ -24,8 +24,10 @@ pub fn catalog_generation_is_current(current: u64, result: u64) -> bool {
     current == result
 }
 
-/// A catalog fetch failure as the user should read it: a local manifest that
-/// fails verification in strict mode is a policy matter, not a corrupt file.
+/// A catalog fetch failure as the user should read it: a local manifest without a signature in
+/// strict mode is a policy matter (Developer mode accepts it), not a corrupt file. Any other
+/// failure, a bad signature included, is reported as it is: a correctly signed local copy is
+/// accepted in strict mode.
 pub fn explain_registry_error(
     error: &engine_driver_host::RegistryError,
     source: &str,
@@ -33,9 +35,11 @@ pub fn explain_registry_error(
 ) -> String {
     let local = url::Url::parse(source).is_ok_and(|url| url.scheme() == "file");
     match error {
-        engine_driver_host::RegistryError::Manifest(_) if local && policy == TrustPolicy::Strict => {
+        engine_driver_host::RegistryError::Manifest(
+            engine_driver_host::ManifestTrustError::SignatureMissing,
+        ) if local && policy == TrustPolicy::Strict => {
             format!(
-                "Local driver manifests are only accepted in Developer mode (\u{22EF} menu): {error}"
+                "Unsigned local driver manifests are only accepted in Developer mode (\u{22EF} menu): {error}"
             )
         }
         _ => error.to_string(),
@@ -781,6 +785,24 @@ mod tests {
         assert!(strict.contains("Developer mode"), "{strict}");
         let remote = explain_registry_error(&error, "https://h/m.json", TrustPolicy::Strict);
         assert!(!remote.contains("Developer mode"), "{remote}");
+        let developer = explain_registry_error(&error, "file:///tmp/m.json", TrustPolicy::Developer);
+        assert_eq!(developer, error.to_string());
+    }
+
+    #[test]
+    fn a_local_manifest_failing_for_another_reason_reports_the_real_error() {
+        for trust_error in [
+            ManifestTrustError::SignatureInvalid,
+            ManifestTrustError::SignatureMalformed("bad base64".into()),
+            ManifestTrustError::MissingGeneratedAt,
+            ManifestTrustError::Replayed { generated_at: "1".into() },
+            ManifestTrustError::NoTrustedKeys,
+        ] {
+            let error = engine_driver_host::RegistryError::Manifest(trust_error);
+            let said = explain_registry_error(&error, "file:///tmp/m.json", TrustPolicy::Strict);
+            assert_eq!(said, error.to_string());
+            assert!(!said.contains("Developer mode"), "{said}");
+        }
     }
 
     /// A loopback HTTP server that answers its first connection with `respond` and returns the port.
