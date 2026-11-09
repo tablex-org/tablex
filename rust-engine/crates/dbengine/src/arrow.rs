@@ -503,12 +503,11 @@ fn build_string_array(docs: &[Document], key: &str, report: &mut LargeFieldRepor
                     }
                     bson::Bson::ObjectId(oid) => oid.to_string(),
                     bson::Bson::Document(d) if is_extended_json_date(d) => {
-                        match extended_json_date_to_iso8601(d, key, row, "<id>", "<store>") {
+                        match extended_json_date_to_iso8601(d, key, row, "<id>") {
                             Some(iso) => iso,
                             None => {
                                 let id = doc.get("_id").map(bson_value_to_log_string).unwrap_or_else(|| "<none>".to_string());
-                                let store_code = doc.get("storeCode").map(bson_value_to_log_string).unwrap_or_else(|| "<none>".to_string());
-                                eprintln!("[arrow] build_string_array: extended JSON date conversion FAILED for key='{}', storeCode='{}', row={}, _id={}, doc={:?}", key, store_code, row, id, d);
+                                eprintln!("[arrow] build_string_array: extended JSON date conversion FAILED for key='{}', row={}, _id={}, doc={:?}", key, row, id, d);
                                 let ser = serde_json::to_string(v).unwrap_or_else(|_| "null".to_string());
                                 let (capped, kind) = cap_string_ref_with_kind(&ser);
                                 if let Some(c) = capped {
@@ -604,17 +603,13 @@ fn build_datetime_string_array(docs: &[Document], key: &str) -> StringArray {
             .enumerate()
             .map(|(row, doc)| {
                 let id = doc.get("_id").map(bson_value_to_log_string).unwrap_or_else(|| "<none>".to_string());
-                let store_code = doc
-                    .get("storeCode")
-                    .map(bson_value_to_log_string)
-                    .unwrap_or_else(|| "<none>".to_string());
                 doc.get(key).map(|v| match v {
-                    bson::Bson::DateTime(dt) => safe_bson_datetime_to_string(dt, key, row, &id, &store_code),
+                    bson::Bson::DateTime(dt) => safe_bson_datetime_to_string(dt, key, row, &id),
                     bson::Bson::Document(d) if is_extended_json_date(d) => {
-                        match extended_json_date_to_iso8601(d, key, row, &id, &store_code) {
+                        match extended_json_date_to_iso8601(d, key, row, &id) {
                             Some(iso) => iso,
                             None => {
-                                eprintln!("[arrow] build_datetime_string_array: conversion FAILED for key='{}', storeCode='{}', row={}, _id={}, doc={:?}", key, store_code, row, id, d);
+                                eprintln!("[arrow] build_datetime_string_array: conversion FAILED for key='{}', row={}, _id={}, doc={:?}", key, row, id, d);
                                 "null".to_string()
                             }
                         }
@@ -635,17 +630,15 @@ fn build_datetime_string_array(docs: &[Document], key: &str) -> StringArray {
 /// `{"$date":{"$numberLong":<ms>}}` representation for out-of-range values.
 ///
 /// `key` is the column/field name, `row` is the row index in the result
-/// batch, `id` is the document `_id` (any BSON value rendered as a string),
-/// and `store_code` is a business-level identifier (e.g. `storeCode`)
-/// used to locate the offending row quickly. All are included in the
-/// diagnostic log when the value falls back. Pass `""` / `0` when there is
-/// no context.
+/// batch and `id` is the document `_id` (any BSON value rendered as a
+/// string), used to locate the offending row quickly. All are included in
+/// the diagnostic log when the value falls back. Pass `""` / `0` when there
+/// is no context.
 fn safe_bson_datetime_to_string(
     dt: &bson::DateTime,
     key: &str,
     row: usize,
     id: &str,
-    store_code: &str,
 ) -> String {
     let ms = dt.timestamp_millis();
     match chrono::DateTime::from_timestamp_millis(ms) {
@@ -655,16 +648,16 @@ fn safe_bson_datetime_to_string(
                 c.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
             } else {
                 eprintln!(
-                    "[arrow] datetime fallback: key={} storeCode={} row={} _id={} ms={} year={} reason=outside_rfc3339_year_range value={{\"$date\":{{\"$numberLong\":\"{}\"}}}}",
-                    key, store_code, row, id, ms, year, ms
+                    "[arrow] datetime fallback: key={} row={} _id={} ms={} year={} reason=outside_rfc3339_year_range value={{\"$date\":{{\"$numberLong\":\"{}\"}}}}",
+                    key, row, id, ms, year, ms
                 );
                 format!("{{\"$date\":{{\"$numberLong\":\"{}\"}}}}", ms)
             }
         }
         None => {
             eprintln!(
-                "[arrow] datetime fallback: key={} storeCode={} row={} _id={} ms={} year=<chrono_none> reason=chrono_from_timestamp_millis_failed value={{\"$date\":{{\"$numberLong\":\"{}\"}}}}",
-                key, store_code, row, id, ms, ms
+                "[arrow] datetime fallback: key={} row={} _id={} ms={} year=<chrono_none> reason=chrono_from_timestamp_millis_failed value={{\"$date\":{{\"$numberLong\":\"{}\"}}}}",
+                key, row, id, ms, ms
             );
             format!("{{\"$date\":{{\"$numberLong\":\"{}\"}}}}", ms)
         }
@@ -742,7 +735,6 @@ fn extended_json_date_to_iso8601(
     key: &str,
     row: usize,
     id: &str,
-    store_code: &str,
 ) -> Option<String> {
     doc.get("$date").and_then(|date_value| {
         match date_value {
@@ -750,12 +742,12 @@ fn extended_json_date_to_iso8601(
             bson::Bson::Document(inner) => {
                 match extract_millis(inner.get("$numberLong")) {
                     Some(ms) => {
-                        Some(safe_bson_datetime_to_string(&bson::DateTime::from_millis(ms), key, row, id, store_code))
+                        Some(safe_bson_datetime_to_string(&bson::DateTime::from_millis(ms), key, row, id))
                     }
                     None => {
                         eprintln!(
-                            "[arrow] extended_json_date: key={} storeCode={} row={} _id={} reason=invalid_numberLong value={:?}",
-                            key, store_code, row, id, inner
+                            "[arrow] extended_json_date: key={} row={} _id={} reason=invalid_numberLong value={:?}",
+                            key, row, id, inner
                         );
                         None
                     }
@@ -763,18 +755,18 @@ fn extended_json_date_to_iso8601(
             }
             // {"$date": 1727239981386} (direct Int64)
             bson::Bson::Int64(ms) => {
-                Some(safe_bson_datetime_to_string(&bson::DateTime::from_millis(*ms), key, row, id, store_code))
+                Some(safe_bson_datetime_to_string(&bson::DateTime::from_millis(*ms), key, row, id))
             }
             // {"$date": 1727239981} (direct Int32 - seconds, unlikely but handle)
             bson::Bson::Int32(ms) => {
-                Some(safe_bson_datetime_to_string(&bson::DateTime::from_millis(*ms as i64), key, row, id, store_code))
+                Some(safe_bson_datetime_to_string(&bson::DateTime::from_millis(*ms as i64), key, row, id))
             }
             // {"$date": "2024-09-25T10:13:01.386Z"} (ISO string)
             bson::Bson::String(s) => Some(s.clone()),
             _ => {
                 eprintln!(
-                    "[arrow] extended_json_date: key={} storeCode={} row={} _id={} reason=unsupported_inner_type value={:?}",
-                    key, store_code, row, id, date_value
+                    "[arrow] extended_json_date: key={} row={} _id={} reason=unsupported_inner_type value={:?}",
+                    key, row, id, date_value
                 );
                 None
             }
@@ -866,7 +858,7 @@ mod tests {
     #[test]
     fn test_extended_json_date_numberlong_string() {
         let d = doc! { "$date": { "$numberLong": "1727239981386" } };
-        let result = extended_json_date_to_iso8601(&d, "ts", 0, "id1", "STOREC").unwrap();
+        let result = extended_json_date_to_iso8601(&d, "ts", 0, "id1").unwrap();
         assert!(
             result.contains("2024-09-25"),
             "Expected 2024-09-25 in: {}",
@@ -877,7 +869,7 @@ mod tests {
     #[test]
     fn test_extended_json_date_direct_int64() {
         let d = doc! { "$date": 1727239981386_i64 };
-        let result = extended_json_date_to_iso8601(&d, "ts", 0, "id1", "STOREC").unwrap();
+        let result = extended_json_date_to_iso8601(&d, "ts", 0, "id1").unwrap();
         assert!(
             result.contains("2024-09-25"),
             "Expected 2024-09-25 in: {}",
@@ -890,7 +882,7 @@ mod tests {
         // Int32 max is ~2.1B, so max ms is ~24 days from epoch (Jan 1970)
         // Use a realistic Int32 millisecond value
         let d = doc! { "$date": 86400000_i32 }; // 1 day after epoch
-        let result = extended_json_date_to_iso8601(&d, "ts", 0, "id1", "STOREC").unwrap();
+        let result = extended_json_date_to_iso8601(&d, "ts", 0, "id1").unwrap();
         assert!(
             result.contains("1970-01-02"),
             "Expected 1970-01-02 in: {}",
@@ -902,21 +894,21 @@ mod tests {
     fn test_extended_json_date_iso_string_passthrough() {
         let iso = "2024-09-25T10:13:01.386Z";
         let d = doc! { "$date": iso };
-        let result = extended_json_date_to_iso8601(&d, "ts", 0, "id1", "STOREC").unwrap();
+        let result = extended_json_date_to_iso8601(&d, "ts", 0, "id1").unwrap();
         assert_eq!(result, iso);
     }
 
     #[test]
     fn test_extended_json_date_invalid_returns_none() {
         let d = doc! { "$date": { "$invalid": "key" } };
-        assert!(extended_json_date_to_iso8601(&d, "ts", 0, "id1", "STOREC").is_none());
+        assert!(extended_json_date_to_iso8601(&d, "ts", 0, "id1").is_none());
     }
 
     #[test]
     fn test_extended_json_date_missing_key_returns_none() {
         let d = doc! { "$date": { "$numberLong": 123 } };
         // This should work since $numberLong is present
-        assert!(extended_json_date_to_iso8601(&d, "ts", 0, "id1", "STOREC").is_some());
+        assert!(extended_json_date_to_iso8601(&d, "ts", 0, "id1").is_some());
     }
 
     // MARK: - extract_millis
@@ -1055,7 +1047,7 @@ mod tests {
     #[test]
     fn test_safe_bson_datetime_normal_value() {
         let dt = DateTime::from_millis(1727239981386);
-        let s = safe_bson_datetime_to_string(&dt, "ts", 0, "id1", "STOREC");
+        let s = safe_bson_datetime_to_string(&dt, "ts", 0, "id1");
         assert!(s.contains("2024-09-25"), "Expected 2024-09-25 in: {}", s);
         assert!(
             !s.contains("$date"),
@@ -1068,7 +1060,7 @@ mod tests {
         // i64::MAX ms is far outside the RFC3339 year range and historically
         // caused bson::DateTime::to_rfc3339_string to panic via internal unwrap.
         let dt = DateTime::from_millis(i64::MAX);
-        let s = safe_bson_datetime_to_string(&dt, "birthDate", 0, "id1", "STOREC");
+        let s = safe_bson_datetime_to_string(&dt, "birthDate", 0, "id1");
         assert!(
             s.contains("$date"),
             "Extreme value should fall back to Extended JSON, got: {}",
@@ -1079,7 +1071,7 @@ mod tests {
     #[test]
     fn test_safe_bson_datetime_extreme_negative_does_not_panic() {
         let dt = DateTime::from_millis(i64::MIN);
-        let s = safe_bson_datetime_to_string(&dt, "birthDate", 0, "id1", "STOREC");
+        let s = safe_bson_datetime_to_string(&dt, "birthDate", 0, "id1");
         assert!(
             s.contains("$date"),
             "Extreme value should fall back to Extended JSON, got: {}",
@@ -1092,9 +1084,9 @@ mod tests {
         // Direct repro of the production crash: documents_to_arrow_cdata on
         // a BSON datetime with an out-of-range year must not abort the dylib.
         let docs = vec![
-            doc! { "_id": bson::oid::ObjectId::new(), "storeCode": "STOREC", "ts": DateTime::from_millis(i64::MAX) },
-            doc! { "_id": bson::oid::ObjectId::new(), "storeCode": "FOO", "ts": DateTime::from_millis(i64::MIN) },
-            doc! { "_id": bson::oid::ObjectId::new(), "storeCode": "BAR", "ts": DateTime::from_millis(0) },
+            doc! { "_id": bson::oid::ObjectId::new(), "ts": DateTime::from_millis(i64::MAX) },
+            doc! { "_id": bson::oid::ObjectId::new(), "ts": DateTime::from_millis(i64::MIN) },
+            doc! { "_id": bson::oid::ObjectId::new(), "ts": DateTime::from_millis(0) },
         ];
         let result =
             documents_to_arrow_cdata(&docs).expect("must not panic/err on extreme datetimes");
@@ -1109,7 +1101,7 @@ mod tests {
     #[test]
     fn test_extended_json_date_with_extreme_value_does_not_panic() {
         let d = doc! { "$date": { "$numberLong": "9223372036854775807" } };
-        let result = extended_json_date_to_iso8601(&d, "ts", 0, "id1", "STOREC");
+        let result = extended_json_date_to_iso8601(&d, "ts", 0, "id1");
         assert!(
             result.is_some(),
             "Extreme extended JSON date should not return None"
