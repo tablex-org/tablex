@@ -222,3 +222,111 @@ fn live_mongo_value_panel_shows_the_document_of_a_sorted_find(cx: &mut TestAppCo
     assert_eq!(detail.column_name, "extra");
     assert!(!detail.value.contains("<object>") && !detail.value.contains("<array"), "{}", detail.value);
 }
+
+/// Many open find tabs and many re-runs of one tab on the REAL MongoDB driver:
+/// each tab holds one result page, a re-run replaces it, and the driver must
+/// not refuse a query because of how many tabs show results (0.2.1 allowed 8).
+#[gpui::test]
+#[ignore = "needs TABLEX_TEST_MONGO_URI (127.0.0.1:57017) and TABLEX_TEST_MONGO_DYLIB"]
+fn live_mongo_many_result_tabs_and_reruns_keep_running(cx: &mut TestAppContext) {
+    let (Ok(uri), Ok(dylib)) = (std::env::var("TABLEX_TEST_MONGO_URI"), std::env::var("TABLEX_TEST_MONGO_DYLIB")) else {
+        panic!("TABLEX_TEST_MONGO_URI / TABLEX_TEST_MONGO_DYLIB are not set");
+    };
+    assert!(uri.contains("127.0.0.1:57017"), "refusing to touch {uri}");
+    let database = format!("tablex_many_tabs_{}", uuid::Uuid::new_v4().to_simple());
+    let (app, visual) = script_app(cx);
+    visual.dispatcher.allow_parking();
+    let connection = crate::ui_fixture::MONGO_ID;
+    let session = app.update(visual, |this, _| {
+        this.scenario_ui.service = None;
+        let handle = engine_driver_host::DriverLoader.load(std::path::Path::new(&dylib)).expect("mongo driver loads");
+        let session = handle
+            .connect(&serde_json::json!({ "uri": uri, "name": "live" }).to_string())
+            .expect("connect to the local MongoDB");
+        let engine_id = session.connection_id();
+        this.driver_runtime.capabilities.insert(connection.into(), std::sync::Arc::new(handle.capabilities().clone()));
+        let session = std::sync::Arc::new(engine_driver_host::SharedDriverSession::new(session));
+        this.driver_runtime.sessions.insert(connection.into(), session.clone());
+        this.driver_runtime.connection_ids.insert(connection.into(), engine_id);
+        this.driver_ui.handles.insert("mongodb".into(), handle);
+        session
+    });
+    let write = |kind: &str, payload: serde_json::Value| {
+        let operation = session.begin_operation().expect("operation");
+        let request = engine_driver_api::MutationRequest {
+            operation_id: operation.id(),
+            kind: kind.into(),
+            database: Some(database.clone()),
+            object: Some("logs".into()),
+            identity: serde_json::Value::Null,
+            payload,
+        };
+        session.mutate(&operation, request).map(|_| ())
+    };
+    for n in 0..5 {
+        write("insert", log_document(n)).expect("insert");
+    }
+    struct Drop_<'a>(&'a dyn Fn() -> Result<(), String>);
+    impl Drop for Drop_<'_> {
+        fn drop(&mut self) {
+            let _ = (self.0)();
+        }
+    }
+    let cleanup = || write("drop_collection", serde_json::Value::Null).map_err(|error| error.to_string());
+    let _guard = Drop_(&cleanup);
+
+    let open_tab = |app: &gpui::Entity<AppRoot>, visual: &mut gpui::VisualTestContext| {
+        app.update(visual, |this, _| {
+            this.workspace.open_query_tab_with_metadata(
+                "logs",
+                crate::workspace::TabMetadata {
+                    source_id: None,
+                    connection_id: connection.into(),
+                    database: database.clone(),
+                    schema: None,
+                    collection: "logs".into(),
+                    query_mode: Some(QueryMode::MongoFind),
+                    is_pinned: false,
+                },
+            )
+        })
+    };
+    let failures = |app: &gpui::Entity<AppRoot>, visual: &gpui::VisualTestContext| {
+        app.read_with(visual, |this, _| {
+            (0..this.error_log.log.len())
+                .filter_map(|index| this.error_log.log.get(index))
+                .filter(|entry| entry.area == crate::error_log::Area::Query)
+                .map(|entry| entry.message.to_string())
+                .collect::<Vec<_>>()
+        })
+    };
+    // Runs `tab` and waits for its query task to end; the page it shows.
+    let run = |app: &gpui::Entity<AppRoot>, visual: &mut gpui::VisualTestContext, tab: u64| {
+        app.update(visual, |this, cx| this.run_tab_query(tab, cx));
+        wait_until(visual, "the find to finish", |visual| {
+            settle(visual);
+            app.read_with(visual, |this, _| !this.query_tasks.tasks.contains_key(&tab))
+        });
+        settle(visual);
+        app.read_with(visual, |this, _| this.workspace.runtime(tab).unwrap().driver_page_id)
+    };
+
+    // One tab re-run many times: each run replaces the page, none leaks.
+    let tab = open_tab(&app, visual);
+    let mut pages = Vec::new();
+    for _ in 0..12 {
+        pages.push(run(&app, visual, tab));
+        assert_eq!(failures(&app, visual), Vec::<String>::new(), "re-run {} of one tab", pages.len());
+    }
+    assert!(pages.iter().all(Option::is_some), "{pages:?}");
+
+    // More tabs with results than 0.2.1 allowed pages.
+    let mut tabs = vec![tab];
+    for _ in 0..11 {
+        let tab = open_tab(&app, visual);
+        let page = run(&app, visual, tab);
+        tabs.push(tab);
+        assert_eq!(failures(&app, visual), Vec::<String>::new(), "tab {} of {}", tabs.len(), 12);
+        assert!(page.is_some(), "tab {} shows a page", tabs.len());
+    }
+}
