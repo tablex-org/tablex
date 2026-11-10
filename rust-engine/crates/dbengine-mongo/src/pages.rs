@@ -14,19 +14,17 @@ pub(crate) struct RenderedCellBatch {
 }
 
 pub(crate) struct BsonPageCache {
-    max_pages: usize,
     max_bytes: usize,
     next_page_id: u64,
     pages: HashMap<u64, BsonPage>,
     order: VecDeque<u64>,
     bytes: usize,
     // A pending old/new pair counts once logically, while both allocations stay live;
-    // physical pages and bytes can therefore temporarily reach 2x their logical caps.
-    logical_pages: usize,
+    // physical bytes can therefore temporarily reach 2x the logical cap. The number
+    // of pages is not capped: every open result tab holds one, only bytes are.
     logical_bytes: usize,
 }
 
-pub(crate) const MAX_PAGE_COUNT: usize = 8;
 pub(crate) const MAX_PAGE_BYTES: usize = 64 * 1024 * 1024;
 
 struct BsonPage {
@@ -131,19 +129,16 @@ fn encode_raw_documents(documents: &[Document]) -> (Vec<u8>, Vec<CPageSlice>) {
 
 impl BsonPageCache {
     pub(crate) fn default() -> Self {
-        Self::new(MAX_PAGE_COUNT, MAX_PAGE_BYTES)
+        Self::new(MAX_PAGE_BYTES)
     }
 
-    pub(crate) fn new(max_pages: usize, max_bytes: usize) -> Self {
-        assert!(max_pages > 0, "page cache needs at least one page slot");
+    pub(crate) fn new(max_bytes: usize) -> Self {
         Self {
-            max_pages,
             max_bytes,
             next_page_id: 1,
             pages: HashMap::new(),
             order: VecDeque::new(),
             bytes: 0,
-            logical_pages: 0,
             logical_bytes: 0,
         }
     }
@@ -167,9 +162,7 @@ impl BsonPageCache {
         total_is_exact: bool,
     ) -> Option<QueryPage> {
         let (columns, raw_data, raw_slices, bytes) = Self::prepare_page(&documents);
-        if self.logical_pages >= self.max_pages
-            || self.logical_bytes.saturating_add(bytes) > self.max_bytes
-        {
+        if self.logical_bytes.saturating_add(bytes) > self.max_bytes {
             return None;
         }
         let page = self.insert_prepared(
@@ -184,7 +177,6 @@ impl BsonPageCache {
             bytes,
             None,
         );
-        self.logical_pages += 1;
         self.logical_bytes += bytes;
         Some(page)
     }
@@ -345,11 +337,9 @@ impl BsonPageCache {
                     .saturating_add(old_bytes);
             }
             (Some(_), _, None) => {
-                self.logical_pages = self.logical_pages.saturating_sub(1);
                 self.logical_bytes = self.logical_bytes.saturating_sub(page_bytes);
             }
             (None, None, _) => {
-                self.logical_pages = self.logical_pages.saturating_sub(1);
                 self.logical_bytes = self.logical_bytes.saturating_sub(page_bytes);
             }
         }
@@ -455,7 +445,6 @@ impl BsonPageCache {
         self.pages.clear();
         self.order.clear();
         self.bytes = 0;
-        self.logical_pages = 0;
         self.logical_bytes = 0;
         page_ids
     }
@@ -530,7 +519,7 @@ mod tests {
 
     #[test]
     fn a_write_drops_only_the_pages_of_its_collection_and_unscoped_ones() {
-        let mut cache = BsonPageCache::new(8, 1_000_000);
+        let mut cache = BsonPageCache::new(1_000_000);
         let mut page = |connection: u64, namespace: Option<(&str, &str)>| {
             let page_id = cache
                 .insert_for_connection(connection, OperationId(1), sample_documents(), None, true)
@@ -558,7 +547,7 @@ mod tests {
 
     #[test]
     fn inserts_page_with_union_columns_and_count_metadata() {
-        let mut cache = BsonPageCache::new(4, 1_000_000);
+        let mut cache = BsonPageCache::new(1_000_000);
         let page = cache
             .insert(OperationId(9), sample_documents(), Some(200), false)
             .expect("page fits cache");
@@ -579,7 +568,7 @@ mod tests {
 
     #[test]
     fn renders_only_requested_viewport_into_one_text_buffer() {
-        let mut cache = BsonPageCache::new(4, 1_000_000);
+        let mut cache = BsonPageCache::new(1_000_000);
         let page = cache
             .insert(OperationId(9), sample_documents(), None, true)
             .expect("page fits cache");
@@ -597,7 +586,7 @@ mod tests {
 
     #[test]
     fn inspects_native_fields_and_uses_bson_id_as_mutation_identity() {
-        let mut cache = BsonPageCache::new(4, 1_000_000);
+        let mut cache = BsonPageCache::new(1_000_000);
         let page = cache
             .insert(OperationId(9), sample_documents(), None, true)
             .expect("page fits cache");
@@ -612,7 +601,7 @@ mod tests {
 
     #[test]
     fn a_row_without_id_has_no_identity_and_no_editable_field() {
-        let mut cache = BsonPageCache::new(4, 1_000_000);
+        let mut cache = BsonPageCache::new(1_000_000);
         let page = cache
             .insert(
                 OperationId(9),
@@ -658,11 +647,11 @@ mod tests {
     }
 
     #[test]
-    fn evicts_oldest_pages_to_meet_count_and_byte_budgets() {
+    fn refuses_a_page_past_the_byte_budget_and_keeps_the_others() {
         let document_bytes = bson::to_vec(&doc! { "value": "x".repeat(64) })
             .expect("serialize")
             .len();
-        let mut cache = BsonPageCache::new(2, document_bytes * 4);
+        let mut cache = BsonPageCache::new(document_bytes * 4);
         let first = cache
             .insert(
                 OperationId(1),
@@ -694,8 +683,22 @@ mod tests {
     }
 
     #[test]
+    fn the_number_of_live_pages_is_not_capped() {
+        let mut cache = BsonPageCache::new(1_000_000);
+        let pages: Vec<_> = (0..100)
+            .map(|n| {
+                cache
+                    .insert(OperationId(n), vec![doc! { "n": n as i64 }], None, true)
+                    .expect("a small page fits whatever the number of open pages")
+            })
+            .collect();
+        assert_eq!(cache.len(), 100);
+        assert!(pages.iter().all(|page| cache.contains(page.page_id)));
+    }
+
+    #[test]
     fn release_removes_page_and_storage_budget() {
-        let mut cache = BsonPageCache::new(4, 1_000_000);
+        let mut cache = BsonPageCache::new(1_000_000);
         let page = cache
             .insert(OperationId(1), sample_documents(), None, true)
             .expect("page fits cache");
@@ -708,7 +711,7 @@ mod tests {
 
     #[test]
     fn raw_page_exports_one_backing_buffer_and_document_slices() {
-        let mut cache = BsonPageCache::new(4, 1_000_000);
+        let mut cache = BsonPageCache::new(1_000_000);
         let page = cache
             .insert(OperationId(1), sample_documents(), None, true)
             .expect("page fits cache");
@@ -739,7 +742,7 @@ mod tests {
 
     #[test]
     fn oversized_page_is_reported_without_indexing_an_evicted_page() {
-        let mut cache = BsonPageCache::new(2, 1);
+        let mut cache = BsonPageCache::new(1);
         let page = cache.insert(OperationId(1), vec![doc! { "value": "x" }], Some(1), true);
 
         assert!(page.is_none());
@@ -749,7 +752,7 @@ mod tests {
 
     #[test]
     fn connection_clear_removes_only_owned_pages() {
-        let mut cache = BsonPageCache::new(4, 1_000_000);
+        let mut cache = BsonPageCache::new(1_000_000);
         let first = cache
             .insert_for_connection(7, OperationId(1), sample_documents(), None, true)
             .expect("first page fits cache");
@@ -768,7 +771,7 @@ mod tests {
     fn replacement_fits_when_count_and_bytes_are_full() {
         let documents = vec![doc! { "value": "x".repeat(64) }];
         let page_bytes = document_bytes(&documents) + encode_raw_documents(&documents).0.len();
-        let mut cache = BsonPageCache::new(8, page_bytes * 8);
+        let mut cache = BsonPageCache::new(page_bytes * 8);
         let mut pages = Vec::new();
         for operation_id in 0..8 {
             pages.push(
@@ -804,7 +807,7 @@ mod tests {
         let old_documents = sample_documents();
         let page_bytes =
             document_bytes(&old_documents) + encode_raw_documents(&old_documents).0.len();
-        let mut cache = BsonPageCache::new(1, page_bytes);
+        let mut cache = BsonPageCache::new(page_bytes);
         let old = cache
             .insert_for_connection(7, OperationId(1), old_documents, None, true)
             .expect("old page fits");
@@ -825,7 +828,7 @@ mod tests {
 
     #[test]
     fn releasing_aborted_replacement_keeps_old_page_inspectable() {
-        let mut cache = BsonPageCache::new(1, 1_000_000);
+        let mut cache = BsonPageCache::new(1_000_000);
         let old = cache
             .insert_for_connection(7, OperationId(1), sample_documents(), None, true)
             .expect("old page fits");
@@ -847,7 +850,7 @@ mod tests {
 
     #[test]
     fn releasing_committed_old_page_keeps_new_page_for_next_replacement() {
-        let mut cache = BsonPageCache::new(1, 1_000_000);
+        let mut cache = BsonPageCache::new(1_000_000);
         let old = cache
             .insert_for_connection(7, OperationId(1), sample_documents(), None, true)
             .expect("old page fits");
@@ -878,7 +881,7 @@ mod tests {
 
     #[test]
     fn replacement_rejects_chains_and_siblings() {
-        let mut cache = BsonPageCache::new(2, 1_000_000);
+        let mut cache = BsonPageCache::new(1_000_000);
         let old = cache
             .insert_for_connection(7, OperationId(1), sample_documents(), None, true)
             .expect("old page fits");
@@ -917,8 +920,8 @@ mod tests {
     }
 
     #[test]
-    fn replacement_cannot_claim_another_connections_page_capacity() {
-        let mut cache = BsonPageCache::new(1, 1_000_000);
+    fn a_replacement_cannot_replace_another_connections_page() {
+        let mut cache = BsonPageCache::new(1_000_000);
         let page = cache
             .insert_for_connection(7, OperationId(1), sample_documents(), None, true)
             .expect("page fits");
@@ -933,8 +936,7 @@ mod tests {
                 true,
             )
             .is_none());
-        assert!(cache
-            .insert_for_connection(8, OperationId(3), sample_documents(), None, true)
-            .is_none());
+        assert!(cache.contains(page.page_id));
+        assert_eq!(cache.len(), 1);
     }
 }

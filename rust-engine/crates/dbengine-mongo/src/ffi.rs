@@ -461,7 +461,7 @@ unsafe fn open_query_unguarded(
         ),
     };
     let Some(page) = page else {
-        return error_envelope("query.page_cache_full", "all cached query pages are in use");
+        return error_envelope("query.page_cache_full", "open query results use all of the driver's 64 MB of result memory; close some result tabs and run the query again");
     };
     session.pages.set_namespace(page.page_id, database, &collection);
     success_json(serde_json::to_value(page).expect("query page serializes"))
@@ -497,7 +497,7 @@ fn list_indexes_page(connection_id: u64, request: &QueryRequest) -> *mut c_char 
         Some(total),
         true,
     ) else {
-        return error_envelope("query.page_cache_full", "all cached query pages are in use");
+        return error_envelope("query.page_cache_full", "open query results use all of the driver's 64 MB of result memory; close some result tabs and run the query again");
     };
     session.pages.set_namespace(page.page_id, &database, &collection);
     success_json(serde_json::to_value(page).expect("query page serializes"))
@@ -989,7 +989,7 @@ fn aggregate_page(connection_id: u64, request: &QueryRequest) -> *mut c_char {
         ),
     };
     let Some(page) = page else {
-        return error_envelope("query.page_cache_full", "all cached query pages are in use");
+        return error_envelope("query.page_cache_full", "open query results use all of the driver's 64 MB of result memory; close some result tabs and run the query again");
     };
     success_json(serde_json::to_value(page).expect("query page serializes"))
 }
