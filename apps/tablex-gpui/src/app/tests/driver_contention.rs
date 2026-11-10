@@ -758,3 +758,57 @@ fn a_cancel_between_staged_requests_stops_the_batch_and_keeps_the_unsent_changes
         assert_eq!(this.error_log.log.len(), 0, "a user cancel is not an Error Log entry");
     });
 }
+
+/// A click on Next shows that it took: while the page loads, Next spins and both
+/// page buttons wait (a second click does not page twice); once it lands they
+/// are back. The run is held at the session lock so "loading" lasts.
+#[gpui::test]
+fn next_page_spins_and_waits_while_the_page_loads(cx: &mut TestAppContext) {
+    // A find tab (the "View Data" one) with its first page shown.
+    let (app, visual, tab, session) = find_tab_on_real_session(cx);
+    wait_until(visual, "the first page", |visual| {
+        app.read_with(visual, |this, _| {
+            !this.query_tasks.tasks.contains_key(&tab)
+                && this.workspace.runtime(tab).is_some_and(|runtime| runtime.driver_page_id.is_some())
+        })
+    });
+    let page = |app: &gpui::Entity<AppRoot>, visual: &gpui::VisualTestContext| {
+        app.read_with(visual, |this, _| this.workspace.runtime(tab).unwrap().pagination.page())
+    };
+    // The mock finds one document; report a full page so Next is offered.
+    app.update(visual, |this, cx| {
+        let pagination = &mut this.workspace.runtime_mut(tab).unwrap().pagination;
+        let full = pagination.page_size() as usize;
+        pagination.set_result_count(full);
+        cx.notify();
+    });
+    visual.run_until_parked();
+    assert!(app.read_with(visual, |this, _| this.workspace.runtime(tab).unwrap().pagination.has_next()));
+    assert_eq!(app.read_with(visual, |this, _| this.query_tasks.paging_direction(tab)), None);
+    let first = page(&app, visual);
+
+    // The handlers are invoked directly: the harness's click helpers park until
+    // background work finishes, which would wait out the held lock.
+    let holder = SessionLockHolder::hold(&session);
+    app.update(visual, |this, cx| this.page_tab_query(tab, true, cx));
+    assert_eq!(app.read_with(visual, |this, _| this.query_tasks.paging_direction(tab)), Some(true), "Next spins");
+    assert_eq!(page(&app, visual), first + 1);
+    app.update(visual, |this, cx| this.page_tab_query(tab, true, cx));
+    assert_eq!(page(&app, visual), first + 1, "Next while the page loads does not page twice");
+    app.update(visual, |this, cx| this.page_tab_query(tab, false, cx));
+    assert_eq!(page(&app, visual), first + 1, "Previous waits too");
+
+    holder.release();
+    wait_until(visual, "the second page", |visual| {
+        app.read_with(visual, |this, _| !this.query_tasks.tasks.contains_key(&tab))
+    });
+    visual.run_until_parked();
+    assert_eq!(app.read_with(visual, |this, _| this.query_tasks.paging_direction(tab)), None);
+    assert_eq!(page(&app, visual), first + 1);
+    // Back to normal: Previous pages again.
+    click_debug_button(visual, "page-previous");
+    wait_until(visual, "the first page again", |visual| {
+        app.read_with(visual, |this, _| !this.query_tasks.tasks.contains_key(&tab))
+    });
+    assert_eq!(page(&app, visual), first);
+}

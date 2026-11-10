@@ -120,6 +120,19 @@ pub(super) struct QueryTaskState {
     pub(super) pending_runs: HashMap<u64, PendingRun>,
     pub(super) started_at: HashMap<u64, (crate::query::QueryRunId, Instant)>,
     pub(super) registry: QueryTaskRegistry,
+    /// The run a page button started, and its direction (`true` = next): the
+    /// footer spins that button while the run is the tab's current one.
+    pub(super) paging: HashMap<u64, (crate::query::QueryRunId, bool)>,
+}
+
+impl QueryTaskState {
+    /// The direction of the page the tab is loading, if its running query
+    /// came from a page button.
+    pub(super) fn paging_direction(&self, tab_id: u64) -> Option<bool> {
+        let (run, _) = self.started_at.get(&tab_id)?;
+        let (paged_run, forward) = self.paging.get(&tab_id)?;
+        (self.tasks.contains_key(&tab_id) && paged_run == run).then_some(*forward)
+    }
 }
 
 impl AppRoot {
@@ -961,6 +974,18 @@ impl AppRoot {
     /// executed statement there is nothing to page. Mongo tabs and the scenario
     /// fixture keep their own query state and re-run through the common path.
     pub(super) fn page_tab_query(&mut self, tab_id: u64, forward: bool, cx: &mut Context<Self>) {
+        // A page that is still loading: another click (or key) waits for it
+        // instead of moving the page counter twice.
+        if self.query_tasks.tasks.contains_key(&tab_id) {
+            return;
+        }
+        self.page_tab_query_inner(tab_id, forward, cx);
+        if let Some((run, _)) = self.query_tasks.started_at.get(&tab_id) {
+            self.query_tasks.paging.insert(tab_id, (*run, forward));
+        }
+    }
+
+    fn page_tab_query_inner(&mut self, tab_id: u64, forward: bool, cx: &mut Context<Self>) {
         if self.refuse_while_editing_mongo_document(tab_id, cx) {
             return;
         }

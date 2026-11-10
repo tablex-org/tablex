@@ -84,6 +84,14 @@ fn auto_refresh_label(seconds: Option<u64>) -> String {
     seconds.map_or_else(|| "Off".to_string(), |seconds| format!("{seconds}s"))
 }
 
+/// A page button whose page is loading: its icon spins. Kept out of the footer
+/// render so the icon is only built while loading.
+fn spinning_page_button(button: Button) -> Button {
+    button
+        .loading(true)
+        .loading_icon(Icon::empty().path("icons/loader-circle.svg").size(px(14.0)))
+}
+
 impl AppRoot {
     pub(in crate::app) fn selection_stats(&mut self, tab_id: u64) -> Option<crate::selection_stats::SelectionStats> {
         let view = self.view(tab_id);
@@ -203,6 +211,10 @@ impl AppRoot {
         // would commit, roll back, undo, change rows or re-run wait for its Save or Cancel.
         let editing_document = self.view(tab_id).mongo.document_edit.is_some();
         let commit_running = commit_running || editing_document;
+        // While the tab's query runs the page buttons wait for it; the one that
+        // started it spins, so a click visibly took.
+        let query_running = self.query_tasks.tasks.contains_key(&tab_id);
+        let paging = self.query_tasks.paging_direction(tab_id);
         let previous = Button::new(("page-previous", tab_id))
             .small()
             .icon(
@@ -214,7 +226,8 @@ impl AppRoot {
             .ghost()
             .tooltip("Previous")
             .debug_selector(|| "page-previous".into())
-            .disabled(!pagination.has_previous() || editing_document)
+            .when(paging == Some(false), spinning_page_button)
+            .disabled(!pagination.has_previous() || editing_document || query_running)
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.page_tab_query(tab_id, false, cx);
             }));
@@ -225,7 +238,8 @@ impl AppRoot {
             .ghost()
             .tooltip("Next")
             .debug_selector(|| "page-next".into())
-            .disabled(!pagination.has_next() || editing_document)
+            .when(paging == Some(true), spinning_page_button)
+            .disabled(!pagination.has_next() || editing_document || query_running)
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.page_tab_query(tab_id, true, cx);
             }));
