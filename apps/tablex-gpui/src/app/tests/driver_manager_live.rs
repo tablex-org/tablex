@@ -105,13 +105,13 @@ fn live_catalog_is_fetched_and_verified_with_the_production_key() {
         assert!(item.manifest.as_ref().is_some_and(|entry| entry.artifact_for_target(&target).is_some()));
     }
     let mongodb = full.drivers.iter().find(|item| item.id == "mongodb").unwrap();
-    assert_eq!(mongodb.version, "0.2.1");
     let mut tool_ids: Vec<&str> = full.tools.iter().map(|item| item.id.as_str()).collect();
     tool_ids.sort();
     assert_eq!(tool_ids, LIVE_TOOLS);
     let shell = full.tools.iter().find(|item| item.id == "tablex-mongo-shell").unwrap();
     assert_eq!(shell.requires().len(), 1);
-    assert_eq!((shell.requires()[0].driver.as_str(), shell.requires()[0].min_version.as_str()), ("mongodb", "0.2.1"));
+    // The release pins the shell to the mongodb driver of the same checkout.
+    assert_eq!((shell.requires()[0].driver.as_str(), shell.requires()[0].min_version.as_str()), ("mongodb", mongodb.version.as_str()));
 
     // The replay watermark of the store moved to the manifest's generatedAt.
     eprintln!("LIVE watermark file    = {:?}", std::fs::read_to_string(store.manifest_watermark_path()).ok());
@@ -231,6 +231,13 @@ impl DmRig<'_> {
         });
     }
 
+    /// The manager with its tools loaded, on the All tab: the driver rows (and
+    /// their action buttons) are not rendered on the Tools tab.
+    fn open_live_manager(&mut self) {
+        self.open_manager_with_tool();
+        self.click(DriverFilter::All.selector());
+    }
+
     fn live_tool_installed(&self, id: &str) -> bool {
         self.read(|this| this.driver_ui.tools.item_of(id).is_some_and(|item| item.installed.is_some()))
     }
@@ -309,7 +316,7 @@ fn live_codesign(path: &std::path::Path) -> String {
 #[ignore = "network + local containers: installs every published driver and tool"]
 fn live_every_catalog_driver_installs_connects_uninstalls_and_reinstalls(cx: &mut TestAppContext) {
     let mut rig = live_rig(cx);
-    rig.open_manager_with_tool();
+    rig.open_live_manager();
     assert_eq!(rig.read(|this| this.driver_ui.catalog_error.clone()), None);
     assert_eq!(rig.read(|this| this.driver_ui.policy), TrustPolicy::Strict);
     for id in LIVE_DRIVERS {
@@ -452,12 +459,15 @@ fn live_every_catalog_driver_installs_connects_uninstalls_and_reinstalls(cx: &mu
 #[ignore = "network + local MongoDB container: update and uninstall with an open session"]
 fn live_mongodb_update_offer_stale_session_reconnect_and_uninstall(cx: &mut TestAppContext) {
     let mut rig = live_rig(cx);
-    rig.open_manager_with_tool();
+    rig.open_live_manager();
 
-    // Real 0.2.1 first (to get the real bytes), then turn the install into a 0.2.0 one.
+    // The catalog's real build first (to get the real bytes), then turn the install into a 0.2.0 one.
     let real = rig.live_install("mongodb");
-    assert_eq!(real.version, "0.2.1");
-    let saved = rig.root.join("mongodb-0.2.1.dylib");
+    let latest = real.version.clone();
+    assert_ne!(latest, "0.2.0");
+    // The directory of the catalog build, for the `move` wait closures below.
+    let latest_dir: &'static str = Box::leak(format!("/mongodb/{latest}/").into_boxed_str());
+    let saved = rig.root.join("mongodb-latest.dylib");
     std::fs::copy(&real.path, &saved).unwrap();
     rig.live_uninstall("mongodb");
     let old_dir = rig.live_driver_dir("mongodb").join("0.2.0");
@@ -477,13 +487,13 @@ fn live_mongodb_update_offer_stale_session_reconnect_and_uninstall(cx: &mut Test
         this.driver_ui.catalog_task.is_none() && this.driver_ui.model.row("mongodb").is_some_and(|row| row.is_installed())
     });
 
-    // The model offers 0.2.0 -> 0.2.1 and the add-on says "update driver first".
+    // The model offers 0.2.0 -> the catalog version and the add-on says "update driver first".
     let (text, has_update, action) = rig.read(|this| {
         let row = this.driver_ui.model.row("mongodb").unwrap();
         (driver_manager::version_text(row), row.has_update(), driver_manager::primary_action(row, None))
     });
     eprintln!("LIVE mongodb row: version_text {text:?} has_update {has_update} action {action:?}");
-    assert_eq!(text, ("0.2.0".to_string(), Some("0.2.1".to_string())));
+    assert_eq!(text, ("0.2.0".to_string(), Some(latest.clone())));
     assert!(has_update);
     assert_eq!(action, Some(PrimaryAction::Update));
     assert!(rig.read(|this| this.driver_ui.updates_available) >= 1);
@@ -493,7 +503,7 @@ fn live_mongodb_update_offer_stale_session_reconnect_and_uninstall(cx: &mut Test
         (need.reason(), driver_manager::addon_actions(item, None, Some(&need)))
     });
     eprintln!("LIVE mongo-shell: reason {reason:?} actions {actions:?}");
-    assert!(reason.contains("0.2.1") && reason.contains("0.2.0 installed"), "{reason}");
+    assert!(reason.contains(latest.as_str()) && reason.contains("0.2.0 installed"), "{reason}");
     assert_eq!(actions, [driver_manager::ToolAction::UpdateDriverFirst]);
     // And installing it directly is refused by the host (the requirement is enforced there too).
     rig.update(|this, cx| this.run_tool_action_of("tablex-mongo-shell", driver_manager::ToolAction::Install, cx));
@@ -509,15 +519,15 @@ fn live_mongodb_update_offer_stale_session_reconnect_and_uninstall(cx: &mut Test
     rig.click("driver-action-mongodb");
     rig.wait("the update", |this| {
         this.driver_ui.queue.job("mongodb").is_none()
-            && this.driver_ui.handles.get("mongodb").is_some_and(|handle| handle.path().to_string_lossy().contains("/mongodb/0.2.1/"))
+            && this.driver_ui.handles.get("mongodb").is_some_and(|handle| handle.path().to_string_lossy().contains(latest_dir))
     });
     let record = rig.live_record("mongodb").unwrap();
     eprintln!("LIVE after update: record {} previous {:?} dirs {:?}", record.version, record.previous_version, rig.live_versions("mongodb"));
-    assert_eq!(record.version, "0.2.1");
+    assert_eq!(record.version, latest);
     assert_eq!(record.sha256, driver_sha256(&record.path));
-    assert_eq!(rig.live_versions("mongodb"), ["0.2.0", "0.2.1"]);
+    assert_eq!(rig.live_versions("mongodb"), ["0.2.0", latest.as_str()]);
     let text = rig.read(|this| driver_manager::version_text(this.driver_ui.model.row("mongodb").unwrap()));
-    assert_eq!(text, ("0.2.1".to_string(), None));
+    assert_eq!(text, (latest.clone(), None));
     assert_eq!(rig.read(|this| this.driver_ui.updates_available), 0);
 
     // The open session was not disturbed: still on 0.2.0, still answers, flagged stale.
@@ -540,7 +550,7 @@ fn live_mongodb_update_offer_stale_session_reconnect_and_uninstall(cx: &mut Test
     rig.live_tool_action("tablex-mongo-shell", driver_manager::ToolAction::Install);
     assert!(rig.live_tool_installed("tablex-mongo-shell"));
 
-    // Reconnect moves the session to 0.2.1.
+    // Reconnect moves the session to the catalog version.
     rig.click("driver-action-mongodb");
     let k = key.clone();
     rig.wait("the reconnect", move |this| {
@@ -549,7 +559,7 @@ fn live_mongodb_update_offer_stale_session_reconnect_and_uninstall(cx: &mut Test
                 .driver_runtime
                 .session_handles
                 .get(&k)
-                .is_some_and(|handle| handle.path().to_string_lossy().contains("/mongodb/0.2.1/"))
+                .is_some_and(|handle| handle.path().to_string_lossy().contains(latest_dir))
     });
     assert_eq!(rig.read(|this| this.driver_sessions("mongodb").iter().filter(|s| s.stale).count()), 0);
     eprintln!("LIVE reconnected on {}", rig.session_version(&key));
@@ -568,7 +578,7 @@ fn live_mongodb_update_offer_stale_session_reconnect_and_uninstall(cx: &mut Test
 
     // Reinstall works afterwards.
     let again = rig.live_install("mongodb");
-    assert_eq!(again.version, "0.2.1");
+    assert_eq!(again.version, latest);
 }
 
 // --- case 8 -----------------------------------------------------------------------------------
@@ -696,7 +706,7 @@ fn live_tampered_manifest_and_artifact_are_rejected() {
 #[ignore = "network: an unreachable catalog URL keeps installed drivers working"]
 fn live_an_unreachable_catalog_reports_clearly_and_installed_drivers_still_load(cx: &mut TestAppContext) {
     let mut rig = live_rig(cx);
-    rig.open_manager_with_tool();
+    rig.open_live_manager();
     let sqlite = rig.live_install("sqlite");
     let sqlite_uri = format!("sqlite://{}", rig.root.join("offline.sqlite").display());
 
@@ -797,7 +807,7 @@ fn live_a_cancel_in_the_middle_of_a_real_download_leaves_nothing() {
 #[ignore = "network: the Cancel button during a real driver download"]
 fn live_the_cancel_button_during_a_real_download_leaves_no_files_or_record(cx: &mut TestAppContext) {
     let mut rig = live_rig(cx);
-    rig.open_manager_with_tool();
+    rig.open_live_manager();
     let mut cancelled = 0;
     for attempt in 1..=4 {
         rig.click("driver-action-mongodb");
@@ -830,10 +840,12 @@ fn live_the_cancel_button_during_a_real_download_leaves_no_files_or_record(cx: &
 
 // --- extra: the same proofs through the Driver Manager UI ---------------------------------------
 
-/// Installs the real mongodb 0.2.1, then makes the store hold it as a 0.2.0 install.
-fn live_downgrade_mongodb(rig: &mut DmRig<'_>) {
+/// Installs the catalog's real mongodb, then makes the store hold it as a 0.2.0
+/// install. Returns the catalog version.
+fn live_downgrade_mongodb(rig: &mut DmRig<'_>) -> String {
     let real = rig.live_install("mongodb");
-    let saved = rig.root.join("mongodb-0.2.1.dylib");
+    let latest = real.version.clone();
+    let saved = rig.root.join("mongodb-latest.dylib");
     std::fs::copy(&real.path, &saved).unwrap();
     rig.live_uninstall("mongodb");
     let old_dir = rig.live_driver_dir("mongodb").join("0.2.0");
@@ -847,14 +859,15 @@ fn live_downgrade_mongodb(rig: &mut DmRig<'_>) {
     rig.wait("the reload", |this| {
         this.driver_ui.catalog_task.is_none() && this.driver_ui.model.row("mongodb").is_some_and(|row| row.is_installed())
     });
+    latest
 }
 
 #[gpui::test]
-#[ignore = "network: Update driver first updates mongodb to 0.2.1, then installs the shell"]
+#[ignore = "network: Update driver first updates mongodb to the catalog version, then installs the shell"]
 fn live_update_driver_first_updates_the_driver_then_installs_the_shell(cx: &mut TestAppContext) {
     let mut rig = live_rig(cx);
-    rig.open_manager_with_tool();
-    live_downgrade_mongodb(&mut rig);
+    rig.open_live_manager();
+    let latest = live_downgrade_mongodb(&mut rig);
     rig.update(|this, cx| this.run_tool_action_of("tablex-mongo-shell", driver_manager::ToolAction::UpdateDriverFirst, cx));
     rig.wait("the driver update and the add-on install", |this| {
         this.driver_ui.queue.job("mongodb").is_none()
@@ -864,7 +877,7 @@ fn live_update_driver_first_updates_the_driver_then_installs_the_shell(cx: &mut 
     });
     let record = rig.live_record("mongodb").unwrap();
     eprintln!("LIVE Update driver first -> mongodb {} (previous {:?}), shell installed", record.version, record.previous_version);
-    assert_eq!(record.version, "0.2.1");
+    assert_eq!(record.version, latest);
     assert!(rig.live_tool_installed("tablex-mongo-shell"));
     assert!(rig.read(|this| this.addon_need(this.driver_ui.tools.item_of("tablex-mongo-shell").unwrap()).is_none()));
 }
@@ -873,7 +886,7 @@ fn live_update_driver_first_updates_the_driver_then_installs_the_shell(cx: &mut 
 #[ignore = "network: a one-byte-changed manifest as the Driver Manager's explicit file:// source"]
 fn live_driver_manager_refuses_a_tampered_manifest_and_offers_nothing_from_it(cx: &mut TestAppContext) {
     let mut rig = live_rig(cx);
-    rig.open_manager_with_tool();
+    rig.open_live_manager();
     rig.live_install("sqlite");
     let manifest = live_fetch(crate::drivers::DEFAULT_MANIFEST_SOURCE);
     let signature = live_fetch(&format!("{}.sig", crate::drivers::DEFAULT_MANIFEST_SOURCE));
