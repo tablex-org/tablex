@@ -4,13 +4,13 @@
 //! Navicat versions, so keys are matched case- and punctuation-insensitively.
 
 use super::{
-    crypto, find_product, normalize, parse_port, ImportError, ImportKind, ImportedConnection,
+    crypto, dedup, find_product, normalize, parse_port, ImportError, ImportKind, ImportedConnection,
     ImportedProxy, ImportedSsh, Secret,
 };
 use crate::connections::ConnectionKind;
 use crate::ssh_tunnel::{ProxyType, SshAuthMethod};
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /// Element data keyed by normalized name.
 #[derive(Default)]
@@ -244,23 +244,27 @@ fn proxy_of(node: &Node) -> Option<ImportedProxy> {
 }
 
 /// `mongodb://user@a:1,b:2/db?replicaSet=…`: Navicat leaves `Host` at a
-/// `localhost` placeholder and lists the real seeds as `<Member>`s.
-fn mongo_replica_uri(node: &Node, username: &str) -> Option<(String, String)> {
-    if node.members.is_empty() {
-        return None;
-    }
+/// `localhost` placeholder and lists the real seeds as `<Member>`s. A single `host` without
+/// members only gets a URI when there is something the host/port fields cannot say (SRV, options).
+fn mongo_replica_uri(node: &Node, username: &str, host: &str, port: Option<u16>) -> Option<(String, String)> {
     let srv = is_truthy(node.any(&["useSRVRecord", "srvRecord"]));
+    let seeds: Vec<(&str, Option<u16>)> = if node.members.is_empty() {
+        vec![(host, port)]
+    } else {
+        node.members.iter().map(|(host, port)| (host.as_str(), Some(*port))).collect()
+    };
+    // Only user names and database names are encoded: a host name keeps its dots.
     let encode = |text: &str| utf8_percent_encode(text, NON_ALPHANUMERIC).to_string();
     let hosts = if srv {
-        encode(&node.members[0].0)
+        seeds[0].0.to_string()
     } else {
-        node.members
+        seeds
             .iter()
             .map(|(host, port)| {
-                if host.contains(':') {
-                    format!("[{host}]:{port}")
-                } else {
-                    format!("{host}:{port}")
+                let host = if host.contains(':') { format!("[{host}]") } else { host.to_string() };
+                match port {
+                    Some(port) => format!("{host}:{port}"),
+                    None => host,
                 }
             })
             .collect::<Vec<_>>()
@@ -268,9 +272,11 @@ fn mongo_replica_uri(node: &Node, username: &str) -> Option<(String, String)> {
     };
     let database = node.any(&["advanceDatabase", "database", "databaseName"]);
     let mut query = url::form_urlencoded::Serializer::new(String::new());
+    let mut has_options = false;
     let mut param = |key: &str, value: &str| {
         if !value.is_empty() {
             query.append_pair(key, value);
+            has_options = true;
         }
     };
     param("replicaSet", node.any(&["replicaSetName", "replicaSet"]));
@@ -294,8 +300,12 @@ fn mongo_replica_uri(node: &Node, username: &str) -> Option<(String, String)> {
             param(key, if is_truthy(value) { "true" } else { "false" });
         }
     }
+    // TLS alone is the form's own TLS field.
+    if node.members.is_empty() && !srv && !has_options {
+        return None;
+    }
     if node.flag(&["ssl", "useSsl"]) {
-        param("tls", "true");
+        query.append_pair("tls", "true");
     }
     let query = query.finish();
     let userinfo = if username.is_empty() {
@@ -353,9 +363,13 @@ fn connection_of(node: &Node) -> Option<ImportedConnection> {
     connection.ssh = ssh_of(node);
     connection.proxy = proxy_of(node);
     if connection.kind.supported() == Some(ConnectionKind::Mongodb) {
-        if let Some((uri, database)) = mongo_replica_uri(node, &connection.username) {
-            connection.host = node.members[0].0.clone();
-            connection.port = Some(node.members[0].1);
+        if let Some((uri, database)) =
+            mongo_replica_uri(node, &connection.username, &connection.host, connection.port)
+        {
+            if let Some((host, port)) = node.members.first() {
+                connection.host = host.clone();
+                connection.port = Some(*port);
+            }
             connection.database = database;
             connection.uri = Some(uri);
         }
@@ -367,25 +381,14 @@ pub fn parse(bytes: &[u8]) -> Result<Vec<ImportedConnection>, ImportError> {
     let text = std::str::from_utf8(bytes).map_err(|_| ImportError::InvalidXml)?;
     let document = roxmltree::Document::parse(text.trim_start_matches('\u{feff}'))
         .map_err(|_| ImportError::InvalidXml)?;
-    let mut seen = HashSet::new();
     let connections = document
         .descendants()
         .filter(roxmltree::Node::is_element)
         .map(read_node)
         .filter(is_candidate)
         .filter_map(|node| connection_of(&node))
-        .filter(|c| {
-            seen.insert((
-                c.name.clone(),
-                c.kind.label(),
-                c.host.clone(),
-                c.port,
-                c.database.clone(),
-                c.uri.clone(),
-            ))
-        })
         .collect();
-    Ok(connections)
+    Ok(dedup(connections))
 }
 
 #[cfg(test)]
@@ -545,5 +548,36 @@ mod tests {
             parse(b"<!DOCTYPE a [<!ENTITY x \"y\">]><a/>"),
             Err(ImportError::InvalidXml)
         );
+    }
+
+    #[test]
+    fn an_srv_host_is_not_percent_encoded_and_the_uri_saves() {
+        let xml = r#"<Connections><Connection ConnectionName="Atlas" ConnType="MONGODB" Host="localhost" UserName="app@corp" Database="app" UseSRVRecord="true" AuthSource="admin">
+            <Member HostName="cluster0.ab-cd.mongodb.net" Port="27017" /></Connection></Connections>"#;
+        let all = parse(xml.as_bytes()).unwrap();
+        assert_eq!(
+            all[0].uri.as_deref(),
+            Some("mongodb+srv://app%40corp@cluster0.ab-cd.mongodb.net/app?authSource=admin")
+        );
+        assert_eq!(all[0].to_record(1.0).unwrap().uri, all[0].uri.clone().unwrap());
+    }
+
+    #[test]
+    fn a_single_host_mongo_keeps_its_auth_and_replica_options() {
+        let xml = r#"<Connections>
+          <Connection ConnectionName="One" ConnType="MONGODB" Host="mongo.example.com" Port="27018" UserName="u" Database="app" AuthSource="admin" AuthMechanism="SCRAM-SHA-256" ReplicaSetName="rs0" />
+          <Connection ConnectionName="Plain" ConnType="MONGODB" Host="mongo2.example.com" Port="27017" UserName="u" Database="app" SSL="true" />
+        </Connections>"#;
+        let all = parse(xml.as_bytes()).unwrap();
+        let one = by_name(&all, "One");
+        assert_eq!(
+            one.uri.as_deref(),
+            Some("mongodb://u@mongo.example.com:27018/app?replicaSet=rs0&authSource=admin&authMechanism=SCRAM-SHA-256")
+        );
+        assert_eq!((one.host.as_str(), one.port), ("mongo.example.com", Some(27018)));
+        // Nothing the fields cannot say (TLS alone is the TLS field): no URI.
+        let plain = by_name(&all, "Plain");
+        assert_eq!(plain.uri, None);
+        assert!(plain.tls);
     }
 }

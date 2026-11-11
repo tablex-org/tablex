@@ -3,13 +3,12 @@
 //! Folders are not imported.
 
 use super::{
-    crypto, find_product, jdbc, normalize, parse_port, ImportError, ImportKind,
+    crypto, dedup, find_product, jdbc, normalize, parse_port, strip_bom, ImportError, ImportKind,
     ImportedConnection, ImportedJump, ImportedProxy, ImportedSsh, Secret,
 };
 use crate::connections::ConnectionKind;
 use crate::ssh_tunnel::{ProxyType, SshAuthMethod};
 use serde_json::Value;
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, PartialEq, Eq)]
@@ -53,44 +52,84 @@ fn sibling_credentials(data_sources: &Path) -> PathBuf {
     data_sources.with_file_name(credentials)
 }
 
-/// Resolves what the picker returned (files and/or folders) to the data
-/// sources file and its credentials file.
-pub fn locate(paths: &[PathBuf]) -> Result<DbeaverFiles, ImportError> {
-    let mut data_sources = None;
-    let mut credentials = None;
-    for path in paths {
-        if path.is_dir() {
-            let found = WORKSPACE_SUBDIRS
-                .iter()
-                .map(|sub| path.join(sub))
-                .find_map(|dir| {
-                    let plain = dir.join("data-sources.json");
-                    if plain.is_file() {
-                        return Some(plain);
-                    }
-                    let mut others: Vec<_> = std::fs::read_dir(&dir)
-                        .ok()?
-                        .filter_map(Result::ok)
-                        .map(|entry| entry.path())
-                        .filter(|p| p.is_file() && is_data_sources(&file_name(p)))
-                        .collect();
-                    others.sort();
-                    others.into_iter().next()
-                });
-            data_sources = data_sources.or(found);
-        } else if is_credentials(&file_name(path)) {
-            credentials = Some(path.clone());
-        } else if path.extension().is_some_and(|ext| ext == "json") {
-            data_sources = data_sources.or(Some(path.clone()));
+/// Every `data-sources*.json` of the workspace folders below a picked folder: the usual spots
+/// and each project's `.dbeaver` folder (`workspace6/<Project>/.dbeaver`), plain file first.
+fn data_sources_below(path: &Path) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = WORKSPACE_SUBDIRS.iter().map(|sub| path.join(sub)).collect();
+    for workspace in [path.to_path_buf(), path.join("workspace6"), path.join("DBeaverData/workspace6")] {
+        if file_name(&workspace) != "workspace6" {
+            continue;
+        }
+        let mut projects: Vec<_> = std::fs::read_dir(&workspace)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path().join(".dbeaver"))
+            .filter(|dir| dir.is_dir())
+            .collect();
+        projects.sort();
+        dirs.extend(projects);
+    }
+    let mut files: Vec<PathBuf> = Vec::new();
+    for dir in dirs {
+        let mut here: Vec<_> = std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|p| p.is_file() && is_data_sources(&file_name(p)))
+            .collect();
+        here.sort_by_key(|p| (file_name(p) != "data-sources.json", p.clone()));
+        for file in here {
+            if !files.contains(&file) {
+                files.push(file);
+            }
         }
     }
-    let data_sources = data_sources.ok_or(ImportError::MissingFile("data-sources.json"))?;
-    let credentials =
-        credentials.or_else(|| Some(sibling_credentials(&data_sources)).filter(|p| p.is_file()));
-    Ok(DbeaverFiles {
-        data_sources,
-        credentials,
-    })
+    files
+}
+
+/// Resolves what the picker returned (files and/or folders) to every data sources file and its
+/// credentials file.
+pub fn locate(paths: &[PathBuf]) -> Result<Vec<DbeaverFiles>, ImportError> {
+    let mut data_sources: Vec<PathBuf> = Vec::new();
+    let mut credentials: Vec<PathBuf> = Vec::new();
+    for path in paths {
+        let found = if path.is_dir() {
+            data_sources_below(path)
+        } else if is_credentials(&file_name(path)) {
+            credentials.push(path.clone());
+            continue;
+        } else if path.extension().is_some_and(|ext| ext == "json") {
+            vec![path.clone()]
+        } else {
+            continue;
+        };
+        for file in found {
+            if !data_sources.contains(&file) {
+                data_sources.push(file);
+            }
+        }
+    }
+    if data_sources.is_empty() {
+        return Err(ImportError::MissingFile("data-sources.json in the selection"));
+    }
+    Ok(data_sources
+        .into_iter()
+        .map(|data_sources| {
+            let sibling = sibling_credentials(&data_sources);
+            let credentials = credentials
+                .iter()
+                .find(|file| file.parent() == data_sources.parent() && file_name(file) == file_name(&sibling))
+                .cloned()
+                .or_else(|| Some(sibling.clone()).filter(|p| p.is_file()))
+                .or_else(|| credentials.iter().find(|file| file_name(file) == file_name(&sibling)).cloned());
+            DbeaverFiles {
+                data_sources,
+                credentials,
+            }
+        })
+        .collect())
 }
 
 fn text(value: Option<&Value>) -> String {
@@ -117,10 +156,14 @@ fn decrypt_credentials(file: Option<&[u8]>) -> Value {
 }
 
 fn entries(parsed: &Value) -> Vec<(String, &Value)> {
-    let source = ["connections", "dataSources", "datasources"]
-        .iter()
-        .find_map(|key| parsed.get(key))
-        .unwrap_or(parsed);
+    // A top-level object is the file: its `folders`, `connection-types`... are not connections.
+    let source = match parsed {
+        Value::Object(_) => ["connections", "dataSources", "datasources"]
+            .iter()
+            .find_map(|key| parsed.get(key))
+            .unwrap_or(&Value::Null),
+        other => other,
+    };
     match source {
         Value::Object(map) => map
             .iter()
@@ -236,7 +279,7 @@ fn proxy_of(config: &Value, id: &str, credentials: &Value) -> Option<ImportedPro
 /// "password" is the key's passphrase.
 fn ssh_of(config: &Value, id: &str, credentials: &Value) -> Option<(ImportedSsh, Option<&'static str>)> {
     let handler = config.get("handlers")?.get("ssh_tunnel")?;
-    if handler.get("enabled").and_then(Value::as_bool) != Some(true) {
+    if !flag(handler.get("enabled")) {
         return None;
     }
     let properties = handler.get("properties").unwrap_or(&Value::Null);
@@ -335,6 +378,7 @@ fn connection_of(id: &str, entry: &Value, credentials: &Value) -> Option<Importe
         .filter(|user| !user.is_empty())
         .unwrap_or(target.user.clone());
     connection.password = Secret::new(password).or(target.password);
+    connection.tls = target.tls;
     if let Some((ssh, note)) = ssh_of(config, id, credentials) {
         connection.ssh = Some(ssh);
         connection.route_note = note;
@@ -355,20 +399,18 @@ pub fn parse(
     credentials: Option<&[u8]>,
 ) -> Result<Vec<ImportedConnection>, ImportError> {
     let parsed: Value =
-        serde_json::from_slice(data_sources).map_err(|_| ImportError::InvalidJson)?;
+        serde_json::from_slice(strip_bom(data_sources)).map_err(|_| ImportError::InvalidJson)?;
     if !parsed.is_object() && !parsed.is_array() {
         return Err(ImportError::NotThisFormat("a DBeaver data-sources.json"));
     }
     let credentials = decrypt_credentials(credentials);
-    let mut seen = HashSet::new();
-    Ok(entries(&parsed)
-        .into_iter()
-        .filter(|(id, _)| !id.is_empty())
-        .filter_map(|(id, entry)| connection_of(&id, entry, &credentials))
-        .filter(|c| {
-            seen.insert((c.name.clone(), c.kind.label(), c.host.clone(), c.port, c.database.clone()))
-        })
-        .collect())
+    Ok(dedup(
+        entries(&parsed)
+            .into_iter()
+            .filter(|(id, _)| !id.is_empty())
+            .filter_map(|(id, entry)| connection_of(&id, entry, &credentials))
+            .collect(),
+    ))
 }
 
 #[cfg(test)]
@@ -482,18 +524,18 @@ mod tests {
 
         for pick in [dot.clone(), root.clone(), dot.join("data-sources.json")] {
             let files = locate(&[pick]).unwrap();
-            assert_eq!(files.data_sources, dot.join("data-sources.json"));
-            assert_eq!(files.credentials, Some(dot.join("credentials-config.json")));
+            assert_eq!(files.len(), 1);
+            assert_eq!(files[0].data_sources, dot.join("data-sources.json"));
+            assert_eq!(files[0].credentials, Some(dot.join("credentials-config.json")));
         }
         assert_eq!(
-            locate(&[dot.join("credentials-config.json"), dot.join("data-sources.json")])
-                .unwrap()
+            locate(&[dot.join("credentials-config.json"), dot.join("data-sources.json")]).unwrap()[0]
                 .credentials,
             Some(dot.join("credentials-config.json"))
         );
         assert_eq!(
             locate(&[std::env::temp_dir().join("tablex-no-such-dir-xyz")]),
-            Err(ImportError::MissingFile("data-sources.json"))
+            Err(ImportError::MissingFile("data-sources.json in the selection"))
         );
         assert_eq!(
             sibling_credentials(Path::new("/x/data-sources-extra.json")),
@@ -553,5 +595,55 @@ mod tests {
             let route = crate::ssh_tunnel::SshSettings::parse(&connection.to_record(1.0).unwrap().network_settings_json).unwrap();
             assert!(!route.routed(), "{name}");
         }
+    }
+
+    #[test]
+    fn a_byte_order_mark_does_not_break_the_json() {
+        let mut bom = vec![0xEF, 0xBB, 0xBF];
+        bom.extend_from_slice(br#"{"connections":{"a":{"name":"x","driver":"postgres-jdbc","configuration":{"host":"h","port":"5432"}}}}"#);
+        assert_eq!(parse(&bom, None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn only_the_connections_object_is_read_and_enabled_may_be_text() {
+        // `folders` and `connection-types` hold objects too, but no connections.
+        let json = br#"{"folders":{"Prod":{"description":"x"}},"connection-types":{"dev":{"name":"Dev","color":"1"}}}"#;
+        assert_eq!(parse(json, None), Ok(Vec::new()));
+        let tunnel = br#"{"connections":{"a":{"name":"t","driver":"postgres-jdbc","configuration":{"host":"h","port":"5432","handlers":{"ssh_tunnel":{"enabled":"true","user":"u","properties":{"host":"b.example.com","authType":"AGENT"}}}}}}}"#;
+        assert!(parse(tunnel, None).unwrap()[0].ssh.is_some());
+    }
+
+    #[test]
+    fn the_url_sets_tls() {
+        let json = br#"{"connections":{"a":{"name":"t","driver":"postgres-jdbc","configuration":{"url":"jdbc:postgresql://h:5432/d?sslmode=require"}}}}"#;
+        assert!(parse(json, None).unwrap()[0].tls);
+    }
+
+    #[test]
+    fn every_project_workspace_and_every_data_sources_file_is_found() {
+        let root = std::env::temp_dir().join(format!("tablex-dbeaver-multi-{}", uuid::Uuid::new_v4()));
+        let workspace = root.join("workspace6");
+        let general = workspace.join("General/.dbeaver");
+        let other = workspace.join("Other/.dbeaver");
+        for dir in [&general, &other] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(general.join("data-sources.json"), DATA_SOURCES).unwrap();
+        std::fs::write(general.join("data-sources-extra.json"), b"{}").unwrap();
+        std::fs::write(general.join("credentials-config.json"), CREDENTIALS).unwrap();
+        std::fs::write(other.join("data-sources.json"), b"{}").unwrap();
+        for pick in [root.clone(), workspace.clone()] {
+            let files = locate(&[pick]).unwrap();
+            let found: Vec<_> = files.iter().map(|f| f.data_sources.clone()).collect();
+            assert_eq!(
+                found,
+                [general.join("data-sources.json"), general.join("data-sources-extra.json"), other.join("data-sources.json")]
+            );
+            assert_eq!(files[0].credentials, Some(general.join("credentials-config.json")));
+            assert_eq!(files[1].credentials, None);
+        }
+        // Two picked files are both used.
+        assert_eq!(locate(&[general.join("data-sources.json"), other.join("data-sources.json")]).unwrap().len(), 2);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

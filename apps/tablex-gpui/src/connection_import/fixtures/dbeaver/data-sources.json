@@ -26,7 +26,8 @@
 			"configuration": {
 				"host": "localhost",
 				"port": "5432",
-				"database": "appdb"
+				"database": "appdb",
+				"user": "postgres"
 			}
 		},
 		"mysql8-2": {

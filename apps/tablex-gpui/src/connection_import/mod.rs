@@ -20,9 +20,10 @@ use crate::connection_form::ConnectionFormState;
 use crate::connections::ConnectionKind;
 use crate::credentials::SecretKind;
 use crate::ssh_tunnel::{
-    JumpSettings, ProxySettings, ProxyType, SshAuthMethod, SshSettings,
+    plan_for, JumpSettings, ProxySettings, ProxyType, SshAuthMethod, SshSettings,
 };
 use engine_storage::connection::SavedConnectionRecord;
+use std::collections::HashSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -77,10 +78,7 @@ impl ImportSource {
                 "Choose the DBeaver workspace folder or data-sources.json{}",
                 location(crate::platform::dbeaver_workspace_dir())
             ),
-            Self::DataGrip => format!(
-                "Choose the DataGrip options folder or dataSources.xml{}",
-                location(crate::platform::datagrip_config_root())
-            ),
+            Self::DataGrip => datagrip::PICK_HINT.to_string(),
         }
     }
 
@@ -338,12 +336,69 @@ impl ImportedConnection {
         self.ssh.is_some() || self.proxy.is_some() || self.route_note.is_some()
     }
 
+    /// Why the route stays off whatever the secrets: the file's own note, or what TableX's tunnel
+    /// settings would refuse (a blank SSH user, no key file...).
+    fn route_off_reason(&self) -> Option<String> {
+        match self.route_note {
+            Some(note) => Some(note.to_owned()),
+            None => self
+                .route_settings(true)?
+                .validate()
+                .err()
+                .map(|invalid| invalid.to_string()),
+        }
+    }
+
     /// The whole route (every hop, the proxy) is there: it is switched on only then, so a half
     /// route never connects some other way than the file's tool did.
     pub fn route_usable(&self) -> bool {
-        self.route_note.is_none()
+        self.route_off_reason().is_none()
             && self.ssh.as_ref().is_none_or(ImportedSsh::usable)
             && self.proxy.as_ref().is_none_or(ImportedProxy::usable)
+    }
+
+    /// TableX's tunnel settings for the route, `None` without one.
+    fn route_settings(&self, on: bool) -> Option<SshSettings> {
+        if self.ssh.is_none() && self.proxy.is_none() {
+            return None;
+        }
+        let mut settings = SshSettings::default();
+        if let Some(ssh) = &self.ssh {
+            settings = SshSettings {
+                enabled: on,
+                host: ssh.host.clone(),
+                port: ssh.port.clone(),
+                user: ssh.user.clone(),
+                auth: ssh.auth,
+                key_path: ssh.key_path.clone(),
+                save_secrets: true,
+                jumps: ssh.jumps.iter().map(ImportedJump::settings).collect(),
+                ..SshSettings::default()
+            };
+        }
+        if let Some(proxy) = &self.proxy {
+            settings.proxy = proxy.settings(on);
+        }
+        Some(settings)
+    }
+
+    /// The tunnel cannot carry this connection (SQLite, an SRV or multi-host MongoDB URI...).
+    fn route_blocked_by_plan(&self, kind: ConnectionKind, record: &SavedConnectionRecord) -> bool {
+        self.route_settings(true)
+            .is_some_and(|settings| plan_for(kind, &record.uri, &settings).is_err())
+    }
+
+    /// Notes a route the connection's address cannot use, so the selection says it is off.
+    pub fn check_route(&mut self) {
+        if self.route_note.is_some() {
+            return;
+        }
+        let Some(kind) = self.kind.supported() else { return };
+        if let Ok(record) = self.record_without_route(0.0) {
+            if self.route_blocked_by_plan(kind, &record) {
+                self.route_note = Some("a tunnel cannot carry this connection's address");
+            }
+        }
     }
 
     /// `via SSH user@bastion[:port] (2 jumps) through SOCKS5 proxy host:port` when the connection
@@ -372,8 +427,8 @@ impl ImportedConnection {
                 None => "no tunnel or proxy imported".to_owned(),
             },
         };
-        match self.route_note {
-            Some(note) => label.push_str(&format!(" (off: {note})")),
+        match self.route_off_reason() {
+            Some(reason) => label.push_str(&format!(" (off: {reason})")),
             None if !self.route_usable() => label.push_str(" (off: a secret is missing)"),
             None => {}
         }
@@ -398,6 +453,18 @@ impl ImportedConnection {
     /// The record to save. The password is not part of it: the caller stores
     /// [`Self::password`] under the record's id in the credential store.
     pub fn to_record(&self, now: f64) -> Result<SavedConnectionRecord, ImportError> {
+        let mut record = self.record_without_route(now)?;
+        let Some(kind) = self.kind.supported() else {
+            return Ok(record);
+        };
+        let on = self.route_usable() && !self.route_blocked_by_plan(kind, &record);
+        if let Some(settings) = self.route_settings(on) {
+            record.network_settings_json = settings.write_into(&record.network_settings_json);
+        }
+        Ok(record)
+    }
+
+    fn record_without_route(&self, now: f64) -> Result<SavedConnectionRecord, ImportError> {
         let ImportKind::Supported(kind) = &self.kind else {
             return Err(ImportError::UnsupportedKind);
         };
@@ -415,7 +482,12 @@ impl ImportedConnection {
                 form.uri = uri.clone();
             }
             _ => {
-                form.host = self.host.clone();
+                // An IPv6 literal is bracketed in a URL.
+                form.host = if self.host.contains(':') && !self.host.starts_with('[') {
+                    format!("[{}]", self.host)
+                } else {
+                    self.host.clone()
+                };
                 form.port = self.port.map(|port| port.to_string()).unwrap_or_default();
                 form.username = self.username.clone();
                 form.database = self.database.clone();
@@ -423,37 +495,17 @@ impl ImportedConnection {
                     match kind {
                         ConnectionKind::Mongodb => form.uri_options = "tls=true".into(),
                         ConnectionKind::Postgres => form.uri_options = "sslmode=require".into(),
-                        ConnectionKind::Clickhouse => form.secure = true,
-                        _ => {}
+                        ConnectionKind::Mysql | ConnectionKind::Mariadb => {
+                            form.uri_options = "ssl-mode=REQUIRED".into()
+                        }
+                        ConnectionKind::Clickhouse | ConnectionKind::Redis => form.secure = true,
+                        ConnectionKind::Sqlite => {}
                     }
                 }
             }
         }
-        let mut record = form
-            .to_record(now, None)
-            .map_err(ImportError::InvalidConnection)?;
-        if self.ssh.is_some() || self.proxy.is_some() {
-            let on = self.route_usable();
-            let mut settings = SshSettings::default();
-            if let Some(ssh) = &self.ssh {
-                settings = SshSettings {
-                    enabled: on,
-                    host: ssh.host.clone(),
-                    port: ssh.port.clone(),
-                    user: ssh.user.clone(),
-                    auth: ssh.auth,
-                    key_path: ssh.key_path.clone(),
-                    save_secrets: true,
-                    jumps: ssh.jumps.iter().map(ImportedJump::settings).collect(),
-                    ..SshSettings::default()
-                };
-            }
-            if let Some(proxy) = &self.proxy {
-                settings.proxy = proxy.settings(on);
-            }
-            record.network_settings_json = settings.write_into(&record.network_settings_json);
-        }
-        Ok(record)
+        form.to_record(now, None)
+            .map_err(ImportError::InvalidConnection)
     }
 }
 
@@ -478,7 +530,7 @@ impl std::fmt::Display for ImportError {
         match self {
             Self::NotReadable => f.write_str("Could not read the selected file"),
             Self::TooLarge => f.write_str("The selected file is too large"),
-            Self::MissingFile(name) => write!(f, "Could not find {name} in the selection"),
+            Self::MissingFile(name) => write!(f, "Could not find {name}"),
             Self::InvalidXml => f.write_str("The file is not valid XML"),
             Self::InvalidJson => f.write_str("The file is not valid JSON"),
             Self::NotThisFormat(what) => write!(f, "The file is not {what}"),
@@ -536,7 +588,7 @@ pub enum Loaded {
 /// Reads and parses what the file picker returned. Blocking: run it off the
 /// UI thread.
 pub fn load(source: ImportSource, paths: &[PathBuf]) -> Result<Loaded, ImportError> {
-    let connections = match source {
+    let mut connections = match source {
         ImportSource::Dbx => {
             let bytes = read_limited(paths.first().ok_or(ImportError::NotReadable)?)?;
             if dbx::is_encrypted(&bytes) {
@@ -547,18 +599,16 @@ pub fn load(source: ImportSource, paths: &[PathBuf]) -> Result<Loaded, ImportErr
         ImportSource::Navicat => {
             navicat::parse(&read_limited(paths.first().ok_or(ImportError::NotReadable)?)?)?
         }
-        ImportSource::Dbeaver => {
-            let files = dbeaver::locate(paths)?;
+        ImportSource::Dbeaver => merge_sources(dbeaver::locate(paths)?.iter().map(|files| {
             let credentials = files
                 .credentials
                 .as_deref()
                 .map(read_limited)
                 .transpose()
                 .unwrap_or(None);
-            dbeaver::parse(&read_limited(&files.data_sources)?, credentials.as_deref())?
-        }
-        ImportSource::DataGrip => {
-            let files = datagrip::locate(paths)?;
+            dbeaver::parse(&read_limited(&files.data_sources)?, credentials.as_deref())
+        }))?,
+        ImportSource::DataGrip => merge_sources(datagrip::locate(paths)?.iter().map(|files| {
             let local = files
                 .local
                 .as_deref()
@@ -575,13 +625,64 @@ pub fn load(source: ImportSource, paths: &[PathBuf]) -> Result<Loaded, ImportErr
                 &read_limited(&files.data_sources)?,
                 local.as_deref(),
                 &ssh_configs,
-            )?
-        }
+                files.project_dir.as_deref(),
+            )
+        }))?,
     };
+    for connection in &mut connections {
+        connection.check_route();
+    }
     Ok(Loaded::Ready(ImportPreview {
         source,
         connections,
     }))
+}
+
+/// The connections of every file read, one list: a file that fails is skipped while another
+/// brought something, and the first failure is the answer when none did.
+fn merge_sources(
+    results: impl Iterator<Item = Result<Vec<ImportedConnection>, ImportError>>,
+) -> Result<Vec<ImportedConnection>, ImportError> {
+    let mut merged = Vec::new();
+    let mut first_error = None;
+    let mut any_read = false;
+    for result in results {
+        match result {
+            Ok(connections) => {
+                any_read = true;
+                merged.extend(connections);
+            }
+            Err(error) => first_error = first_error.or(Some(error)),
+        }
+    }
+    match first_error {
+        Some(error) if !any_read => Err(error),
+        _ => Ok(dedup(merged)),
+    }
+}
+
+/// The same connection listed twice (a file read twice, a name in two projects) is kept once.
+fn dedup(connections: Vec<ImportedConnection>) -> Vec<ImportedConnection> {
+    let mut seen = HashSet::new();
+    connections
+        .into_iter()
+        .filter(|c| {
+            seen.insert((
+                c.name.clone(),
+                c.kind.label(),
+                c.host.clone(),
+                c.port,
+                c.database.clone(),
+                c.username.clone(),
+                c.uri.clone(),
+            ))
+        })
+        .collect()
+}
+
+/// A UTF-8 byte order mark some editors put in front of JSON.
+fn strip_bom(bytes: &[u8]) -> &[u8] {
+    bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes)
 }
 
 fn read_limited(path: &Path) -> Result<Vec<u8>, ImportError> {
@@ -605,6 +706,9 @@ pub struct ImportSummary {
     pub invalid: usize,
     pub passwords_saved: usize,
     pub passwords_failed: usize,
+    /// Selected connections already saved (same name, type, host, port, database and user):
+    /// skipped, not duplicated.
+    pub already_present: usize,
 }
 
 impl ImportSummary {
@@ -623,6 +727,9 @@ impl ImportSummary {
         }
         if self.invalid > 0 {
             text.push_str(&format!("; {} could not be converted", self.invalid));
+        }
+        if self.already_present > 0 {
+            text.push_str(&format!("; {} already saved, skipped", self.already_present));
         }
         if self.passwords_saved > 0 {
             text.push_str(&format!(
@@ -837,6 +944,113 @@ mod tests {
         assert_eq!(oracle.to_record(1.0), Err(ImportError::UnsupportedKind));
     }
 
+    fn supported(kind: ConnectionKind, host: &str) -> ImportedConnection {
+        let mut connection = ImportedConnection::new("c".into(), ImportKind::Supported(kind));
+        connection.host = host.into();
+        connection.port = Some(5432);
+        connection
+    }
+
+    #[test]
+    fn an_ipv6_host_is_bracketed_so_the_record_can_be_saved() {
+        for host in ["::1", "fe80::1", "[::1]"] {
+            let record = supported(ConnectionKind::Postgres, host).to_record(1.0).unwrap();
+            let bracketed = format!("[{}]", host.trim_matches(['[', ']']));
+            assert!(record.uri.contains(&bracketed), "{host}: {}", record.uri);
+        }
+        // Each importer hands the host over unbracketed or bracketed; all of them save.
+        let navicat = navicat::parse(br#"<Connections><Connection ConnectionName="v6" ConnType="POSTGRESQL" Host="fe80::1" Port="5432" UserName="u" /></Connections>"#).unwrap();
+        assert!(navicat[0].to_record(1.0).unwrap().uri.contains("[fe80::1]:5432"));
+        let dbx = dbx::parse(br#"[{"name":"v6","db_type":"mysql","host":"::1","port":3306}]"#, None).unwrap();
+        assert!(dbx[0].to_record(1.0).unwrap().uri.contains("[::1]:3306"));
+        let jdbc = datagrip::parse(br#"<project><component><data-source name="v6" uuid="a"><driver-ref>postgresql</driver-ref><jdbc-url>jdbc:postgresql://[::1]:5432/db</jdbc-url></data-source></component></project>"#, None, &[], None).unwrap();
+        assert!(jdbc[0].to_record(1.0).unwrap().uri.contains("[::1]:5432/db"));
+    }
+
+    #[test]
+    fn tls_maps_onto_each_kinds_own_setting() {
+        let uri = |kind| {
+            let mut connection = supported(kind, "db.example.com");
+            connection.tls = true;
+            connection.to_record(1.0).unwrap().uri
+        };
+        assert!(uri(ConnectionKind::Mysql).contains("ssl-mode=REQUIRED"), "{}", uri(ConnectionKind::Mysql));
+        assert!(uri(ConnectionKind::Mariadb).contains("ssl-mode=REQUIRED"));
+        assert!(uri(ConnectionKind::Redis).starts_with("rediss://"), "{}", uri(ConnectionKind::Redis));
+        assert!(uri(ConnectionKind::Postgres).contains("sslmode=require"));
+        assert!(uri(ConnectionKind::Clickhouse).contains("secure=true"));
+    }
+
+    fn agent_ssh(user: &str) -> ImportedSsh {
+        ImportedSsh {
+            host: "bastion.example.com".into(),
+            port: "22".into(),
+            user: user.into(),
+            auth: SshAuthMethod::Agent,
+            ..ImportedSsh::default()
+        }
+    }
+
+    #[test]
+    fn an_imported_route_the_tunnel_settings_refuse_is_saved_off_with_the_reason() {
+        let mut blank_user = supported(ConnectionKind::Postgres, "db.example.com");
+        blank_user.ssh = Some(agent_ssh(""));
+        assert!(!blank_user.route_usable());
+        let label = blank_user.tunnel_label().unwrap();
+        assert!(label.contains("(off: SSH user is required"), "{label}");
+        let route = SshSettings::from_network_json(&blank_user.to_record(1.0).unwrap().network_settings_json);
+        assert!(!route.enabled, "validate refused it");
+        assert_eq!(route.host, "bastion.example.com", "the hop is kept for the user to complete");
+
+        let mut fine = supported(ConnectionKind::Postgres, "db.example.com");
+        fine.ssh = Some(agent_ssh("ops"));
+        assert!(SshSettings::from_network_json(&fine.to_record(1.0).unwrap().network_settings_json).enabled);
+    }
+
+    #[test]
+    fn a_route_the_connections_address_cannot_use_is_off_and_says_so() {
+        // A SQLite file and an SRV seed list have no host the bastion could forward to.
+        let mut sqlite = supported(ConnectionKind::Sqlite, "/data/app.db");
+        sqlite.ssh = Some(agent_ssh("ops"));
+        let mut srv = supported(ConnectionKind::Mongodb, "cluster0.example.com");
+        srv.uri = Some("mongodb+srv://cluster0.example.com/db".into());
+        srv.ssh = Some(agent_ssh("ops"));
+        for mut connection in [sqlite, srv] {
+            let route = |c: &ImportedConnection| SshSettings::from_network_json(&c.to_record(1.0).unwrap().network_settings_json);
+            assert!(!route(&connection).enabled, "never a tunnel that cannot open");
+            assert_eq!(connection.route_note, None);
+            connection.check_route();
+            assert!(connection.route_note.is_some());
+            assert!(connection.tunnel_label().unwrap().contains("(off: a tunnel cannot carry"));
+            assert!(!route(&connection).enabled);
+        }
+    }
+
+    #[test]
+    fn importing_a_selection_twice_is_recognised_as_present() {
+        let mut batch = store::Batch::build(&[supported(ConnectionKind::Postgres, "db.example.com")], 1.0);
+        let saved: Vec<_> = batch.records.iter().map(crate::connections::SavedConnection::from_record).collect();
+        let mut again = store::Batch::build(
+            &[supported(ConnectionKind::Postgres, "db.example.com"), supported(ConnectionKind::Postgres, "other.example.com")],
+            2.0,
+        );
+        assert_eq!(again.skip_existing(&saved), 1);
+        assert_eq!(again.records.len(), 1);
+        assert!(again.records[0].uri.contains("other.example.com"));
+        assert_eq!(batch.skip_existing(&[]), 0);
+    }
+
+    #[test]
+    fn several_files_merge_and_a_bad_one_only_matters_when_nothing_was_read() {
+        let one = || Ok(vec![supported(ConnectionKind::Postgres, "a.example.com")]);
+        let merged = merge_sources([one(), Err(ImportError::InvalidJson), one()].into_iter()).unwrap();
+        assert_eq!(merged.len(), 1, "the same connection from two files is kept once");
+        assert_eq!(
+            merge_sources([Err(ImportError::InvalidJson), Err(ImportError::InvalidXml)].into_iter()),
+            Err(ImportError::InvalidJson)
+        );
+    }
+
     #[test]
     fn summary_message_counts_skips_and_passwords() {
         let summary = ImportSummary {
@@ -846,6 +1060,7 @@ mod tests {
             invalid: 0,
             passwords_saved: 1,
             passwords_failed: 0,
+            already_present: 0,
         };
         assert_eq!(
             summary.message(),
@@ -854,6 +1069,8 @@ mod tests {
                 crate::platform::CREDENTIAL_STORE_LABEL
             )
         );
+        let repeated = ImportSummary { already_present: 3, ..summary };
+        assert!(repeated.message().contains("; 3 already saved, skipped"), "{}", repeated.message());
         let datagrip = ImportSummary {
             source: ImportSource::DataGrip,
             imported: 1,
@@ -861,6 +1078,7 @@ mod tests {
             invalid: 0,
             passwords_saved: 0,
             passwords_failed: 0,
+            already_present: 0,
         };
         assert!(datagrip.message().contains("keychain entries"));
         assert!(datagrip.message().contains("no passwords were imported"));

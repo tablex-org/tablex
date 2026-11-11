@@ -4,6 +4,7 @@
 //! [`MemoryImportStore`] and cannot touch the user's connections or keychain.
 
 use super::{ImportedConnection, Secret};
+use crate::connections::SavedConnection;
 use crate::credentials::{CredentialError, CredentialStore, SecretKind, SystemStore};
 use crate::ssh_tunnel::SshSettings;
 use engine_storage::connection::SavedConnectionRecord;
@@ -74,6 +75,30 @@ impl Batch {
             }
         }
         batch
+    }
+
+    /// Drops the records of connections that are already saved: the same name, type, host, port,
+    /// database and user (the URI before its options), so importing a file twice does not double
+    /// the list. Their secrets go with them. Returns how many were dropped.
+    pub fn skip_existing(&mut self, existing: &[SavedConnection]) -> usize {
+        let identity = |name: &str, db_type: &str, uri: &str| {
+            (name.to_owned(), db_type.to_owned(), uri.split(['?', '#']).next().unwrap_or_default().to_owned())
+        };
+        let saved: HashSet<_> = existing
+            .iter()
+            .map(|connection| identity(&connection.name, connection.kind.driver_id(), &connection.uri))
+            .collect();
+        let (kept, dropped): (Vec<_>, Vec<_>) = std::mem::take(&mut self.records)
+            .into_iter()
+            .partition(|record| !saved.contains(&identity(&record.name, &record.db_type, &record.uri)));
+        self.records = kept;
+        // Secrets are stored under the record id (and `<id>#jump<n>` for jump hosts).
+        self.secrets.retain(|secret| {
+            !dropped.iter().any(|record| {
+                secret.account == record.id || secret.account.starts_with(&format!("{}#", record.id))
+            })
+        });
+        dropped.len()
     }
 }
 
@@ -382,5 +407,26 @@ mod tests {
         let route = SshSettings::parse(&saved[0].network_settings_json).unwrap();
         assert!(!route.proxy.save_secrets, "the proxy password will be asked for");
         assert!(route.save_secrets, "nothing was refused for the SSH side");
+    }
+
+    #[test]
+    fn skipping_saved_connections_takes_their_secrets_along() {
+        use crate::connection_import::{ImportedJump, ImportedSsh};
+        use crate::ssh_tunnel::SshAuthMethod;
+        let mut routed = connection("same", "pw-db");
+        routed.ssh = Some(ImportedSsh {
+            host: "b".into(), port: "22".into(), user: "u".into(), auth: SshAuthMethod::Agent,
+            jumps: vec![ImportedJump { host: "j".into(), port: "22".into(), user: "a".into(), auth: SshAuthMethod::Password, password: Secret::new("pw-jump"), ..ImportedJump::default() }],
+            ..ImportedSsh::default()
+        });
+        let mut batch = Batch::build(&[routed, connection("new", "pw-new")], 5.0);
+        let first = batch.records[0].clone();
+        let saved = vec![crate::connections::SavedConnection::from_record(&first)];
+        assert_eq!(batch.secrets.len(), 3);
+        assert_eq!(batch.skip_existing(&saved), 1);
+        assert_eq!(batch.records.len(), 1);
+        assert_eq!(batch.records[0].name, "new");
+        assert_eq!(batch.secrets.len(), 1, "no secret of the skipped connection is written again");
+        assert_eq!(batch.secrets[0].account, batch.records[0].id);
     }
 }

@@ -11,7 +11,7 @@
 //! Groups (`layout`) and shared tunnel profiles are not imported.
 
 use super::{
-    crypto, find_product, jdbc, normalize, parse_port, ImportError, ImportKind,
+    crypto, find_product, jdbc, normalize, parse_port, strip_bom, ImportError, ImportKind,
     ImportedConnection, ImportedJump, ImportedProxy, ImportedSsh, Secret,
 };
 use crate::connections::ConnectionKind;
@@ -29,7 +29,7 @@ fn text(value: &Value, key: &str) -> String {
 
 /// Whether `bytes` is a passphrase-protected export.
 pub fn is_encrypted(bytes: &[u8]) -> bool {
-    serde_json::from_slice::<Value>(bytes)
+    serde_json::from_slice::<Value>(strip_bom(bytes))
         .ok()
         .is_some_and(|value| {
             text(&value, "format") == "dbx-encrypted"
@@ -193,7 +193,8 @@ fn ssh_of(layer: &Value) -> ImportedSsh {
 
 /// `passphrase` is required for (and only used by) an encrypted export.
 pub fn parse(bytes: &[u8], passphrase: Option<&str>) -> Result<Vec<ImportedConnection>, ImportError> {
-    let mut value: Value = serde_json::from_slice(bytes).map_err(|_| ImportError::InvalidJson)?;
+    let mut value: Value =
+        serde_json::from_slice(strip_bom(bytes)).map_err(|_| ImportError::InvalidJson)?;
     if is_encrypted(bytes) {
         let passphrase = passphrase.ok_or(ImportError::Encrypted)?;
         value = serde_json::from_slice(&decrypt(&value, passphrase)?)
@@ -374,5 +375,16 @@ mod tests {
         let max: Vec<(&str, String)> = (0..9).map(|i| ("ssh", format!("h{i}.example.com"))).collect();
         let max: Vec<(&str, &str)> = max.iter().map(|(k, h)| (*k, h.as_str())).collect();
         assert_eq!(route(&max).0.unwrap().jumps.len(), 8);
+    }
+
+    #[test]
+    fn a_byte_order_mark_does_not_break_the_json() {
+        let mut bom = vec![0xEF, 0xBB, 0xBF];
+        bom.extend_from_slice(PLAIN);
+        assert_eq!(parse(&bom, None), parse(PLAIN, None));
+        let mut encrypted = vec![0xEF, 0xBB, 0xBF];
+        encrypted.extend_from_slice(ENCRYPTED);
+        assert!(is_encrypted(&encrypted));
+        assert_eq!(parse(&encrypted, Some(PASSPHRASE)), parse(PLAIN, None));
     }
 }

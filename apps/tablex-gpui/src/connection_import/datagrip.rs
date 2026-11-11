@@ -5,16 +5,31 @@
 //! are not imported.
 
 use super::{
-    find_product, jdbc, normalize, ImportError, ImportKind, ImportedConnection, ImportedProxy, ImportedSsh,
+    dedup, find_product, jdbc, normalize, ImportError, ImportKind, ImportedConnection, ImportedProxy,
+    ImportedSsh,
 };
 use crate::connections::ConnectionKind;
 use crate::ssh_tunnel::{ProxyType, SshAuthMethod};
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+
+/// Where to find the project's data sources, for the picker's hint and the "not found" error.
+macro_rules! where_to_look {
+    () => {
+        "the project's .idea folder (usually ~/DataGripProjects/<project>/.idea; Cmd+Shift+. shows hidden folders on macOS) or the project folder itself"
+    };
+}
+
+pub const PICK_HINT: &str = concat!("Choose dataSources.xml in ", where_to_look!());
+pub const MISSING: &str = concat!("dataSources.xml in the selection; pick it in ", where_to_look!());
+
+/// The most folders looked into below a picked one.
+const MAX_FOLDERS: usize = 200;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct DataGripFiles {
     pub data_sources: PathBuf,
+    /// The folder holding `.idea`: what `$PROJECT_DIR$` and relative SQLite paths mean.
+    pub project_dir: Option<PathBuf>,
     pub local: Option<PathBuf>,
     /// `sshConfigs.xml` files: the project's (next to `dataSources.xml`) and the IDE's own in its
     /// `options` folder, where bastions shared by every project are kept.
@@ -44,57 +59,126 @@ fn candidate_dirs(dir: &Path) -> Vec<PathBuf> {
     dirs
 }
 
-/// Resolves what the picker returned (files and/or folders).
-pub fn locate(paths: &[PathBuf]) -> Result<DataGripFiles, ImportError> {
+/// Visible child folders of `dir`, sorted, at most [`MAX_FOLDERS`].
+fn child_dirs(dir: &Path) -> Vec<PathBuf> {
+    let mut children: Vec<_> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir() && !file_name(path).starts_with('.'))
+        .collect();
+    children.sort();
+    children.truncate(MAX_FOLDERS);
+    children
+}
+
+/// `<child>/.idea` of every child folder of `dir`.
+fn project_dirs_in(dir: &Path) -> Vec<PathBuf> {
+    child_dirs(dir).into_iter().map(|child| child.join(".idea")).collect()
+}
+
+/// Where projects can sit below a picked folder when the usual spots have no `dataSources.xml`:
+/// a folder of projects (`~/DataGripProjects`), and the IDE's default project
+/// (`DataGrip<version>/projects/<project>/.idea`, best effort: the layout is not verified).
+fn deep_candidate_dirs(dir: &Path) -> Vec<PathBuf> {
+    let mut dirs = project_dirs_in(dir);
+    dirs.extend(project_dirs_in(&dir.join("projects")));
+    for product in child_dirs(dir).into_iter().filter(|path| file_name(path).starts_with("datagrip")) {
+        dirs.extend(project_dirs_in(&product.join("projects")));
+    }
+    dirs.truncate(MAX_FOLDERS);
+    dirs
+}
+
+/// The folder holding the `.idea` folder of `data_sources`.
+fn project_dir_of(data_sources: &Path) -> Option<PathBuf> {
+    data_sources
+        .parent()
+        .filter(|idea| file_name(idea) == ".idea")
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+}
+
+/// Resolves what the picker returned (files and/or folders): every `dataSources.xml` found.
+pub fn locate(paths: &[PathBuf]) -> Result<Vec<DataGripFiles>, ImportError> {
     // Tests never look at the user's own IDE folders.
     let app_root = if cfg!(test) { None } else { crate::platform::datagrip_config_root() };
     locate_with(paths, app_root.as_deref())
 }
 
 /// [`locate`] with the IDE's per-OS config root (`JetBrains/`) given.
-pub fn locate_with(paths: &[PathBuf], app_root: Option<&Path>) -> Result<DataGripFiles, ImportError> {
-    let mut data_sources = None;
-    let mut local = None;
+pub fn locate_with(paths: &[PathBuf], app_root: Option<&Path>) -> Result<Vec<DataGripFiles>, ImportError> {
+    let mut data_sources: Vec<PathBuf> = Vec::new();
+    let mut locals: Vec<PathBuf> = Vec::new();
     for path in paths {
+        let mut found = Vec::new();
         if path.is_dir() {
-            let found = candidate_dirs(path)
-                .into_iter()
-                .map(|dir| dir.join("dataSources.xml"))
-                .find(|file| file.is_file());
-            data_sources = data_sources.or(found);
+            let at = |dirs: Vec<PathBuf>| -> Vec<PathBuf> {
+                dirs.into_iter()
+                    .map(|dir| dir.join("dataSources.xml"))
+                    .filter(|file| file.is_file())
+                    .collect()
+            };
+            // The usual spots first (the newest IDE folder wins); only without one, every
+            // project one level down.
+            let mut here = at(candidate_dirs(path));
+            here.truncate(1);
+            if here.is_empty() {
+                here = at(deep_candidate_dirs(path));
+            }
+            found = here;
         } else {
             match file_name(path).as_str() {
-                "datasources.xml" => data_sources = data_sources.or(Some(path.clone())),
-                "datasources.local.xml" => local = Some(path.clone()),
+                "datasources.xml" => found.push(path.clone()),
+                "datasources.local.xml" => locals.push(path.clone()),
                 _ => {}
             }
         }
+        for file in found {
+            if !data_sources.contains(&file) {
+                data_sources.push(file);
+            }
+        }
     }
-    let data_sources = data_sources.ok_or(ImportError::MissingFile("dataSources.xml"))?;
-    let local = local.or_else(|| {
-        Some(data_sources.with_file_name("dataSources.local.xml")).filter(|file| file.is_file())
-    });
-    let project = data_sources.with_file_name("sshConfigs.xml");
+    if data_sources.is_empty() {
+        return Err(ImportError::MissingFile(MISSING));
+    }
     let application = app_root.and_then(|root| {
         candidate_dirs(root)
             .into_iter()
             .map(|dir| dir.join("sshConfigs.xml"))
             .find(|file| file.is_file())
     });
-    let ssh_configs: Vec<PathBuf> = std::iter::once(project)
-        .filter(|file| file.is_file())
-        .chain(application)
-        .fold(Vec::new(), |mut all, file| {
-            if !all.contains(&file) {
-                all.push(file);
+    let single = data_sources.len() == 1;
+    Ok(data_sources
+        .into_iter()
+        .map(|data_sources| {
+            let local = locals
+                .iter()
+                .find(|local| local.parent() == data_sources.parent())
+                .cloned()
+                .or_else(|| {
+                    Some(data_sources.with_file_name("dataSources.local.xml")).filter(|file| file.is_file())
+                })
+                .or_else(|| locals.first().cloned().filter(|_| single));
+            let mut ssh_configs: Vec<PathBuf> = Vec::new();
+            for file in std::iter::once(data_sources.with_file_name("sshConfigs.xml"))
+                .filter(|file| file.is_file())
+                .chain(application.clone())
+            {
+                if !ssh_configs.contains(&file) {
+                    ssh_configs.push(file);
+                }
             }
-            all
-        });
-    Ok(DataGripFiles {
-        data_sources,
-        local,
-        ssh_configs,
-    })
+            DataGripFiles {
+                project_dir: project_dir_of(&data_sources),
+                data_sources,
+                local,
+                ssh_configs,
+            }
+        })
+        .collect())
 }
 
 #[derive(Default)]
@@ -106,8 +190,12 @@ struct Fragment {
     driver_class: String,
     username: String,
     product: String,
-    /// The id of the `sshConfig` this data source tunnels through, when its tunnel is on.
+    /// The data source tunnels (its `<ssh-properties>` are enabled).
+    ssh_enabled: bool,
+    /// The id of the `sshConfig` this data source tunnels through.
     ssh_config_id: String,
+    /// An older file keeps the bastion inside `<ssh-properties>` itself.
+    inline_ssh: Option<ImportedSsh>,
 }
 
 fn child_text(element: roxmltree::Node, tag: &str) -> String {
@@ -155,7 +243,25 @@ fn fragments(xml: &str, local: bool) -> Result<Vec<Fragment>, ImportError> {
                     .filter(|text| !text.is_empty())
                     .unwrap_or_else(|| option("sshConfigId"));
                 if enabled.eq_ignore_ascii_case("true") {
+                    fragment.ssh_enabled = true;
                     fragment.ssh_config_id = config_id;
+                    // Spellings of the old inline form are not verified against DataGrip.
+                    let field = |tags: &[&str]| {
+                        tags.iter()
+                            .flat_map(|tag| [child_text(ssh, tag), option(tag)])
+                            .find(|text| !text.is_empty())
+                            .unwrap_or_default()
+                    };
+                    let host = field(&["proxy-host", "host", "proxyHost"]);
+                    fragment.inline_ssh = (!host.is_empty()).then(|| {
+                        bastion(
+                            host,
+                            &field(&["proxy-port", "port", "proxyPort"]),
+                            field(&["user", "proxy-user", "username", "proxyUser"]),
+                            &field(&["auth-type", "authType"]),
+                            &field(&["key-path", "keyPath", "private-key-file"]),
+                        )
+                    });
                 }
             }
             if local {
@@ -185,8 +291,12 @@ fn merge(shared: Vec<Fragment>, local: Vec<Fragment>) -> Vec<Fragment> {
                     existing.username = extra.username;
                 }
                 existing.product = extra.product;
-                if !extra.ssh_config_id.is_empty() {
-                    existing.ssh_config_id = extra.ssh_config_id;
+                if extra.ssh_enabled {
+                    existing.ssh_enabled = true;
+                    if !extra.ssh_config_id.is_empty() {
+                        existing.ssh_config_id = extra.ssh_config_id;
+                    }
+                    existing.inline_ssh = extra.inline_ssh.or(existing.inline_ssh.take());
                 }
                 if existing.name.is_empty() {
                     existing.name = extra.name;
@@ -213,14 +323,17 @@ fn subprotocol(jdbc_url: &str) -> String {
 fn kind_of(fragment: &Fragment) -> Option<ImportKind> {
     let reference = fragment.driver_ref.split('.').next().unwrap_or_default();
     let class = normalize(&fragment.driver_class);
-    let product = [
-        normalize(reference),
-        normalize(&fragment.product),
-        normalize(&subprotocol(&fragment.jdbc_url)),
-        class.clone(),
-    ]
-    .iter()
-    .find_map(|text| find_product(text));
+    let (reference, reported) = (normalize(reference), normalize(&fragment.product));
+    // DataGrip drives MariaDB with its MySQL driver: the server's own name tells them apart.
+    let texts = if reported.contains("mariadb") {
+        [reported, reference]
+    } else {
+        [reference, reported]
+    };
+    let product = texts
+        .into_iter()
+        .chain([normalize(&subprotocol(&fragment.jdbc_url)), class])
+        .find_map(|text| find_product(&text));
     match product {
         Some(product) => Some(ImportKind::of(product)),
         // A custom driver nobody recognises is no usable connection.
@@ -277,28 +390,16 @@ fn ssh_configs_of(xml: &[u8]) -> Vec<(String, ImportedSsh, Option<ImportedProxy>
         .filter_map(|node| {
             let attribute = |name: &str| node.attribute(name).unwrap_or_default().trim().to_string();
             let id = attribute("id");
-            let auth = match attribute("authType").as_str() {
-                "KEY_PAIR" => SshAuthMethod::KeyFile,
-                "OPEN_SSH" => SshAuthMethod::Agent,
-                _ => SshAuthMethod::Password,
-            };
             (!id.is_empty() && !attribute("host").is_empty()).then(|| {
                 (
                     id,
-                    ImportedSsh {
-                        host: attribute("host"),
-                        port: super::parse_port(&attribute("port")).unwrap_or(22).to_string(),
-                        user: attribute("username"),
-                        auth,
-                        key_path: if auth == SshAuthMethod::KeyFile {
-                            attribute("keyPath")
-                        } else {
-                            String::new()
-                        },
-                        password: None,
-                        passphrase: None,
-                        jumps: Vec::new(),
-                    },
+                    bastion(
+                        attribute("host"),
+                        &attribute("port"),
+                        attribute("username"),
+                        &attribute("authType"),
+                        &attribute("keyPath"),
+                    ),
                     proxy_of(&attribute),
                 )
             })
@@ -306,10 +407,51 @@ fn ssh_configs_of(xml: &[u8]) -> Vec<(String, ImportedSsh, Option<ImportedProxy>
         .collect()
 }
 
+/// A bastion as DataGrip names it: `KEY_PAIR` (a key file, `$USER_HOME$` for the home folder),
+/// `OPEN_SSH` (the agent / OpenSSH config), otherwise a password (kept in its keychain, not read).
+fn bastion(host: String, port: &str, user: String, auth_type: &str, key_path: &str) -> ImportedSsh {
+    let auth = match auth_type {
+        "KEY_PAIR" => SshAuthMethod::KeyFile,
+        "OPEN_SSH" => SshAuthMethod::Agent,
+        _ => SshAuthMethod::Password,
+    };
+    ImportedSsh {
+        host,
+        port: super::parse_port(port).unwrap_or(22).to_string(),
+        user,
+        auth,
+        key_path: if auth == SshAuthMethod::KeyFile {
+            jdbc::expand_home(key_path)
+        } else {
+            String::new()
+        },
+        password: None,
+        passphrase: None,
+        jumps: Vec::new(),
+    }
+}
+
+/// `$PROJECT_DIR$` and relative SQLite paths mean the project folder.
+fn project_path(path: &str, project: Option<&Path>) -> String {
+    let Some(project) = project else {
+        return path.to_string();
+    };
+    let resolved = path
+        .replace("$PROJECT_DIR$", &project.to_string_lossy())
+        .replace("$ProjectFileDir$", &project.to_string_lossy());
+    if resolved.is_empty() || resolved.starts_with(':') || Path::new(&resolved).is_absolute() {
+        resolved
+    } else {
+        project.join(resolved).to_string_lossy().into_owned()
+    }
+}
+
+/// `project_dir`: the folder holding the `.idea` folder of `data_sources`.
 pub fn parse(
     data_sources: &[u8],
     local: Option<&[u8]>,
     ssh_configs_xml: &[&[u8]],
+    project_dir: Option<&Path>,
 ) -> Result<Vec<ImportedConnection>, ImportError> {
     let bastions = ssh_configs(ssh_configs_xml);
     let shared = fragments(&parse_document(data_sources)?, false)?;
@@ -320,8 +462,7 @@ pub fn parse(
             .unwrap_or_default(),
         None => Vec::new(),
     };
-    let mut seen = HashSet::new();
-    Ok(merge(shared, local)
+    Ok(dedup(merge(shared, local)
         .into_iter()
         .filter_map(|fragment| {
             let kind = kind_of(&fragment)?;
@@ -337,7 +478,7 @@ pub fn parse(
                 .or(Some(target.database.clone()).filter(|database| !database.is_empty()))
                 .unwrap_or_else(|| host.clone());
             let mut connection = ImportedConnection::new(name, kind);
-            connection.host = host;
+            connection.host = if sqlite { project_path(&host, project_dir) } else { host };
             connection.port = target.port;
             connection.database = if sqlite { String::new() } else { target.database };
             connection.username = if fragment.username.is_empty() {
@@ -345,29 +486,45 @@ pub fn parse(
             } else {
                 fragment.username
             };
+            connection.password = target.password;
+            connection.tls = target.tls;
             if connection.kind.supported() == Some(ConnectionKind::Mongodb) {
                 connection.uri = jdbc::mongo_multi_host_uri(&fragment.jdbc_url);
             }
-            if let Some((_, ssh, proxy)) =
-                bastions.iter().find(|(id, ..)| *id == fragment.ssh_config_id)
-            {
-                connection.ssh = Some(ssh.clone());
-                connection.proxy = proxy.clone();
+            if fragment.ssh_enabled {
+                let shared = bastions
+                    .iter()
+                    .find(|(id, ..)| !id.is_empty() && *id == fragment.ssh_config_id);
+                match (shared, fragment.inline_ssh) {
+                    (Some((_, ssh, proxy)), _) => {
+                        connection.ssh = Some(ssh.clone());
+                        connection.proxy = proxy.clone();
+                    }
+                    (None, Some(ssh)) => connection.ssh = Some(ssh),
+                    // Imported direct rather than through a bastion nobody can name.
+                    (None, None) => connection.route_note = Some("tunnel settings not found"),
+                }
             }
             Some(connection)
         })
-        .filter(|c| {
-            seen.insert((c.name.clone(), c.kind.label(), c.host.clone(), c.port, c.database.clone()))
-        })
-        .collect())
+        .collect()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::connection_import::{ImportSource, Loaded};
 
     const SHARED: &[u8] = include_bytes!("fixtures/datagrip/dataSources.xml");
     const LOCAL: &[u8] = include_bytes!("fixtures/datagrip/dataSources.local.xml");
+
+    fn parse(
+        data_sources: &[u8],
+        local: Option<&[u8]>,
+        ssh_configs: &[&[u8]],
+    ) -> Result<Vec<ImportedConnection>, ImportError> {
+        super::parse(data_sources, local, ssh_configs, None)
+    }
 
     fn by_name<'a>(all: &'a [ImportedConnection], name: &str) -> &'a ImportedConnection {
         all.iter().find(|c| c.name == name).unwrap_or_else(|| panic!("{name} imported"))
@@ -504,10 +661,11 @@ mod tests {
 
         for pick in [options.clone(), options.parent().unwrap().to_path_buf(), root.join("JetBrains"), options.join("dataSources.xml")] {
             let files = locate(&[pick]).unwrap();
-            assert_eq!(files.data_sources, options.join("dataSources.xml"));
-            assert_eq!(files.local, Some(options.join("dataSources.local.xml")));
+            assert_eq!(files.len(), 1);
+            assert_eq!(files[0].data_sources, options.join("dataSources.xml"));
+            assert_eq!(files[0].local, Some(options.join("dataSources.local.xml")));
         }
-        assert_eq!(locate(std::slice::from_ref(&root)), Err(ImportError::MissingFile("dataSources.xml")));
+        assert_eq!(locate(std::slice::from_ref(&root)), Err(ImportError::MissingFile(MISSING)));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -523,12 +681,159 @@ mod tests {
         // Only the IDE knows this bastion.
         std::fs::write(ide.join("sshConfigs.xml"), "<project/>").unwrap();
         let files = locate_with(std::slice::from_ref(&project), Some(&root.join("JetBrains"))).unwrap();
-        assert_eq!(files.ssh_configs, vec![ide.join("sshConfigs.xml")]);
+        assert_eq!(files[0].ssh_configs, vec![ide.join("sshConfigs.xml")]);
         std::fs::write(project.join("sshConfigs.xml"), "<project/>").unwrap();
         let both = locate_with(std::slice::from_ref(&project), Some(&root.join("JetBrains"))).unwrap();
-        assert_eq!(both.ssh_configs, vec![project.join("sshConfigs.xml"), ide.join("sshConfigs.xml")]);
+        assert_eq!(both[0].ssh_configs, vec![project.join("sshConfigs.xml"), ide.join("sshConfigs.xml")]);
         // Without an IDE root only the project's file counts.
-        assert_eq!(locate_with(&[project], None).unwrap().ssh_configs.len(), 1);
+        assert_eq!(locate_with(&[project], None).unwrap()[0].ssh_configs.len(), 1);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn source(name: &str, id: &str, driver: &str, url: &str, extra: &str) -> String {
+        format!(
+            r#"<data-source source="LOCAL" name="{name}" uuid="{id}"><driver-ref>{driver}</driver-ref><jdbc-url>{url}</jdbc-url>{extra}</data-source>"#
+        )
+    }
+
+    fn project(sources: &[String]) -> String {
+        format!(r#"<project version="4"><component name="DataSourceManagerImpl">{}</component></project>"#, sources.concat())
+    }
+
+    #[test]
+    fn a_key_path_with_user_home_is_expanded() {
+        let shared = project(&[source("k", "a1", "postgresql", "jdbc:postgresql://db.internal/d", "<ssh-properties><enabled>true</enabled><ssh-config-id>cfg</ssh-config-id></ssh-properties>")]);
+        let configs = br#"<project><component name="SshConfigs"><configs><sshConfig authType="KEY_PAIR" host="b.example.com" id="cfg" port="22" username="ops" keyPath="$USER_HOME$/.ssh/id_rsa" /></configs></component></project>"#;
+        let all = parse(shared.as_bytes(), None, &[configs]).unwrap();
+        let key = &all[0].ssh.as_ref().unwrap().key_path;
+        assert_eq!(*key, format!("{}/.ssh/id_rsa", dirs::home_dir().unwrap().display()));
+        assert!(!key.contains("$USER_HOME$"));
+    }
+
+    #[test]
+    fn an_enabled_tunnel_is_read_inline_or_imported_direct_with_a_note() {
+        let tunnel = |inner: &str| format!("<ssh-properties><enabled>true</enabled>{inner}</ssh-properties>");
+        let shared = project(&[
+            source("inline", "a1", "postgresql", "jdbc:postgresql://db.internal/d", &tunnel("<proxy-host>bastion.example.com</proxy-host><proxy-port>2222</proxy-port><user>ops</user>")),
+            source("lost id", "a2", "postgresql", "jdbc:postgresql://db2.internal/d", &tunnel("<ssh-config-id>missing</ssh-config-id>")),
+            source("no id", "a3", "postgresql", "jdbc:postgresql://db3.internal/d", &tunnel("")),
+        ]);
+        let all = parse(shared.as_bytes(), None, &[]).unwrap();
+        let inline = by_name(&all, "inline");
+        let ssh = inline.ssh.as_ref().expect("the inline bastion");
+        assert_eq!((ssh.host.as_str(), ssh.port.as_str(), ssh.user.as_str()), ("bastion.example.com", "2222", "ops"));
+        assert_eq!(inline.route_note, None);
+        for name in ["lost id", "no id"] {
+            let connection = by_name(&all, name);
+            assert!(connection.ssh.is_none() && connection.proxy.is_none(), "{name}");
+            assert_eq!(connection.route_note, Some("tunnel settings not found"), "{name}");
+            assert!(connection.tunnel_label().unwrap().contains("tunnel settings not found"), "{name}");
+            assert!(!connection.route_usable());
+        }
+    }
+
+    #[test]
+    fn the_url_brings_its_password_tls_and_the_user_tells_duplicates_apart() {
+        let shared = project(&[
+            source("secure", "a1", "postgresql", "jdbc:postgresql://u:p%40ss@db.example.com:5432/d?sslmode=require", ""),
+            source("dup", "a2", "postgresql", "jdbc:postgresql://db.example.com:5432/d", ""),
+            source("dup", "a3", "postgresql", "jdbc:postgresql://db.example.com:5432/d", ""),
+        ]);
+        let local = br#"<project><component name="DataSourceManagerImpl"><data-source name="dup" uuid="a3"><user-name>other</user-name></data-source></component></project>"#;
+        let all = parse(shared.as_bytes(), Some(local), &[]).unwrap();
+        let secure = by_name(&all, "secure");
+        assert_eq!((secure.username.as_str(), secure.password.as_ref().unwrap().expose(), secure.tls), ("u", "p@ss", true));
+        assert_eq!(all.iter().filter(|c| c.name == "dup").count(), 2, "the same name and address with another user is another connection");
+    }
+
+    #[test]
+    fn sqlite_paths_are_relative_to_the_project_and_mariadb_is_told_by_the_server() {
+        let shared = project(&[
+            source("placeholder", "a1", "sqlite", "jdbc:sqlite:$PROJECT_DIR$/data/app.db", ""),
+            source("relative", "a2", "sqlite", "jdbc:sqlite:notes.db", ""),
+            source("absolute", "a3", "sqlite", "jdbc:sqlite:/var/db/x.db", ""),
+            source("maria", "a4", "mysql.8", "jdbc:mysql://m.example.com:3306/d", ""),
+        ]);
+        let local = br#"<project><component name="x"><data-source name="maria" uuid="a4"><database-info product="MariaDB" /></data-source></component></project>"#;
+        let project_dir = Path::new("/work/proj");
+        let all = super::parse(shared.as_bytes(), Some(local), &[], Some(project_dir)).unwrap();
+        assert_eq!(by_name(&all, "placeholder").host, "/work/proj/data/app.db");
+        assert_eq!(by_name(&all, "relative").host, "/work/proj/notes.db");
+        assert_eq!(by_name(&all, "absolute").host, "/var/db/x.db");
+        assert_eq!(by_name(&all, "maria").kind, ImportKind::Supported(ConnectionKind::Mariadb));
+        // Without the project folder a path is left as it was.
+        assert_eq!(by_name(&parse(shared.as_bytes(), None, &[]).unwrap(), "relative").host, "notes.db");
+    }
+
+    fn write_project(root: &Path, relative: &str, sources: &[String]) -> PathBuf {
+        let idea = root.join(relative).join(".idea");
+        std::fs::create_dir_all(&idea).unwrap();
+        std::fs::write(idea.join("dataSources.xml"), project(sources)).unwrap();
+        idea
+    }
+
+    #[test]
+    fn a_folder_of_projects_is_searched_one_level_down_and_every_project_is_merged() {
+        let root = std::env::temp_dir().join(format!("tablex-datagrip-deep-{}", uuid::Uuid::new_v4()));
+        let projects = root.join("DataGripProjects");
+        let one = write_project(&projects, "one", &[source("a", "a1", "postgresql", "jdbc:postgresql://a.example.com/d", "")]);
+        write_project(&projects, "two", &[
+            source("b", "b1", "postgresql", "jdbc:postgresql://b.example.com/d", ""),
+            source("a", "a1", "postgresql", "jdbc:postgresql://a.example.com/d", ""),
+            source("rel", "b2", "sqlite", "jdbc:sqlite:rel.db", ""),
+        ]);
+        // Hidden folders and deeper levels are not searched.
+        write_project(&projects, ".hidden", &[source("h", "h1", "postgresql", "jdbc:postgresql://h.example.com/d", "")]);
+        write_project(&projects, "nested/inner", &[source("n", "n1", "postgresql", "jdbc:postgresql://n.example.com/d", "")]);
+
+        let files = locate(std::slice::from_ref(&projects)).unwrap();
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].project_dir.as_deref(), Some(projects.join("one").as_path()));
+        assert_eq!(files[0].data_sources, one.join("dataSources.xml"));
+
+        let Loaded::Ready(preview) = super::super::load(ImportSource::DataGrip, std::slice::from_ref(&projects)).unwrap() else {
+            panic!("DataGrip needs no passphrase");
+        };
+        let mut names: Vec<_> = preview.connections.iter().map(|c| c.name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, ["a", "b", "rel"], "the shared connection is listed once");
+        let rel = preview.connections.iter().find(|c| c.name == "rel").unwrap();
+        assert_eq!(rel.host, projects.join("two").join("rel.db").to_string_lossy());
+
+        // Two explicit files are both read, too.
+        let both = locate(&[one.join("dataSources.xml"), projects.join("two/.idea/dataSources.xml")]).unwrap();
+        assert_eq!(both.len(), 2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_default_project_of_the_ide_is_found_and_the_search_is_bounded() {
+        let root = std::env::temp_dir().join(format!("tablex-datagrip-default-{}", uuid::Uuid::new_v4()));
+        let jetbrains = root.join("JetBrains");
+        let idea = write_project(&jetbrains.join("DataGrip2024.3/projects"), "default", &[source("d", "d1", "postgresql", "jdbc:postgresql://d.example.com/d", "")]);
+        for pick in [jetbrains.clone(), jetbrains.join("DataGrip2024.3")] {
+            assert_eq!(locate(&[pick]).unwrap()[0].data_sources, idea.join("dataSources.xml"));
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+
+        // More folders than the cap: the ones past it are not looked into.
+        let crowded = root.join("crowded");
+        for index in 0..MAX_FOLDERS + 5 {
+            std::fs::create_dir_all(crowded.join(format!("p{index:03}"))).unwrap();
+        }
+        write_project(&crowded, &format!("p{:03}", MAX_FOLDERS + 4), &[source("far", "f1", "postgresql", "jdbc:postgresql://f.example.com/d", "")]);
+        assert_eq!(locate(std::slice::from_ref(&crowded)), Err(ImportError::MissingFile(MISSING)));
+        write_project(&crowded, "p000", &[source("near", "n1", "postgresql", "jdbc:postgresql://n.example.com/d", "")]);
+        assert_eq!(locate(std::slice::from_ref(&crowded)).unwrap().len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_picker_and_the_error_point_at_the_idea_folder() {
+        for text in [PICK_HINT, MISSING, &ImportError::MissingFile(MISSING).to_string()] {
+            assert!(text.contains(".idea") && text.contains("~/DataGripProjects/<project>/.idea") && text.contains("Cmd+Shift+."), "{text}");
+        }
+        assert_eq!(ImportSource::DataGrip.picker_hint(), PICK_HINT);
+        assert!(ImportError::MissingFile(MISSING).to_string().starts_with("Could not find dataSources.xml"));
     }
 }

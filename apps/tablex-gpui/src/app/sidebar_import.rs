@@ -550,10 +550,19 @@ impl AppRoot {
         skipped_unsupported: Vec<String>,
         cx: &mut Context<Self>,
     ) {
-        let batch = Batch::build(&selected, current_time());
+        let mut batch = Batch::build(&selected, current_time());
         let invalid = batch.invalid;
+        let already_present = batch.skip_existing(&self.saved_connections);
         if batch.records.is_empty() {
-            self.sidebar.notice = Some("None of the selected connections could be imported".into());
+            self.sidebar.notice = Some(if already_present > 0 && invalid == 0 {
+                format!(
+                    "The selected connection{} {} already saved, nothing imported",
+                    if already_present == 1 { "" } else { "s" },
+                    if already_present == 1 { "is" } else { "are" },
+                )
+            } else {
+                "None of the selected connections could be imported".into()
+            });
             cx.notify();
             return;
         }
@@ -576,6 +585,7 @@ impl AppRoot {
                             invalid,
                             passwords_saved: outcome.passwords_saved,
                             passwords_failed: outcome.passwords_failed,
+                            already_present,
                         };
                         if this.sidebar.notice.is_none() {
                             this.sidebar.notice = Some(summary.message());

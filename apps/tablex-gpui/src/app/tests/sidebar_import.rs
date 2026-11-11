@@ -121,6 +121,64 @@ fn navicat_import_selects_confirms_and_saves_with_the_password_in_the_credential
 }
 
 #[gpui::test]
+fn importing_the_same_file_again_skips_what_is_already_saved(cx: &mut TestAppContext) {
+    let (app, visual, store) = import_test_app(cx);
+    let before = saved_count(&app, visual);
+    import_pick(visual, "import-menu-navicat", vec![import_fixture("navicat.ncx")]);
+    import_selection_dialog(visual);
+    click_debug_button(visual, "import-row-2");
+    click_debug_button(visual, "import-confirm");
+    import_wait(visual, |_| store.records().len() == 5);
+    import_wait(visual, |v| v.debug_bounds("import-selection-list").is_none());
+
+    // Everything again: only the connection left out the first time is new.
+    import_pick(visual, "import-menu-navicat", vec![import_fixture("navicat.ncx")]);
+    import_selection_dialog(visual);
+    click_debug_button(visual, "import-confirm");
+    import_wait(visual, |_| store.records().len() == 6);
+    import_wait(visual, |v| v.debug_bounds("import-selection-list").is_none());
+    assert_eq!(saved_count(&app, visual), before + 6, "no duplicates in the sidebar");
+    let names: Vec<_> = store.records().into_iter().map(|r| r.name).collect();
+    assert_eq!(names.iter().filter(|name| *name == "Prod PG").count(), 1, "{names:?}");
+    let notice = import_notice(&app, visual).unwrap();
+    assert!(notice.starts_with("Imported 1 connection from Navicat NCX"), "{notice}");
+    assert!(notice.contains("; 5 already saved, skipped"), "{notice}");
+
+    // A third time there is nothing left to import, and the user is told why.
+    import_pick(visual, "import-menu-navicat", vec![import_fixture("navicat.ncx")]);
+    import_selection_dialog(visual);
+    click_debug_button(visual, "import-confirm");
+    import_wait(visual, |v| v.debug_bounds("import-selection-list").is_none());
+    import_wait(visual, |v| import_notice(&app, v).is_some_and(|notice| notice.contains("already saved")));
+    assert_eq!(
+        import_notice(&app, visual).as_deref(),
+        Some("The selected connections are already saved, nothing imported")
+    );
+    assert_eq!(store.records().len(), 6);
+    assert_eq!(saved_count(&app, visual), before + 6);
+}
+
+#[gpui::test]
+fn datagrip_picker_hint_and_a_missing_file_point_at_the_idea_folder(cx: &mut TestAppContext) {
+    let (app, visual, store) = import_test_app(cx);
+    click_debug_button(visual, "sidebar-import-export");
+    click_debug_button(visual, "import-menu-datagrip");
+    let hint = import_notice(&app, visual).expect("the picker hint");
+    assert!(hint.contains(".idea") && hint.contains("~/DataGripProjects/<project>/.idea"), "{hint}");
+    let empty = std::env::temp_dir().join(format!("tablex-import-datagrip-empty-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&empty).unwrap();
+    visual.simulate_path_prompt_response({
+        let empty = empty.clone();
+        move |_| Some(vec![empty.clone()])
+    });
+    import_wait(visual, |v| import_notice(&app, v).is_some_and(|notice| notice.starts_with("DataGrip import failed")));
+    let error = import_notice(&app, visual).unwrap();
+    assert!(error.contains("dataSources.xml") && error.contains(".idea"), "{error}");
+    std::fs::remove_dir_all(empty).unwrap();
+    assert!(store.records().is_empty());
+}
+
+#[gpui::test]
 fn the_wheel_scrolls_the_selection_list_before_the_dialog_around_it(cx: &mut TestAppContext) {
     let (_app, visual, _store) = import_test_app(cx);
     import_pick(visual, "import-menu-navicat", vec![import_fixture("navicat.ncx")]);
