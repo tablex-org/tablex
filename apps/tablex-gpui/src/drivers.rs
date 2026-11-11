@@ -576,7 +576,7 @@ impl engine_driver_host::ManifestFetcher for HttpManifestFetcher {
 
 /// Fetches a manifest or signature. `file://` is readable here on purpose:
 /// whether a local manifest is *acceptable* is the registry's trust check.
-fn fetch_bytes(source: &str, max_bytes: u64) -> Result<Vec<u8>, String> {
+pub(crate) fn fetch_bytes(source: &str, max_bytes: u64) -> Result<Vec<u8>, String> {
     let url = url::Url::parse(source).map_err(|error| format!("invalid driver URL: {error}"))?;
     match url.scheme() {
         "file" => {

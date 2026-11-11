@@ -715,5 +715,156 @@ class SigningDryRunTests(unittest.TestCase):
         self.assertFalse(Path(str(self.manifest) + ".sig").exists())
 
 
+class AppManifestTests(unittest.TestCase):
+    """`app-manifest`: the update manifest of an app release, signed like the driver catalog."""
+
+    BASE = "https://github.com/tablex-org/tablex/releases/download/v0.2.0"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+        self.arm = self.dir / "TableX-0.2.0-macos-apple-silicon.app.zip"
+        self.intel = self.dir / "TableX-0.2.0-macos-intel.app.zip"
+        self.arm.write_bytes(b"arm zip")
+        self.intel.write_bytes(b"intel zip bytes")
+        self.zips = [("x86_64-apple-darwin", self.intel), ("aarch64-apple-darwin", self.arm)]
+
+    def test_the_manifest_lists_one_zip_per_target_by_size_and_sha256(self):
+        manifest = dm.build_app_manifest("0.2.0", self.BASE + "/", self.zips, now="2026-11-11T00:00:00Z")
+        self.assertEqual(manifest, {
+            "kind": "tablex-app-update",
+            "schema": 1,
+            "version": "0.2.0",
+            "generatedAt": "2026-11-11T00:00:00Z",
+            "artifacts": [
+                {"target": "aarch64-apple-darwin", "url": f"{self.BASE}/{self.arm.name}", "size": 7,
+                 "sha256": hashlib.sha256(b"arm zip").hexdigest()},
+                {"target": "x86_64-apple-darwin", "url": f"{self.BASE}/{self.intel.name}", "size": 15,
+                 "sha256": hashlib.sha256(b"intel zip bytes").hexdigest()},
+            ],
+        })
+
+    def test_an_incomplete_or_odd_release_is_refused(self):
+        build = dm.build_app_manifest
+        with self.assertRaises(dm.ManifestError):
+            build("0.2.0", self.BASE, self.zips[:1])
+        with self.assertRaises(dm.ManifestError):
+            build("0.2.0", self.BASE, self.zips + self.zips[:1])
+        with self.assertRaises(dm.ManifestError):
+            build("0.2.0", self.BASE, [("aarch64-apple-darwin", self.arm), ("x86_64-unknown-linux-gnu", self.intel)])
+        with self.assertRaises(dm.ManifestError):
+            build("v0.2", self.BASE, self.zips)
+        with self.assertRaises(dm.ManifestError):
+            build("0.2.0", "http://example.com/v0.2.0", self.zips)
+        dmg = self.dir / "TableX.dmg"
+        dmg.write_bytes(b"x")
+        with self.assertRaises(dm.ManifestError):
+            build("0.2.0", self.BASE, [("aarch64-apple-darwin", dmg), ("x86_64-apple-darwin", self.intel)])
+        self.arm.write_bytes(b"")
+        with self.assertRaises(dm.ManifestError):
+            build("0.2.0", self.BASE, self.zips)
+
+    def args(self, *extra):
+        return [
+            "app-manifest", "--version", "0.2.0", "--base-url", self.BASE, "--out", str(self.dir / "app-update.json"),
+            "--zip", f"aarch64-apple-darwin={self.arm}", "--zip", f"x86_64-apple-darwin={self.intel}", *extra,
+        ]
+
+    def test_the_secret_reaches_the_signer_on_stdin_only_and_the_build_is_locked(self):
+        secret = "c2VjcmV0LXNlZWQtZm9yLXRlc3RzLW9ubHktMzItYnl0ZXM="
+        seen = {}
+
+        def fake_run(command, **kwargs):
+            seen.update(command=command, kwargs=kwargs)
+            Path(command[-1] + ".sig").write_text("sig\n")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        with mock.patch.dict(os.environ, {"TEST_APP_KEY": secret}), mock.patch.object(dm.subprocess, "run", fake_run), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(dm.main(self.args("--key-env", "TEST_APP_KEY")), 0)
+        command = seen["command"]
+        self.assertIn("--locked", command)
+        self.assertEqual(command[command.index("sign") + 1], "-", "the key is read from stdin")
+        self.assertEqual(command[-1], str(self.dir / "app-update.json"), "the exact file that is published is signed")
+        self.assertEqual(seen["kwargs"]["input"], secret + "\n")
+        self.assertFalse(any(secret in part for part in command), "no secret on a command line")
+        written = json.loads((self.dir / "app-update.json").read_text())
+        self.assertEqual(written["version"], "0.2.0")
+        self.assertEqual([a["target"] for a in written["artifacts"]], ["aarch64-apple-darwin", "x86_64-apple-darwin"])
+
+    def test_the_signer_never_has_the_key_in_its_environment_but_on_stdin(self):
+        secret = "c2VjcmV0LXNlZWQtZm9yLXRlc3RzLW9ubHktMzItYnl0ZXM="
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append((command, kwargs))
+            Path(command[-1] + ".sig").write_text("sig\n")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        signer = self.dir / "sign-manifest"
+        signer.write_bytes(b"#!/bin/sh\n")
+        environment = {"TEST_APP_KEY": secret, "OTHER_SECRET": "x", "PATH": "/usr/bin"}
+        with mock.patch.dict(os.environ, environment, clear=True), mock.patch.object(dm.subprocess, "run", fake_run), \
+                contextlib.redirect_stdout(io.StringIO()):
+            # Built and run by cargo: the key variable is removed from what cargo (and so every build
+            # script) inherits.
+            self.assertEqual(dm.main(self.args("--key-env", "TEST_APP_KEY")), 0)
+            # A prebuilt signer is run directly, with nothing but PATH.
+            self.assertEqual(dm.main(self.args("--key-env", "TEST_APP_KEY", "--signer", str(signer))), 0)
+            # The driver catalog's `sign` takes the same path.
+            manifest = self.dir / "drivers-manifest.json"
+            entry = dm.build_entry(
+                inspect_json(driver="clickhouse", features=["navigator", "query.sql"], schemes=["clickhouse"]),
+                version="1.0.0", zip_path=self.arm, url=HTTPS, arch="arm64", team_id="ABCDE12345", license="Apache-2.0",
+            )
+            manifest.write_text(json.dumps(dm.merge_entries([entry], now="2026-10-08T12:00:00Z")))
+            self.assertEqual(dm.main(["sign", "--manifest", str(manifest), "--key-env", "TEST_APP_KEY", "--signer", str(signer)]), 0)
+        (cargo_command, cargo), (direct, prebuilt), (catalog, catalog_kwargs) = calls
+        self.assertEqual(cargo_command[0], "cargo")
+        self.assertNotIn("TEST_APP_KEY", cargo["env"])
+        self.assertEqual(cargo["input"], secret + "\n")
+        self.assertEqual(direct[0], str(signer))
+        self.assertEqual(direct[1:3], ["sign", "-"])
+        self.assertEqual(prebuilt["env"], {"PATH": "/usr/bin"})
+        self.assertEqual(prebuilt["input"], secret + "\n")
+        self.assertEqual(catalog[0], str(signer))
+        self.assertEqual(catalog_kwargs["env"], {"PATH": "/usr/bin"})
+
+    def test_a_missing_signer_is_an_error_not_a_fallback_to_cargo(self):
+        with contextlib.redirect_stderr(io.StringIO()), mock.patch.dict(os.environ, {"TEST_APP_KEY": "k"}):
+            self.assertEqual(dm.main(self.args("--key-env", "TEST_APP_KEY", "--signer", str(self.dir / "nope"))), 1)
+
+    def test_bad_input_is_an_error_code_not_a_traceback(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(dm.main(self.args("--key-env", "UNSET_KEY_VAR_XYZ")), 1)
+            self.assertEqual(dm.main(["app-manifest", "--version", "0.2.0", "--base-url", self.BASE, "--out", str(self.dir / "m.json"),
+                                      "--zip", "nonsense", "--key-env", "X"]), 1)
+        self.assertFalse((self.dir / "app-update.json.sig").exists())
+
+    @unittest.skipUnless(shutil.which("cargo"), "needs cargo to build the sign-manifest example")
+    def test_it_signs_with_a_throwaway_key_in_the_format_the_driver_catalog_uses(self):
+        import subprocess
+        key = self.dir / "throwaway.key"
+        keygen = subprocess.run(SigningDryRunTests.cargo + ["keygen", str(key)], capture_output=True, text=True)
+        self.assertEqual(keygen.returncode, 0, keygen.stderr)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(dm.main(self.args("--key", str(key))), 0)
+        manifest = self.dir / "app-update.json"
+        sig = self.dir / "app-update.json.sig"
+        self.assertEqual(len(base64.b64decode(sig.read_text().strip())), 64)
+        # `sign-manifest sign` verifies the signature it wrote; a second signing of the same bytes is identical.
+        before = sig.read_text()
+        self.assertEqual(dm.sign_manifest(manifest, key).read_text(), before)
+        # The prebuilt example (what CI runs, with the key in a variable) gives the same signature.
+        built = ROOT / "rust-engine" / "target" / "release" / "examples" / "sign-manifest"
+        if built.is_file():
+            sig.unlink()
+            with mock.patch.dict(os.environ, {"TEST_APP_KEY": key.read_text()}), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(dm.main(self.args("--key-env", "TEST_APP_KEY", "--signer", str(built))), 0)
+            # (the manifest was rewritten: signed over its new bytes, the same as the cargo-run signer does)
+            self.assertEqual(dm.sign_manifest(manifest, key).read_text(), sig.read_text())
+
+
 if __name__ == "__main__":
     unittest.main()

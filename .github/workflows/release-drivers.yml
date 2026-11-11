@@ -354,10 +354,16 @@ jobs:
             dist/drivers/*-manifest-entry.json \
             dist/drivers/*-tool-entry.json
 
+      # Built in a step that has no secret, so no build script or procedural macro of its
+      # dependency tree can read the signing key; the signing step runs the finished binary.
+      - name: Build the manifest signer
+        run: cargo build --locked --release --manifest-path rust-engine/Cargo.toml -p engine-driver-host --example sign-manifest
+
       # LAST step that touches the manifest: any later rewrite invalidates the
-      # signature. The key reaches the signer through an environment variable and
-      # then the signer's standard input (never echoed, never on a command line,
-      # never written to disk), and the signer is built with `cargo --locked`.
+      # signature. The key reaches the signer through an environment variable of this
+      # step and then only the signer's standard input (never echoed, never on a
+      # command line, never written to disk; the signer's own environment holds
+      # nothing but PATH).
       - name: Sign manifest
         env:
           DRIVER_MANIFEST_SIGNING_KEY: ${{ secrets.DRIVER_MANIFEST_SIGNING_KEY }}
@@ -365,7 +371,8 @@ jobs:
           set -euo pipefail
           python3 scripts/driver_manifest.py sign \
             --manifest dist/drivers/drivers-manifest.json \
-            --key-env DRIVER_MANIFEST_SIGNING_KEY
+            --key-env DRIVER_MANIFEST_SIGNING_KEY \
+            --signer rust-engine/target/release/examples/sign-manifest
           test -s dist/drivers/drivers-manifest.json.sig
 
       - name: Upload release assets
@@ -375,9 +382,17 @@ jobs:
           set -euo pipefail
           # Never "latest": that label belongs to the app release (release-app.yml), which
           # is what a visitor of the Releases page wants.
+          # What changed (docs/release-notes/<tag>.md, when written), then what this release is.
+          {
+            if [[ -s "docs/release-notes/${RELEASE_TAG}.md" ]]; then
+              cat "docs/release-notes/${RELEASE_TAG}.md"
+              printf '\n---\n\n'
+            fi
+            echo "Driver plugins and tools for TableX, installed by the app from Driver Manager (this is not the app)."
+          } > release-notes.md
           gh release view "${RELEASE_TAG}" >/dev/null 2>&1 || \
             gh release create "${RELEASE_TAG}" --title "Drivers ${RELEASE_TAG#drivers-v}" --latest=false \
-              --notes "Driver plugins and tools for TableX, installed by the app from Driver Manager (this is not the app)."
+              --notes-file release-notes.md
           shopt -s nullglob
           assets=(
             dist/drivers/libdbengine_*.dylib.zip

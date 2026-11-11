@@ -371,3 +371,15 @@ fn an_ad_hoc_signature_installs_when_the_signed_manifest_pins_no_team_id() {
         .expect("developer mode accepts ad-hoc");
     assert_eq!(developer.team_id, "");
 }
+
+#[test]
+fn a_document_of_another_kind_is_not_a_catalog() {
+    let parse = |text: &str| serde_json::from_str::<DriverManifest>(text);
+    assert!(parse(r#"{"drivers":[]}"#).is_ok());
+    assert!(parse(r#"{"kind":"tablex-driver-catalog","drivers":[]}"#).is_ok());
+    // The app's update manifest (signed by the same key) is not read as a catalog.
+    let update = r#"{"kind":"tablex-app-update","schema":1,"version":"0.2.0","generatedAt":"2026-11-11T00:00:00Z","artifacts":[]}"#;
+    assert!(parse(update).is_err());
+    assert!(parse(r#"{"kind":"tablex-app-update","drivers":[]}"#).is_err());
+    assert!(parse(r#"{"kind":null,"drivers":[]}"#).is_err());
+}

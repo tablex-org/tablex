@@ -115,8 +115,23 @@ open source" in `docs/plans/2026-10-08-driver-manager.md`.
 - Secrets are scoped to the individual steps that need them via `env:`; nothing echoes them. The
   checkout uses `persist-credentials: false`. The tag name reaches shell only through `env`.
 - Repository setup: create the GitHub **Environment** `release`, add **required reviewers**, and
-  restrict **Deployment branches and tags** to protected tags (add a tag protection / ruleset for
-  `drivers-v*`, restricted to maintainers). Put the secrets below in that environment, not at repo level.
+  restrict **Deployment branches and tags** to protected tags. A tag ruleset, "Protect release tags",
+  covers `v*` and `drivers-v*` (only a repository admin can create, move or delete those tags). Put the
+  secrets below in that environment, not at repo level.
+
+### The app's own update manifest
+
+`release-app.yml` (tags `v*`) signs `app-update.json` with the same `DRIVER_MANIFEST_SIGNING_KEY`
+(`scripts/driver_manifest.py app-manifest`, same `sign-manifest` signer and signature format) and the
+app verifies it with the keys above before it offers "Install & Restart". The document carries
+`"kind": "tablex-app-update"` (the app refuses one without it, and the driver catalog refuses a `kind`
+of another value). Its publish job uses the `release` environment, so that environment's deployment tags
+must allow `v*` as well as `drivers-v*`; the "Protect release tags" ruleset covers both.
+
+In both release workflows the signer (`--example sign-manifest`) is built in a step that has no secret
+and the signing step runs the finished binary (`driver_manifest.py ... --signer`): the key is in the
+environment of that one step only, reaches the signer on its standard input, and the signer's own
+environment holds nothing but `PATH`.
 
 ### Required secrets (environment `release`) and variables
 

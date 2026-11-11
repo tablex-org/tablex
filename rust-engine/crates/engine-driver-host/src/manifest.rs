@@ -11,6 +11,10 @@ pub const MANIFEST_SCHEMA_VERSION: u32 = 2;
 pub struct DriverManifest {
     #[serde(default = "default_schema_version", alias = "schema_version")]
     pub schema_version: u32,
+    /// A catalog carries no `kind`; a document that names another one (the app's update manifest,
+    /// `"tablex-app-update"`, is signed by the same key) is not a catalog.
+    #[serde(default, skip_serializing)]
+    kind: CatalogKind,
     #[serde(default)]
     pub generated_at: Option<String>,
     #[serde(default)]
@@ -20,6 +24,21 @@ pub struct DriverManifest {
     /// drivers (see [`ManifestTool`]).
     #[serde(default, deserialize_with = "lenient_tools")]
     pub tools: Vec<ManifestTool>,
+}
+
+/// The `kind` of a catalog: absent, or `"tablex-driver-catalog"`; anything else fails the parse.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+struct CatalogKind;
+
+impl<'de> Deserialize<'de> for CatalogKind {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        match serde_json::Value::deserialize(deserializer)? {
+            serde_json::Value::String(kind) if kind == "tablex-driver-catalog" => Ok(Self),
+            other => Err(serde::de::Error::custom(format!(
+                "not a driver catalog: kind {other}"
+            ))),
+        }
+    }
 }
 
 /// `tools` read so that it can never fail the drivers: a list is read element by element,
@@ -45,6 +64,7 @@ impl Default for DriverManifest {
     fn default() -> Self {
         Self {
             schema_version: default_schema_version(),
+            kind: CatalogKind,
             generated_at: None,
             drivers: Vec::new(),
             tools: Vec::new(),

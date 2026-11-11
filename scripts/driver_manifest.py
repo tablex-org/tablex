@@ -51,8 +51,22 @@ Subcommands:
   merge  --out MANIFEST [--release] ENTRY.json...   (--release: refuse file://
          URLs and a missing Team ID on macOS artifacts; entries may be driver
          or tool entries)
-  sign   --manifest FILE (--key FILE | --key-env VAR)   (release only; writes
+  sign   --manifest FILE (--key FILE | --key-env VAR) [--signer BIN]   (release only; writes
          FILE.sig with the engine-driver-host `sign-manifest` example)
+  app-manifest --version V --base-url URL --zip TARGET=FILE... --out FILE
+         (--key FILE | --key-env VAR) [--signer BIN]   (release only; the app's own update manifest, see below)
+
+`--signer BIN` runs the already built `sign-manifest` example directly: CI builds it in a step that has
+no secret, and the key (`--key-env`) then reaches only that process, on its standard input, in an
+environment that holds nothing else. Without it the example is built by `cargo run`, in an
+environment without the key variable.
+
+App update manifest (`app-manifest`, published by release-app.yml as `app-update.json` +
+`app-update.json.sig` on the release of the app's tag): {kind: "tablex-app-update", schema: 1, version, generatedAt,
+artifacts: [{target, url, size, sha256}]} with one `TableX-<version>-macos-<arch>.app.zip` per target
+(aarch64-apple-darwin | x86_64-apple-darwin). It is signed like the driver catalog: the same key, the
+same `sign-manifest` example, a detached base64 ed25519 signature over the exact bytes. The app
+verifies it with the keys it pins for the driver catalog before it reads a field.
 """
 from __future__ import annotations
 
@@ -467,23 +481,98 @@ def validate_tool_release(tool: dict) -> None:
         seen.add(target)
 
 
-def sign_manifest(manifest_path: Path, key_path: Path | None, cargo: str = "cargo", key_text: str | None = None) -> Path:
+def sign_manifest(
+    manifest_path: Path,
+    key_path: Path | None,
+    cargo: str = "cargo",
+    key_text: str | None = None,
+    signer: Path | None = None,
+    env: dict[str, str] | None = None,
+) -> Path:
     """Writes `<manifest>.sig` with the host's `sign-manifest` example (ed25519 over
     the exact bytes of the file, so call this after the manifest is final). The key is a file
     (`key_path`) or, with `key_text`, passed on the example's standard input so that a secret
-    never touches the disk. `--locked`: the signing build uses exactly the committed lock file."""
-    command = [
-        cargo, "run", "--locked", "-q", "--release", "--manifest-path", str(ROOT / "rust-engine" / "Cargo.toml"),
-        "-p", "engine-driver-host", "--example", "sign-manifest", "--",
-        "sign", "-" if key_text is not None else str(key_path), str(manifest_path),
-    ]
-    result = subprocess.run(command, capture_output=True, text=True, input=key_text)
+    never touches the disk. With `signer` (the example, built earlier without the secret) that
+    binary is run directly; otherwise it is built and run with `cargo run --locked` (the signing
+    build uses exactly the committed lock file). `env` is the environment of that process: a
+    build script or procedural macro compiled by `cargo run` must not be able to read the key."""
+    sign_args = ["sign", "-" if key_text is not None else str(key_path), str(manifest_path)]
+    if signer is not None:
+        command = [str(signer), *sign_args]
+    else:
+        command = [
+            cargo, "run", "--locked", "-q", "--release", "--manifest-path", str(ROOT / "rust-engine" / "Cargo.toml"),
+            "-p", "engine-driver-host", "--example", "sign-manifest", "--", *sign_args,
+        ]
+    result = subprocess.run(command, capture_output=True, text=True, input=key_text, env=env)
     if result.returncode != 0:
         raise ManifestError(f"sign-manifest failed: {result.stderr.strip() or result.stdout.strip()}")
     sig = Path(str(manifest_path) + ".sig")
     if not sig.exists():
         raise ManifestError(f"sign-manifest did not write {sig}")
     return sig
+
+
+def sign_with_args(manifest_path: Path, args: argparse.Namespace) -> Path:
+    """Signs with the key the command line names: a key file, or the variable `--key-env`. The signer
+    gets the key on its standard input and an environment WITHOUT that variable (and, with `--signer`,
+    nothing but PATH), so nothing the signer runs or builds can read the secret."""
+    signer = Path(args.signer) if args.signer else None
+    if signer is not None and not signer.is_file():
+        raise ManifestError(f"--signer {signer} is not a file (build the sign-manifest example first)")
+    if args.key:
+        return sign_manifest(manifest_path, Path(args.key), args.cargo, signer=signer)
+    secret = os.environ.get(args.key_env or "")
+    if not secret:
+        raise ManifestError(f"environment variable {args.key_env} is empty or unset")
+    if signer is not None:
+        env = {"PATH": os.environ.get("PATH", "")}
+    else:
+        env = {name: value for name, value in os.environ.items() if name != args.key_env}
+    # Standard input of the signing process: never written to disk, never on a command line.
+    return sign_manifest(manifest_path, None, args.cargo, key_text=secret.strip() + "\n", signer=signer, env=env)
+
+
+APP_MANIFEST_KIND = "tablex-app-update"  # the app requires it: a driver catalog is never read as an update
+APP_TARGETS = ("aarch64-apple-darwin", "x86_64-apple-darwin")
+APP_VERSION_PATTERN = re.compile(r"\d+\.\d+\.\d+")
+
+
+def build_app_manifest(version: str, base_url: str, zips: list[tuple[str, Path]], now: str | None = None) -> dict:
+    """The update manifest of one app release: one artifact per target, each a `.app.zip` named in
+    `base_url` (the release's download address). Every target must be there: a release that cannot
+    update one architecture must not publish a manifest that looks complete."""
+    if not APP_VERSION_PATTERN.fullmatch(version):
+        raise ManifestError(f"{version!r} is not a release version (major.minor.patch)")
+    if not base_url.startswith("https://"):
+        raise ManifestError("--base-url must be an https address")
+    targets = [target for target, _ in zips]
+    if sorted(targets) != sorted(APP_TARGETS):
+        raise ManifestError(f"expected one zip for each of {', '.join(APP_TARGETS)}, got {targets or 'none'}")
+    artifacts = []
+    for target, path in sorted(zips):
+        if not path.name.endswith(".app.zip"):
+            raise ManifestError(f"{path.name}: an app zip is named <something>.app.zip")
+        size = path.stat().st_size
+        if size == 0:
+            raise ManifestError(f"{path}: empty")
+        artifacts.append({"target": target, "url": f"{base_url.rstrip('/')}/{path.name}", "size": size, "sha256": sha256_file(path)})
+    return {"kind": APP_MANIFEST_KIND, "schema": 1, "version": version, "generatedAt": now or utc_now(), "artifacts": artifacts}
+
+
+def _cmd_app_manifest(args: argparse.Namespace) -> int:
+    zips = []
+    for item in args.zip:
+        target, separator, path = item.partition("=")
+        if not separator:
+            raise ManifestError(f"--zip {item!r}: expected TARGET=FILE")
+        zips.append((target, Path(path)))
+    manifest = build_app_manifest(args.version, args.base_url, zips)
+    out = Path(args.out)
+    out.write_text(json.dumps(manifest, indent=2) + "\n")
+    sig = sign_with_args(out, args)
+    print(f"Wrote and signed {out}: {sig} ({', '.join(target for target, _ in sorted(zips))})")
+    return 0
 
 
 def _cmd_entry(args: argparse.Namespace) -> int:
@@ -558,14 +647,7 @@ def _cmd_merge(args: argparse.Namespace) -> int:
 def _cmd_sign(args: argparse.Namespace) -> int:
     manifest_path = Path(args.manifest)
     validate_release(json.loads(manifest_path.read_text()))
-    if args.key:
-        sig = sign_manifest(manifest_path, Path(args.key), args.cargo)
-    else:
-        secret = os.environ.get(args.key_env or "")
-        if not secret:
-            raise ManifestError(f"environment variable {args.key_env} is empty or unset")
-        # Standard input of the signing process: never written to disk, never on a command line.
-        sig = sign_manifest(manifest_path, None, args.cargo, key_text=secret.strip() + "\n")
+    sig = sign_with_args(manifest_path, args)
     print(f"Signed {manifest_path}: {sig}")
     return 0
 
@@ -616,7 +698,20 @@ def main(argv: list[str] | None = None) -> int:
     group.add_argument("--key", help="key file (never commit one)")
     group.add_argument("--key-env", help="environment variable holding the base64 key (a CI secret)")
     sign.add_argument("--cargo", default=os.environ.get("CARGO", "cargo"))
+    sign.add_argument("--signer", help="the built sign-manifest example (rust-engine/target/release/examples/sign-manifest): run directly, with no cargo")
     sign.set_defaults(func=_cmd_sign)
+
+    app = sub.add_parser("app-manifest", help="write and sign the app's update manifest (app-update.json + .sig)")
+    app.add_argument("--version", required=True, help="the app version the tag names")
+    app.add_argument("--base-url", required=True, help="https://github.com/<repo>/releases/download/v<version>")
+    app.add_argument("--zip", action="append", default=[], metavar="TARGET=FILE", help="aarch64-apple-darwin=FILE and x86_64-apple-darwin=FILE")
+    app.add_argument("--out", required=True)
+    app_key = app.add_mutually_exclusive_group(required=True)
+    app_key.add_argument("--key", help="key file (never commit one)")
+    app_key.add_argument("--key-env", help="environment variable holding the base64 key (a CI secret)")
+    app.add_argument("--cargo", default=os.environ.get("CARGO", "cargo"))
+    app.add_argument("--signer", help="the built sign-manifest example: run directly, with no cargo")
+    app.set_defaults(func=_cmd_app_manifest)
 
     args = parser.parse_args(argv)
     try:

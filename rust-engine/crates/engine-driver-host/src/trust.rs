@@ -128,7 +128,12 @@ impl ManifestTrust {
         Ok(parsed)
     }
 
-    fn verify_signature(
+    /// Check that `signature` (the base64 of a detached ed25519 signature) is
+    /// a valid one over exactly `manifest`, by one of the pinned keys. Nothing is
+    /// parsed and nothing is tracked: for a signed document that is not a driver
+    /// catalog (the app's update manifest), whose caller reads the fields only
+    /// after this returns `Ok`.
+    pub fn verify_signature(
         &self,
         manifest: &[u8],
         signature: Option<&[u8]>,

@@ -8,7 +8,13 @@ name: Release App
 # the user to confirm the first launch (the release notes say how). Drivers are not
 # in the app: it installs them from the signed driver catalog (release-drivers.yml).
 #
-# No secrets are used. Never add pull_request / pull_request_target here.
+# In-app update: each build also packs the bundle as `TableX-<version>-macos-<arch>.app.zip`, and the
+# publish job writes `app-update.json` (version, size and SHA-256 of both zips) and signs it with the
+# driver catalog's key (`DRIVER_MANIFEST_SIGNING_KEY`, a secret of the `release` environment, which the
+# publish job alone uses; the environment must allow `v*` tags). The app verifies that signature with
+# the keys it pins for the driver catalog before it offers "Install & Restart".
+#
+# The build jobs use no secrets. Never add pull_request / pull_request_target here.
 
 on:
   push:
@@ -51,11 +57,21 @@ jobs:
         run: |
           set -euo pipefail
           version="$(sed -n 's/^version = "\(.*\)"/\1/p' apps/tablex-gpui/Cargo.toml | head -n 1)"
+          # The update manifest needs a plain major.minor.patch: fail here, not when publishing.
+          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "the app version ${version} is not major.minor.patch" >&2
+            exit 1
+          fi
           if [[ "${GITHUB_REF_NAME}" != "v${version}" ]]; then
             echo "tag ${GITHUB_REF_NAME} does not match the app version ${version}" >&2
             exit 1
           fi
           echo "VERSION=${version}" >> "${GITHUB_ENV}"
+          # What changed, written before tagging; it opens the release page.
+          if [[ ! -s "docs/release-notes/${GITHUB_REF_NAME}.md" ]]; then
+            echo "docs/release-notes/${GITHUB_REF_NAME}.md is missing or empty" >&2
+            exit 1
+          fi
 
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
@@ -71,26 +87,67 @@ jobs:
           scripts/bundle-macos.sh --binary "target/${{ matrix.target }}/dist/tablex-gpui"
           scripts/dmg-macos.sh target/release/bundle/TableX.app \
             "dist/TableX-${VERSION}-macos-${{ matrix.arch }}.dmg"
+          # The zip the in-app update installs from. ditto keeps the bundle's symlinks and signature.
+          ditto -c -k --keepParent target/release/bundle/TableX.app \
+            "dist/TableX-${VERSION}-macos-${{ matrix.arch }}.app.zip"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: dmg-${{ matrix.arch }}
-          path: dist/*.dmg
+          name: app-${{ matrix.arch }}
+          path: |
+            dist/*.dmg
+            dist/*.app.zip
           if-no-files-found: error
 
   release:
     name: publish
     needs: build
     if: github.repository_owner == vars.RELEASE_OWNER && github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
-    runs-on: ubuntu-latest
+    # macOS, as release-drivers.yml: the signer is built and run there.
+    runs-on: macos-15
+    # The signing key lives in this environment (required reviewers and the allowed tags are set on it).
+    environment: release
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          pattern: dmg-*
+          pattern: app-*
           path: dist
           merge-multiple: true
+
+      # Built in a step that has no secret, so no build script or procedural macro of its dependency tree
+      # can read the signing key; the signing step runs the finished binary.
+      - name: Build the manifest signer
+        run: cargo build --locked --release --manifest-path rust-engine/Cargo.toml -p engine-driver-host --example sign-manifest
+
+      # Signs the exact bytes that are uploaded: nothing rewrites app-update.json after this. The key
+      # reaches the signer through an environment variable of this step and then only the signer's
+      # standard input (never echoed, never on a command line, never written to disk; the signer's own
+      # environment holds nothing but PATH).
+      - name: Write and sign the update manifest
+        env:
+          DRIVER_MANIFEST_SIGNING_KEY: ${{ secrets.DRIVER_MANIFEST_SIGNING_KEY }}
+          GITHUB_REPOSITORY_NAME: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          python3 scripts/driver_manifest.py app-manifest \
+            --version "${version}" \
+            --base-url "https://github.com/${GITHUB_REPOSITORY_NAME}/releases/download/${TAG}" \
+            --zip "aarch64-apple-darwin=dist/TableX-${version}-macos-apple-silicon.app.zip" \
+            --zip "x86_64-apple-darwin=dist/TableX-${version}-macos-intel.app.zip" \
+            --out dist/app-update.json \
+            --key-env DRIVER_MANIFEST_SIGNING_KEY \
+            --signer rust-engine/target/release/examples/sign-manifest
+          test -s dist/app-update.json.sig
 
       - name: Publish the release
         env:
@@ -115,6 +172,9 @@ jobs:
           Database drivers are installed from the app: **Driver Manager** lists PostgreSQL,
           MySQL, MariaDB, SQLite, MongoDB, Redis and ClickHouse.
           EOF
-          sed -i 's/^          //' notes.md
-          gh release create "${TAG}" --title "TableX ${version}" --notes-file notes.md --latest \
-            dist/*.dmg
+          # `-i.bak` is the form GNU and BSD sed (this runner's) both take.
+          sed -i.bak 's/^          //' notes.md
+          # What changed first (docs/release-notes/<tag>.md), then the install notes.
+          { cat "docs/release-notes/${TAG}.md"; printf '\n---\n\n'; cat notes.md; } > release-notes.md
+          gh release create "${TAG}" --title "TableX ${version}" --notes-file release-notes.md --latest \
+            dist/*.dmg dist/*.app.zip dist/app-update.json dist/app-update.json.sig

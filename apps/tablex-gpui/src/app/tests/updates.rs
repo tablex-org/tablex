@@ -274,3 +274,230 @@ fn the_launch_check_does_not_fetch_when_the_preference_is_off_the_build_is_debug
     assert_eq!(rig.releases.calls(), 1);
     assert_eq!(rig.shown(), ["TableX 0.2.0 is available"]);
 }
+
+// --- Install & Restart ---------------------------------------------------------------------------
+// The signed manifest decides what the notice offers; the install itself runs against a fake source
+// (canned manifest and zip), a real bundle in a temp folder and a recorder in place of the restart.
+
+use updates::install::tests as fixtures;
+
+const INSTALL_TARGET: &str = "aarch64-apple-darwin";
+const ZIP_URL: &str = "https://github.com/tablex-org/tablex/releases/download/v0.2.0/TableX-0.2.0-macos-apple-silicon.app.zip";
+
+fn app_manifest(size: u64, sha256: &str) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "tablex-app-update", "schema": 1, "version": "0.2.0", "generatedAt": "2026-11-11T00:00:00Z",
+        "artifacts": [{"target": INSTALL_TARGET, "url": ZIP_URL, "size": size, "sha256": sha256}],
+    })
+}
+
+/// What the restart hook was armed with, and how often the app was asked to quit.
+#[derive(Clone, Default)]
+struct Restarts {
+    armed: std::rc::Rc<std::cell::RefCell<Vec<std::path::PathBuf>>>,
+    quits: std::rc::Rc<std::cell::Cell<usize>>,
+}
+
+impl UpdateRig<'_> {
+    /// Points the install at `fake`, the key 1 and `exe`; a restart is recorded instead of done.
+    fn install_env(&mut self, exe: Option<std::path::PathBuf>) -> (std::sync::Arc<fixtures::Fake>, Restarts) {
+        let fake = std::sync::Arc::new(fixtures::Fake::default());
+        let restarts = Restarts::default();
+        let (source, seen, quits) = (fake.clone(), restarts.armed.clone(), restarts.quits.clone());
+        self.app.update(self.visual, move |this, _| {
+            this.update_ui.source = source;
+            this.update_ui.trust = Some(fixtures::trust(&fixtures::key(1)));
+            this.update_ui.exe = exe;
+            this.update_ui.target = INSTALL_TARGET;
+            this.update_ui.restart = Box::new(move |_, bundle| seen.borrow_mut().push(bundle.to_owned()));
+            this.update_ui.quit = Box::new(move |_| quits.set(quits.get() + 1));
+        });
+        (fake, restarts)
+    }
+
+    /// The next day's launch check.
+    fn check_again(&mut self) {
+        self.forget_last_check();
+        self.launch_check();
+    }
+
+    fn wait_install(&mut self) {
+        let app = self.app.clone();
+        wait_until(self.visual, "the install", |visual| app.read_with(visual, |this, _| this.update_ui.install_task.is_none()));
+        for _ in 0..3 {
+            settle(self.visual);
+        }
+    }
+
+    fn shows(&mut self, selector: &'static str) -> bool {
+        self.visual.debug_bounds(selector).is_some()
+    }
+}
+
+#[gpui::test]
+fn install_and_restart_is_offered_only_with_a_verified_manifest_and_an_installable_app(cx: &mut TestAppContext) {
+    let mut rig = UpdateRig::new(cx, FakeReleases::tag("v0.2.0"), "0.1.0");
+    let scratch = fixtures::Scratch::new();
+    let exe = fixtures::fake_app_layout(&scratch.0, "TableX.app");
+    let (fake, _) = rig.install_env(Some(exe));
+
+    // No manifest on the release: Download.
+    rig.launch_check();
+    assert!(rig.shows("update-download") && !rig.shows("update-install"));
+    rig.click("update-later");
+
+    // A manifest signed by a key the app does not trust: Download.
+    fake.publish(&fixtures::key(2), &app_manifest(10, &"ab".repeat(32)));
+    rig.check_again();
+    assert!(rig.shows("update-download") && !rig.shows("update-install"));
+    rig.click("update-later");
+
+    // Signed by the pinned key: Install & Restart, Later and Skip, and no Download.
+    fake.publish(&fixtures::key(1), &app_manifest(10, &"ab".repeat(32)));
+    rig.check_again();
+    assert!(rig.shows("update-install") && rig.shows("update-later") && rig.shows("update-skip"));
+    assert!(!rig.shows("update-download"));
+    assert!(rig.opened.borrow().is_empty(), "nothing happens without a click");
+    rig.click("update-later");
+    assert_eq!(rig.notifications(), 0);
+
+    // The same verified manifest, but this run cannot replace itself (a development run): Download.
+    rig.app.update(rig.visual, |this, _| this.update_ui.exe = Some("/repo/target/release/tablex-gpui".into()));
+    rig.check_again();
+    assert!(rig.shows("update-download") && !rig.shows("update-install"));
+}
+
+#[cfg(target_os = "macos")]
+#[gpui::test]
+fn install_and_restart_downloads_verifies_swaps_the_bundle_and_restarts(cx: &mut TestAppContext) {
+    use sha2::Digest as _;
+    let mut rig = UpdateRig::new(cx, FakeReleases::tag("v0.2.0"), "0.1.0");
+    let scratch = fixtures::Scratch::new();
+    let running = scratch.0.join("TableX.app");
+    fixtures::make_bundle(&scratch.0, "TableX.app", "org.tablex.TableX", "0.1.0");
+    let new = fixtures::make_bundle(&scratch.0.join("packed"), "TableX.app", "org.tablex.TableX", "0.2.0");
+    let zip = scratch.0.join("release.zip");
+    fixtures::zip_of(&new, &zip);
+    let bytes = std::fs::read(&zip).unwrap();
+    let (fake, restarts) = rig.install_env(Some(running.join("Contents/MacOS/TableX")));
+    fake.serve(ZIP_URL, bytes.clone());
+    fake.publish(&fixtures::key(1), &app_manifest(bytes.len() as u64, &hex::encode(sha2::Sha256::digest(&bytes))));
+
+    rig.launch_check();
+    rig.click("update-install");
+    rig.wait_install();
+
+    assert_eq!(*restarts.armed.borrow(), std::slice::from_ref(&running), "the app restarts into the bundle it has just been replaced by");
+    let version = std::process::Command::new("/usr/bin/plutil")
+        .args(["-extract", "CFBundleShortVersionString", "raw", "-o", "-"])
+        .arg(running.join("Contents/Info.plist"))
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&version.stdout).trim(), "0.2.0");
+    assert!(scratch.0.join("TableX.app.old-0.1.0/Contents/Info.plist").is_file(), "the old app waits beside it");
+    let leftovers: Vec<_> = std::fs::read_dir(&scratch.0)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(".TableX-update-"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+    assert_eq!(restarts.quits.get(), 1, "the app is asked to quit once, as Quit does");
+
+    // The new version waits for the restart: this process runs from the moved-aside bundle, so it is
+    // neither checked nor installed again; the notice offers Restart, and a check shows it again.
+    assert_eq!(rig.notifications(), 1);
+    assert!(rig.shows("update-restart") && !rig.shows("update-install") && !rig.shows("update-download"));
+    let checks = rig.releases.calls();
+    rig.click("update-restart-later");
+    assert_eq!(rig.notifications(), 0);
+    rig.forget_last_check();
+    rig.launch_check();
+    assert_eq!(rig.releases.calls(), checks, "no check while a restart is pending");
+    rig.palette_check();
+    assert_eq!(rig.releases.calls(), checks);
+    assert!(rig.shows("update-restart"), "Check for Updates shows the pending restart again");
+    assert_eq!(restarts.armed.borrow().len(), 1, "the relaunch is armed once");
+    rig.click("update-restart");
+    assert_eq!(restarts.quits.get(), 2, "Restart quits");
+    assert_eq!(rig.notifications(), 0);
+    assert!(rig.opened.borrow().is_empty());
+}
+
+#[cfg(target_os = "macos")]
+#[gpui::test]
+fn a_download_that_does_not_match_the_manifest_falls_back_to_download_and_changes_nothing(cx: &mut TestAppContext) {
+    let mut rig = UpdateRig::new(cx, FakeReleases::tag("v0.2.0"), "0.1.0");
+    let scratch = fixtures::Scratch::new();
+    let running = scratch.0.join("TableX.app");
+    fixtures::make_bundle(&scratch.0, "TableX.app", "org.tablex.TableX", "0.1.0");
+    let (fake, restarts) = rig.install_env(Some(running.join("Contents/MacOS/TableX")));
+    fake.serve(ZIP_URL, b"not the signed file".to_vec());
+    fake.publish(&fixtures::key(1), &app_manifest(19, &"ab".repeat(32)));
+
+    rig.launch_check();
+    rig.click("update-install");
+    rig.wait_install();
+
+    assert!(restarts.armed.borrow().is_empty(), "no restart");
+    assert!(rig.shows("update-download") && !rig.shows("update-install"), "Download is offered instead");
+    rig.click("update-download");
+    assert_eq!(*rig.opened.borrow(), ["https://github.com/tablex-org/tablex/releases/tag/v0.2.0"]);
+    assert!(running.join("Contents/Info.plist").is_file());
+    let entries = std::fs::read_dir(&scratch.0).unwrap().count();
+    assert_eq!(entries, 1, "the running bundle is all that is there");
+}
+
+#[gpui::test]
+fn the_install_shows_its_progress_and_cancel_stops_it_quietly(cx: &mut TestAppContext) {
+    let mut rig = UpdateRig::new(cx, FakeReleases::tag("v0.2.0"), "0.1.0");
+    let scratch = fixtures::Scratch::new();
+    let exe = fixtures::fake_app_layout(&scratch.0, "TableX.app");
+    let (fake, restarts) = rig.install_env(Some(exe));
+    fake.serve(ZIP_URL, b"zip".to_vec());
+    fake.publish(&fixtures::key(1), &app_manifest(3, &"ab".repeat(32)));
+    fake.hold.store(true, std::sync::atomic::Ordering::Release);
+
+    rig.launch_check();
+    rig.click("update-install");
+    assert_eq!(rig.shown().last().map(String::as_str), Some("Installing TableX 0.2.0"));
+    assert_eq!(rig.notifications(), 1);
+    assert!(rig.shows("update-progress") && rig.shows("update-cancel"));
+    assert!(!rig.shows("update-install"), "the notice is the progress now");
+
+    rig.click("update-cancel");
+    rig.wait_install();
+    assert_eq!(rig.notifications(), 0, "cancelling ends it without another notice");
+    assert!(restarts.armed.borrow().is_empty() && rig.opened.borrow().is_empty());
+    assert_eq!(rig.state().skipped, None);
+}
+
+#[gpui::test]
+fn closing_the_progress_notice_cancels_the_install(cx: &mut TestAppContext) {
+    let mut rig = UpdateRig::new(cx, FakeReleases::tag("v0.2.0"), "0.1.0");
+    let scratch = fixtures::Scratch::new();
+    let exe = fixtures::fake_app_layout(&scratch.0, "TableX.app");
+    let (fake, restarts) = rig.install_env(Some(exe));
+    fake.serve(ZIP_URL, b"zip".to_vec());
+    fake.publish(&fixtures::key(1), &app_manifest(3, &"ab".repeat(32)));
+    fake.hold.store(true, std::sync::atomic::Ordering::Release);
+
+    rig.launch_check();
+    rig.click("update-install");
+    assert!(rig.shows("update-cancel"));
+    // The close button of the notice (and any other way of closing it) ends the install.
+    rig.visual.update(|window, cx| {
+        use gpui_component::WindowExt as _;
+        window.clear_notifications(cx);
+    });
+    // The notice slides out before it is gone (and only then is it closed).
+    for _ in 0..3 {
+        settle(rig.visual);
+    }
+    rig.visual.cx.executor().advance_clock(Duration::from_secs(2));
+    settle(rig.visual);
+    rig.wait_install();
+    assert_eq!(rig.notifications(), 0, "cancelled quietly");
+    assert!(restarts.armed.borrow().is_empty() && restarts.quits.get() == 0);
+    assert!(!rig.shows("update-download"));
+}
