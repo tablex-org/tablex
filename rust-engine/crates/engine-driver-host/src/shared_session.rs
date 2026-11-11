@@ -7,16 +7,18 @@ use crate::loader::{DriverOperation, DriverSession, LoaderError, QueryRunner, Se
 /// Shares one driver session between UI inspection and serialized background
 /// operations while preserving page-release ordering.
 ///
-/// The session lock is held for the whole duration of navigator calls and
-/// page acquisition (network I/O), so anything that runs on the UI thread must
-/// use the lock-free [`Self::begin_operation`] / [`Self::query_runner`] /
-/// [`Self::mutate`] / [`Self::describe_object`] instead of [`Self::lock`].
+/// The session lock is held for page bookkeeping and page acquisition, never
+/// for network I/O: anything that talks to the server (and anything that runs on
+/// the UI thread) must use the lock-free [`Self::begin_operation`] /
+/// [`Self::query_runner`] / [`Self::mutate`] / [`Self::describe_object`] /
+/// [`Self::list_nav_nodes`] instead of [`Self::lock`].
 pub struct SharedDriverSession {
     session: Mutex<DriverSession>,
     anchor: SessionAnchor,
     pending_releases: Mutex<Vec<u64>>,
     /// Pages a lock-free mutation invalidated, forgotten by the next `lock`.
     pending_invalidations: Mutex<Vec<u64>>,
+    created: std::time::Instant,
 }
 
 impl SharedDriverSession {
@@ -26,6 +28,7 @@ impl SharedDriverSession {
             session: Mutex::new(session),
             pending_releases: Mutex::new(Vec::new()),
             pending_invalidations: Mutex::new(Vec::new()),
+            created: std::time::Instant::now(),
         }
     }
 
@@ -86,6 +89,26 @@ impl SharedDriverSession {
         request: &serde_json::Value,
     ) -> Result<serde_json::Value, LoaderError> {
         self.anchor.describe_object(request)
+    }
+
+    /// `dbengine_list_nav_nodes` **without** the session lock, under its own
+    /// registered operation: a navigator call is network I/O, and holding the
+    /// lock for it would queue page adoption, release and disconnect behind a
+    /// server that does not answer.
+    pub fn list_nav_nodes(
+        &self,
+        request_json: &str,
+    ) -> Result<engine_driver_api::NavigatorPage, LoaderError> {
+        self.anchor.list_nav_nodes(request_json)
+    }
+
+    /// The operations running on this session right now (queries, navigator calls,
+    /// mutations: everything that registered one) and when one last started or ended
+    /// (when the session was created, if none has). Never takes the session lock: the idle
+    /// ping asks this to leave a busy session alone.
+    pub fn activity(&self) -> (usize, std::time::Instant) {
+        let (running, last) = self.anchor.activity();
+        (running, last.unwrap_or(self.created))
     }
 
     /// Locks the session and flushes queued page releases before returning it.

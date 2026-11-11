@@ -41,6 +41,9 @@ pub(super) struct DriverRuntime {
     /// The window hosting this root, recorded by its first render, so a
     /// background completion can open a dialog without a `Window` in hand.
     pub(super) window: Option<gpui::AnyWindowHandle>,
+    /// Disconnects every session when the application quits (see
+    /// [`AppRoot::disconnect_sessions_for_quit`]).
+    pub(super) _quit: Option<gpui::Subscription>,
     /// Pages handed back, as `(connection, page id)` (tests assert that a
     /// page is released through the connection that owns it).
     #[cfg(test)]
@@ -453,6 +456,43 @@ pub(super) struct DriverPageGuard {
     page_id: Option<u64>,
 }
 
+/// How long quitting waits for the sessions to say goodbye: a driver whose server stopped
+/// answering must not hold the quit (the process ends right after).
+const QUIT_DISCONNECT_WAIT: Duration = Duration::from_millis(1500);
+
+impl AppRoot {
+    /// What the platform runs when the application quits. The last reference to a session
+    /// disconnects it (a network goodbye, which can wait on a dead server), and the quit
+    /// would drop those references on the main thread: they are taken out here and dropped
+    /// on one worker, and the quit waits for it at most [`QUIT_DISCONNECT_WAIT`] in total.
+    pub(super) fn disconnect_sessions_for_quit(
+        &mut self,
+    ) -> impl std::future::Future<Output = ()> + 'static {
+        let sessions: Vec<_> = self.driver_runtime.sessions.drain().map(|(_, session)| session).collect();
+        let tab_sessions: Vec<_> = std::mem::take(&mut self.driver_runtime.tab_sessions).into_values().collect();
+        async move {
+            if sessions.is_empty() && tab_sessions.is_empty() {
+                return;
+            }
+            let (done, finished) = smol::channel::bounded::<()>(1);
+            std::thread::spawn(move || {
+                drop(sessions);
+                drop(tab_sessions);
+                let _ = done.send_blocking(());
+            });
+            smol::future::or(
+                async {
+                    let _ = finished.recv().await;
+                },
+                async {
+                    smol::Timer::after(QUIT_DISCONNECT_WAIT).await;
+                },
+            )
+            .await;
+        }
+    }
+}
+
 pub(super) fn release_driver_page_async(
     session: Arc<engine_driver_host::SharedDriverSession>,
     page_id: u64,
@@ -636,6 +676,9 @@ impl AppRoot {
             Err(error) => {
                 // Nothing was sent: a tab smart commit switched for it goes back.
                 self.smart_commit_undo(tab_id);
+                if self.retry_run_after_loss(run, &request, &error, route, cx) {
+                    return;
+                }
                 let connection = request.connection;
                 self.transactions_report(reporting, |this| this.apply_driver_arrow_query_result(tab_id, run, connection, Err(error)));
                 return;
@@ -791,6 +834,18 @@ impl AppRoot {
         if self.is_script_run(request.tab_id, run) {
             self.finish_script_statement(run, request, result, cx);
             return;
+        }
+        // A read that lost its session reconnects and runs once more; nothing else is sent twice.
+        if let (Some(error), Some(route)) = (
+            result.as_ref().err(),
+            self.transactions
+                .reporting
+                .filter(|reporting| reporting.tab_id == request.tab_id)
+                .map(|reporting| reporting.route),
+        ) {
+            if self.retry_run_after_loss(run, &request, error, route, cx) {
+                return;
+            }
         }
         if let Some(reason) = result
             .as_ref()
@@ -1065,7 +1120,10 @@ impl AppRoot {
         cx: &mut Context<Self>,
     ) {
         let tab_id = request.tab_id;
+        // Reopening a dead session cancels the runs of the connection's tabs: not this one's.
+        self.recovery.queueing = Some(tab_id);
         self.ensure_connected(request.connection.clone(), None, cx);
+        self.recovery.queueing = None;
         let epoch = matches!(
             self.sessions.status(&request.connection),
             ConnectionStatus::Connecting

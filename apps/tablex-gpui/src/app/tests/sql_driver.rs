@@ -729,7 +729,8 @@ fn a_dropped_session_flips_the_connection_to_its_reconnect_state(cx: &mut TestAp
     let db = SqliteDb::new(ITEMS_SEED);
     let mut rig = SqlRig::sqlite(cx, &db);
     rig.session.lock().unwrap().disconnect().expect("disconnect");
-    rig.run("SELECT 1");
+    // A write: a read would be reconnected and retried (see `recovery.rs`), a write is only shown.
+    rig.run("DELETE FROM items WHERE id < 0");
     rig.wait_not_running("the run on a dropped session");
     settle(rig.visual);
 

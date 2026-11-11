@@ -99,19 +99,25 @@ pub const DEFAULT_PAGE_SIZE: u32 = 200;
 pub const QUERY_TIMEOUT_SECS_LIMITS: (f64, f64, f64) = (0.0, 86_400.0, 1.0);
 pub const CONNECT_TIMEOUT_SECS_LIMITS: (f64, f64, f64) = (0.0, 600.0, 1.0);
 pub const PAGE_SIZE_LIMITS: (f64, f64, f64) = (1.0, 100_000.0, 1.0);
+pub const KEEP_ALIVE_SECS_LIMITS: (f64, f64, f64) = (0.0, 86_400.0, 1.0);
 
 /// Registry ids of the overridable settings (`settings.json` / `overrides_json` keys).
 pub const QUERY_TIMEOUT_SECS: &str = "query.query_timeout_secs";
 pub const CONNECT_TIMEOUT_SECS: &str = "query.connect_timeout_secs";
 pub const PAGE_SIZE: &str = "results.page_size";
+pub const KEEP_ALIVE_SECS: &str = "query.keep_alive_secs";
 pub const CONFIRM_DANGEROUS: &str = "editor.confirm_dangerous";
 /// How far an AI agent may go on the connection (see [`AgentLevel`]).
 pub const AGENT_ACCESS: &str = "agent.access";
 
+/// Seconds an open connection may sit idle before the app checks it is alive (0 = never).
+pub const DEFAULT_KEEP_ALIVE_SECS: u32 = 60;
+
 /// Every setting a connection can override, by id.
-pub const OVERRIDABLE_IDS: [&str; 5] = [
+pub const OVERRIDABLE_IDS: [&str; 6] = [
     QUERY_TIMEOUT_SECS,
     CONNECT_TIMEOUT_SECS,
+    KEEP_ALIVE_SECS,
     PAGE_SIZE,
     CONFIRM_DANGEROUS,
     AGENT_ACCESS,
@@ -672,6 +678,8 @@ fn revision_of(record: &SavedConnectionRecord) -> engine_agent::Revision {
 pub struct Effective {
     pub query_timeout: Option<Duration>,
     pub connect_timeout_secs: u32,
+    /// Idle seconds before the liveness check of an open connection; 0 = off.
+    pub keep_alive_secs: u32,
     pub page_size: u32,
     pub confirm_dangerous: bool,
     pub confirm_execute: bool,
@@ -752,6 +760,7 @@ impl AgentResolution {
 pub struct Globals {
     pub query_timeout_secs: u32,
     pub connect_timeout_secs: u32,
+    pub keep_alive_secs: u32,
     pub page_size: u32,
     pub confirm_dangerous: bool,
 }
@@ -761,6 +770,7 @@ impl Default for Globals {
         Self {
             query_timeout_secs: 0,
             connect_timeout_secs: 0,
+            keep_alive_secs: DEFAULT_KEEP_ALIVE_SECS,
             page_size: DEFAULT_PAGE_SIZE,
             confirm_dangerous: true,
         }
@@ -791,6 +801,10 @@ impl Globals {
             (CONNECT_TIMEOUT_SECS, value) => {
                 self.connect_timeout_secs = whole_in(value, CONNECT_TIMEOUT_SECS_LIMITS)
                     .unwrap_or(self.connect_timeout_secs)
+            }
+            (KEEP_ALIVE_SECS, value) => {
+                self.keep_alive_secs =
+                    whole_in(value, KEEP_ALIVE_SECS_LIMITS).unwrap_or(self.keep_alive_secs)
             }
             (PAGE_SIZE, value) => {
                 self.page_size = whole_in(value, PAGE_SIZE_LIMITS).unwrap_or(self.page_size)
@@ -833,6 +847,7 @@ impl Effective {
             query_timeout: (values.query_timeout_secs > 0)
                 .then(|| Duration::from_secs(u64::from(values.query_timeout_secs))),
             connect_timeout_secs: values.connect_timeout_secs,
+            keep_alive_secs: values.keep_alive_secs,
             page_size: values.page_size,
             confirm_dangerous: values.confirm_dangerous,
             confirm_execute: preset.confirm_execute,
@@ -863,11 +878,22 @@ pub struct ProfileSettings {
     editor: EditorValues,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
 struct QueryValues {
     query_timeout_secs: u32,
     connect_timeout_secs: u32,
+    keep_alive_secs: u32,
+}
+
+impl Default for QueryValues {
+    fn default() -> Self {
+        Self {
+            query_timeout_secs: 0,
+            connect_timeout_secs: 0,
+            keep_alive_secs: DEFAULT_KEEP_ALIVE_SECS,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -952,6 +978,7 @@ impl ProfileSettings {
         Globals {
             query_timeout_secs: self.query.query_timeout_secs,
             connect_timeout_secs: self.query.connect_timeout_secs,
+            keep_alive_secs: self.query.keep_alive_secs,
             page_size: self.results.page_size,
             confirm_dangerous: self.editor.confirm_dangerous,
         }
@@ -1509,6 +1536,21 @@ mod tests {
         assert_eq!(
             of(&profile(CONNECT_TIMEOUT_SECS, OverrideValue::Number(7.0))).connect_timeout_secs,
             7
+        );
+        assert_eq!(of(&ConnectionProfile::default()).keep_alive_secs, 60, "on by default");
+        assert_eq!(
+            of(&profile(KEEP_ALIVE_SECS, OverrideValue::Number(0.0))).keep_alive_secs,
+            0,
+            "0 = off"
+        );
+        assert_eq!(
+            of(&profile(KEEP_ALIVE_SECS, OverrideValue::Number(15.0))).keep_alive_secs,
+            15
+        );
+        assert_eq!(
+            of(&profile(KEEP_ALIVE_SECS, OverrideValue::Number(-1.0))).keep_alive_secs,
+            60,
+            "below the limit"
         );
         assert!(!of(&profile(CONFIRM_DANGEROUS, OverrideValue::Bool(false))).confirm_dangerous);
         assert!(of(&profile("no.such_setting", OverrideValue::Bool(false))).confirm_dangerous);

@@ -207,73 +207,86 @@ impl AppRoot {
         // the sidebar) of this connection behind it. The lock is taken only
         // (on the background executor) to register / read the finished page.
         let task = cx.background_executor().spawn(async move {
-            let session_for_guard = Arc::clone(&session);
-            let page = runner
-                .open_query(&request_json)
-                .map_err(|error| error.to_string())?;
-            let (page, payload) = {
-                // A poisoned lock after `open_query` must not leak the page.
-                let mut session = session.lock().map_err(|_| {
-                    runner.release_page(page.page_id);
-                    "Driver session lock poisoned".to_string()
-                })?;
-                session
-                    .adopt_page(&runner, page.page_id)
+            // `smol::unblock`: the query blocks on the server for as long as it takes, which must not
+            // pin a worker of the shared background pool (a few stuck queries would stall every task).
+            smol::unblock(move || {
+                let session_for_guard = Arc::clone(&session);
+                let page = runner
+                    .open_query(&request_json)
                     .map_err(|error| error.to_string())?;
-                let payload = match session.acquire_page(page.page_id, 0, page.row_count) {
-                    Ok(page_lease) => DriverMongoResult::PageLease(page_lease),
-                    Err(engine_driver_host::PageError::Driver(
-                        engine_driver_host::LoaderError::UnsupportedFeature { feature },
-                    )) if feature == "query.page_lease" => {
-                        let batch = session
-                            .render_cell_batch(
-                                page.page_id,
-                                0,
-                                page.row_count,
-                                0,
-                                page.columns.len() as u64,
-                            )
-                            .map_err(|error| error.to_string())
-                            .and_then(|batch| {
-                                let cells = (0..batch.cell_count())
-                                    .filter_map(|index| batch.cell(index))
-                                    .collect::<Vec<_>>();
-                                crate::grid_arrow::host_cells_to_record_batch(
-                                    &page.columns,
+                let (page, payload) = {
+                    // A poisoned lock after `open_query` must not leak the page.
+                    let mut session = session.lock().map_err(|_| {
+                        runner.release_page(page.page_id);
+                        "Driver session lock poisoned".to_string()
+                    })?;
+                    session
+                        .adopt_page(&runner, page.page_id)
+                        .map_err(|error| error.to_string())?;
+                    let payload = match session.acquire_page(page.page_id, 0, page.row_count) {
+                        Ok(page_lease) => DriverMongoResult::PageLease(page_lease),
+                        Err(engine_driver_host::PageError::Driver(
+                            engine_driver_host::LoaderError::UnsupportedFeature { feature },
+                        )) if feature == "query.page_lease" => {
+                            let batch = session
+                                .render_cell_batch(
+                                    page.page_id,
+                                    0,
                                     page.row_count,
-                                    cells,
+                                    0,
+                                    page.columns.len() as u64,
                                 )
-                                .map(DriverMongoResult::CellBatch)
                                 .map_err(|error| error.to_string())
-                            });
-                        match batch {
-                            Ok(batch) => batch,
-                            Err(error) => {
-                                let _ = session.release_page(page.page_id);
-                                return Err(error);
+                                .and_then(|batch| {
+                                    let cells = (0..batch.cell_count())
+                                        .filter_map(|index| batch.cell(index))
+                                        .collect::<Vec<_>>();
+                                    crate::grid_arrow::host_cells_to_record_batch(
+                                        &page.columns,
+                                        page.row_count,
+                                        cells,
+                                    )
+                                    .map(DriverMongoResult::CellBatch)
+                                    .map_err(|error| error.to_string())
+                                });
+                            match batch {
+                                Ok(batch) => batch,
+                                Err(error) => {
+                                    let _ = session.release_page(page.page_id);
+                                    return Err(error);
+                                }
                             }
                         }
-                    }
-                    Err(error) => {
-                        let _ = session.release_page(page.page_id);
-                        return Err(error.to_string());
-                    }
+                        Err(error) => {
+                            let _ = session.release_page(page.page_id);
+                            return Err(error.to_string());
+                        }
+                    };
+                    (page, payload)
                 };
-                (page, payload)
-            };
-            let page_id = page.page_id;
-            Ok::<_, String>((
-                page,
-                payload,
-                DriverPageGuard::new(session_for_guard, page_id),
-            ))
+                let page_id = page.page_id;
+                Ok::<_, String>((
+                    page,
+                    payload,
+                    DriverPageGuard::new(session_for_guard, page_id),
+                ))
+            })
+            .await
         });
         let task = cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
+                let lost = result.as_ref().err().is_some_and(|error| crate::sessions::is_connection_lost_error(error));
+                let ok = result.is_ok();
                 let applied = this.apply_driver_query_result(tab_id, run, connection, result);
                 if applied {
                     this.select_mongo_document(tab_id, 0, cx);
+                }
+                // A find that lost its session reconnects; the tab runs again with the others a reconnect re-runs.
+                if lost {
+                    this.retry_tab_after_loss(tab_id, cx);
+                } else if ok {
+                    this.tab_query_succeeded(tab_id);
                 }
                 this.notify_tab(tab_id, cx);
             });

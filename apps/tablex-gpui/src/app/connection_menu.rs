@@ -652,8 +652,6 @@ impl super::AppRoot {
                     let json = serde_json::to_string(&request)
                         .map_err(|_| "Invalid navigator request")?;
                     session
-                        .lock()
-                        .map_err(|_| "Driver session is unavailable".to_string())?
                         .list_nav_nodes(&json)
                         .map_err(|error| error.to_string())
                 })

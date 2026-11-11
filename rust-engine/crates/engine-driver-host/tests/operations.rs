@@ -646,6 +646,46 @@ fn a_lock_free_mutate_pins_the_driver_and_refuses_foreign_operations() {
 }
 
 #[test]
+fn a_lock_free_navigator_call_runs_while_another_thread_holds_the_session_lock() {
+    let temp = TempDir::new().expect("temp directory");
+    let handle = load_mock(&temp);
+    let session = handle
+        .connect(r#"{"uri":"mock://nav-free","name":"nav-free"}"#)
+        .expect("connect");
+    let shared = Arc::new(SharedDriverSession::new(session));
+    let (holder, release) = hold_session_lock(&shared);
+
+    let request = serde_json::json!({
+        "parent": null, "database": null, "payload": null, "cursor": null, "limit": 200
+    })
+    .to_string();
+    let page = finishes_while_locked({
+        let shared = Arc::clone(&shared);
+        move || {
+            shared
+                .list_nav_nodes(&request)
+                .expect("navigator call without the lock")
+        }
+    });
+    assert!(!page.nodes.is_empty(), "the driver answered");
+    assert_eq!(
+        handle.active_operation_count(),
+        0,
+        "the call's own operation is released"
+    );
+
+    release.send(()).unwrap();
+    holder.join().unwrap();
+    shared
+        .lock()
+        .expect("lock")
+        .disconnect()
+        .expect("disconnect");
+    // A disconnected session refuses the call, lock-free too.
+    assert!(shared.list_nav_nodes("{}").is_err());
+}
+
+#[test]
 fn a_lock_free_describe_runs_while_another_thread_holds_the_session_lock() {
     let temp = TempDir::new().expect("temp directory");
     let staged = temp.path().join(common::driver_file_name("mock"));
@@ -688,4 +728,42 @@ fn a_lock_free_describe_runs_while_another_thread_holds_the_session_lock() {
         .expect("disconnect");
     drop(shared);
     handle.shutdown().expect("shutdown after cleanup");
+}
+
+#[test]
+fn a_session_reports_the_operations_running_on_it_and_when_it_last_did_anything() {
+    let temp = TempDir::new().expect("temp directory");
+    let handle = load_mock(&temp);
+    let a = Arc::new(SharedDriverSession::new(
+        handle.connect(r#"{"uri":"mock://activity-a","name":"a"}"#).expect("connect"),
+    ));
+    let b = Arc::new(SharedDriverSession::new(
+        handle.connect(r#"{"uri":"mock://activity-b","name":"b"}"#).expect("connect"),
+    ));
+    let created = std::time::Instant::now();
+
+    let (running, last) = a.activity();
+    assert_eq!(running, 0);
+    assert!(last <= created, "idle since it connected");
+
+    // An operation of A makes A busy and B not, and counts as activity.
+    let operation = a.begin_operation().expect("operation");
+    assert_eq!(a.activity().0, 1);
+    assert_eq!(b.activity().0, 0, "another session of the same driver is not busy");
+    assert!(a.activity().1 >= created);
+    let started = a.activity().1;
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    drop(operation);
+    let (running, ended) = a.activity();
+    assert_eq!(running, 0);
+    assert!(ended > started, "the end of an operation is activity too");
+
+    // A runner holds an operation for as long as it lives.
+    let runner = a.query_runner().expect("runner");
+    assert_eq!(a.activity().0, 1);
+    drop(runner);
+    assert_eq!(a.activity().0, 0);
+
+    a.lock().expect("lock").disconnect().expect("disconnect");
+    b.lock().expect("lock").disconnect().expect("disconnect");
 }

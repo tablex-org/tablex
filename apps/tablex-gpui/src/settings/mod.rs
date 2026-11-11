@@ -465,19 +465,35 @@ impl Default for Results {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct QuerySettings {
     /// Seconds a query may run; 0 = no limit.
     pub query_timeout_secs: u32,
     /// Seconds to wait for a connection; 0 = the driver default.
     pub connect_timeout_secs: u32,
+    /// Idle seconds before an open connection is checked for life; 0 = never checked.
+    pub keep_alive_secs: u32,
     /// Backup and restore: the native client tools to run. Empty = look for the tool (PATH, then the
     /// places each operating system installs it).
     pub pg_dump_path: String,
     pub pg_restore_path: String,
     pub mysqldump_path: String,
     pub mariadb_dump_path: String,
+}
+
+impl Default for QuerySettings {
+    fn default() -> Self {
+        Self {
+            query_timeout_secs: 0,
+            connect_timeout_secs: 0,
+            keep_alive_secs: engine_connect::profile::DEFAULT_KEEP_ALIVE_SECS,
+            pg_dump_path: String::new(),
+            pg_restore_path: String::new(),
+            mysqldump_path: String::new(),
+            mariadb_dump_path: String::new(),
+        }
+    }
 }
 
 impl QuerySettings {

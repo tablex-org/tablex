@@ -1165,25 +1165,29 @@ impl AppRoot {
         let request_json = serde_json::to_string(&request).expect("aggregate request serializes");
         let task = cx.background_executor().spawn(async move {
             // No session lock while the server works (see run_active_mongo_request).
-            let page = runner
-                .open_query(&request_json)
-                .map_err(|error| error.to_string())?;
-            // Every path after `open_query` frees the page: a poisoned
-            // session lock must not leak it in the driver's page cache.
-            let mut session = session.lock().map_err(|_| {
-                runner.release_page(page.page_id);
-                "Driver session lock poisoned".to_string()
-            })?;
-            session
-                .adopt_page(&runner, page.page_id)
-                .map_err(|error| error.to_string())?;
-            let decoded = session
-                .acquire_page(page.page_id, 0, page.row_count)
-                .map_err(|error| error.to_string())
-                .and_then(|lease| decode_page_documents(&lease, page.row_count));
-            // Previews never keep a driver page: they are decoded and freed.
-            let _ = session.release_page(page.page_id);
-            decoded.map(|documents| AggregateDocs { documents })
+            // `smol::unblock`: see run_active_mongo_request.
+            smol::unblock(move || {
+                let page = runner
+                    .open_query(&request_json)
+                    .map_err(|error| error.to_string())?;
+                // Every path after `open_query` frees the page: a poisoned
+                // session lock must not leak it in the driver's page cache.
+                let mut session = session.lock().map_err(|_| {
+                    runner.release_page(page.page_id);
+                    "Driver session lock poisoned".to_string()
+                })?;
+                session
+                    .adopt_page(&runner, page.page_id)
+                    .map_err(|error| error.to_string())?;
+                let decoded = session
+                    .acquire_page(page.page_id, 0, page.row_count)
+                    .map_err(|error| error.to_string())
+                    .and_then(|lease| decode_page_documents(&lease, page.row_count));
+                // Previews never keep a driver page: they are decoded and freed.
+                let _ = session.release_page(page.page_id);
+                decoded.map(|documents| AggregateDocs { documents })
+            })
+            .await
         });
         DispatchedAggregate::Pending {
             operation: Some(operation),

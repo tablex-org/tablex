@@ -39,6 +39,9 @@ pub struct ConnectionSessions {
     /// teardown), until the next connect attempt. Tells "was connected, now
     /// gone" from "never connected" (both read `Disconnected`).
     dropped: HashSet<String>,
+    /// Live sessions the computer slept under: nothing says they died, nothing vouches that they
+    /// did not. The next use reconnects them first (see `app::recovery`).
+    stale: HashSet<String>,
 }
 
 impl ConnectionSessions {
@@ -57,6 +60,7 @@ impl ConnectionSessions {
         match self.status(connection) {
             ConnectionStatus::Disconnected | ConnectionStatus::Failed(_) => {
                 self.dropped.remove(connection);
+                self.stale.remove(connection);
                 self.next_generation = self.next_generation.wrapping_add(1);
                 let generation = self.next_generation;
                 self.generations.insert(connection.to_string(), generation);
@@ -104,9 +108,23 @@ impl ConnectionSessions {
             return false;
         }
         self.generations.remove(connection);
+        self.stale.remove(connection);
         self.statuses
             .insert(connection.to_string(), ConnectionStatus::Failed(reason));
         true
+    }
+
+    /// Marks every live session stale (the system woke); returns how many there were.
+    pub fn mark_all_stale(&mut self) -> usize {
+        let live: Vec<String> = self.connected().map(str::to_string).collect();
+        let count = live.len();
+        self.stale.extend(live);
+        count
+    }
+
+    /// The session was live when the system slept, and nothing has reconnected it since.
+    pub fn is_stale(&self, connection: &str) -> bool {
+        self.stale.contains(connection) && self.is_connected(connection)
     }
 
     /// The connection was live and has been disconnected since.
@@ -122,6 +140,7 @@ impl ConnectionSessions {
     /// remembered as dropped).
     pub fn disconnect(&mut self, connection: &str) -> bool {
         self.generations.remove(connection);
+        self.stale.remove(connection);
         let was_connected = self.statuses.remove(connection) == Some(ConnectionStatus::Connected);
         if was_connected {
             self.dropped.insert(connection.to_string());
@@ -255,6 +274,29 @@ mod tests {
         ] {
             assert!(!is_connection_lost_error(text), "{text}");
         }
+    }
+
+    #[test]
+    fn a_wake_marks_live_sessions_stale_until_they_reconnect() {
+        let mut sessions = ConnectionSessions::default();
+        let generation = sessions.begin_connect("a").expect("connect should start");
+        sessions.finish_connect("a", generation, Ok(()));
+        sessions.begin_connect("b");
+
+        assert_eq!(sessions.mark_all_stale(), 1, "only the live session");
+        assert!(sessions.is_stale("a"));
+        assert!(!sessions.is_stale("b"), "a connect under way is fresh");
+        assert!(sessions.is_connected("a"), "stale is not lost: nothing changes on screen");
+
+        assert!(sessions.mark_lost("a"));
+        assert!(!sessions.is_stale("a"), "lost replaces stale");
+        let generation = sessions.begin_connect("a").expect("lost allows reconnect");
+        sessions.finish_connect("a", generation, Ok(()));
+        assert!(!sessions.is_stale("a"), "a fresh session is not stale");
+
+        sessions.mark_all_stale();
+        sessions.disconnect("a");
+        assert!(!sessions.is_stale("a"));
     }
 
     #[test]

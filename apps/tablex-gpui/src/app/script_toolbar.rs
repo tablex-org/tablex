@@ -192,13 +192,15 @@ impl AppRoot {
                 return;
             }
         };
+        // A network call: on the blocking pool (never a worker of the shared background
+        // pool), and without the session lock.
         let task = cx.background_executor().spawn(async move {
-            let mut session = session
-                .lock()
-                .map_err(|_| "Driver session lock poisoned".to_string())?;
-            session
-                .list_nav_nodes(&json)
-                .map_err(|error| error.to_string())
+            smol::unblock(move || {
+                session
+                    .list_nav_nodes(&json)
+                    .map_err(|error| error.to_string())
+            })
+            .await
         });
         let connection = connection.to_string();
         cx.spawn(async move |this, cx| {

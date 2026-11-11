@@ -88,6 +88,7 @@ impl Settings {
             Globals {
                 query_timeout_secs: self.query.query_timeout_secs,
                 connect_timeout_secs: self.query.connect_timeout_secs,
+                keep_alive_secs: self.query.keep_alive_secs,
                 page_size: self.results.page_size,
                 confirm_dangerous: self.editor.confirm_dangerous,
             },
@@ -254,6 +255,7 @@ mod tests {
             let limits = match id {
                 QUERY_TIMEOUT_SECS => QUERY_TIMEOUT_SECS_LIMITS,
                 CONNECT_TIMEOUT_SECS => CONNECT_TIMEOUT_SECS_LIMITS,
+                KEEP_ALIVE_SECS => KEEP_ALIVE_SECS_LIMITS,
                 PAGE_SIZE => PAGE_SIZE_LIMITS,
                 _ => continue,
             };

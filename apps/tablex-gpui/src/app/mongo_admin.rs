@@ -375,8 +375,10 @@ impl AppRoot {
             );
             return;
         };
-        let operation = match session.begin_operation() {
-            Ok(operation) => operation,
+        // A lock-free runner: the network call must not hold the session lock (a server
+        // that does not answer would queue page adoption, release and disconnect behind it).
+        let runner = match session.query_runner() {
+            Ok(runner) => runner,
             Err(error) => {
                 done(self, Err(error.to_string()), cx);
                 return;
@@ -385,17 +387,12 @@ impl AppRoot {
         let request = crate::mongo_admin::list_indexes_request(
             database,
             collection,
-            operation.id(),
+            runner.operation_id(),
         );
         let work = cx.background_executor().spawn(async move {
             smol::unblock(move || -> Result<Vec<MongoIndexInfo>, String> {
-                // Keeps the host-allocated operation registered for the call.
-                let _operation = operation;
                 let request_json = serde_json::to_string(&request).map_err(|e| e.to_string())?;
-                let mut session = session
-                    .lock()
-                    .map_err(|_| "Driver session is unavailable".to_string())?;
-                let page = session
+                let page = runner
                     .open_query(&request_json)
                     .map_err(|error| error.to_string())?;
                 let rows = (0..page.row_count)
@@ -405,7 +402,7 @@ impl AppRoot {
                             .map_err(|error| error.to_string())
                     })
                     .collect::<Result<Vec<_>, _>>();
-                let _ = session.release_page(page.page_id);
+                runner.release_page(page.page_id);
                 Ok(rows?
                     .iter()
                     .filter_map(|row| MongoIndexInfo::from_fields(&row.fields))

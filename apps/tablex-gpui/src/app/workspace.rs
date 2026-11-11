@@ -1451,7 +1451,8 @@ impl AppRoot {
             self.begin_script(run, &request, plan);
         }
         // A connection that never opened, or whose session dropped, opens
-        // first and runs once it is up.
+        // first and runs once it is up. A session the computer slept under counts as dropped.
+        self.reopen_if_stale(&request.connection);
         let needs_connect = !self
             .driver_runtime
             .sessions

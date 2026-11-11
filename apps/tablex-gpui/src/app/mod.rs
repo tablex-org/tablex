@@ -79,6 +79,7 @@ mod object_actions;
 mod panes_ui;
 mod params;
 mod process_list;
+mod recovery;
 mod redis;
 mod remote_search;
 mod results;
@@ -275,6 +276,8 @@ pub struct AppRoot {
     recorded_history: Vec<workspace::RecordedHistory>,
     /// Live driver-backed sessions keyed by saved-connection UUID.
     driver_runtime: drivers::DriverRuntime,
+    /// Wake detection, automatic reconnect-and-retry of reads, idle liveness checks.
+    recovery: recovery::Recovery,
     /// Manual commit mode of SQL tabs: the open transactions and their Commit / Rollback.
     transactions: transaction::TransactionUi,
     /// SSH tunnels of the live connections, the secrets they were opened with and the dialogs
@@ -493,6 +496,7 @@ impl AppRoot {
             #[cfg(test)]
             recorded_history: Vec::new(),
             driver_runtime: drivers::DriverRuntime::default(),
+            recovery: recovery::Recovery::default(),
             transactions: transaction::TransactionUi::default(),
             tunnel_ui,
             // The installed set is read off the UI thread (`start_driver_startup`).
@@ -514,7 +518,12 @@ impl AppRoot {
         cx.observe_self(|this, cx| this.on_root_notified(cx))
             .detach();
         app.tunnel_ui._quit = Some(tunnel_ui::listen_for_prompts(tunnel_prompts, cx));
+        app.driver_runtime._quit = Some(cx.on_app_quit(|this, _| this.disconnect_sessions_for_quit()));
         app.init_assistant(cx);
+        #[cfg(not(test))]
+        if !scenario_enabled {
+            app.start_recovery(cx);
+        }
         #[cfg(feature = "ui-scenarios")]
         if scenario_enabled {
             app.seed_connected_tunnels();
@@ -737,6 +746,7 @@ mod tests {
     include!("tests/editor_layout.rs");
     include!("tests/driver_contention.rs");
     include!("tests/sql_driver.rs");
+    include!("tests/recovery.rs");
     include!("tests/script_run.rs");
     include!("tests/explain.rs");
     include!("tests/sql_editor.rs");

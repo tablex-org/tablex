@@ -186,7 +186,7 @@ pub(super) struct TransactionUi {
     /// The toolbar's Commit / Roll Back tooltips with the shortcut labels, for one settings snapshot.
     tooltips: RefCell<Option<(Arc<crate::settings::Settings>, gpui::SharedString, gpui::SharedString)>>,
     /// The request whose result is being reported: which session it ran on.
-    reporting: Option<Reporting>,
+    pub(super) reporting: Option<Reporting>,
     /// Tabs that sent a statement on the connection's shared session in auto-commit: smart commit does
     /// not apply to them (a tab is never moved between sessions on its own; the editors opened after
     /// smart commit was turned on are the ones it applies to).

@@ -517,6 +517,7 @@ impl AppRoot {
             self.navigator_ui.generation = self.navigator.generation();
             cx.notify();
         }
+        self.reopen_if_stale(&connection);
         // A session that dropped (`*.not_connected`) keeps its dead driver
         // handle until the user reconnects; release it so this attempt
         // starts clean instead of reusing it.
@@ -1169,7 +1170,10 @@ impl AppRoot {
             if self.driver_runtime.tab_sessions.contains_key(&tab_id) {
                 continue;
             }
-            self.cancel_tab_query(tab_id, cx);
+            // The run that is being queued behind this very reconnect is not in flight.
+            if self.recovery.queueing != Some(tab_id) {
+                self.cancel_tab_query(tab_id, cx);
+            }
             self.release_driver_page(tab_id);
         }
         let had_session = self.driver_runtime.sessions.contains_key(connection_id)

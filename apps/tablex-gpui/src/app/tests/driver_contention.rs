@@ -812,3 +812,56 @@ fn next_page_spins_and_waits_while_the_page_loads(cx: &mut TestAppContext) {
     });
     assert_eq!(page(&app, visual), first);
 }
+
+#[gpui::test]
+fn a_navigator_call_does_not_wait_for_the_session_lock(cx: &mut TestAppContext) {
+    let (_app, visual, _tab, session) =
+        script_tab_on_real_session(cx, &["navigator", "query.find", "query.mongo_script"]);
+    visual.dispatcher.allow_parking();
+    // Page adoption, release and disconnect take the lock; a navigator call that
+    // held it for its network I/O would queue them all behind a server that never answers.
+    let holder = SessionLockHolder::hold(&session);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let worker = {
+        let session = session.clone();
+        std::thread::spawn(move || {
+            let request = engine_driver_api::NavigatorRequest {
+                parent: None,
+                database: None,
+                payload: None,
+                cursor: None,
+                limit: 200,
+            };
+            let _ = sender.send(
+                crate::app::navigator_ui::list_driver_nav_nodes(&session, &request)
+                    .map(|page| page.nodes.len()),
+            );
+        })
+    };
+    let listed = receiver
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("a navigator call must not wait for the session lock");
+    assert!(listed.is_ok(), "{listed:?}");
+    worker.join().unwrap();
+    holder.release();
+}
+
+#[gpui::test]
+fn quitting_takes_the_sessions_out_and_drops_them_off_the_main_thread(cx: &mut TestAppContext) {
+    let (app, visual, _tab, session) =
+        script_tab_on_real_session(cx, &["navigator", "query.find", "query.mongo_script"]);
+    visual.dispatcher.allow_parking();
+    // The runtime holds the last reference: dropping it is what disconnects.
+    let weak = std::sync::Arc::downgrade(&session);
+    drop(session);
+    let quit = app.update(visual, |this, _| this.disconnect_sessions_for_quit());
+    app.read_with(visual, |this, _| {
+        assert!(this.driver_runtime.sessions.is_empty(), "every session was taken");
+    });
+    assert!(
+        weak.upgrade().is_some(),
+        "the handler itself disconnects nothing (that would run on the main thread): its future's worker does"
+    );
+    visual.cx.foreground_executor().spawn(quit).detach();
+    wait_until(visual, "the session to be dropped", |_| weak.upgrade().is_none());
+}

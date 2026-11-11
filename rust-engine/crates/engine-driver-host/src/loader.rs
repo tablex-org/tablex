@@ -235,6 +235,8 @@ pub struct DriverHandle {
     active_leases: AtomicUsize,
     next_operation_id: AtomicU64,
     active_operations: Mutex<HashMap<OperationId, u64>>,
+    /// When an operation of a connection (by connection id) last started or ended: how long it has been idle.
+    last_activity: Mutex<HashMap<u64, std::time::Instant>>,
 }
 
 unsafe impl Send for DriverHandle {}
@@ -481,6 +483,7 @@ impl DriverLoader {
             active_leases: AtomicUsize::new(0),
             next_operation_id: AtomicU64::new(1),
             active_operations: Mutex::new(HashMap::new()),
+            last_activity: Mutex::new(HashMap::new()),
         });
         Ok(handle)
     }
@@ -661,6 +664,7 @@ impl DriverHandle {
             .lock()
             .map_err(|_| LoaderError::Shutdown)?
             .insert(id, connection_id);
+        self.touch_activity(connection_id);
         Ok(DriverOperation {
             handle: Arc::clone(self),
             connection_id,
@@ -679,6 +683,28 @@ impl DriverHandle {
             .lock()
             .map(|operations| operations.len())
             .unwrap_or(0)
+    }
+
+    fn touch_activity(&self, connection_id: u64) {
+        if let Ok(mut activity) = self.last_activity.lock() {
+            activity.insert(connection_id, std::time::Instant::now());
+        }
+    }
+
+    /// The operations running on `connection_id` now, and when one of them last started or ended
+    /// (`None`: none since it connected).
+    fn connection_activity(&self, connection_id: u64) -> (usize, Option<std::time::Instant>) {
+        let running = self
+            .active_operations
+            .lock()
+            .map(|operations| operations.values().filter(|id| **id == connection_id).count())
+            .unwrap_or(0);
+        let last = self
+            .last_activity
+            .lock()
+            .ok()
+            .and_then(|activity| activity.get(&connection_id).copied());
+        (running, last)
     }
 
     pub fn adopt_page(
@@ -776,6 +802,22 @@ impl DriverHandle {
             return Err(LoaderError::UnsupportedFeature { feature });
         }
         self.call_optional(connection_id, "mutation.*", self.symbols.mutate, request)
+    }
+
+    /// `dbengine_list_nav_nodes` without a session: the caller has checked liveness.
+    fn list_nav_nodes_raw(
+        &self,
+        connection_id: u64,
+        request_json: &str,
+    ) -> Result<NavigatorPage, LoaderError> {
+        let request = CString::new(request_json).map_err(|error| LoaderError::DlOpenFailed {
+            message: error.to_string(),
+        })?;
+        // SAFETY: symbols are resolved; request outlives the call.
+        let response =
+            unsafe { (self.symbols.list_nav_nodes)(connection_id, request.as_ptr()) };
+        let response = self.take_string(response)?;
+        parse_value_envelope(&response)
     }
 
     fn describe_object_raw(
@@ -971,6 +1013,20 @@ impl SessionAnchor {
         self.handle.describe_object_raw(self.connection_id, request)
     }
 
+    /// `dbengine_list_nav_nodes` under a freshly registered operation that pins
+    /// the driver generation for the call.
+    pub(crate) fn list_nav_nodes(&self, request_json: &str) -> Result<NavigatorPage, LoaderError> {
+        self.ensure_connected()?;
+        let _operation = self.handle.begin_operation(self.connection_id)?;
+        self.handle
+            .list_nav_nodes_raw(self.connection_id, request_json)
+    }
+
+    /// See [`SharedDriverSession::activity`].
+    pub(crate) fn activity(&self) -> (usize, Option<std::time::Instant>) {
+        self.handle.connection_activity(self.connection_id)
+    }
+
     pub(crate) fn query_runner(&self) -> Result<QueryRunner, LoaderError> {
         self.ensure_connected()?;
         Ok(QueryRunner {
@@ -1111,6 +1167,12 @@ impl Drop for DriverOperation {
         if let Ok(mut operations) = self.handle.active_operations.lock() {
             operations.remove(&self.id);
         }
+        // Only a connection that is still known: a disconnected one forgot its entry.
+        if let Ok(mut activity) = self.handle.last_activity.lock() {
+            if let Some(last) = activity.get_mut(&self.connection_id) {
+                *last = std::time::Instant::now();
+            }
+        }
     }
 }
 
@@ -1206,14 +1268,8 @@ impl DriverSession {
 
     pub fn list_nav_nodes(&mut self, request_json: &str) -> Result<NavigatorPage, LoaderError> {
         self.ensure_connected()?;
-        let request = CString::new(request_json).map_err(|error| LoaderError::DlOpenFailed {
-            message: error.to_string(),
-        })?;
-        // SAFETY: symbols are resolved; request outlives the call.
-        let response =
-            unsafe { (self.handle.symbols.list_nav_nodes)(self.connection_id, request.as_ptr()) };
-        let response = self.handle.take_string(response)?;
-        parse_value_envelope(&response)
+        self.handle
+            .list_nav_nodes_raw(self.connection_id, request_json)
     }
 
     pub fn open_query(&mut self, request_json: &str) -> Result<QueryPage, LoaderError> {
@@ -1327,6 +1383,9 @@ impl DriverSession {
         if envelope.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
             self.connected.store(false, Ordering::Release);
             self.handle.active_sessions.fetch_sub(1, Ordering::Release);
+            if let Ok(mut activity) = self.handle.last_activity.lock() {
+                activity.remove(&self.connection_id);
+            }
             Ok(())
         } else {
             Err(LoaderError::DriverRejected {

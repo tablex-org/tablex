@@ -867,6 +867,15 @@ fn build_registry() -> Vec<SettingDescriptor> {
             d,
         )
         .overridable(),
+        number::<u32>(
+            place!("query.keep_alive_secs", Query, "Timeouts", "Connection keep-alive interval", "Seconds an open connection may sit idle before TableX checks it is still alive, so one that died (a server restart, a night asleep) is noticed and reopened on its next use. 0 means never check.")
+            ,
+            profile::KEEP_ALIVE_SECS_LIMITS,
+            |s| s.query.keep_alive_secs,
+            |s, v| s.query.keep_alive_secs = v,
+            d,
+        )
+        .overridable(),
         text(
             place!("query.pg_dump_path", Query, "Backup tools", "pg_dump", "The pg_dump program to back up PostgreSQL with. Empty looks for it on your PATH and in the usual install folders and takes the newest version that is not older than the server. A path set here is used as it is."),
             1024,

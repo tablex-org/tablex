@@ -347,8 +347,9 @@ pub(super) fn navigator_request_from_load(request: &LoadRequest) -> engine_drive
     }
 }
 
-/// One navigator call on a driver session. The session lock is held for the
-/// call only; run this on a blocking thread, never the UI thread.
+/// One navigator call on a driver session. It takes no session lock (a server that
+/// does not answer must not queue page adoption, release or disconnect behind it);
+/// run this on a blocking thread, never the UI thread.
 pub(super) fn list_driver_nav_nodes(
     session: &engine_driver_host::SharedDriverSession,
     request: &engine_driver_api::NavigatorRequest,
@@ -358,10 +359,7 @@ pub(super) fn list_driver_nav_nodes(
             "invalid navigator request: {error}"
         ))
     })?;
-    Ok(session
-        .lock()
-        .map_err(|_| DriverQueryError::SessionPoisoned)?
-        .list_nav_nodes(&json)?)
+    Ok(session.list_nav_nodes(&json)?)
 }
 
 #[derive(Default)]
@@ -2615,8 +2613,14 @@ impl AppRoot {
     ) {
         let children = children.map_err(|error| crate::sessions::redact_secrets(&error));
         if let Err(error) = &children {
+            // A listing that lost its session reconnects and loads again, once: the node keeps loading.
+            if self.retry_load_after_loss(request, error, cx) {
+                return;
+            }
             self.report_error(Area::Navigator, Some(&request.connection_id()), error);
             self.note_navigator_connection_lost(&request.connection_id(), error);
+        } else {
+            self.load_succeeded(request);
         }
         self.navigator.apply_load(request, generation, children);
         self.navigator_ui.generation = self.navigator.generation();
@@ -2667,8 +2671,13 @@ impl AppRoot {
             let _ = this.update(cx, |this, cx| {
                 let loaded = result.is_ok();
                 if let Err(error) = &result {
+                    if this.retry_load_after_loss(&request, error, cx) {
+                        return;
+                    }
                     this.report_error(Area::Navigator, Some(&request.connection_id()), error);
                     this.note_navigator_connection_lost(&request.connection_id(), error);
+                } else {
+                    this.load_succeeded(&request);
                 }
                 this.navigator.apply_provider_page(
                     &request,

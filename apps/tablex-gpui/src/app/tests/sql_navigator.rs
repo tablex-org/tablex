@@ -320,6 +320,10 @@ fn not_connected_during_expand_flips_the_connection_to_its_reconnect_state(
     let mut rig = nav_rig_sqlite(cx, &db);
     let key = rig.key.clone();
     rig.session.lock().unwrap().disconnect().expect("disconnect");
+    // The listing already had its one automatic reconnect (see `recovery.rs`): this loss is shown.
+    rig.app.update(rig.visual, |this, _| {
+        this.recovery.retried_loads.insert(connection_node(&key));
+    });
 
     rig.click_node(&connection_node(&key), "sidebar-row");
     let (app, key_for_wait) = (rig.app.clone(), key.clone());

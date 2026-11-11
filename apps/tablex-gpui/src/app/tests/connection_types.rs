@@ -599,6 +599,18 @@ fn agent_of(profile: &ConnectionProfile) -> Option<AgentLevel> {
     profile.agent_level()
 }
 
+/// The Agent access row is the last of the tab: with every overridable setting above it, the tab
+/// scrolls.
+fn scroll_overrides_to_the_end(visual: &mut gpui::VisualTestContext) {
+    let notice = visual.debug_bounds("connection-config-overrides-notice").expect("the tab's notice");
+    visual.simulate_event(gpui::ScrollEvent {
+        position: notice.center(),
+        delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.0), gpui::px(-10_000.0))),
+        ..Default::default()
+    });
+    settle(visual);
+}
+
 fn effective_text(visual: &mut gpui::VisualTestContext) -> bool {
     visual.debug_bounds("override-agent-effective").is_some()
 }
@@ -613,6 +625,7 @@ fn the_overrides_tab_sets_the_agent_access_through_a_real_select_and_it_survives
     let pg = crate::ui_fixture::POSTGRES_ID;
     let inputs = open_fixture_dialog(&app, visual, pg);
     click(visual, "connection-config-tab-overrides".into());
+    scroll_overrides_to_the_end(visual);
 
     // Default: off, following the type's default; no control, nothing stored.
     assert!(rendered(visual, "override-row-agent.access".into()));
@@ -659,6 +672,7 @@ fn the_overrides_tab_sets_the_agent_access_through_a_real_select_and_it_survives
     // Reopening shows the saved level as the connection's own.
     let again = open_fixture_dialog(&app, visual, pg);
     click(visual, "connection-config-tab-overrides".into());
+    scroll_overrides_to_the_end(visual);
     assert!(rendered(visual, "override-control-agent.access".into()), "the saved level is custom, not the default");
     assert_eq!(visual.update(|_, cx| again.agent_select_value(cx)), Some(AgentLevel::Read));
     assert_eq!(agent_of(&dialog_profile(&again, visual)), Some(AgentLevel::Read));
@@ -676,6 +690,7 @@ fn the_overrides_tab_sets_the_agent_access_through_a_real_select_and_it_survives
     settle(visual);
     assert_eq!(dialog_profile(&again, visual).type_id, PRODUCTION);
     click(visual, "connection-config-tab-overrides".into());
+    scroll_overrides_to_the_end(visual);
     let effective = again.effective_agent_for_test(visual);
     assert_eq!(effective, AgentAccess::Read, "Production is read-only here: read_write is capped at read");
     assert_eq!(
