@@ -1404,7 +1404,7 @@ dependencies = [
 
 [[package]]
 name = "dbengine-clickhouse"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -1438,7 +1438,7 @@ dependencies = [
 
 [[package]]
 name = "dbengine-mariadb"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -1463,7 +1463,7 @@ dependencies = [
 
 [[package]]
 name = "dbengine-mongo"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -1491,7 +1491,7 @@ dependencies = [
 
 [[package]]
 name = "dbengine-mysql"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -1516,7 +1516,7 @@ dependencies = [
 
 [[package]]
 name = "dbengine-postgres"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arrow",
  "arrow-array",

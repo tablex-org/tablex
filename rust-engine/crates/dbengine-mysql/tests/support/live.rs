@@ -2476,10 +2476,10 @@ fn a_connection_lost_mid_mutation_is_closed_for_good() {
         change(SqlRowOp::Insert, json!(null), json!({"id": 1})),
     )
     .unwrap_err();
-    let (code, _) = rejected(error);
-    assert_ne!(
+    let (code, message) = rejected(error);
+    assert_eq!(
         code, "mutation.not_connected",
-        "the first failure is the lost connection"
+        "the first failure already says the connection is lost: {message}"
     );
     let (code, _) = rejected(
         apply(
@@ -3118,7 +3118,7 @@ fn an_unknown_transaction_state_fails_the_mutation_and_starts_nothing() {
         )
         .unwrap_err(),
     );
-    assert_eq!(code, "mutation.failed");
+    assert_eq!(code, "mutation.not_connected");
     // The lost connection is closed for good, and nothing was written or committed.
     let (code, _) = rejected(run(&mut session, "SELECT 1", 0, 10).unwrap_err());
     assert_eq!(code, "query.not_connected");

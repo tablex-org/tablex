@@ -746,7 +746,9 @@ impl Writer<'_, '_, '_> {
         };
         result.map_err(|error: HttpError| {
             let unknown = error.outcome_unknown();
-            let error = error.into_backend(Area::Mutation, self.active.cancel_requested());
+            let error = self.connection.abandoned(Area::Mutation).unwrap_or_else(|| {
+                error.into_backend(Area::Mutation, self.active.cancel_requested())
+            });
             Stop { error, unknown }
         })
     }

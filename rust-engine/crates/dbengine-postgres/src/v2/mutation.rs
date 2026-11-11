@@ -81,7 +81,7 @@
 use super::connection::{
     batch_execute_uninterrupted, session_scope, ArmedCancel, PgConnection, Scope,
 };
-use super::query::{cancelled, classify_error};
+use super::query::{cancelled, classify_error, is_lost};
 use super::runtime;
 use crate::db::postgres::{v2_create_database_sql, v2_error_detail};
 use crate::db::sql_builder::{quote_ident, quote_qualified_table};
@@ -294,7 +294,12 @@ pub(crate) fn mutate(
         &statements,
         &cancel_requested,
     ))
-    .map_err(BackendError::new)??;
+    .map_err(BackendError::new)?
+    .inspect_err(|error| {
+        if is_lost(error) {
+            connection.mark_broken();
+        }
+    })?;
     drop(active);
     Ok(MutationOutcome::new(affected_rows))
 }
@@ -373,7 +378,10 @@ async fn run_transaction(
         armed.check("mutation")?;
         apply(&client, &armed, statements, cancel_requested).await
     };
-    let applied = armed.watch(work).await;
+    let Ok(applied) = armed.watch(work).await else {
+        // The server is not answering: no undo or commit can reach it.
+        return Err(connection.abandoned("mutation"));
+    };
     // The cancellable part is over: from here a cancel cannot interrupt the
     // undo or the commit (see `ArmedCancel::disarm`).
     armed.disarm();
@@ -521,12 +529,15 @@ fn create_database(
         }
         // PostgreSQL rejects CREATE DATABASE inside a transaction block: run it
         // alone, outside BEGIN/COMMIT.
-        let outcome = armed
+        let Ok(outcome) = armed
             .watch(tokio::time::timeout(
                 CREATE_DATABASE_TIMEOUT,
                 client.batch_execute(&statement),
             ))
-            .await;
+            .await
+        else {
+            return Err(connection.abandoned("mutation"));
+        };
         armed.disarm();
         match outcome {
             Err(_) => Err(unknown(

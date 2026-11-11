@@ -37,7 +37,17 @@ fn redelivery_pauses() -> impl Iterator<Item = Duration> {
 const CLEANUP_ATTEMPTS: usize = 3;
 /// How long `disconnect` waits for a statement it just asked to stop.
 const DISCONNECT_WAIT: Duration = Duration::from_secs(3);
-const TCP_KEEPALIVE: Duration = Duration::from_secs(60);
+/// Idle time before TCP keepalive probes start (`mysql_async` sets no interval or retry
+/// count, the OS defaults apply): a vanished server is noticed in minutes, not hours.
+const TCP_KEEPALIVE: Duration = Duration::from_secs(30);
+/// How long a statement may keep running after the host asked to cancel it. A server
+/// that does not react (a dead peer, a sleeping laptop) would otherwise hold the
+/// calling thread and the connection forever: past this the statement is dropped
+/// locally and the connection is closed (see [`ActiveMark::watch`]).
+pub(super) const CANCEL_GRACE: Duration = Duration::from_secs(10);
+/// How long a call waits for the connection while another call still holds it (see
+/// [`MyConnection::lock`]).
+pub(super) const GATE_WAIT: Duration = Duration::from_secs(30);
 /// Upper bound of one catalog call (navigator, describe), connect included.
 const META_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -432,6 +442,21 @@ impl Drop for KillGate<'_> {
     }
 }
 
+/// The statement did not end within [`CANCEL_GRACE`] of a cancel request: the server is
+/// not answering, and the connection cannot be used again.
+#[derive(Debug)]
+pub(super) struct Abandoned;
+
+impl Abandoned {
+    /// The error of `area`: the connection is lost (the app reconnects on it).
+    pub(super) fn error(area: Area) -> BackendError {
+        BackendError::with_code(
+            area.not_connected(),
+            "the server did not react to the cancel; the connection was dropped, reconnect",
+        )
+    }
+}
+
 /// Marks an operation as the one running on the connection for as long as it
 /// lives. `KILL QUERY` targets a thread, not a statement, so the canceller
 /// re-checks the mark right before it sends the kill: a cancel that arrives
@@ -486,12 +511,25 @@ impl ActiveMark<'_> {
     /// handshake is dropped, it holds nothing on the server), none is started
     /// once `work` returned or after [`ActiveMark::end`], and the first one is
     /// the canceller's own. Without a cancel this only polls `work`.
-    pub(super) async fn watch<T>(&self, work: impl Future<Output = T>) -> T {
+    ///
+    /// A server that does not react to the cancel within [`CANCEL_GRACE`] is not
+    /// coming back: `work` is dropped and [`Abandoned`] returned. The session is then in
+    /// an unknown state; the caller closes it (`ConnState::mark_broken`) and sends
+    /// nothing more on it.
+    pub(super) async fn watch<T>(&self, work: impl Future<Output = T>) -> Result<T, Abandoned> {
+        self.watch_within(CANCEL_GRACE, work).await
+    }
+
+    async fn watch_within<T>(
+        &self,
+        grace: Duration,
+        work: impl Future<Output = T>,
+    ) -> Result<T, Abandoned> {
         let mut work = std::pin::pin!(work);
         let canceller = loop {
             tokio::select! {
                 biased;
-                out = &mut work => return out,
+                out = &mut work => return Ok(out),
                 // A permit left by an earlier operation's cancel is not ours.
                 () = self.connection.wake.notified() => {
                     if self.cancel_requested() {
@@ -500,11 +538,13 @@ impl ActiveMark<'_> {
                 }
             }
         };
+        let deadline = tokio::time::Instant::now() + grace;
         for pause in redelivery_pauses() {
             tokio::select! {
                 biased;
-                out = &mut work => return out,
+                out = &mut work => return Ok(out),
                 () = tokio::time::sleep(pause) => {}
+                () = tokio::time::sleep_until(deadline) => return Err(Abandoned),
             }
             // `committed`: the kill's connection is open and the gate entered, so
             // the kill is (about to be) on the wire and must be finished. Before
@@ -523,9 +563,10 @@ impl ActiveMark<'_> {
                     if committed.get() {
                         let _ = kill.await;
                     }
-                    return out;
+                    return Ok(out);
                 }
                 _ = &mut kill => {}
+                () = tokio::time::sleep_until(deadline) => return Err(Abandoned),
             }
         }
         unreachable!("the pauses never run out")
@@ -721,11 +762,33 @@ impl MyConnection {
     /// cancel is in progress. The Dekker pairing (the gate increments, then
     /// reads the running mark; the lock holder has been released after the mark
     /// was cleared, then reads the counter) is `SeqCst` on both sides.
-    pub(super) fn lock(&self) -> Result<MutexGuard<'_, ConnState>, BackendError> {
-        let guard = self
-            .state
-            .lock()
-            .map_err(|_| BackendError::new("connection lock poisoned"))?;
+    pub(super) fn lock(&self, area: Area) -> Result<MutexGuard<'_, ConnState>, BackendError> {
+        self.lock_within(area, GATE_WAIT)
+    }
+
+    /// [`lock`](Self::lock) waits (blocking the calling thread) for at most `wait`: a call
+    /// that still holds the connection is stuck on a server that does not answer, and the
+    /// next call must fail (`<area>.busy`) instead of waiting with it.
+    fn lock_within(
+        &self,
+        area: Area,
+        wait: Duration,
+    ) -> Result<MutexGuard<'_, ConnState>, BackendError> {
+        let deadline = Instant::now() + wait;
+        let mut pause = Duration::from_millis(1);
+        let guard = loop {
+            match self.state.try_lock() {
+                Ok(guard) => break guard,
+                Err(TryLockError::Poisoned(_)) => {
+                    return Err(BackendError::new("connection lock poisoned"))
+                }
+                Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    std::thread::sleep(pause);
+                    pause = (pause * 2).min(Duration::from_millis(50));
+                }
+                Err(TryLockError::WouldBlock) => return Err(busy(area)),
+            }
+        };
         self.wait_for_kills();
         Ok(guard)
     }
@@ -936,7 +999,26 @@ pub(super) fn map_error(
     if interrupted {
         return BackendError::with_code(area.interrupted(), describe_error(error)).retryable();
     }
+    if is_connection_lost(error) {
+        return BackendError::with_code(
+            area.not_connected(),
+            format!("the connection to the server was lost: {}", describe_error(error)),
+        );
+    }
     BackendError::new(describe_error(error))
+}
+
+/// `<area>.busy`: another statement still holds the connection.
+fn busy(area: Area) -> BackendError {
+    let code = match area {
+        Area::Query => "query.busy",
+        Area::Mutation => "mutation.busy",
+    };
+    BackendError::with_code(
+        code,
+        "the connection is busy with another statement that has not finished; try again",
+    )
+    .retryable()
 }
 
 /// The error of a requested cancel.
@@ -1064,7 +1146,7 @@ mod tests {
         );
         for uri in uris {
             let connection = MyConnection::connect::<Probe>(&uri).expect("connect");
-            let mut state = connection.lock().expect("lock");
+            let mut state = connection.lock(Area::Query).expect("lock");
             let mark = connection.mark_running(OperationId(41));
             let canceller = connection.canceller();
             assert!(!mark.cancel_requested());
@@ -1081,7 +1163,8 @@ mod tests {
                     .unwrap()
                     .query_first("SELECT SLEEP(30)")
                     .await
-            }));
+            }))
+            .expect("the server answered within the grace period");
             eprintln!(
                 "kill test: the statement ended after {:?}",
                 started.elapsed()
@@ -1189,7 +1272,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(300)).await;
             42
         }));
-        assert_eq!(out, 42);
+        assert_eq!(out.unwrap(), 42);
         // KILL_TIMEOUT (5 s) was not waited for.
         assert!(
             started.elapsed() < Duration::from_secs(3),
@@ -1255,6 +1338,98 @@ mod tests {
         assert!(!may_change_charset("SELECT 1"));
         assert!(!may_change_charset("SELECT name FROM t"));
         assert!(!contains_ignore_case("select 1", "sql_mode"));
+    }
+
+    /// A connection object with no server behind it (`kill_opts` points at a closed port).
+    fn offline() -> MyConnection {
+        let broken = Arc::new(AtomicBool::new(false));
+        let db_hint = Arc::new(Mutex::new(None));
+        MyConnection {
+            state: Mutex::new(ConnState {
+                conn: None,
+                current_db: None,
+                db_hint: Arc::clone(&db_hint),
+                lex: SqlLexOptions::mysql(),
+                base_lex: SqlLexOptions::mysql(),
+                lex_stale: false,
+                charset_stale: false,
+                broken: Arc::clone(&broken),
+            }),
+            meta: Mutex::new(MetaState { conn: None }),
+            closed: AtomicBool::new(false),
+            broken,
+            db_hint,
+            kill_opts: Opts::from_url("mysql://u@127.0.0.1:1/").expect("url"),
+            thread_id: 1,
+            running: Arc::default(),
+            kills_in_flight: Arc::default(),
+            wake: Arc::default(),
+        }
+    }
+
+    #[test]
+    fn a_statement_the_server_never_answers_is_dropped_after_the_grace_period() {
+        let connection = offline();
+        let mark = connection.mark_running(OperationId(1));
+        // Nobody asked to cancel: a slow statement is polled for as long as it takes.
+        let slow = mark.watch_within(Duration::from_millis(50), async {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            7
+        });
+        assert_eq!(block_on(slow).unwrap(), 7);
+        // Cancelled (the kill itself cannot connect), and the statement never ends: dropped.
+        let _ = connection.canceller().kill_query(OperationId(1));
+        assert!(mark.cancel_requested());
+        let started = Instant::now();
+        let outcome = block_on(mark.watch_within(Duration::from_millis(300), std::future::pending::<()>()));
+        assert!(outcome.is_err(), "the statement was not dropped");
+        assert!(
+            started.elapsed() >= Duration::from_millis(300)
+                && started.elapsed() < Duration::from_secs(8),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            Abandoned::error(Area::Query).code.as_deref(),
+            Some("query.not_connected")
+        );
+    }
+
+    #[test]
+    fn waiting_for_a_busy_connection_gives_up_instead_of_blocking_forever() {
+        let connection = offline();
+        let holder = connection.lock(Area::Query).expect("lock");
+        let started = Instant::now();
+        let error = connection
+            .lock_within(Area::Mutation, Duration::from_millis(150))
+            .err()
+            .expect("busy");
+        assert_eq!(error.code.as_deref(), Some("mutation.busy"));
+        assert!(error.retryable);
+        assert!(
+            started.elapsed() >= Duration::from_millis(150)
+                && started.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
+        // Once the holder is done the next call gets the connection.
+        drop(holder);
+        assert!(connection.lock_within(Area::Query, Duration::from_millis(150)).is_ok());
+    }
+
+    #[test]
+    fn a_lost_connection_is_not_connected_and_a_server_refusal_is_not() {
+        let gone = mysql_async::Error::Io(mysql_async::IoError::Io(std::io::Error::other("reset")));
+        for area in [Area::Query, Area::Mutation] {
+            let mapped = map_error(&gone, false, area);
+            assert_eq!(mapped.code.as_deref(), Some(area.not_connected()));
+        }
+        let refused = mysql_async::Error::Server(mysql_async::ServerError {
+            code: 1064,
+            message: "syntax".into(),
+            state: "42000".into(),
+        });
+        assert_eq!(map_error(&refused, false, Area::Query).code, None);
     }
 
     #[test]

@@ -37,7 +37,9 @@
 //!   label `<type> (invalid utf-8)`, so the stored bytes are shown as bytes and
 //!   cannot be mistaken for (or written back as) text.
 
-use super::conn::{cancelled, map_error, other_error, ActiveMark, Area, ConnState};
+use super::conn::{
+    cancelled, is_connection_lost, map_error, other_error, Abandoned, ActiveMark, Area, ConnState,
+};
 use super::sql::{scan, with_limit};
 use super::MyConnection;
 use arrow::datatypes::{Field, Schema};
@@ -114,7 +116,7 @@ pub(super) fn open_query(
         .get("run_to_end")
         .and_then(serde_json::Value::as_bool)
         == Some(true);
-    let guard = connection.lock()?;
+    let guard = connection.lock(Area::Query)?;
     // `active` owns the connection guard: the operation stops being active
     // before the connection is released.
     let mut active = operation.activate(guard)?;
@@ -174,7 +176,13 @@ pub(super) fn open_query(
                 "the statement tried to write in a read-only execution (error 1792)",
             ))
         }
-        Err(RunError::Db(error)) => Err(map_error(&error, active.cancel_requested(), Area::Query)),
+        Err(RunError::Db(error)) => {
+            // A lost connection is closed for good: every later call says so.
+            if is_connection_lost(&error) {
+                active.mark_broken();
+            }
+            Err(map_error(&error, active.cancel_requested(), Area::Query))
+        }
     }
 }
 
@@ -227,9 +235,14 @@ async fn run(
 ) -> Result<Outcome, RunError> {
     // `START TRANSACTION` may have been sent, even if the statement then failed.
     let mut transaction = false;
-    let outcome = mark
+    let Ok(outcome) = mark
         .watch(attempt(state, job, mark, &mut transaction))
-        .await;
+        .await
+    else {
+        // The server is not answering: no `ROLLBACK` can reach it. Close the session.
+        state.mark_broken();
+        return Err(RunError::Refused(Abandoned::error(Area::Query)));
+    };
     if transaction {
         mark.end();
         if state.control_uninterrupted("ROLLBACK").await.is_err() {

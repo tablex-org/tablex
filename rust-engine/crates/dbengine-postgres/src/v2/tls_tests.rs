@@ -748,6 +748,21 @@ fn no_roots_means_encrypt_only() {
 
 // ---- a fake server that speaks only SSLRequest ---------------------------------------------------------
 
+#[test]
+fn a_session_left_idle_notices_a_vanished_server_within_minutes() {
+    // tokio-postgres' own default is a first probe after 2 hours.
+    let (config, _) = Transport::prepare("postgres://u@127.0.0.1:1/d").unwrap();
+    assert!(config.get_keepalives());
+    assert_eq!(config.get_keepalives_idle(), Duration::from_secs(30));
+    assert_eq!(config.get_keepalives_interval(), Some(Duration::from_secs(10)));
+    assert_eq!(config.get_keepalives_retries(), Some(3));
+    // A URI that sets any of them is left alone.
+    let (config, _) =
+        Transport::prepare("postgres://u@127.0.0.1:1/d?keepalives_idle=600").unwrap();
+    assert_eq!(config.get_keepalives_idle(), Duration::from_secs(600));
+    assert_eq!(config.get_keepalives_interval(), None);
+}
+
 pub(crate) mod fake {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

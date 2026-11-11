@@ -76,6 +76,23 @@ pub(crate) trait MongoBackend: Send + Sync {
         offset: u64,
         limit: u64,
     ) -> Result<FindDocuments, String>;
+    /// [`find_documents`](Self::find_documents) that ends as soon as `control` is
+    /// cancelled (the call is dropped client-side, the way a dead server's reply
+    /// never has to arrive for the app to move on).
+    #[allow(clippy::too_many_arguments)]
+    fn find_documents_controlled(
+        &self,
+        database: &str,
+        collection: &str,
+        filter: Document,
+        sort: Document,
+        projection: Option<Document>,
+        offset: u64,
+        limit: u64,
+        _control: &AggControl,
+    ) -> Result<FindDocuments, String> {
+        self.find_documents(database, collection, filter, sort, projection, offset, limit)
+    }
     fn insert_document(
         &self,
         database: &str,
@@ -359,31 +376,62 @@ impl MongoBackend for MongoClientBackend {
         offset: u64,
         limit: u64,
     ) -> Result<FindDocuments, String> {
-        crate::RUNTIME.block_on(async {
-            let collection = self
-                .client
-                .database(database)
-                .collection::<Document>(collection);
-            let mut options = mongodb::options::FindOptions::builder()
-                .sort(sort)
-                .skip(offset)
-                .limit(limit as i64)
-                .build();
-            options.projection = projection;
-            let (cursor, total_count) = tokio::try_join!(
-                collection.find(filter.clone()).with_options(options),
-                collection.count_documents(filter),
-            )
-            .map_err(|error| error.to_string())?;
-            let documents = futures::TryStreamExt::try_collect(cursor)
-                .await
+        self.find_documents_controlled(
+            database,
+            collection,
+            filter,
+            sort,
+            projection,
+            offset,
+            limit,
+            &AggControl::default(),
+        )
+    }
+
+    fn find_documents_controlled(
+        &self,
+        database: &str,
+        collection: &str,
+        filter: Document,
+        sort: Document,
+        projection: Option<Document>,
+        offset: u64,
+        limit: u64,
+        control: &AggControl,
+    ) -> Result<FindDocuments, String> {
+        // No client deadline: a count over a big collection may legitimately run
+        // long; the user cancels it.
+        crate::RUNTIME.block_on(run_controlled(
+            async {
+                let collection = self
+                    .client
+                    .database(database)
+                    .collection::<Document>(collection);
+                let mut options = mongodb::options::FindOptions::builder()
+                    .sort(sort)
+                    .skip(offset)
+                    .limit(limit as i64)
+                    .build();
+                options.projection = projection;
+                // Tags the operation in `currentOp` so a cancel can `killOp` it.
+                options.comment = control.comment.clone().map(bson::Bson::String);
+                let (cursor, total_count) = tokio::try_join!(
+                    collection.find(filter.clone()).with_options(options),
+                    collection.count_documents(filter),
+                )
                 .map_err(|error| error.to_string())?;
-            Ok(FindDocuments {
-                documents,
-                total_count,
-                total_is_exact: true,
-            })
-        })
+                let documents = futures::TryStreamExt::try_collect(cursor)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                Ok(FindDocuments {
+                    documents,
+                    total_count,
+                    total_is_exact: true,
+                })
+            },
+            control.cancel.as_ref(),
+            None,
+        ))
     }
 
     fn insert_document(
@@ -883,6 +931,7 @@ impl MongoDriver {
         projection_json: &str,
         offset: u64,
         limit: u64,
+        control: &AggControl,
     ) -> Result<FindDocuments, String> {
         if database.is_empty() {
             return Err("MongoDB query requires a database".into());
@@ -902,7 +951,7 @@ impl MongoDriver {
         };
         let projection = parse_mongo_projection(projection_json)?;
         self.mongo_find_documents(
-            database, collection, filter, sort, projection, offset, limit,
+            database, collection, filter, sort, projection, offset, limit, control,
         )
     }
 
@@ -918,6 +967,7 @@ impl MongoDriver {
         projection: Option<Document>,
         offset: u64,
         limit: u64,
+        control: &AggControl,
     ) -> Result<FindDocuments, String> {
         if database.is_empty() {
             return Err("MongoDB query requires a database".into());
@@ -925,7 +975,7 @@ impl MongoDriver {
         if collection.is_empty() {
             return Err("MongoDB query requires a collection".into());
         }
-        self.backend.find_documents(
+        self.backend.find_documents_controlled(
             database,
             collection,
             filter,
@@ -933,6 +983,7 @@ impl MongoDriver {
             projection,
             offset,
             limit.clamp(1, 200),
+            control,
         )
     }
 
@@ -1601,7 +1652,7 @@ mod tests {
         let driver = MongoDriver::from_backend(Box::new(backend));
         let filter = bson::doc! { "at": { "$gte": bson::DateTime::from_millis(1_725_148_800_000) } };
         driver
-            .mongo_find_documents("app", "users", filter.clone(), None, None, 0, 20)
+            .mongo_find_documents("app", "users", filter.clone(), None, None, 0, 20, &AggControl::default())
             .unwrap();
         let calls = calls.lock().unwrap();
         assert_eq!(calls[0].2, filter);
@@ -1705,7 +1756,7 @@ mod tests {
         let driver = MongoDriver::from_backend(backend);
 
         let page = driver
-            .mongo_find("app", "users", r#"{active: true}"#, "", "", 17, 999)
+            .mongo_find("app", "users", r#"{active: true}"#, "", "", 17, 999, &AggControl::default())
             .expect("find page");
 
         assert_eq!(page.documents.len(), 1);
@@ -1724,7 +1775,7 @@ mod tests {
         let driver = MongoDriver::from_backend(backend);
 
         driver
-            .mongo_find("app", "users", "{}", r#"{createdAt: -1}"#, "", 0, 20)
+            .mongo_find("app", "users", "{}", r#"{createdAt: -1}"#, "", 0, 20, &AggControl::default())
             .expect("find page");
 
         let calls = calls.lock().expect("find calls lock");
@@ -1738,7 +1789,7 @@ mod tests {
         let driver = MongoDriver::from_backend(backend);
 
         driver
-            .mongo_find("app", "users", "{}", "", r#"{name: 1}"#, 0, 20)
+            .mongo_find("app", "users", "{}", "", r#"{name: 1}"#, 0, 20, &AggControl::default())
             .expect("find page");
 
         let calls = calls.lock().expect("find calls lock");
@@ -1751,7 +1802,7 @@ mod tests {
         let driver = MongoDriver::from_backend(backend);
 
         let error = driver
-            .mongo_find("app", "users", "{}", "not-json", "", 0, 20)
+            .mongo_find("app", "users", "{}", "not-json", "", 0, 20, &AggControl::default())
             .expect_err("invalid sort");
         assert!(error.contains("invalid MongoDB sort"));
     }
@@ -1762,7 +1813,7 @@ mod tests {
             MongoDriver::from_backend(Box::new(MockBackend::new(vec!["app".into()], vec![])));
 
         let error = driver
-            .mongo_find("app", "users", "{}", "", "not-json", 0, 20)
+            .mongo_find("app", "users", "{}", "", "not-json", 0, 20, &AggControl::default())
             .expect_err("invalid projection");
 
         assert!(error.contains("invalid MongoDB projection"));
@@ -1774,15 +1825,15 @@ mod tests {
             MongoDriver::from_backend(Box::new(MockBackend::new(vec!["app".into()], vec![])));
 
         assert!(driver
-            .mongo_find("app", "users", "not-json", "", "", 0, 20)
+            .mongo_find("app", "users", "not-json", "", "", 0, 20, &AggControl::default())
             .expect_err("invalid filter")
             .contains("invalid MongoDB filter"));
         assert!(driver
-            .mongo_find("", "users", "{}", "", "", 0, 20)
+            .mongo_find("", "users", "{}", "", "", 0, 20, &AggControl::default())
             .expect_err("missing database")
             .contains("requires a database"));
         assert!(driver
-            .mongo_find("app", "", "{}", "", "", 0, 20)
+            .mongo_find("app", "", "{}", "", "", 0, 20, &AggControl::default())
             .expect_err("missing collection")
             .contains("requires a collection"));
     }

@@ -22,8 +22,8 @@ use engine_driver_kit::BackendError;
 use std::cell::Cell;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, TryLockError};
+use std::time::{Duration, Instant};
 use tokio::sync::Notify;
 use tokio_postgres::error::SqlState;
 use tokio_postgres::{CancelToken, Client, SimpleQueryMessage};
@@ -32,6 +32,15 @@ use tokio_postgres::{CancelToken, Client, SimpleQueryMessage};
 /// mutations are bounded by `operation.cancel` instead: users run long statements.
 pub(crate) const CATALOG_TIMEOUT: Duration = Duration::from_secs(30);
 const CANCEL_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a statement may keep running after the host asked to cancel it. A
+/// cancel the server never answers (a dead peer, a sleeping laptop) would
+/// otherwise hold the calling thread and the connection forever: past this the
+/// statement is dropped locally and the connection is marked broken (see
+/// [`ArmedCancel::watch`]).
+pub(crate) const CANCEL_GRACE: Duration = Duration::from_secs(10);
+/// How long a call waits for the session while another call still holds it
+/// (see [`Gate::lock`]).
+pub(crate) const GATE_WAIT: Duration = Duration::from_secs(30);
 /// How long finishing an operation waits for a cancel request that targets it.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(6);
 
@@ -268,6 +277,21 @@ impl Drop for Delivered<'_> {
     }
 }
 
+/// The statement did not end within [`CANCEL_GRACE`] of a cancel request: the server is
+/// not answering, and the session cannot be used again.
+#[derive(Debug)]
+pub(crate) struct Abandoned;
+
+impl Abandoned {
+    /// The error of `area`: the connection is lost (the app reconnects on it).
+    pub(crate) fn error(area: &str) -> BackendError {
+        BackendError::with_code(
+            format!("{area}.not_connected"),
+            "the server did not react to the cancel; the connection was dropped, reconnect",
+        )
+    }
+}
+
 /// The armed operation. Dropping it disarms (see [`CancelState`]).
 pub(crate) struct ArmedCancel {
     state: Arc<CancelState>,
@@ -292,18 +316,33 @@ impl ArmedCancel {
     /// while one is being written it is still finished before this returns) and
     /// none is started after `work` returned. Without a cancel this only polls
     /// `work`.
-    pub(crate) async fn watch<T>(&self, work: impl Future<Output = T>) -> T {
+    ///
+    /// A server that does not react to the cancel within [`CANCEL_GRACE`] is
+    /// not coming back: `work` is dropped and [`Abandoned`] returned. The
+    /// session is then in an unknown state; the caller marks it broken and
+    /// sends nothing more on it.
+    pub(crate) async fn watch<T>(&self, work: impl Future<Output = T>) -> Result<T, Abandoned> {
+        self.watch_within(CANCEL_GRACE, work).await
+    }
+
+    async fn watch_within<T>(
+        &self,
+        grace: Duration,
+        work: impl Future<Output = T>,
+    ) -> Result<T, Abandoned> {
         let mut work = std::pin::pin!(work);
         tokio::select! {
             biased;
-            out = &mut work => return out,
+            out = &mut work => return Ok(out),
             () = self.requested.wake.notified() => {}
         }
+        let deadline = tokio::time::Instant::now() + grace;
         for pause in redelivery_pauses() {
             tokio::select! {
                 biased;
-                out = &mut work => return out,
+                out = &mut work => return Ok(out),
                 () = tokio::time::sleep(pause) => {}
+                () = tokio::time::sleep_until(deadline) => return Err(Abandoned),
             }
             // `work` is polled first, and a delivery `work` beat to it was never
             // polled: it is dropped, not started. One that was polled may be
@@ -319,9 +358,10 @@ impl ArmedCancel {
                     if started.get() {
                         let _ = delivery.await;
                     }
-                    return out;
+                    return Ok(out);
                 }
                 _ = &mut delivery => {}
+                () = tokio::time::sleep_until(deadline) => return Err(Abandoned),
             }
         }
         unreachable!("the pauses never run out")
@@ -432,19 +472,42 @@ impl Gate {
         }
     }
 
-    /// Waits for the session (blocking the calling thread). A gate poisoned by
-    /// a panic marks the connection broken.
+    /// Waits for the session (blocking the calling thread) for at most
+    /// [`GATE_WAIT`]: a call that still holds it is stuck on a server that does
+    /// not answer, and the next call must fail (`<area>.busy`) instead of
+    /// waiting with it. A gate poisoned by a panic marks the connection broken.
     pub(crate) fn lock(&self, area: &str) -> Result<MutexGuard<'_, ()>, BackendError> {
+        self.lock_within(area, GATE_WAIT)
+    }
+
+    fn lock_within(&self, area: &str, wait: Duration) -> Result<MutexGuard<'_, ()>, BackendError> {
         self.ensure_usable(area)?;
-        match self.lock.lock() {
-            Ok(guard) => {
-                // Another call may have broken the connection while we waited.
-                self.ensure_usable(area)?;
-                Ok(guard)
-            }
-            Err(_) => {
-                self.mark_broken();
-                Err(Self::not_connected(area))
+        let deadline = Instant::now() + wait;
+        let mut pause = Duration::from_millis(1);
+        loop {
+            match self.lock.try_lock() {
+                Ok(guard) => {
+                    // Another call may have broken the connection while we waited.
+                    self.ensure_usable(area)?;
+                    return Ok(guard);
+                }
+                Err(TryLockError::Poisoned(_)) => {
+                    self.mark_broken();
+                    return Err(Self::not_connected(area));
+                }
+                Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    std::thread::sleep(pause);
+                    pause = (pause * 2).min(Duration::from_millis(50));
+                    // The holder may have broken the connection (abandoned its statement).
+                    self.ensure_usable(area)?;
+                }
+                Err(TryLockError::WouldBlock) => {
+                    return Err(BackendError::with_code(
+                        format!("{area}.busy"),
+                        "the connection is busy with another statement that has not finished; try again",
+                    )
+                    .retryable());
+                }
             }
         }
     }
@@ -503,6 +566,13 @@ impl PgConnection {
 
     pub(crate) fn mark_broken(&self) {
         self.gate.mark_broken();
+    }
+
+    /// A statement was dropped after the server ignored a cancel for
+    /// [`CANCEL_GRACE`]: the connection can no longer be used.
+    pub(crate) fn abandoned(&self, area: &str) -> BackendError {
+        self.mark_broken();
+        Abandoned::error(area)
     }
 
     pub(crate) fn ensure_usable(&self, area: &str) -> Result<(), BackendError> {
@@ -842,6 +912,7 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         }))
+        .unwrap()
         .unwrap();
         // One request per delivery (the exact request would be a second per delivery,
         // and would mark the operation), all acknowledged: nothing to settle.
@@ -1050,6 +1121,7 @@ mod tests {
         let started = Instant::now();
         let error = runtime::block_on(armed.watch(client.simple_query("SELECT pg_sleep(30)")))
             .unwrap()
+            .unwrap()
             .unwrap_err();
         assert_eq!(
             error.code(),
@@ -1065,6 +1137,96 @@ mod tests {
         drop(armed);
         let again = runtime::block_on(client.simple_query("SELECT pg_sleep(0.3)")).unwrap();
         assert!(again.is_ok(), "{again:?}");
+    }
+
+    #[test]
+    fn a_statement_the_server_never_answers_is_dropped_after_the_grace_period() {
+        let server = fake_server(16, fake::Linger::Close);
+        let (state, client) = session_on(&server, &uri(&server));
+        let armed = state.arm(OperationId(1), client.cancel_token());
+        // Nobody asked to cancel: a slow statement is polled for as long as it takes.
+        let slow = armed.watch_within(Duration::from_millis(50), async {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            7
+        });
+        assert_eq!(runtime::block_on(slow).unwrap().unwrap(), 7);
+        // Cancelled, and the server does not react (this work never ends): dropped.
+        state.cancel(OperationId(1)).unwrap();
+        let started = Instant::now();
+        let outcome = runtime::block_on(
+            armed.watch_within(Duration::from_millis(300), std::future::pending::<()>()),
+        )
+        .unwrap();
+        assert!(outcome.is_err(), "the work was not dropped");
+        assert!(
+            started.elapsed() >= Duration::from_millis(300)
+                && started.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
+        // A cancel the server does answer inside the grace period is not an abandon.
+        let armed = state.arm(OperationId(2), client.cancel_token());
+        state.cancel(OperationId(2)).unwrap();
+        let answered = armed.watch_within(Duration::from_secs(5), async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        });
+        assert!(runtime::block_on(answered).unwrap().is_ok());
+    }
+
+    #[test]
+    fn an_abandoned_statement_breaks_the_connection_for_every_area() {
+        let error = Abandoned::error("query");
+        assert_eq!(error.code.as_deref(), Some("query.not_connected"));
+        let gate = Gate::default();
+        gate.mark_broken();
+        assert_eq!(
+            gate.lock("mutation").unwrap_err().code.as_deref(),
+            Some("mutation.not_connected")
+        );
+    }
+
+    #[test]
+    fn waiting_for_a_busy_session_gives_up_instead_of_blocking_forever() {
+        let gate = Arc::new(Gate::default());
+        let holder = gate.lock("query").unwrap();
+        let started = Instant::now();
+        let error = gate
+            .lock_within("query", Duration::from_millis(150))
+            .unwrap_err();
+        assert_eq!(error.code.as_deref(), Some("query.busy"));
+        assert!(error.retryable);
+        assert!(
+            started.elapsed() >= Duration::from_millis(150)
+                && started.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
+        // A holder that finishes inside the wait hands the session over.
+        let waiter = {
+            let gate = Arc::clone(&gate);
+            std::thread::spawn(move || gate.lock_within("query", Duration::from_secs(5)).map(|_| ()))
+        };
+        std::thread::sleep(Duration::from_millis(100));
+        drop(holder);
+        assert!(waiter.join().unwrap().is_ok());
+        // A holder that broke the connection (abandoned its statement) frees the waiters at once.
+        let holder = gate.lock("query").unwrap();
+        let waiter = {
+            let gate = Arc::clone(&gate);
+            std::thread::spawn(move || {
+                gate.lock_within("query", Duration::from_secs(30))
+                    .map(|_| ())
+                    .unwrap_err()
+                    .code
+            })
+        };
+        std::thread::sleep(Duration::from_millis(100));
+        gate.mark_broken();
+        assert_eq!(
+            waiter.join().unwrap().as_deref(),
+            Some("query.not_connected")
+        );
+        drop(holder);
     }
 
     #[test]

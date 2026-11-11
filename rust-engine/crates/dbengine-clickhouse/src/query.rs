@@ -375,7 +375,11 @@ fn run_statement(
             }
         }
     }
-    result.map_err(|error| error.into_backend(Area::Query, active.cancel_requested()))
+    result.map_err(|error| {
+        connection
+            .abandoned(Area::Query)
+            .unwrap_or_else(|| error.into_backend(Area::Query, active.cancel_requested()))
+    })
 }
 
 /// [`attempt`], sent again without what the server refuses to take: the

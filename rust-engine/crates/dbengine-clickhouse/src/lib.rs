@@ -51,15 +51,24 @@ use engine_driver_kit::{
 use http::{Area, Client};
 use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
+use std::time::{Duration, Instant};
 use types::Described;
 
 const DRIVER: &str = "clickhouse";
+/// How long a statement may keep running after the host asked to cancel it. A server that
+/// does not react (a dead peer, a sleeping laptop) would otherwise hold the calling thread
+/// and the connection for ever: past this the statement is dropped locally
+/// (`<area>.not_connected`, the app reconnects).
+const CANCEL_GRACE: Duration = Duration::from_secs(10);
+/// How often the statement of a cancel is looked at while it is within its grace period.
+const GRACE_POLL: Duration = Duration::from_millis(100);
 /// How long a cancel keeps trying `KILL QUERY` (a statement the server has not
 /// registered yet, or a kill the server refuses), and how long it pauses between tries.
 const KILL_WINDOW: Duration = Duration::from_secs(1);
 const KILL_RETRY: Duration = Duration::from_millis(25);
+/// How long a call waits for the connection while another call still holds it.
+const GATE_WAIT: Duration = Duration::from_secs(30);
 /// `DESCRIBE` results kept per connection.
 const TYPE_CACHE_STATEMENTS: usize = 16;
 
@@ -101,23 +110,51 @@ impl TypeCache {
     }
 }
 
-/// The `query_id` of the statement in flight, shared with the canceller.
+/// The `query_id` of the statement in flight, shared with the canceller, and the flag that
+/// ends its blocked wait for the reply (see `http::Guarded`).
 #[derive(Default)]
-pub(crate) struct Inflight(Mutex<Option<String>>);
+pub(crate) struct Inflight {
+    id: Mutex<Option<String>>,
+    abandon: Arc<AtomicBool>,
+}
 
 impl Inflight {
-    fn set(&self, id: Option<String>) {
-        *self
-            .0
+    fn with_abandon_flag(abandon: Arc<AtomicBool>) -> Self {
+        Self {
+            id: Mutex::default(),
+            abandon,
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Option<String>> {
+        self.id
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = id;
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Another statement (or none) is the one in flight now: the flag of the last
+    /// one is not the next one's.
+    fn set(&self, id: Option<String>) {
+        let mut current = self.lock();
+        *current = id;
+        self.abandon.store(false, Ordering::Release);
     }
 
     fn current(&self) -> Option<String> {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+        self.lock().clone()
+    }
+
+    /// Ends the blocked wait of `query_id`, if it is still the statement in flight (under
+    /// the lock `set` takes, so the flag can never reach the next statement).
+    fn abandon(&self, query_id: &str) {
+        if self.lock().as_deref() == Some(query_id) {
+            self.abandon.store(true, Ordering::Release);
+        }
+    }
+
+    /// Whether the statement in flight was abandoned.
+    pub(crate) fn abandoned(&self) -> bool {
+        self.abandon.load(Ordering::Acquire)
     }
 }
 
@@ -155,6 +192,7 @@ pub struct ChConnection {
 impl ChConnection {
     fn new(client: Client) -> Self {
         let nonce = nonce();
+        let inflight = Inflight::with_abandon_flag(client.abandon_flag());
         Self {
             client: Arc::new(client),
             session: Mutex::new(UserSession {
@@ -162,7 +200,7 @@ impl ChConnection {
                 database_unknown: Cell::new(false),
                 types: RefCell::new(TypeCache::default()),
             }),
-            inflight: Arc::new(Inflight::default()),
+            inflight: Arc::new(inflight),
             id_prefix: format!("tablex-{nonce}"),
             closed: AtomicBool::new(false),
         }
@@ -179,10 +217,53 @@ impl ChConnection {
         Ok(())
     }
 
-    /// The user session, exclusively, for one operation.
+    /// The user session, exclusively, for one operation. Waits (blocking the calling
+    /// thread) for at most [`GATE_WAIT`]: a call that still holds it is stuck on a
+    /// server that does not answer, and the next call must fail (`<area>.busy`)
+    /// instead of waiting with it.
     pub(crate) fn lock(&self, area: Area) -> Result<MutexGuard<'_, UserSession>, BackendError> {
-        self.session.lock().map_err(|_| {
-            BackendError::with_code(area.not_connected(), "the connection state is poisoned")
+        self.lock_within(area, GATE_WAIT)
+    }
+
+    fn lock_within(
+        &self,
+        area: Area,
+        wait: Duration,
+    ) -> Result<MutexGuard<'_, UserSession>, BackendError> {
+        let deadline = Instant::now() + wait;
+        let mut pause = Duration::from_millis(1);
+        loop {
+            match self.session.try_lock() {
+                Ok(guard) => return Ok(guard),
+                Err(TryLockError::Poisoned(_)) => {
+                    return Err(BackendError::with_code(
+                        area.not_connected(),
+                        "the connection state is poisoned",
+                    ))
+                }
+                Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    std::thread::sleep(pause);
+                    pause = (pause * 2).min(Duration::from_millis(50));
+                }
+                Err(TryLockError::WouldBlock) => {
+                    return Err(BackendError::with_code(
+                        area.busy(),
+                        "the connection is busy with another statement that has not finished; try again",
+                    )
+                    .retryable())
+                }
+            }
+        }
+    }
+
+    /// The error of the statement in flight if its wait was ended by [`ChCanceller::kill`]'s
+    /// grace period: the connection is lost as far as the app is concerned.
+    pub(crate) fn abandoned(&self, area: Area) -> Option<BackendError> {
+        self.inflight.abandoned().then(|| {
+            BackendError::with_code(
+                area.not_connected(),
+                "the server did not react to the cancel; the request was dropped, reconnect",
+            )
         })
     }
 
@@ -287,6 +368,7 @@ impl ChCanceller {
         if !belongs_to(&query_id, &self.id_prefix, operation) {
             return Ok(());
         }
+        self.abandon_after_grace(query_id.clone(), CANCEL_GRACE);
         kill_within(
             KILL_WINDOW,
             KILL_RETRY,
@@ -297,6 +379,25 @@ impl ChCanceller {
             let (KillError::Refused(reason) | KillError::Transport(reason)) = error;
             BackendError::with_code("operation.failed", format!("KILL QUERY failed: {reason}"))
         })
+    }
+}
+
+impl ChCanceller {
+    /// Ends the blocked wait of `query_id` if it is still in flight `grace` from now: the
+    /// kill (which has its own short timeouts) did not stop it, so the server is not answering.
+    /// A thread of its own, so the cancel itself returns as soon as its kill did.
+    fn abandon_after_grace(&self, query_id: String, grace: Duration) {
+        let inflight = Arc::clone(&self.inflight);
+        let deadline = Instant::now() + grace;
+        std::thread::spawn(move || {
+            while Instant::now() < deadline {
+                if inflight.current().as_deref() != Some(query_id.as_str()) {
+                    return;
+                }
+                std::thread::sleep(GRACE_POLL);
+            }
+            inflight.abandon(&query_id);
+        });
     }
 }
 
@@ -423,6 +524,29 @@ engine_driver_kit::export_driver!(ClickHouse; cancel_operation, mutate, describe
 mod tests {
     use super::*;
     use engine_driver_kit::ExportedSymbols;
+
+    #[test]
+    fn waiting_for_a_busy_connection_gives_up_instead_of_blocking_forever() {
+        let connection = ChConnection::new(Client::with_kill_agent(http::kill_agent_for_tests()));
+        let holder = connection.lock(Area::Query).expect("lock");
+        let started = Instant::now();
+        let error = connection
+            .lock_within(Area::Mutation, Duration::from_millis(150))
+            .err()
+            .expect("busy");
+        assert_eq!(error.code.as_deref(), Some("mutation.busy"));
+        assert!(error.retryable);
+        assert!(
+            started.elapsed() >= Duration::from_millis(150)
+                && started.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
+        drop(holder);
+        assert!(connection
+            .lock_within(Area::Query, Duration::from_millis(150))
+            .is_ok());
+    }
 
     #[test]
     fn capabilities_match_the_exported_symbols_and_describe_the_dialect() {
@@ -591,6 +715,49 @@ mod tests {
         assert!(!belongs_to("tablex-00ff-77-0", prefix, OperationId(7)));
         assert!(!belongs_to("tablex-aaaa-7-0", prefix, OperationId(7)));
         assert!(!belongs_to("tablex-00ff-7-", prefix, OperationId(7)));
+    }
+
+    #[test]
+    fn abandoning_reaches_only_the_statement_in_flight() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let inflight = Inflight::with_abandon_flag(Arc::clone(&flag));
+        inflight.set(Some("first".into()));
+        // Another statement's id (a cancel that was late): nothing happens.
+        inflight.abandon("other");
+        assert!(!inflight.abandoned());
+        inflight.abandon("first");
+        assert!(inflight.abandoned() && flag.load(Ordering::Acquire));
+        // The next statement does not start abandoned.
+        inflight.set(Some("second".into()));
+        assert!(!inflight.abandoned());
+        // A statement that ended before the grace period is never abandoned.
+        inflight.set(None);
+        inflight.abandon("second");
+        assert!(!inflight.abandoned());
+    }
+
+    #[test]
+    fn a_cancel_that_the_server_ignores_abandons_the_statement_after_the_grace_period() {
+        let connection = ChConnection::new(Client::with_kill_agent(http::kill_agent_for_tests()));
+        let canceller = ChCanceller {
+            client: Arc::clone(&connection.client),
+            inflight: Arc::clone(&connection.inflight),
+            id_prefix: connection.id_prefix.clone(),
+        };
+        let mark = connection.mark("q-1");
+        canceller.abandon_after_grace("q-1".into(), Duration::from_millis(300));
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(connection.abandoned(Area::Query).is_none(), "still within the grace period");
+        std::thread::sleep(Duration::from_millis(500));
+        let error = connection.abandoned(Area::Query).expect("abandoned after the grace period");
+        assert_eq!(error.code.as_deref(), Some("query.not_connected"));
+        drop(mark);
+        // A statement that ends inside the grace period is left alone.
+        let mark = connection.mark("q-2");
+        canceller.abandon_after_grace("q-2".into(), Duration::from_millis(300));
+        drop(mark);
+        std::thread::sleep(Duration::from_millis(600));
+        assert!(connection.abandoned(Area::Query).is_none());
     }
 
     #[test]

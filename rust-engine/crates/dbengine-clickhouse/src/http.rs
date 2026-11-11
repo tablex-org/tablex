@@ -25,6 +25,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use ureq::tls::{Certificate, RootCerts, TlsConfig};
+use ureq::unversioned::resolver::DefaultResolver;
+use ureq::unversioned::transport::{
+    Buffers, Connector, DefaultConnector, NextTimeout, Transport,
+};
 use ureq::{Agent, Body};
 
 /// The most one reply may weigh (bytes read off the wire) before the query is
@@ -206,6 +210,15 @@ impl Area {
         }
     }
 
+    pub(crate) fn busy(self) -> &'static str {
+        match self {
+            Self::Query => "query.busy",
+            Self::Mutation => "mutation.busy",
+            Self::Navigator => "navigator.busy",
+            Self::Describe => "describe.busy",
+        }
+    }
+
     pub(crate) fn not_connected(self) -> &'static str {
         match self {
             Self::Query => "query.not_connected",
@@ -266,12 +279,33 @@ pub(crate) struct Client {
     arrow_extras_refused: AtomicBool,
     /// The server does not know `mutations_execute_subqueries_on_initiator`.
     initiator_subqueries_refused: AtomicBool,
+    /// Raised to end the blocked wait of the statement in flight (see [`Guarded`]).
+    abandon: Arc<AtomicBool>,
 }
 
 fn agent(
     tls: Option<&TlsConfig>,
     connect_timeout: Duration,
     global_timeout: Option<Duration>,
+) -> Agent {
+    agent_with(tls, connect_timeout, global_timeout, None)
+}
+
+/// The agent of user statements: it has no overall timeout, so a server that stops
+/// answering would hold the calling thread for ever. Its connections end the blocked
+/// wait for the reply when `abandon` is raised (see [`Guarded`]).
+fn query_agent(
+    tls: Option<&TlsConfig>,
+    abandon: &Arc<AtomicBool>,
+) -> Agent {
+    agent_with(tls, CONNECT_TIMEOUT, None, Some(abandon))
+}
+
+fn agent_with(
+    tls: Option<&TlsConfig>,
+    connect_timeout: Duration,
+    global_timeout: Option<Duration>,
+    abandon: Option<&Arc<AtomicBool>>,
 ) -> Agent {
     let mut builder = Agent::config_builder()
         .http_status_as_error(false)
@@ -283,13 +317,101 @@ fn agent(
     if let Some(tls) = tls {
         builder = builder.tls_config(tls.clone());
     }
-    Agent::new_with_config(builder.build())
+    let config = builder.build();
+    match abandon {
+        Some(abandon) => Agent::with_parts(
+            config,
+            DefaultConnector::new().chain(Guard(Arc::clone(abandon))),
+            DefaultResolver::default(),
+        ),
+        None => Agent::new_with_config(config),
+    }
+}
+
+/// How often a blocked wait for the reply looks at the abandon flag.
+const GUARD_SLICE: Duration = Duration::from_millis(200);
+
+/// Puts [`Guarded`] around every connection of the agent.
+#[derive(Debug)]
+struct Guard(Arc<AtomicBool>);
+
+impl Connector<Box<dyn Transport>> for Guard {
+    type Out = Guarded;
+
+    fn connect(
+        &self,
+        _details: &ureq::unversioned::transport::ConnectionDetails,
+        chained: Option<Box<dyn Transport>>,
+    ) -> Result<Option<Guarded>, ureq::Error> {
+        Ok(chained.map(|inner| Guarded {
+            inner,
+            abandon: Arc::clone(&self.0),
+        }))
+    }
+}
+
+/// A connection whose wait for the reply ends with an I/O error as soon as `abandon` is
+/// raised: the thread that runs a statement on a server that stopped answering (the laptop
+/// slept, the VPN dropped) cannot be freed any other way, since the blocking read has no
+/// socket to shut down from outside. Everything else is the wrapped transport's.
+#[derive(Debug)]
+struct Guarded {
+    inner: Box<dyn Transport>,
+    abandon: Arc<AtomicBool>,
+}
+
+impl Transport for Guarded {
+    fn buffers(&mut self) -> &mut dyn Buffers {
+        self.inner.buffers()
+    }
+
+    fn transmit_output(&mut self, amount: usize, timeout: NextTimeout) -> Result<(), ureq::Error> {
+        self.inner.transmit_output(amount, timeout)
+    }
+
+    fn await_input(&mut self, timeout: NextTimeout) -> Result<bool, ureq::Error> {
+        let started = std::time::Instant::now();
+        loop {
+            if self.abandon.load(Ordering::Acquire) {
+                return Err(ureq::Error::Io(io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    "the server did not react to the cancel",
+                )));
+            }
+            let remaining = (!timeout.after.is_not_happening())
+                .then(|| (*timeout.after).saturating_sub(started.elapsed()));
+            if remaining == Some(Duration::ZERO) {
+                return Err(ureq::Error::Timeout(timeout.reason));
+            }
+            let slice = remaining.map_or(GUARD_SLICE, |remaining| remaining.min(GUARD_SLICE));
+            match self.inner.await_input(NextTimeout {
+                after: slice.into(),
+                reason: timeout.reason,
+            }) {
+                Err(ureq::Error::Timeout(_)) => {}
+                other => return other,
+            }
+        }
+    }
+
+    fn is_open(&mut self) -> bool {
+        self.inner.is_open()
+    }
+
+    fn is_tls(&self) -> bool {
+        self.inner.is_tls()
+    }
 }
 
 /// Every certificate of a PEM bundle, or the single certificate of a DER file.
 /// The pool of `KILL QUERY`: [`KILL_TIMEOUT`] to connect and for the whole call.
 fn kill_agent(tls: Option<&TlsConfig>) -> Agent {
     agent(tls, KILL_TIMEOUT, Some(KILL_TIMEOUT))
+}
+
+#[cfg(test)]
+pub(crate) fn kill_agent_for_tests() -> Agent {
+    kill_agent(None)
 }
 
 fn certificates(bytes: &[u8]) -> Result<Vec<Certificate<'static>>, String> {
@@ -339,8 +461,9 @@ impl Client {
             (Some(path), true) => Some(tls_config(path)?),
             _ => None,
         };
+        let abandon = Arc::new(AtomicBool::new(false));
         let client = Self {
-            query_agent: agent(tls.as_ref(), CONNECT_TIMEOUT, None),
+            query_agent: query_agent(tls.as_ref(), &abandon),
             meta_agent: agent(tls.as_ref(), CONNECT_TIMEOUT, Some(META_TIMEOUT)),
             kill_agent: kill_agent(tls.as_ref()),
             base: config.base_url(),
@@ -351,6 +474,7 @@ impl Client {
             result_cap_refused: AtomicBool::new(false),
             arrow_extras_refused: AtomicBool::new(false),
             initiator_subqueries_refused: AtomicBool::new(false),
+            abandon,
         };
         client
             .rows_in("SELECT 1", &[], client.database.as_deref())
@@ -547,6 +671,11 @@ impl Client {
     }
 
     /// Stops the running query `query_id`; the number of queries the server found.
+    /// The flag [`Inflight`](crate::Inflight) raises to end the statement in flight.
+    pub(crate) fn abandon_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.abandon)
+    }
+
     pub(crate) fn kill_query(&self, query_id: &str) -> Result<usize, HttpError> {
         let sql = format!(
             "KILL QUERY WHERE query_id = {} FORMAT JSONCompactEachRow",
@@ -736,12 +865,12 @@ impl ArrowBody {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn client_with_kill_agent(kill_agent: Agent) -> Client {
-        Client {
-            query_agent: agent(None, CONNECT_TIMEOUT, None),
+impl Client {
+    /// A client with no server behind it, for tests of what surrounds the wire.
+    pub(crate) fn with_kill_agent(kill_agent: Agent) -> Self {
+        let abandon = Arc::new(AtomicBool::new(false));
+        Self {
+            query_agent: query_agent(None, &abandon),
             meta_agent: agent(None, CONNECT_TIMEOUT, Some(META_TIMEOUT)),
             kill_agent,
             base: String::new(),
@@ -752,7 +881,56 @@ mod tests {
             result_cap_refused: AtomicBool::new(false),
             arrow_extras_refused: AtomicBool::new(false),
             initiator_subqueries_refused: AtomicBool::new(false),
+            abandon,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn client_with_kill_agent(kill_agent: Agent) -> Client {
+        Client::with_kill_agent(kill_agent)
+    }
+
+    #[test]
+    fn a_statement_on_a_server_that_never_answers_ends_when_it_is_abandoned() {
+        use std::net::TcpListener;
+        use std::sync::mpsc::channel;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // Accepts and reads the request, never answers (a paused server behind a port forward).
+        let silent = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            std::thread::sleep(Duration::from_secs(5));
+            drop(stream);
+        });
+        let abandon = Arc::new(AtomicBool::new(false));
+        let agent = query_agent(None, &abandon);
+        let (sender, receiver) = channel();
+        let started = std::time::Instant::now();
+        std::thread::spawn(move || {
+            let result = agent
+                .post(format!("http://127.0.0.1:{port}/"))
+                .send("SELECT 1")
+                .map(|_| ())
+                .map_err(|error| error.to_string());
+            let _ = sender.send((started.elapsed(), result));
+        });
+        // Nobody asked to stop it: it waits (the user's long statements are not cut off).
+        assert!(receiver.recv_timeout(Duration::from_millis(700)).is_err());
+        abandon.store(true, Ordering::Release);
+        let (elapsed, result) = receiver
+            .recv_timeout(Duration::from_secs(3))
+            .expect("the blocked request ends once it is abandoned");
+        let error = result.expect_err("the request failed");
+        assert!(error.contains("did not react to the cancel"), "{error}");
+        assert!(
+            elapsed >= Duration::from_millis(700) && elapsed < Duration::from_secs(3),
+            "{elapsed:?}"
+        );
+        silent.join().unwrap();
     }
 
     #[test]

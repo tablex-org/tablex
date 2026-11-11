@@ -60,7 +60,8 @@
 //! "no rows".
 
 use super::conn::{
-    block_on, cancelled, describe_error, is_connection_lost, map_error, other_error, ActiveMark,
+    block_on, cancelled, describe_error, is_connection_lost, map_error, other_error, Abandoned,
+    ActiveMark,
     Area, ConnState, ER_QUERY_INTERRUPTED,
 };
 use super::sql::{count_sql, create_database_sql, delete_sql, insert_sql, update_sql};
@@ -491,7 +492,7 @@ pub(super) fn mutate(
     capabilities: &DriverCapabilities,
 ) -> Result<MutationOutcome, BackendError> {
     let plan = plan(request, capabilities)?;
-    let guard = connection.lock()?;
+    let guard = connection.lock(Area::Mutation)?;
     let mut active = operation.activate(guard)?;
     // Declared after `active`, so it ends first.
     let running = connection.mark_running(active.operation_id());
@@ -505,7 +506,11 @@ pub(super) fn mutate(
             "connection closed",
         ));
     }
-    let mode = match block_on(active.in_user_transaction()) {
+    let Ok(probe) = block_on(running.watch(active.in_user_transaction())) else {
+        active.mark_broken();
+        return Err(Abandoned::error(Area::Mutation));
+    };
+    let mode = match probe {
         Ok(true) => TxMode::Savepoint,
         Ok(false) => TxMode::Own,
         // Unknown: starting a transaction of our own could commit the user's
@@ -528,8 +533,14 @@ pub(super) fn mutate(
             }
             // A cancel that came during `DO 0` was not killed (no statement ran).
             running.check(Area::Mutation)?;
-            let result = block_on(running.watch(control(&mut active, &sql)));
+            let Ok(result) = block_on(running.watch(control(&mut active, &sql))) else {
+                active.mark_broken();
+                return Err(Abandoned::error(Area::Mutation));
+            };
             if let Err(error) = result {
+                if is_connection_lost(&error) {
+                    active.mark_broken();
+                }
                 let mapped = map_error(&error, active.cancel_requested(), Area::Mutation);
                 return Err(if mapped.code.is_some() {
                     mapped
@@ -544,12 +555,20 @@ pub(super) fn mutate(
         Plan::Dml { target, statements } => {
             // Phase 1: the table's schema, BEGIN (or SAVEPOINT) + every statement.
             // Any failure undoes (where the engine can).
-            let executed =
-                block_on(running.watch(execute(&mut active, mode, &target, statements, &running)));
+            let Ok(executed) =
+                block_on(running.watch(execute(&mut active, mode, &target, statements, &running)))
+            else {
+                // No undo or commit can reach a server that is not answering.
+                active.mark_broken();
+                return Err(Abandoned::error(Area::Mutation));
+            };
             let executed = match executed {
                 Ok(executed) => executed,
                 Err(Failure::Refused(error)) => return Err(error),
                 Err(Failure::Db(error)) => {
+                    if is_connection_lost(&error) {
+                        active.mark_broken();
+                    }
                     return Err(map_error(&error, active.cancel_requested(), Area::Mutation));
                 }
             };

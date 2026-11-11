@@ -407,12 +407,23 @@ unsafe fn open_query_unguarded(
         Ok(snapshot) => snapshot,
         Err(error) => return error_envelope("query.not_connected", error),
     };
+    // Cancellable like aggregate: `operation.cancel` drops the find on a server that never answers.
+    let (_operation, control) = begin_operation(connection_id, request.operation_id.0, &driver);
     let found = match input {
         FindInput::Text {
             filter,
             sort,
             project,
-        } => driver.mongo_find(database, &collection, &filter, &sort, &project, offset, limit),
+        } => driver.mongo_find(
+            database,
+            &collection,
+            &filter,
+            &sort,
+            &project,
+            offset,
+            limit,
+            &control,
+        ),
         FindInput::Parsed {
             filter,
             sort,
@@ -425,10 +436,14 @@ unsafe fn open_query_unguarded(
             projection,
             offset,
             limit,
+            &control,
         ),
     };
     let mut result = match found {
         Ok(result) => result,
+        Err(error) if error == crate::driver::CANCELLED_MESSAGE => {
+            return error_envelope("query.cancelled", "query cancelled")
+        }
         Err(error) => return error_envelope("query.failed", &error),
     };
     if let Some((skip, limit)) = script_window {
@@ -2176,6 +2191,28 @@ mod tests {
         ) -> Result<FindDocuments, String> {
             Err("unused".into())
         }
+        fn find_documents_controlled(
+            &self,
+            _: &str,
+            _: &str,
+            _: Document,
+            _: Document,
+            _: Option<Document>,
+            _: u64,
+            _: u64,
+            control: &crate::driver::AggControl,
+        ) -> Result<FindDocuments, String> {
+            if self.block_until_cancelled {
+                let token = control.cancel.clone().expect("cancel token supplied");
+                let started = std::time::Instant::now();
+                while !token.is_cancelled() {
+                    assert!(started.elapsed().as_secs() < 10, "never cancelled");
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                return Err(crate::driver::CANCELLED_MESSAGE.into());
+            }
+            Err("unused".into())
+        }
         fn insert_document(&self, _: &str, _: &str, _: Document) -> Result<u64, String> {
             Err("unused".into())
         }
@@ -2431,6 +2468,28 @@ mod tests {
             serde_json::json!({ "pipeline": "[]", "verbosity": "loud" }),
         );
         assert_eq!(bad["error"]["code"], "query.bad_request");
+    }
+
+    #[test]
+    fn cancel_operation_stops_a_find_on_a_server_that_never_answers() {
+        let _serial = test_serial();
+        let mut backend = AggregateBackend::new(Ok(vec![]));
+        backend.block_until_cancelled = true;
+        let id = aggregate_connection(backend);
+        let _cleanup = TestConnectionCleanup([id, u64::MAX]);
+        let runner = std::thread::spawn(move || {
+            aggregate_query(id, 92, "mongo_find", serde_json::json!({ "filter": "{}" }))
+        });
+        let started = std::time::Instant::now();
+        while operations().get(&(id, 92)).is_none() {
+            assert!(started.elapsed().as_secs() < 10, "the find never registered");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let ack = call_json(dbengine_cancel_operation, id, serde_json::json!({ "operation_id": 92 }));
+        assert_eq!(ack["value"]["cancelled"], true, "{ack}");
+        let result = runner.join().unwrap();
+        assert_eq!(result["error"]["code"], "query.cancelled", "{result}");
+        assert!(operations().get(&(id, 92)).is_none(), "the registration is gone");
     }
 
     #[test]

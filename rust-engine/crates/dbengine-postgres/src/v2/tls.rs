@@ -1325,13 +1325,33 @@ fn effective_mode(config: &Config, requested: SslMode) -> Result<SslMode, TlsCon
     })
 }
 
+/// TCP keepalive probes start after this much idle time ...
+const KEEPALIVE_IDLE: Duration = Duration::from_secs(30);
+/// ... repeat at this interval ...
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
+/// ... and a peer that misses this many is dead: a session left open overnight
+/// notices a vanished server in about a minute instead of the OS default (2 h).
+const KEEPALIVE_RETRIES: u32 = 3;
+
+/// Puts the keepalive defaults on `config` unless the URI sets any `keepalives*`
+/// parameter itself (tokio-postgres' own default idle time is 2 hours).
+fn default_keepalives(config: &mut Config, uri: &str) {
+    if !uri.contains("keepalives") {
+        config
+            .keepalives_idle(KEEPALIVE_IDLE)
+            .keepalives_interval(KEEPALIVE_INTERVAL)
+            .keepalives_retries(KEEPALIVE_RETRIES);
+    }
+}
+
 impl Transport {
     /// Parses `uri` (TLS parameters included) into the configuration tokio-postgres
     /// understands and the transport that serves it. Reads the certificate files and,
     /// for `verify-full` without `sslrootcert`, the OS trust store.
     pub(crate) fn prepare(uri: &str) -> Result<(Config, Self), PrepareError> {
         let (cleaned, settings) = TlsSettings::from_uri(uri).map_err(PrepareError::Tls)?;
-        let config: Config = cleaned.parse().map_err(PrepareError::Uri)?;
+        let mut config: Config = cleaned.parse().map_err(PrepareError::Uri)?;
+        default_keepalives(&mut config, &cleaned);
         let mode = effective_mode(&config, settings.mode).map_err(PrepareError::Tls)?;
         let route = if mode == SslMode::Disable {
             Route::Plain

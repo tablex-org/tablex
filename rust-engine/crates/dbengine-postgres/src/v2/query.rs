@@ -322,6 +322,9 @@ pub(crate) fn open_query(
     if decision.changes_settings && !(decision.plan == Plan::Script && result.is_ok()) {
         connection.mark_settings_stale(&database);
     }
+    if result.as_ref().is_err_and(is_lost) {
+        connection.mark_broken();
+    }
     let outcome = result?;
     drop(active);
 
@@ -409,7 +412,30 @@ pub(crate) fn classify_error(
                 .retryable()
         };
     }
+    if connection_lost(error) {
+        return BackendError::with_code(
+            format!("{area}.not_connected"),
+            format!("the connection to the server was lost: {}", v2_error_detail(error)),
+        );
+    }
     BackendError::new(v2_error_detail(error))
+}
+
+/// Whether the failure says the connection itself is gone (the server restarted,
+/// the network dropped, the peer closed it) rather than that the server refused
+/// a statement. The session never recovers: the app has to reconnect.
+pub(crate) fn connection_lost(error: &tokio_postgres::Error) -> bool {
+    error.is_closed()
+        || std::error::Error::source(error)
+            .is_some_and(|source| source.downcast_ref::<std::io::Error>().is_some())
+}
+
+/// `true` for the error of a lost connection (see [`classify_error`]).
+pub(crate) fn is_lost(error: &BackendError) -> bool {
+    error
+        .code
+        .as_deref()
+        .is_some_and(|code| code.ends_with(".not_connected"))
 }
 
 pub(crate) fn cancelled(area: &str) -> BackendError {
@@ -451,7 +477,9 @@ async fn run(
     let result = if rerun_read_only {
         read_only_page(connection, &run, decision, limit, offset, force_read_only).await
     } else {
-        let result = armed.watch(execute(&run, decision, limit, offset)).await;
+        let Ok(result) = armed.watch(execute(&run, decision, limit, offset)).await else {
+            return Err(connection.abandoned("query"));
+        };
         armed.disarm();
         result
     };
@@ -535,7 +563,10 @@ async fn read_only_page(
         run.check()?;
         execute(run, decision, limit, offset).await
     };
-    let result = run.armed.watch(work).await;
+    let Ok(result) = run.armed.watch(work).await else {
+        // Nothing more is sent: the leave-the-scope clean-up would wait for the same dead server.
+        return Err(Failure::Other(connection.abandoned("query")));
+    };
     run.armed.disarm();
     if let Some(scope) = entered {
         let (_, end) = read_only_scope(scope, force_read_only);
@@ -1042,6 +1073,42 @@ async fn script_plans(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_lost_connection_is_not_connected_and_a_server_refusal_is_not() {
+        // The server is gone: an I/O failure.
+        let gone = runtime::block_on(tokio_postgres::connect(
+            "postgres://u@127.0.0.1:1/d?connect_timeout=2",
+            tokio_postgres::NoTls,
+        ))
+        .unwrap()
+        .err()
+        .expect("nothing listens on port 1");
+        assert!(connection_lost(&gone), "{gone:?}");
+        for area in ["query", "mutation"] {
+            let mapped = classify_error(&gone, false, area);
+            assert_eq!(
+                mapped.code.as_deref(),
+                Some(&*format!("{area}.not_connected"))
+            );
+            assert!(is_lost(&mapped));
+        }
+        // A server that refuses the login answers: the connection is fine.
+        let server = runtime::block_on(crate::v2::tls::tests::fake::start(
+            vec![crate::v2::tls::tests::fake::Answer::No],
+            crate::v2::tls::tests::fake::Auth::WrongPassword,
+        ))
+        .unwrap();
+        let refused = runtime::block_on(tokio_postgres::connect(
+            &format!("postgres://u:pw@127.0.0.1:{}/d?sslmode=disable", server.port),
+            tokio_postgres::NoTls,
+        ))
+        .unwrap()
+        .err()
+        .expect("wrong password");
+        assert!(!connection_lost(&refused), "{refused:?}");
+        assert!(!is_lost(&classify_error(&refused, false, "query")));
+    }
 
     fn plan(sql: &str, offset: u64) -> Result<Plan, String> {
         decide(sql, false, false, offset)
