@@ -897,6 +897,15 @@ fn the_new_connection_picker_badges_downloadable_kinds_and_hides_driverless_ones
     // installed: badged) and omits PostgreSQL and MariaDB (no driver at all).
     assert!(rig.rendered("connection-picker-mysql"), "a downloadable kind is listed");
     assert!(rig.rendered("connection-picker-download-mysql"), "with the download badge");
+    // The mark sits in the tile's top-right corner, clear of the logo (it was
+    // pulled to the centre and drawn under the logo).
+    let tile = rig.visual.debug_bounds("connection-picker-mysql").expect("the tile");
+    let mark = rig.visual.debug_bounds("connection-picker-download-mysql").expect("the mark");
+    let logo = rig.visual.debug_bounds("connection-picker-logo-mysql").expect("the logo");
+    assert!(tile.contains(&mark.origin) && tile.contains(&mark.bottom_right()), "{mark:?} inside {tile:?}");
+    assert!(!mark.intersects(&logo), "the mark {mark:?} does not cover the logo {logo:?}");
+    assert!(tile.right() - mark.right() <= gpui::px(12.0), "right edge: {tile:?} {mark:?}");
+    assert!(mark.top() - tile.top() <= gpui::px(12.0), "top edge: {tile:?} {mark:?}");
     assert!(!rig.rendered("connection-picker-postgres"), "a kind with no driver stays hidden");
     assert!(!rig.rendered("connection-picker-mariadb"), "a kind with no driver stays hidden");
 }

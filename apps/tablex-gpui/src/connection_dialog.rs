@@ -1826,19 +1826,27 @@ fn view_toggle_button(
         })
 }
 
-/// The small "download" badge of a kind whose driver is not installed yet.
-fn download_badge(entry: PickerEntry) -> impl IntoElement {
+/// The mark of a kind whose driver is not installed yet: a download icon (an
+/// arrow pointing down). In a tile it sits in the corner of the tile's box.
+fn download_mark(entry: PickerEntry, corner: bool) -> impl IntoElement {
     div()
         .debug_selector(move || format!("connection-picker-download-{}", entry.id))
-        .px(px(5.0))
-        .py(px(1.0))
+        .when(corner, |this| this.absolute().top(px(0.0)).right(px(0.0)))
+        .flex_shrink_0()
+        .size(px(18.0))
+        .flex()
+        .items_center()
+        .justify_center()
         .rounded(px(4.0))
         .bg(theme::surface())
         .border_1()
         .border_color(theme::border())
-        .text_size(px(10.0))
-        .text_color(theme::text_muted())
-        .child("download")
+        .child(
+            Icon::empty()
+                .path("icons/download.svg")
+                .size(px(11.0))
+                .text_color(theme::text_muted()),
+        )
 }
 
 fn picker_tile(
@@ -1858,18 +1866,14 @@ fn picker_tile(
         .p(px(6.0))
         .outline()
         .selected(is_selected)
-        .when(download, |this| {
-            this.child(
-                div()
-                    .absolute()
-                    .top(px(4.0))
-                    .right(px(4.0))
-                    .child(download_badge(entry)),
-            )
-        })
+        .when(download, |this| this.tooltip("The driver is not installed yet"))
         .child(
+            // The tile's own box: the Button centres its content in a wrapper,
+            // so the corner mark is placed against this one instead.
             div()
+                .relative()
                 .w(px(108.0))
+                .h(px(88.0))
                 .flex()
                 .flex_col()
                 .items_center()
@@ -1909,7 +1913,9 @@ fn picker_tile(
                                 .whitespace_normal()
                                 .child(picker_tile_label(entry.label)),
                         ),
-                ),
+                )
+                // Last, so it is drawn over nothing and nothing over it.
+                .when(download, |this| this.child(download_mark(entry, true))),
         )
 }
 
@@ -1929,6 +1935,7 @@ fn picker_row(
         .px(px(10.0))
         .outline()
         .selected(is_selected)
+        .when(download, |this| this.tooltip("The driver is not installed yet"))
         .child(
             div()
                 .w_full()
@@ -1953,7 +1960,7 @@ fn picker_row(
                         .text_color(theme::text())
                         .child(entry.label),
                 )
-                .when(download, |this| this.child(download_badge(entry))),
+                .when(download, |this| this.child(download_mark(entry, false))),
         )
 }
 
