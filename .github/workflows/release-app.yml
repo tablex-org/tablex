@@ -68,8 +68,8 @@ jobs:
           fi
           echo "VERSION=${version}" >> "${GITHUB_ENV}"
           # What changed, written before tagging; it opens the release page.
-          if [[ ! -s "docs/release-notes/${GITHUB_REF_NAME}.md" ]]; then
-            echo "docs/release-notes/${GITHUB_REF_NAME}.md is missing or empty" >&2
+          if [[ ! -s "release-notes/${GITHUB_REF_NAME}.md" ]]; then
+            echo "release-notes/${GITHUB_REF_NAME}.md is missing or empty" >&2
             exit 1
           fi
 
@@ -174,7 +174,7 @@ jobs:
           EOF
           # `-i.bak` is the form GNU and BSD sed (this runner's) both take.
           sed -i.bak 's/^          //' notes.md
-          # What changed first (docs/release-notes/<tag>.md), then the install notes.
-          { cat "docs/release-notes/${TAG}.md"; printf '\n---\n\n'; cat notes.md; } > release-notes.md
+          # What changed first (release-notes/<tag>.md), then the install notes.
+          { cat "release-notes/${TAG}.md"; printf '\n---\n\n'; cat notes.md; } > release-notes.md
           gh release create "${TAG}" --title "TableX ${version}" --notes-file release-notes.md --latest \
             dist/*.dmg dist/*.app.zip dist/app-update.json dist/app-update.json.sig

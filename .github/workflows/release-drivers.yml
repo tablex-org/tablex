@@ -382,10 +382,10 @@ jobs:
           set -euo pipefail
           # Never "latest": that label belongs to the app release (release-app.yml), which
           # is what a visitor of the Releases page wants.
-          # What changed (docs/release-notes/<tag>.md, when written), then what this release is.
+          # What changed (release-notes/<tag>.md, when written), then what this release is.
           {
-            if [[ -s "docs/release-notes/${RELEASE_TAG}.md" ]]; then
-              cat "docs/release-notes/${RELEASE_TAG}.md"
+            if [[ -s "release-notes/${RELEASE_TAG}.md" ]]; then
+              cat "release-notes/${RELEASE_TAG}.md"
               printf '\n---\n\n'
             fi
             echo "Driver plugins and tools for TableX, installed by the app from Driver Manager (this is not the app)."
