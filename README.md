@@ -8,6 +8,8 @@ A performance-first database client written in Rust with [GPUI](https://www.gpui
 - Database support comes from driver plugins that the app downloads, verifies and loads at run time.
 - Results travel as Apache Arrow from the driver to a virtualized grid.
 
+![TableX: a PostgreSQL query and its results](.github/screenshots/sql-results.png)
+
 ## Databases
 
 PostgreSQL, MySQL, MariaDB, SQLite, MongoDB, Redis and ClickHouse. Each is a separate driver, installed from **Driver Manager** inside the app.
@@ -20,6 +22,29 @@ PostgreSQL, MySQL, MariaDB, SQLite, MongoDB, Redis and ClickHouse. Each is a sep
 - Tabs, split panes with drag and drop, a command palette, table and database diagrams.
 - An AI assistant (Anthropic, OpenAI, OpenAI-compatible servers, Ollama) that reads the schema and runs queries with the access you give each connection; every statement that changes data asks first.
 - `tablex-mcp`, a standalone MCP server over your saved connections, installed from Driver Manager → Tools.
+
+## Screenshots
+
+<table>
+  <tr>
+    <td><img src=".github/screenshots/mongodb.png" alt="A MongoDB collection in the grid" /></td>
+    <td><img src=".github/screenshots/diagram.png" alt="A database diagram" /></td>
+  </tr>
+  <tr>
+    <td align="center">MongoDB documents in the same grid</td>
+    <td align="center">Database diagram</td>
+  </tr>
+  <tr>
+    <td><img src=".github/screenshots/assistant.png" alt="The AI assistant answering from the schema" /></td>
+    <td><img src=".github/screenshots/split-panes.png" alt="Two editors side by side" /></td>
+  </tr>
+  <tr>
+    <td align="center">AI assistant that reads the schema</td>
+    <td align="center">Split panes</td>
+  </tr>
+</table>
+
+The screenshots use the app's built-in sample data.
 
 ## Download
 
