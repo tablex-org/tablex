@@ -804,8 +804,13 @@ impl Reply {
         {
             return Ok(None);
         }
-        let reader = StreamReader::try_new(buffered, None)
-            .map_err(|error| stream_error(&error, &exceeded))?;
+        let reader = StreamReader::try_new(buffered, None).map_err(|error| {
+            if exceeded.load(Ordering::Relaxed) {
+                HttpError::TooLarge
+            } else {
+                arrow_error(error)
+            }
+        })?;
         Ok(Some(ArrowBody { reader, exceeded }))
     }
 }
@@ -839,6 +844,15 @@ pub(crate) struct ArrowBody {
     exceeded: Arc<AtomicBool>,
 }
 
+/// An Arrow read error: a broken stream (I/O) can be run again; anything else
+/// (a reply the reader cannot decode) fails the same way every time.
+fn arrow_error(error: arrow_schema::ArrowError) -> HttpError {
+    match error {
+        arrow_schema::ArrowError::IoError(..) => HttpError::Stream(error.to_string()),
+        other => HttpError::Protocol(format!("cannot read the ClickHouse reply: {other}")),
+    }
+}
+
 impl ArrowBody {
     pub(crate) fn schema(&self) -> SchemaRef {
         self.reader.schema()
@@ -852,7 +866,7 @@ impl ArrowBody {
                 let _ = error;
                 Err(HttpError::TooLarge)
             }
-            Some(Err(error)) => Err(HttpError::Stream(error.to_string())),
+            Some(Err(error)) => Err(arrow_error(error)),
         }
     }
 
@@ -1110,5 +1124,33 @@ mod tests {
         assert_eq!(counted.read(&mut buf).unwrap(), 4);
         assert!(counted.read(&mut buf).is_err());
         assert!(exceeded.load(Ordering::Relaxed));
+    }
+}
+
+#[cfg(test)]
+mod arrow_reply_tests {
+    use super::*;
+
+    /// A real `FORMAT ArrowStream` reply of ClickHouse 26.9 with
+    /// `output_format_arrow_compression_method=lz4_frame` (its default):
+    /// `SELECT number AS n, toString(number) AS s FROM numbers(5)`.
+    const LZ4_REPLY: &[u8] = include_bytes!("../tests/fixtures/lz4-frame.arrows");
+
+    #[test]
+    fn an_lz4_compressed_reply_is_read() {
+        let reader = StreamReader::try_new(std::io::Cursor::new(LZ4_REPLY), None).expect("schema");
+        let rows: usize = reader.map(|batch| batch.expect("an LZ4 batch decodes").num_rows()).sum();
+        assert_eq!(rows, 5);
+    }
+
+    #[test]
+    fn a_reply_that_cannot_be_decoded_is_not_retried_but_a_broken_stream_is() {
+        let decode = arrow_error(arrow_schema::ArrowError::InvalidArgumentError("bad".into()));
+        assert!(matches!(decode, HttpError::Protocol(ref m) if m.contains("cannot read the ClickHouse reply")), "{decode:?}");
+        let broken = arrow_error(arrow_schema::ArrowError::IoError(
+            "reset".into(),
+            std::io::Error::other("reset"),
+        ));
+        assert!(matches!(broken, HttpError::Stream(_)), "{broken:?}");
     }
 }

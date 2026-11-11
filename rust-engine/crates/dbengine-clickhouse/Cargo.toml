@@ -1,6 +1,6 @@
 [package]
 name = "dbengine-clickhouse"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 
 [lib]
@@ -11,7 +11,9 @@ name = "dbengine_clickhouse"
 arrow-array = { version = "53", features = ["ffi"] }
 arrow-buffer = "53"
 arrow-cast = "53"
-arrow-ipc = "53"
+# lz4: a server whose profile or proxy ignores `output_format_arrow_compression_method=none`
+# still answers in LZ4 frames (the ClickHouse default).
+arrow-ipc = { version = "53", features = ["lz4"] }
 arrow-schema = "53"
 arrow-select = "53"
 dirs = "5"

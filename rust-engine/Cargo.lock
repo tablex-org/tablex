@@ -279,6 +279,7 @@ dependencies = [
  "arrow-data",
  "arrow-schema",
  "flatbuffers",
+ "lz4_flex",
 ]
 
 [[package]]
@@ -1404,7 +1405,7 @@ dependencies = [
 
 [[package]]
 name = "dbengine-clickhouse"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -3181,6 +3182,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ef9ac18847474e638e3702b76c65d4eb93428471a74778ef0f1be711717f89b5"
 dependencies = [
  "hashbrown 0.17.1",
+]
+
+[[package]]
+name = "lz4_flex"
+version = "0.11.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "373f5eceeeab7925e0c1098212f2fbc4d416adec9d35051a6ab251e824c1854a"
+dependencies = [
+ "twox-hash 2.1.5",
 ]
 
 [[package]]
