@@ -95,6 +95,138 @@ fn cell_menu_icon(path: &'static str) -> Icon {
     Icon::empty().path(path).size(px(12.0))
 }
 
+/// First key of a Mongo sort document and whether it sorts descending.
+fn first_sort_key(sort: &str) -> Option<(String, bool)> {
+    if sort.is_empty() {
+        return None;
+    }
+    let document: serde_json::Map<String, serde_json::Value> = serde_json::from_str(sort).ok()?;
+    let (key, direction) = document.into_iter().next()?;
+    Some((key, direction.as_f64()? < 0.0))
+}
+
+/// The sort a result already has, resolved once per frame for the header
+/// sort buttons.
+pub(in crate::app) struct HeaderSort {
+    /// Database sort: column name and whether it is descending.
+    pub database: Option<(String, bool)>,
+    /// Page-only sort: source column and whether it is descending.
+    pub page: Option<(usize, bool)>,
+}
+
+/// What one header's sort button shows and its menu checks.
+#[derive(Clone, Copy)]
+pub(in crate::app) struct ColumnSort {
+    /// Database sort on this column (`true` = descending).
+    pub database: Option<bool>,
+    /// Page-only sort on this column (`true` = descending).
+    pub page: Option<bool>,
+    pub can_database_sort: bool,
+    pub menu_open: bool,
+}
+
+/// Entries of a header sort menu: the same sorts as the cell context menu,
+/// run for this column, with a check on the sort the column has.
+pub(in crate::app) fn sort_menu_items(
+    tab_id: u64,
+    column: usize,
+    sort: ColumnSort,
+    root: &gpui::WeakEntity<AppRoot>,
+) -> Vec<PopupMenuItem> {
+    let ColumnSort {
+        database,
+        page,
+        can_database_sort,
+        ..
+    } = sort;
+    // The same words and icons as the cell's right-click menu.
+    let choice = |label: &'static str, icon: &'static str, descending: bool, database_sort: bool| {
+        let checked = if database_sort { database } else { page } == Some(descending);
+        let root = root.clone();
+        PopupMenuItem::new(label)
+            .icon(cell_menu_icon(icon))
+            .checked(checked)
+            .disabled(database_sort && !can_database_sort)
+            .on_click(move |_, window, app| {
+                let _ = root.update(app, |this, cx| {
+                    if database_sort {
+                        this.sort_column_database(tab_id, column, descending, window, cx);
+                    } else {
+                        this.sort_column_page(tab_id, column, descending, window, cx);
+                    }
+                });
+            })
+    };
+    let root = root.clone();
+    vec![
+        choice("Sort Database Ascending", "icons/database.svg", false, true),
+        choice("Sort Database Descending", "icons/database.svg", true, true),
+        PopupMenuItem::separator(),
+        choice("Sort Current Page Ascending", "icons/arrow-up.svg", false, false),
+        choice("Sort Current Page Descending", "icons/arrow-down.svg", true, false),
+        PopupMenuItem::separator(),
+        PopupMenuItem::new("Clear Sort")
+            .icon(cell_menu_icon("icons/eraser.svg"))
+            .disabled(database.is_none() && page.is_none())
+            .on_click(move |_, window, app| {
+                let _ = root.update(app, |this, cx| this.clear_context_sort(tab_id, window, cx));
+            }),
+    ]
+}
+
+/// The sort button at the right end of a header's name row; its menu is
+/// [`sort_menu_items`].
+fn header_sort_button(
+    tab_id: u64,
+    column: usize,
+    sort: ColumnSort,
+    root: gpui::WeakEntity<AppRoot>,
+) -> impl IntoElement {
+    let (path, color, state) = match (sort.database, sort.page) {
+        (Some(descending), _) => (
+            if descending { "icons/arrow-up-z-a.svg" } else { "icons/arrow-down-a-z.svg" },
+            theme::accent(),
+            if descending { "database-desc" } else { "database-asc" },
+        ),
+        (None, Some(descending)) => (
+            if descending { "icons/arrow-up-z-a.svg" } else { "icons/arrow-down-a-z.svg" },
+            theme::text_muted(),
+            if descending { "page-desc" } else { "page-asc" },
+        ),
+        (None, None) => ("icons/chevrons-up-down.svg", theme::text_faint(), "none"),
+    };
+    let open_root = root.clone();
+    Button::new(("grid-header-sort", column))
+        .icon(Icon::empty().path(path).size(px(12.0)).text_color(color))
+        .ghost()
+        .xsmall()
+        .compact()
+        .flex_shrink_0()
+        .debug_selector(move || format!("grid-header-sort-{column}-{state}"))
+        .when(sort.database.is_none() && sort.page.is_some(), |this| {
+            this.tooltip("Sorted on the loaded rows only")
+        })
+        .dropdown_menu_with_anchor(gpui::Anchor::TopRight, move |menu, _, _| {
+            // Built when the menu opens, so the checks follow the sort then.
+            sort_menu_items(tab_id, column, sort, &root)
+                .into_iter()
+                .fold(menu.min_w(px(220.0)).check_side(gpui_component::Side::Right), |menu, item| menu.item(item))
+        })
+        .on_open_change(move |open, _, app| {
+            let _ = open_root.update(app, |this, cx| {
+                let ui = &mut this.view_mut(tab_id).grid_ui;
+                if *open {
+                    ui.sort_menu = Some(column);
+                } else if ui.sort_menu == Some(column) {
+                    ui.sort_menu = None;
+                } else {
+                    return;
+                }
+                this.notify_tab(tab_id, cx);
+            });
+        })
+}
+
 /// Which row actions the grid's context menu offers for a tab's result.
 #[derive(Clone, Copy)]
 struct GridRowActions {
@@ -1095,6 +1227,31 @@ impl AppRoot {
             .into_any_element()
     }
 
+    /// The sort the shown result has: a table-data tab's first ORDER BY term,
+    /// a Mongo find's first sort key, a custom SQL result's database sort, and
+    /// the page sort of the loaded rows.
+    pub(in crate::app) fn header_sort(&self, tab_id: u64) -> HeaderSort {
+        let tab = self.workspace.tab(tab_id);
+        let runtime = self.workspace.runtime(tab_id);
+        let database = match (tab, runtime) {
+            (Some(tab), _) if tab.query_mode.is_table_data() => {
+                crate::sql_table::primary_sort(&tab.applied_order_by)
+            }
+            (Some(tab), Some(runtime)) if tab.query_mode.is_mongo_find() => {
+                first_sort_key(&runtime.mongo.sort)
+            }
+            (Some(tab), Some(runtime)) if tab.query_mode.is_sql_table() => runtime
+                .context_sql_sort
+                .as_ref()
+                .map(|sort| (sort.column.clone(), sort.descending)),
+            _ => None,
+        };
+        HeaderSort {
+            database,
+            page: self.grid(tab_id).page_sort(),
+        }
+    }
+
     /// The table grid (header, virtualized rows, scrollbars).
     fn render_grid_pane(&mut self, tab_id: u64, window: &Window, cx: &mut Context<Self>) -> Div {
         // Header type labels resolve once per result/catalog change.
@@ -1150,13 +1307,15 @@ impl AppRoot {
             .as_ref()
             .map(|edit| edit.position.column);
         let columns = layout.column_window(scroll_left, viewport_width, editing_column, frozen);
-        // Table-data tabs sort by clicking a header (ASC -> DESC -> default);
-        // the active term is shown as an arrow and mirrored in ORDER BY.
-        let table_sort = self
+        // Table-data tabs sort by clicking a header (ASC -> DESC -> default),
+        // mirrored in ORDER BY; every header's sort button shows the active sort.
+        let table_data = self
             .workspace
             .tab(tab_id)
-            .filter(|tab| tab.query_mode.is_table_data())
-            .map(|tab| crate::sql_table::primary_sort(&tab.applied_order_by));
+            .is_some_and(|tab| tab.query_mode.is_table_data());
+        let header_sort = self.header_sort(tab_id);
+        let can_database_sort = can_stage_row || can_sql_database_sort;
+        let sort_menu = view.grid_ui.sort_menu;
         let pinned_segment = crate::grid::ColumnSegment {
             columns: 0..frozen,
             spacer: 0.0,
@@ -1258,11 +1417,19 @@ impl AppRoot {
                         .column_name(source_column)
                         .unwrap_or("")
                         .to_string();
-                    let sorted = table_sort
-                        .as_ref()
-                        .and_then(|sort| sort.as_ref())
-                        .filter(|(name, _)| *name == column_name)
-                        .map(|(_, descending)| *descending);
+                    let column_sort = ColumnSort {
+                        database: header_sort
+                            .database
+                            .as_ref()
+                            .filter(|(name, _)| *name == column_name)
+                            .map(|(_, descending)| *descending),
+                        page: header_sort
+                            .page
+                            .filter(|(sorted, _)| *sorted == source_column)
+                            .map(|(_, descending)| descending),
+                        can_database_sort,
+                        menu_open: sort_menu == Some(column),
+                    };
                     let header_cell = div()
                         .id(("grid-header-cell", column))
                         .relative()
@@ -1273,7 +1440,7 @@ impl AppRoot {
                                 theme::find_match()
                             })
                         })
-                        .when(table_sort.is_some(), |this| {
+                        .when(table_data, |this| {
                             let sort_name = column_name.clone();
                             this.cursor_pointer().on_click(cx.listener(
                                 move |this, _, window, cx| {
@@ -1317,18 +1484,12 @@ impl AppRoot {
                                             .flex_shrink_0(),
                                     )
                                 })
-                                .when_some(sorted, |this, descending| {
-                                    this.child(
-                                        Icon::new(if descending {
-                                            IconName::ArrowDown
-                                        } else {
-                                            IconName::ArrowUp
-                                        })
-                                        .size(px(11.0))
-                                        .text_color(theme::accent())
-                                        .flex_shrink_0(),
-                                    )
-                                }),
+                                .child(header_sort_button(
+                                    tab_id,
+                                    column,
+                                    column_sort,
+                                    pin_menu.root.clone(),
+                                )),
                         )
                         .child({
                             // Long native names (`timestamp(3) with time zone`)

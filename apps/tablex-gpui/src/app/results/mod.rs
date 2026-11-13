@@ -93,6 +93,8 @@ pub(super) struct GridUiState {
     pub(super) context_cell: Option<CellPosition>,
     /// Display column of the header that was right-clicked (its menu's target).
     pub(super) context_header: Option<usize>,
+    /// Display column whose header sort menu is open (its button stays shown).
+    pub(super) sort_menu: Option<usize>,
     /// Footer SUM/AVG cache, recomputed only when its key changes.
     pub(super) selection_stats: Option<(footer::SelectionStatsKey, crate::selection_stats::SelectionStats)>,
     /// Resolved header type labels for the tab's result (see `column_type`).
@@ -116,6 +118,7 @@ impl Default for GridUiState {
             inline_edit: None,
             context_cell: None,
             context_header: None,
+            sort_menu: None,
             selection_stats: None,
             column_types: None,
             find: find::FindState::default(),

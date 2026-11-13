@@ -175,6 +175,17 @@ pub struct AppliedRows {
     unknown: HashSet<usize>,
 }
 
+/// A database sort of a custom SQL result: the statement on screen is
+/// `sorted`, the unsorted statement it came from is `base`.
+#[derive(Debug)]
+pub struct ContextSqlSort {
+    pub base: String,
+    pub sorted: String,
+    /// Column the statement is sorted by, and whether it is descending.
+    pub column: String,
+    pub descending: bool,
+}
+
 /// Per-tab runtime state that never touches GPUI entities.
 #[derive(Debug)]
 pub struct TabRuntime {
@@ -211,7 +222,7 @@ pub struct TabRuntime {
     /// (what paging re-sends) only when its result is shown, so a refused,
     /// failed or cancelled run never replaces the statement on screen.
     pub pending_sql: Option<String>,
-    pub context_sql_sort: Option<(String, String)>,
+    pub context_sql_sort: Option<ContextSqlSort>,
     /// `sqlTable` tabs: bar UI state (validation error, expand popovers).
     pub sql_table: SqlTableUi,
     /// Redis key tabs: what the key is (type, TTL, length) and its string value.

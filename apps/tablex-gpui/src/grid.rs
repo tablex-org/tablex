@@ -551,6 +551,8 @@ impl ColumnWindow {
 pub struct GridState<S> {
     source: Arc<S>,
     page_order: Option<Arc<Vec<usize>>>,
+    /// Source column and direction `page_order` sorts by.
+    page_sort: Option<(usize, bool)>,
 }
 
 impl<S> Clone for GridState<S> {
@@ -558,6 +560,7 @@ impl<S> Clone for GridState<S> {
         Self {
             source: Arc::clone(&self.source),
             page_order: self.page_order.clone(),
+            page_sort: self.page_sort,
         }
     }
 }
@@ -567,6 +570,7 @@ impl<S: GridSource> GridState<S> {
         Self {
             source: Arc::new(source),
             page_order: None,
+            page_sort: None,
         }
     }
 
@@ -593,6 +597,13 @@ impl<S: GridSource> GridState<S> {
 
     pub fn clear_page_sort(&mut self) {
         self.page_order = None;
+        self.page_sort = None;
+    }
+
+    /// The source column and direction (`true` = descending) of the active
+    /// page sort.
+    pub fn page_sort(&self) -> Option<(usize, bool)> {
+        self.page_sort
     }
 
     /// Orders the page locally by `column`, keys parsed once per row (no
@@ -634,6 +645,7 @@ impl<S: GridSource> GridState<S> {
             }
         });
         self.page_order = Some(Arc::new(order));
+        self.page_sort = Some((column, descending));
         Ok(())
     }
 
@@ -1339,7 +1351,10 @@ mod tests {
             ],
         ));
         let mut sorted = grid.clone();
+        assert_eq!(sorted.page_sort(), None);
         sorted.sort_page(1, SortKind::Integer, false).unwrap();
+        assert_eq!(sorted.page_sort(), Some((1, false)));
+        assert_eq!(grid.page_sort(), None, "the clone's sort stays its own");
         assert_eq!(
             (0..4).map(|r| sorted.source_row(r)).collect::<Vec<_>>(),
             [2, 3, 0, 1]
@@ -1358,12 +1373,14 @@ mod tests {
             Some("b")
         );
         sorted.sort_page(1, SortKind::Integer, true).unwrap();
+        assert_eq!(sorted.page_sort(), Some((1, true)));
         // NULL is the greatest value: first when descending.
         assert_eq!(
             (0..4).map(|r| sorted.source_row(r)).collect::<Vec<_>>(),
             [1, 0, 2, 3]
         );
         sorted.clear_page_sort();
+        assert_eq!(sorted.page_sort(), None);
         assert_eq!(
             (0..4).map(|r| sorted.source_row(r)).collect::<Vec<_>>(),
             [0, 1, 2, 3]

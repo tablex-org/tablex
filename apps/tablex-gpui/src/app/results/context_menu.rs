@@ -1472,7 +1472,19 @@ impl AppRoot {
         let Some(target) = self.view(tab_id).grid_ui.context_cell else {
             return;
         };
-        let Some(column) = self.source_column_for_display(tab_id, target.column) else {
+        self.sort_column_page(tab_id, target.column, descending, window, cx);
+    }
+
+    /// Orders the loaded rows by the display column `display_column`.
+    pub(in crate::app) fn sort_column_page(
+        &mut self,
+        tab_id: u64,
+        display_column: usize,
+        descending: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(column) = self.source_column_for_display(tab_id, display_column) else {
             return;
         };
         if self.context_sort_blocked(tab_id) {
@@ -1520,6 +1532,21 @@ impl AppRoot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let Some(target) = self.view(tab_id).grid_ui.context_cell else {
+            return;
+        };
+        self.sort_column_database(tab_id, target.column, descending, window, cx);
+    }
+
+    /// Sorts the database result by the display column `display_column`.
+    pub(in crate::app) fn sort_column_database(
+        &mut self,
+        tab_id: u64,
+        display_column: usize,
+        descending: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(tab) = self.workspace.tab(tab_id).cloned() else {
             return;
         };
@@ -1535,10 +1562,7 @@ impl AppRoot {
             });
             return;
         }
-        let Some(target) = self.view(tab_id).grid_ui.context_cell else {
-            return;
-        };
-        let Some(column) = self.source_column_for_display(tab_id, target.column) else {
+        let Some(column) = self.source_column_for_display(tab_id, display_column) else {
             return;
         };
         let Some(name) = self.grid(tab_id).column_name(column) else {
@@ -1562,6 +1586,7 @@ impl AppRoot {
             return;
         }
         if sql_table {
+            let name = name.to_string();
             // Sort the statement whose rows are on screen, never the editor
             // text (it may hold anything typed since the last run).
             // Scenario fixtures seed rows without executing anything; their
@@ -1579,13 +1604,18 @@ impl AppRoot {
                 &base,
                 tab.schema.as_deref().unwrap_or("public"),
                 &tab.collection,
-                name,
+                &name,
                 descending,
             );
             match result {
                 Ok(sorted) => {
                     if let Some(runtime) = self.workspace.runtime_mut(tab.id) {
-                        runtime.context_sql_sort = Some((base, sorted.clone()));
+                        runtime.context_sql_sort = Some(crate::workspace::ContextSqlSort {
+                            base,
+                            sorted: sorted.clone(),
+                            column: name,
+                            descending,
+                        });
                         runtime.pagination.reset();
                     }
                     if scenario {
@@ -1674,7 +1704,7 @@ impl AppRoot {
                 .workspace
                 .runtime_mut(tab.id)
                 .and_then(|runtime| runtime.context_sql_sort.take())
-                .map(|(base, _)| base);
+                .map(|sort| sort.base);
             if base.is_some() {
                 if let Some(runtime) = self.workspace.runtime_mut(tab.id) {
                     runtime.pagination.reset();

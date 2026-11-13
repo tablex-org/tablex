@@ -712,6 +712,7 @@ mod tests {
     include!("tests/cell_detail.rs");
     include!("tests/binary_view.rs");
     include!("tests/pinned_columns.rs");
+    include!("tests/header_sort.rs");
     include!("tests/record_view.rs");
     include!("tests/chart.rs");
     include!("tests/sql_table.rs");

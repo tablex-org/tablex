@@ -938,12 +938,13 @@ fn sql_database_sort_uses_safe_override_and_clear_preserves_editor_query(cx: &mu
         this.av_mut().grid_ui.context_cell = Some(CellPosition { row: 0, column: 1 });
         this.sort_context_database(this.active_id(), true, window, cx);
         let runtime = this.workspace.runtime(tab.id).unwrap();
-        let (base, sorted) = runtime
+        let sort = runtime
             .context_sql_sort
             .as_ref()
             .expect("SQL sort override");
-        assert_eq!(base, &tab.sql);
-        assert!(sorted.contains("ORDER BY \"name\" DESC"));
+        assert_eq!(sort.base, tab.sql);
+        assert!(sort.sorted.contains("ORDER BY \"name\" DESC"));
+        assert_eq!((sort.column.as_str(), sort.descending), ("name", true));
         assert_eq!(
             this.workspace.active_tab().unwrap().sql,
             tab.sql,

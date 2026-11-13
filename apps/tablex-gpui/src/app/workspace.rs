@@ -1086,7 +1086,7 @@ impl AppRoot {
         runtime
             .context_sql_sort
             .as_ref()
-            .map(|(base, _)| base.clone())
+            .map(|sort| sort.base.clone())
             .or_else(|| runtime.last_executed_query.clone())
             .filter(|sql| !sql.is_empty())
     }
@@ -1250,8 +1250,8 @@ impl AppRoot {
             .workspace
             .runtime(tab_id)
             .and_then(|runtime| runtime.context_sql_sort.as_ref())
-            .filter(|(base, _)| base == &tab_sql)
-            .map(|(_, sorted)| sorted.clone());
+            .filter(|sort| sort.base == tab_sql)
+            .map(|sort| sort.sorted.clone());
         let (sql, from_scope) = match (table_sql, sorted) {
             (Some(table_sql), _) => (table_sql, false),
             (None, Some(sorted)) => (sorted, false),
