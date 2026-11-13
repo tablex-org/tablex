@@ -21,7 +21,7 @@ PostgreSQL, MySQL, MariaDB, SQLite, MongoDB, Redis and ClickHouse. Each is a sep
 - SQL and MongoDB editors with completion, query history and saved scripts.
 - Tabs, split panes with drag and drop, a command palette, table and database diagrams.
 - An AI assistant (Anthropic, OpenAI, OpenAI-compatible servers, Ollama) that reads the schema and runs queries with the access you give each connection; every statement that changes data asks first.
-- `tablex-mcp`, a standalone MCP server over your saved connections, installed from Driver Manager → Tools.
+- `tablex-mcp`, a standalone MCP server over your saved connections, installed from Driver Manager → Tools. On macOS, run `tablex-mcp --authorize-keychain` once (or use Allow Keychain access there) so it can read saved passwords without prompting, and again after an update.
 
 ## Screenshots
 

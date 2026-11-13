@@ -6,6 +6,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use tablex_mcp::cli::{self, Command};
+use tablex_mcp::keychain;
 use tablex_mcp::server::{McpServer, MAX_CONCURRENT_CALLS};
 use tablex_mcp::setup;
 use tablex_mcp::transport::Signals;
@@ -20,6 +21,8 @@ fn main() -> ExitCode {
             Ok(config) => print_and_exit(&config),
             Err(error) => fail(&error.to_string()),
         },
+        Ok(Command::AuthorizeKeychain) => keychain::authorize(&setup::production_connector()),
+        Ok(Command::VerifyKeychainAccess) => keychain::verify(&setup::production_connector()),
         Err(error) => {
             eprintln!("tablex-mcp: {error}\n\n{}", cli::USAGE);
             ExitCode::from(2)

@@ -7,6 +7,7 @@
 
 pub mod approver;
 pub mod cli;
+pub mod keychain;
 pub mod server;
 pub mod setup;
 pub mod transport;

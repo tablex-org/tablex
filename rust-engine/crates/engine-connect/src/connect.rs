@@ -932,6 +932,9 @@ pub struct AgentConnections {
     /// and the saved secrets are read once per open, and an error survives until `open` can fail
     /// on it.
     prefetched: Mutex<HashMap<String, Result<Prefetched, ReadFailure>>>,
+    /// What to do about a credential store that cannot be read, appended to the error the model
+    /// sees (the standalone MCP server names its one-time authorisation command here).
+    credential_hint: Option<String>,
 }
 
 /// The record and the saved secrets of one open: the texts to mask and the values the open
@@ -970,7 +973,27 @@ impl AgentConnections {
             tunnels: Mutex::new(HashMap::new()),
             newest_open: AtomicU64::new(0),
             prefetched: Mutex::new(HashMap::new()),
+            credential_hint: None,
         }
+    }
+
+    /// Appends `hint` to the `credentials.unavailable` error of an open (what the user can do
+    /// about a store that cannot be read).
+    pub fn with_credential_hint(mut self, hint: String) -> Self {
+        self.credential_hint = Some(hint);
+        self
+    }
+
+    /// The error of an open whose credential store could not be read.
+    fn credentials_unavailable(&self, error: &CredentialError) -> AgentError {
+        let mut text = format!(
+            "the credential store could not be read ({error}), so the session was not opened"
+        );
+        if let Some(hint) = &self.credential_hint {
+            text.push_str(". ");
+            text.push_str(hint);
+        }
+        AgentError::driver("credentials.unavailable", text, false)
     }
 
     /// Drops the tunnels of the connection's agent sessions **opened before this call**. Front ends
@@ -1227,13 +1250,7 @@ impl SessionProvider for AgentConnections {
             .take_secrets(connection)
             .map_err(|failure| match failure {
                 ReadFailure::Record(failure) => failure.agent_error(connection),
-                ReadFailure::Credentials(error) => AgentError::driver(
-                    "credentials.unavailable",
-                    format!(
-                        "the credential store could not be read ({error}), so the session was not opened"
-                    ),
-                    false,
-                ),
+                ReadFailure::Credentials(error) => self.credentials_unavailable(&error),
             })?;
         let OpenedConnection {
             session,
@@ -2048,6 +2065,21 @@ mod tests {
         })
         .agent_error(&info);
         assert!(error.to_string().contains("`sqlite` driver"), "{error}");
+    }
+
+    #[test]
+    fn the_credential_hint_is_appended_to_the_unavailable_error_only_when_set() {
+        let rig = rig(Scripted::default());
+        let error = CredentialError::Platform("keychain locked".into());
+        let plain = AgentConnections::new(rig.connector.clone(), rig.dyn_prompts());
+        let without = plain.credentials_unavailable(&error).to_string();
+        assert!(without.contains("the credential store could not be read"), "{without}");
+        assert!(without.ends_with("so the session was not opened"), "{without}");
+        let hinted = AgentConnections::new(rig.connector.clone(), rig.dyn_prompts())
+            .with_credential_hint("run the authorize command once.".into());
+        let with = hinted.credentials_unavailable(&error).to_string();
+        assert!(with.starts_with(&without), "{with}");
+        assert!(with.ends_with(". run the authorize command once."), "{with}");
     }
 
     #[test]

@@ -79,6 +79,51 @@ fn an_unknown_argument_prints_the_usage_to_stderr_and_exits_two() {
     }
 }
 
+/// The name `Fixture::connection` gives the connection (`fixture <n>`, n from the id's last digits).
+fn fixture_name(conn: &Conn) -> String {
+    format!("fixture {}", conn.id[24..].trim_start_matches('0'))
+}
+
+#[test]
+fn authorize_keychain_reads_each_connection_open_to_agents_and_skips_the_others() {
+    let fixture = Fixture::new();
+    let open = fixture.connection(Some("read"));
+    let off = fixture.connection(None);
+    let output = run(&["--authorize-keychain"]);
+    let out = String::from_utf8_lossy(&output.stdout);
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{out}{err}");
+    if !cfg!(target_os = "macos") {
+        assert!(out.contains("nothing to authorize"), "{out}");
+        return;
+    }
+    // The test build's store is empty and a SQLite connection saves nothing, so nothing is read
+    // from the real Keychain and nothing is asked.
+    assert!(
+        out.contains(&format!("{}: nothing saved\n", fixture_name(&open))),
+        "{out}"
+    );
+    assert!(!out.contains(&fixture_name(&off)), "{out}");
+    assert!(out.contains("off for agents and"), "{out}");
+    assert!(out.contains("skipped"), "{out}");
+    // The verify child ran and was happy.
+    assert!(out.contains("Keychain access is allowed for "), "{out}");
+    assert!(out.contains("Restart your MCP client"), "{out}");
+}
+
+#[test]
+fn the_hidden_verify_command_exits_zero_and_is_not_in_the_usage() {
+    let fixture = Fixture::new();
+    fixture.connection(Some("read"));
+    let output = run(&["--verify-keychain-access"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stdout.is_empty());
+    let help = run(&["--help"]);
+    let help = String::from_utf8_lossy(&help.stdout);
+    assert!(help.contains("--authorize-keychain"), "{help}");
+    assert!(!help.contains("verify-keychain-access"), "{help}");
+}
+
 #[cfg(unix)]
 #[test]
 fn a_non_utf8_argument_is_an_unknown_argument_not_a_panic() {

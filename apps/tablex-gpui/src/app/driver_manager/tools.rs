@@ -15,6 +15,10 @@ use std::fmt;
 /// One line under the tool: what the server may do. The label is the switch in Settings → AI.
 pub(in crate::app) const MCP_CAPABILITY_NOTE: &str = "It reads according to each connection's assistant access (the names of your connections are listed to the client even where access is off), and changes data only when \"Let MCP clients run changes\" is on in Settings \u{2192} AI, the connection has \"Read and write\" access and it is not of a production type.";
 
+/// Under the "Allow Keychain access" button (macOS).
+pub(in crate::app) const KEYCHAIN_NOTE: &str =
+    "macOS asks once per saved password; choose Always Allow. Needed again after an update.";
+
 /// Shown when the manifest does not describe the tool.
 const MCP_FALLBACK_DESCRIPTION: &str =
     "Lets MCP clients (Claude Code, Claude Desktop, Cursor) use your saved connections.";
@@ -70,6 +74,10 @@ pub(in crate::app) struct ToolsUi {
     /// An add-on waits for its driver's install: "Install MongoDB driver first" queued both, and
     /// the add-on installs when the driver is in.
     pub after_driver: Option<String>,
+    /// The "Allow Keychain access" run (`tablex-mcp --authorize-keychain`): one at a time.
+    pub keychain_task: Option<Task<()>>,
+    /// What the last run showed the user (also what tests read; the toast itself is not kept).
+    pub keychain_notice: Option<String>,
 }
 
 impl ToolsUi {
@@ -82,7 +90,14 @@ impl ToolsUi {
             task: None,
             failure: None,
             after_driver: None,
+            keychain_task: None,
+            keychain_notice: None,
         }
+    }
+
+    /// The Keychain authorisation is running (its button shows it).
+    pub(in crate::app) fn keychain_running(&self) -> bool {
+        self.keychain_task.is_some()
     }
 
     /// The MCP server's row.
@@ -457,6 +472,44 @@ pub(in crate::app) fn code_span(text: &str) -> String {
         .unwrap_or_default();
     let fence = "`".repeat(longest + 1);
     format!("{fence} {text} {fence}")
+}
+
+/// Runs `<tool> --authorize-keychain` and returns the text to show: its output on success, its
+/// error (else its output) on failure. Blocks until the user has answered every macOS prompt.
+fn run_keychain_authorization(tool: &Path) -> String {
+    let output = match std::process::Command::new(tool)
+        .arg("--authorize-keychain")
+        .stdin(std::process::Stdio::null())
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) => return format!("Could not run the MCP server: {error}"),
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let text = if output.status.success() || stderr.trim().is_empty() {
+        stdout
+    } else {
+        stderr
+    };
+    let text = brief(text.trim());
+    if text.is_empty() {
+        match output.status.code() {
+            Some(code) if !output.status.success() => format!("The MCP server exited with code {code}"),
+            _ => "Done".to_string(),
+        }
+    } else {
+        text
+    }
+}
+
+/// The first three lines of `text`, and its last one when there are more (the verdict).
+fn brief(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() <= 4 {
+        return lines.join("\n");
+    }
+    format!("{}\n\u{2026}\n{}", lines[..3].join("\n"), lines[lines.len() - 1])
 }
 
 // --- work -----------------------------------------------------------------------------------------
@@ -884,6 +937,37 @@ impl AppRoot {
             window,
             cx,
         );
+    }
+
+    /// "Allow Keychain access": runs the installed `tablex-mcp --authorize-keychain` off the UI
+    /// thread (macOS asks, once per saved password, while it runs) and shows what it printed.
+    /// One run at a time.
+    pub(super) fn allow_tool_keychain_access(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.driver_ui.tools.keychain_running() {
+            return;
+        }
+        let Some(path) = self
+            .driver_ui
+            .tools
+            .item()
+            .filter(|item| item.installed.is_some())
+            .map(|item| item.path.clone())
+        else {
+            return;
+        };
+        let work = cx
+            .background_executor()
+            .spawn(async move { smol::unblock(move || run_keychain_authorization(&path)).await });
+        self.driver_ui.tools.keychain_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let notice = work.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.driver_ui.tools.keychain_task = None;
+                this.driver_ui.tools.keychain_notice = Some(notice.clone());
+                window.push_notification(notice, cx);
+                cx.notify();
+            });
+        }));
+        cx.notify();
     }
 
     fn copy_tool_text(

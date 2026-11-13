@@ -1456,6 +1456,91 @@ fn the_driver_manager_tools_scenario_shows_the_installed_tool(cx: &mut TestAppCo
     assert!(visual.debug_bounds("driver-footer").is_some(), "the footer is still shown under the section");
 }
 
+/// A shell script standing in for `tablex-mcp`: logs its arguments, waits for `release` to exist,
+/// prints `stdout` (and `stderr`) and exits with `code`.
+#[cfg(target_os = "macos")]
+fn fake_tool(dir: &std::path::Path, name: &str, stdout: &str, stderr: &str, code: i32) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join(name);
+    let script = format!(
+        "#!/bin/sh\necho \"$@\" >> '{log}'\nwhile [ ! -f '{release}' ]; do sleep 0.02; done\n\
+         echo '{stdout}'\necho '{stderr}' >&2\nexit {code}\n",
+        log = dir.join("calls.log").display(),
+        release = dir.join("release").display(),
+    );
+    std::fs::write(&path, script).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+#[cfg(target_os = "macos")]
+#[gpui::test]
+fn allow_keychain_access_runs_the_tool_one_at_a_time_and_shows_its_outcome(cx: &mut TestAppContext) {
+    cx.dispatcher.allow_parking();
+    let (app, visual) = sidebar_test_app(cx);
+    visual.simulate_resize(gpui::size(gpui::px(1500.0), gpui::px(850.0)));
+    let dir = std::env::temp_dir().join(format!("tablex-keychain-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let good = fake_tool(&dir, "good", "Keychain access is allowed for 2 connections.", "", 0);
+    let bad = fake_tool(&dir, "bad", "ignored output", "access was not kept: choose Always Allow", 1);
+    let set_tool = |visual: &mut gpui::VisualTestContext, path: &std::path::Path| {
+        let path = path.to_path_buf();
+        app.update(visual, |this, cx| {
+            this.driver_ui.tools.items[0].path = path;
+            cx.notify();
+        });
+    };
+    app.update(visual, |this, cx| {
+        this.seed_driver_manager_scenario(false);
+        this.seed_driver_tools_fixture(true);
+        this.driver_ui.selected = None;
+        this.driver_ui.model.set_filter(DriverFilter::Tools);
+        cx.notify();
+    });
+    settle(visual);
+    set_tool(visual, &good);
+    settle(visual);
+    let selector = "tool-allow-keychain:tablex-mcp";
+    for selector in [selector, "tool-keychain-note:tablex-mcp"] {
+        let bounds = visual.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is rendered"));
+        assert!(bounds.bottom() <= gpui::px(850.0) && bounds.right() <= gpui::px(1500.0), "{selector} {bounds:?}");
+    }
+    let state = |visual: &mut gpui::VisualTestContext| {
+        app.read_with(visual, |this, _| {
+            (this.driver_ui.tools.keychain_running(), this.driver_ui.tools.keychain_notice.clone())
+        })
+    };
+    let notifications = |visual: &mut gpui::VisualTestContext| visual.update(|window, cx| window.notifications(cx).len());
+    let calls = || std::fs::read_to_string(dir.join("calls.log")).unwrap_or_default();
+    let before = notifications(visual);
+
+    // The click starts the tool off the UI thread: the button is loading, the UI keeps running.
+    click_debug_button(visual, selector);
+    assert!(state(visual).0, "the run is in flight");
+    wait_until(visual, "the tool to start", |_| calls().lines().count() == 1);
+    // A second click while it runs starts nothing.
+    click_debug_button(visual, selector);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    visual.run_until_parked();
+    assert_eq!(calls().lines().collect::<Vec<_>>(), ["--authorize-keychain"]);
+    assert!(state(visual).0);
+    assert!(visual.debug_bounds(selector).is_some(), "the button stays while it loads");
+
+    // It finishes: the first lines of its output are shown, the button is idle again.
+    std::fs::write(dir.join("release"), "").unwrap();
+    wait_until(visual, "the run to end", |visual| !state(visual).0);
+    assert_eq!(state(visual).1.as_deref(), Some("Keychain access is allowed for 2 connections."));
+    assert_eq!(notifications(visual), before + 1);
+
+    // A failing run shows what the tool said on stderr, and can be started again.
+    set_tool(visual, &bad);
+    click_debug_button(visual, selector);
+    wait_until(visual, "the failed run to end", |visual| !state(visual).0 && calls().lines().count() == 2);
+    assert_eq!(state(visual).1.as_deref(), Some("access was not kept: choose Always Allow"));
+    assert_eq!(notifications(visual), before + 2);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[gpui::test]
 fn the_tools_chip_swaps_the_driver_list_for_the_tool_cards_search_filters_them_and_install_works(
     cx: &mut TestAppContext,

@@ -39,7 +39,15 @@ pub enum SetupError {
 /// write) allows it and refused otherwise ([`ElicitingApprover`]), and every call is audited.
 pub fn build_layer(connector: Connector, audit: Arc<AuditLog>) -> ToolLayer {
     let settings_path = connector.settings_path().map(Path::to_path_buf);
-    let connections = Arc::new(AgentConnections::new(connector, Arc::new(RefusePrompts)));
+    let connections = AgentConnections::new(connector, Arc::new(RefusePrompts));
+    // On macOS a Keychain that will not hand a secret over is the user's one-time authorisation to
+    // give: say which command does it.
+    #[cfg(target_os = "macos")]
+    let connections = match std::env::current_exe().and_then(std::path::absolute) {
+        Ok(exe) => connections.with_credential_hint(crate::keychain::credential_hint(&exe)),
+        Err(_) => connections,
+    };
+    let connections = Arc::new(connections);
     ToolLayer::new(connections.clone(), connections, FRONT_END)
         .with_approver(Arc::new(ElicitingApprover::new(settings_path)))
         .with_audit(audit)
@@ -55,7 +63,8 @@ pub fn production_layer() -> Result<(ToolLayer, Arc<AuditLog>), SetupError> {
     Ok((build_layer(connector, Arc::clone(&audit)), audit))
 }
 
-fn production_connector() -> Connector {
+/// The connector over the app's stores (also what `--authorize-keychain` reads the secrets with).
+pub fn production_connector() -> Connector {
     // The app resolves the store the same way (and moves a 0.1.0 store to the new place first).
     let drivers = resolve_driver_data_dir();
     for line in drivers.moved.iter().chain(drivers.warning.iter()) {

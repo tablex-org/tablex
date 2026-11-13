@@ -8,7 +8,7 @@
 
 use super::tools::{
     addon_actions, code_span, tool_actions, tool_description, tool_note, tool_version_lines,
-    ToolAction, ToolJob,
+    ToolAction, ToolJob, KEYCHAIN_NOTE,
 };
 use super::view::{
     badge_element, ACTION_GAP, ACTION_WIDTH, ADDON_DRIVER_ACTION_WIDTH,
@@ -264,6 +264,16 @@ impl AppRoot {
                 (item.kind == ToolKind::McpServer && item.installed.is_some())
                     .then(|| self.render_tool_install_line(item, &tool_id, cx)),
             )
+            .children(
+                (cfg!(target_os = "macos") && item.kind == ToolKind::McpServer && item.installed.is_some())
+                    .then(|| {
+                        div()
+                            .debug_selector(selector_of("tool-keychain-note"))
+                            .text_size(px(11.0))
+                            .text_color(theme::text_muted())
+                            .child(KEYCHAIN_NOTE)
+                    }),
+            )
             .child(
                 div()
                     .debug_selector(selector_of("tool-note"))
@@ -334,6 +344,19 @@ impl AppRoot {
                         cx.listener(|this, _, window, cx| this.copy_tool_claude_command(window, cx)),
                     ),
             )
+            .children(cfg!(target_os = "macos").then(|| {
+                Button::new("tool-allow-keychain")
+                    .debug_selector({
+                        let id = tool_id.clone();
+                        move || format!("tool-allow-keychain:{id}")
+                    })
+                    .label("Allow Keychain access")
+                    .compact()
+                    .loading(self.driver_ui.tools.keychain_running())
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.allow_tool_keychain_access(window, cx)
+                    }))
+            }))
             .into_any_element()
     }
 }

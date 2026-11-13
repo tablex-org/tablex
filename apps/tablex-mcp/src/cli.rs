@@ -13,6 +13,11 @@ pub enum Command {
     Version,
     Help,
     PrintConfig,
+    /// Read the saved secrets of the connections agents may use, so macOS asks for them once.
+    AuthorizeKeychain,
+    /// The child `--authorize-keychain` starts to check the access was kept (hidden: not in
+    /// [`USAGE`]).
+    VerifyKeychainAccess,
 }
 
 /// An argument the program does not know (the usage goes to stderr, exit code 2).
@@ -40,6 +45,9 @@ TableX > connection > Overrides > Agent access.
 
 Options:
       --print-config   print a ready-to-paste MCP client configuration and exit
+      --authorize-keychain
+                       let this program read the saved passwords of the connections agents
+                       may use (macOS); run it once after installing or updating
   -V, --version        print the version and exit
   -h, --help           print this help and exit
 ";
@@ -67,6 +75,8 @@ impl Command {
             "-V" | "--version" => Ok(Self::Version),
             "-h" | "--help" => Ok(Self::Help),
             "--print-config" => Ok(Self::PrintConfig),
+            "--authorize-keychain" => Ok(Self::AuthorizeKeychain),
+            "--verify-keychain-access" => Ok(Self::VerifyKeychainAccess),
             other => Err(UsageError(format!("unknown argument `{other}`"))),
         }
     }
@@ -112,6 +122,25 @@ mod tests {
         assert_eq!(parse(&["--help"]), Ok(Command::Help));
         assert_eq!(parse(&["-h"]), Ok(Command::Help));
         assert_eq!(parse(&["--print-config"]), Ok(Command::PrintConfig));
+        assert_eq!(
+            parse(&["--authorize-keychain"]),
+            Ok(Command::AuthorizeKeychain)
+        );
+    }
+
+    #[test]
+    fn the_verify_command_is_hidden_and_neither_keychain_flag_combines() {
+        assert_eq!(
+            parse(&["--verify-keychain-access"]),
+            Ok(Command::VerifyKeychainAccess)
+        );
+        assert!(!USAGE.contains("verify-keychain-access"));
+        assert!(USAGE.contains("--authorize-keychain"));
+        for flag in ["--authorize-keychain", "--verify-keychain-access"] {
+            assert!(parse(&[flag, "--help"]).is_err());
+            assert!(parse(&["--print-config", flag]).is_err());
+        }
+        assert!(parse(&["--authorize-keychain", "--verify-keychain-access"]).is_err());
     }
 
     #[test]
