@@ -11,23 +11,45 @@ use crate::error::{self, AgentError, ToolError};
 use crate::limits::Limits;
 use crate::policy::{check_statement, Need};
 use crate::ports::{
-    ApprovalDecision, ConnectionCatalog, ConnectionInfo, Language, NodeLevel, NodeQuery,
-    OpenGeneration, RefuseWrites, Revision, RunRequest, Session, SessionInfo, SessionProvider,
-    TableRef, WriteApproval, WriteApprover,
+    ApprovalDecision, ConnectionCatalog, ConnectionInfo, ConnectionKind, Language, NodeLevel,
+    NodeQuery, OpenGeneration, RefuseWrites, Revision, RoutineQuery, RunRequest, Session,
+    SessionInfo, SessionProvider, TableRef, TransactionApproval, TxControl, WriteApproval,
+    WriteApprover,
 };
 use crate::redact::{redact, Masks};
 use crate::result::QueryResult;
-use crate::sanitize::{clean, clean_name, is_shapeless, name_form, MAX_NAME_CHARS};
+use crate::limits::truncate_text;
+use crate::sanitize::{clean, clean_multiline, clean_name, is_shapeless, name_form, MAX_NAME_CHARS};
 use crate::schema::{self, ToolSpec};
 use crate::secret::SecretText;
 use crate::tools::*;
+use engine_driver_api::sql::SchemaObjectRef;
 use engine_driver_kit::sql::Keyword;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// Open transactions in all (one per connection at most).
+pub const MAX_OPEN_TRANSACTIONS: usize = 4;
+/// A transaction nobody has called for this long is rolled back.
+pub const DEFAULT_TRANSACTION_IDLE: Duration = Duration::from_secs(300);
+/// How long the ROLLBACK the layer sends on its own (idle timer, closed session, shutdown) waits
+/// for the server of a session with nothing running on it; then the session is dropped, which ends
+/// the transaction on the server. This bounds the ROLLBACK only: closing the session after it is
+/// the driver's own disconnect (a statement still running on the session is cancelled first and no
+/// ROLLBACK is sent at all: the disconnect ends the transaction).
+const ABANDON_TIMEOUT: Duration = Duration::from_secs(3);
+/// The same for `rollback_transaction`.
+const ROLLBACK_TIMEOUT: Duration = Duration::from_secs(10);
+/// The write statements a transaction keeps for the commit question: the user has to be able to
+/// read them all, so a transaction that would hold more takes no further change.
+const MAX_TRANSACTION_WRITES: usize = 50;
+const MAX_TRANSACTION_WRITE_BYTES: usize = 8000;
+/// Ended transactions whose ids are remembered, to say why one is gone.
+const REMEMBERED_ENDED: usize = 32;
 
 /// What a tool call produced.
 #[derive(Debug, Clone, PartialEq)]
@@ -195,6 +217,134 @@ impl Drop for BusyGuard<'_> {
     }
 }
 
+/// An open transaction: a session of its own (never the connection's shared one) with `BEGIN`
+/// sent on it.
+struct Transaction {
+    id: String,
+    connection_id: String,
+    slot: Arc<OpenSession>,
+    state: Mutex<TxState>,
+    /// Calls using the transaction now (taken under the table lock): the idle sweep leaves it.
+    in_use: AtomicUsize,
+}
+
+struct TxState {
+    last_used: Instant,
+    /// Every write statement sent in the transaction, in order (what the commit question shows).
+    writes: Vec<String>,
+    write_bytes: usize,
+    /// A statement failed (or was cancelled, or timed out): only ROLLBACK is left. PostgreSQL
+    /// refuses everything else itself; SQLite may have rolled the whole transaction back and gone
+    /// back to autocommit (`INSERT OR ROLLBACK`, `RAISE(ROLLBACK)`, an interrupted write, a full
+    /// disk), so a next write would commit by itself.
+    aborted: bool,
+    /// A COMMIT question for this transaction is open (or its COMMIT is being sent): no statement
+    /// runs meanwhile, so the list the user approves is the list that is committed.
+    committing: bool,
+}
+
+/// Why a transaction is not open any more.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ended {
+    Idle,
+    /// Its connection's session was closed, or the layer shut down.
+    Closed,
+    /// Its connection was edited or removed, or the agent access was lowered.
+    Changed,
+    Committed,
+    RolledBack,
+    /// The COMMIT did not complete.
+    CommitFailed,
+}
+
+#[derive(Default)]
+struct TxTable {
+    open: HashMap<String, Arc<Transaction>>,
+    /// Connections with a `begin_transaction` in progress (they count against the limits).
+    beginning: HashSet<String>,
+    ended: VecDeque<(String, Ended)>,
+}
+
+impl TxTable {
+    fn take(&mut self, id: &str, why: Ended) -> Option<Arc<Transaction>> {
+        let tx = self.open.remove(id)?;
+        if self.ended.len() >= REMEMBERED_ENDED {
+            self.ended.pop_front();
+        }
+        self.ended.push_back((id.to_owned(), why));
+        Some(tx)
+    }
+
+    fn take_where(
+        &mut self,
+        mut doomed: impl FnMut(&Transaction) -> bool,
+        why: Ended,
+    ) -> Vec<Arc<Transaction>> {
+        let ids: Vec<String> = self
+            .open
+            .values()
+            .filter(|tx| doomed(tx))
+            .map(|tx| tx.id.clone())
+            .collect();
+        ids.iter().filter_map(|id| self.take(id, why)).collect()
+    }
+
+    fn why_ended(&self, id: &str) -> Option<Ended> {
+        self.ended
+            .iter()
+            .find(|(ended, _)| ended == id)
+            .map(|(_, why)| *why)
+    }
+}
+
+/// A call using a transaction: counted while it lives, and the idle clock restarts when it ends.
+struct TxUse {
+    tx: Arc<Transaction>,
+}
+
+impl Drop for TxUse {
+    fn drop(&mut self) {
+        lock(&self.tx.state).last_used = Instant::now();
+        self.tx.in_use.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Marks a transaction aborted if dropped while armed: the statement running in it panicked.
+struct AbortOnUnwind<'a>(&'a Transaction);
+
+impl AbortOnUnwind<'_> {
+    fn disarm(self) {
+        std::mem::forget(self);
+    }
+}
+
+impl Drop for AbortOnUnwind<'_> {
+    fn drop(&mut self) {
+        lock(&self.0.state).aborted = true;
+    }
+}
+
+/// A commit question open on a transaction: statements are refused while it lives.
+struct Committing<'a>(&'a Transaction);
+
+impl Drop for Committing<'_> {
+    fn drop(&mut self) {
+        lock(&self.0.state).committing = false;
+    }
+}
+
+/// A `begin_transaction` in progress for a connection (see [`TxTable::beginning`]).
+struct Beginning<'a> {
+    layer: &'a ToolLayer,
+    connection_id: String,
+}
+
+impl Drop for Beginning<'_> {
+    fn drop(&mut self) {
+        lock(&self.layer.txs).beginning.remove(&self.connection_id);
+    }
+}
+
 /// What a call learned that the audit line and the redaction need.
 #[derive(Default)]
 struct Trace {
@@ -223,6 +373,16 @@ pub struct ToolLayer {
     opening: Mutex<HashMap<String, Arc<Gate>>>,
     /// The number of the last open (see [`OpenGeneration`]).
     generations: AtomicU64,
+    /// `begin_transaction`, `commit_transaction`, `rollback_transaction` and `execute_query`'s
+    /// `transaction_id` exist (see [`with_transactions`](Self::with_transactions)).
+    transactions_enabled: bool,
+    transaction_idle: Duration,
+    txs: Mutex<TxTable>,
+    /// `close_all` calls in progress: a transaction is not begun meanwhile (and one that got in
+    /// is rolled back by its own begin).
+    closing_all: AtomicUsize,
+    /// The number of the last transaction (its id is `tx-<number>`).
+    tx_numbers: AtomicU64,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -247,11 +407,44 @@ impl ToolLayer {
             audit: None,
             limits: Limits::default(),
             front_end: front_end.into(),
-            specs: schema::tool_specs(),
+            specs: schema::tool_specs_for(false),
             sessions: Mutex::new(HashMap::new()),
             opening: Mutex::new(HashMap::new()),
             generations: AtomicU64::new(0),
+            transactions_enabled: false,
+            transaction_idle: DEFAULT_TRANSACTION_IDLE,
+            txs: Mutex::new(TxTable::default()),
+            closing_all: AtomicUsize::new(0),
+            tx_numbers: AtomicU64::new(0),
         }
+    }
+
+    /// Offers explicit transactions (PostgreSQL and SQLite): `begin_transaction`,
+    /// `commit_transaction`, `rollback_transaction` and `transaction_id` on `execute_query`.
+    /// Off by default (the in-app assistant has none). Safety rules, all enforced here:
+    ///
+    /// * A transaction runs on a session of its own, opened through the [`SessionProvider`], and
+    ///   needs access `read_write` and an approver that would take writes
+    ///   ([`WriteApprover::check_writable`]).
+    /// * Every write in it is approved one by one (the question says it is not committed yet);
+    ///   the COMMIT is approved too, with the list of the writes. A commit declined keeps the
+    ///   transaction open (nothing is committed; the model rolls it back).
+    /// * A transaction is rolled back, and its session closed, when the connection's session is
+    ///   closed or revoked, its access is lowered, the layer shuts down, or nobody called it for
+    ///   the idle timeout ([`expire_idle_transactions`](Self::expire_idle_transactions)).
+    ///   If the server does not answer the ROLLBACK, closing the session ends it.
+    #[must_use]
+    pub fn with_transactions(mut self) -> Self {
+        self.transactions_enabled = true;
+        self.specs = schema::tool_specs_for(true);
+        self
+    }
+
+    /// Replaces [`DEFAULT_TRANSACTION_IDLE`].
+    #[must_use]
+    pub fn with_transaction_idle_timeout(mut self, idle: Duration) -> Self {
+        self.transaction_idle = idle;
+        self
     }
 
     #[must_use]
@@ -293,12 +486,31 @@ impl ToolLayer {
         lock(&self.sessions).contains_key(&self.catalog.canonical_id(connection_id))
     }
 
-    /// Closes every session that is open, or being opened, when it is called. It waits for an open
+    /// Closes every session that is open, or being opened, when it is called, and rolls back every
+    /// open transaction. It waits for an open
     /// that is in flight and closes what that open produced, so when it returns each of those
     /// connections is closed (and its tunnel gone); a call that starts opening a connection after
     /// `close_all` began may leave that connection open, with its tunnel: a session is never open
     /// without its tunnel. Blocks as long as the slowest of those opens or disconnects.
     pub fn close_all(&self) {
+        // A begin that comes from here on is refused, and one that registered before this ran is
+        // found by the take below (it registers, then looks at this count).
+        struct Closing<'a>(&'a AtomicUsize);
+        impl Drop for Closing<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        self.closing_all.fetch_add(1, Ordering::SeqCst);
+        let _closing = Closing(&self.closing_all);
+        // Open transactions are rolled back first, all at once: each waits for its server for a
+        // bounded time, so the total is bounded too.
+        let doomed = lock(&self.txs).take_where(|_| true, Ended::Closed);
+        std::thread::scope(|scope| {
+            for tx in &doomed {
+                scope.spawn(|| self.rollback_abandoned(tx, "rollback_transaction", "session closed"));
+            }
+        });
         let mut ids: Vec<String> = lock(&self.sessions).keys().cloned().collect();
         ids.extend(lock(&self.opening).keys().cloned());
         ids.sort();
@@ -320,6 +532,8 @@ impl ToolLayer {
         let id = self.catalog.canonical_id(connection_id);
         let _gate = self.enter_uncancellable(&id);
         self.close_locked(&id, None);
+        // The transactions of the connection go with it, rolled back.
+        self.end_transactions_of(&id, Ended::Closed, "session closed");
     }
 
     /// The gate of `connection_id`, waiting for it; `None`: the call was cancelled while waiting.
@@ -502,7 +716,11 @@ impl ToolLayer {
         trace: &mut Trace,
     ) -> Result<Value, AgentError> {
         let tool = ToolName::parse(name)
+            .filter(|tool| self.transactions_enabled || !tool.is_transaction_tool())
             .ok_or_else(|| AgentError::UnknownTool(sanitize_tool_name(name)))?;
+        // Before the call looks at any transaction: one that sat idle too long is gone already
+        // (its session is closed without a ROLLBACK round trip: see `expire_idle_transactions`).
+        self.expire_idle(false);
         let mut arguments = arguments?;
         // The one place a model-supplied id is put in the catalog's spelling; everything below
         // (sessions, gates, the audit line) uses that form.
@@ -555,6 +773,26 @@ impl ToolLayer {
                 let request: ExecuteRedisCommandRequest = self.parse(tool, arguments)?;
                 to_value(self.execute_redis(request, cancel, trace)?)
             }
+            ToolName::ListRoutines => {
+                let request: ListRoutinesRequest = self.parse(tool, arguments)?;
+                to_value(self.list_routines(request, cancel, trace)?)
+            }
+            ToolName::GetRoutineSource => {
+                let request: GetRoutineSourceRequest = self.parse(tool, arguments)?;
+                to_value(self.get_routine_source(request, cancel, trace)?)
+            }
+            ToolName::BeginTransaction => {
+                let request: ConnectionRequest = self.parse(tool, arguments)?;
+                to_value(self.begin_transaction(&request.connection_id, cancel, trace)?)
+            }
+            ToolName::CommitTransaction => {
+                let request: TransactionRequest = self.parse(tool, arguments)?;
+                to_value(self.commit_transaction(&request.transaction_id, cancel, trace)?)
+            }
+            ToolName::RollbackTransaction => {
+                let request: TransactionRequest = self.parse(tool, arguments)?;
+                to_value(self.rollback_transaction(&request.transaction_id, trace)?)
+            }
         }
     }
 
@@ -596,6 +834,19 @@ impl ToolLayer {
         if access == AgentAccess::Off {
             // Access was lowered to `off` while a session was open: close it, then refuse.
             self.revoke(connection_id);
+        } else if self.transactions_enabled {
+            // A transaction needs `read_write` and the connection it was begun for.
+            let revision = info.revision;
+            let doomed = lock(&self.txs).take_where(
+                |tx| {
+                    tx.connection_id == connection_id
+                        && (access < AgentAccess::ReadWrite || tx.slot.revision.differs_from(revision))
+                },
+                Ended::Changed,
+            );
+            for tx in doomed {
+                self.rollback_abandoned(&tx, "rollback_transaction", "access lowered or connection edited");
+            }
         }
         // The connection was edited since the session opened (another address, tunnel, type ...):
         // the session goes. `open_session` then simply opens a new one; any other tool is told to.
@@ -729,6 +980,19 @@ impl ToolLayer {
         for (id, slot) in stale {
             self.close_slot(&id, &slot);
         }
+        if self.transactions_enabled {
+            let doomed = lock(&self.txs).take_where(
+                |tx| {
+                    usable
+                        .get(tx.connection_id.as_str())
+                        .is_none_or(|revision| tx.slot.revision.differs_from(*revision))
+                },
+                Ended::Changed,
+            );
+            for tx in doomed {
+                self.rollback_abandoned(&tx, "rollback_transaction", "connection removed, edited or switched off");
+            }
+        }
         let open: std::collections::HashSet<String> =
             lock(&self.sessions).keys().cloned().collect();
         let mut connections: Vec<ConnectionSummary> = listed
@@ -786,13 +1050,25 @@ impl ToolLayer {
             // open the connection as it is now.
             self.close_locked(connection_id, Some(&existing));
         }
+        let slot = self.connect_slot(&info, trace)?;
+        lock(&self.sessions).insert(connection_id.to_owned(), Arc::clone(&slot));
+        Ok(result(&slot, false))
+    }
+
+    /// Opens a driver session for `info` through the provider (a number of its own, so closing it
+    /// never reaches another open's tunnel). Registers nothing: the caller decides where it goes.
+    fn connect_slot(
+        &self,
+        info: &ConnectionInfo,
+        trace: &mut Trace,
+    ) -> Result<Arc<OpenSession>, AgentError> {
         // Known before connecting, so a connect error that echoes one is masked.
         // `secrets` first: a provider reads the connection once for both (`plain_words` docs).
-        let known = self.provider.secrets(&info);
-        let plain_words = self.provider.plain_words(&info);
+        let known = self.provider.secrets(info);
+        let plain_words = self.provider.plain_words(info);
         trace.secrets = Self::without_plain_words(known, &plain_words);
         let generation = OpenGeneration::new(self.generations.fetch_add(1, Ordering::Relaxed) + 1);
-        let session = self.provider.open_generation(&info, generation)?;
+        let session = self.provider.open_generation(info, generation)?;
         let mut secrets = Self::without_plain_words(session.secrets(), &plain_words);
         for known in &trace.secrets {
             if !secrets.contains(known) {
@@ -812,8 +1088,7 @@ impl ToolLayer {
             busy: AtomicBool::new(false),
         });
         trace.secrets.clone_from(&slot.secrets);
-        lock(&self.sessions).insert(connection_id.to_owned(), Arc::clone(&slot));
-        Ok(result(&slot, false))
+        Ok(slot)
     }
 
     /// The secrets that are not equal to a word of the connection that is not secret (its user and
@@ -828,6 +1103,7 @@ impl ToolLayer {
     fn close_session(&self, connection_id: &str, trace: &mut Trace) -> CloseSessionResult {
         let _gate = self.enter_uncancellable(connection_id);
         let slot = self.close_locked(connection_id, None);
+        self.end_transactions_of(connection_id, Ended::Closed, "session closed");
         let closed = slot.is_some();
         if let Some(slot) = slot {
             trace.secrets.clone_from(&slot.secrets);
@@ -970,6 +1246,108 @@ impl ToolLayer {
         })
     }
 
+    fn list_routines(
+        &self,
+        request: ListRoutinesRequest,
+        cancel: &CancelToken,
+        trace: &mut Trace,
+    ) -> Result<ListRoutinesResult, AgentError> {
+        Self::check_not_cancelled(cancel)?;
+        let (info, _) = self.authorize(ToolName::ListRoutines, &request.connection_id)?;
+        let slot = self.open_slot(&info, trace)?;
+        Self::require_sql(&slot, ToolName::ListRoutines)?;
+        let (database, schema) = self.resolve_namespace(&slot, request.database, request.schema)?;
+        let kind = request.kind.object_kind();
+        let page = slot.session.list_routines(&RoutineQuery {
+            kind,
+            database,
+            schema,
+            filter: request.filter.filter(|filter| !filter.is_empty()),
+            cursor: request.cursor,
+            limit: self.limits.list_items_for(request.limit),
+        })?;
+        Ok(ListRoutinesResult {
+            routines: page
+                .routines
+                .into_iter()
+                .filter(|routine| routine.kind == kind)
+                .map(|routine| {
+                    let reference = clean_reference(routine);
+                    RoutineItem {
+                        name: reference.name.clone(),
+                        kind: request.kind,
+                        arguments: reference.arguments.clone(),
+                        table: reference.table.clone(),
+                        reference,
+                    }
+                })
+                .collect(),
+            next_cursor: page.next_cursor,
+        })
+    }
+
+    fn get_routine_source(
+        &self,
+        request: GetRoutineSourceRequest,
+        cancel: &CancelToken,
+        trace: &mut Trace,
+    ) -> Result<GetRoutineSourceResult, AgentError> {
+        Self::check_not_cancelled(cancel)?;
+        let (info, _) = self.authorize(ToolName::GetRoutineSource, &request.connection_id)?;
+        let slot = self.open_slot(&info, trace)?;
+        Self::require_sql(&slot, ToolName::GetRoutineSource)?;
+        let reference = match (request.reference, request.kind, request.name) {
+            (Some(reference), None, None)
+                if request.database.is_none()
+                    && request.schema.is_none()
+                    && request.arguments.is_none()
+                    && request.table.is_none() =>
+            {
+                reference
+            }
+            (Some(_), ..) => {
+                return Err(AgentError::invalid(
+                    "give either `ref` (from list_routines) or `kind` and `name`, not both",
+                ))
+            }
+            (None, Some(kind), Some(name)) => {
+                let (database, schema) =
+                    self.resolve_namespace(&slot, request.database, request.schema)?;
+                SchemaObjectRef {
+                    database,
+                    schema: schema.filter(|_| slot.info.supports_schemas),
+                    kind: kind.object_kind(),
+                    name,
+                    arguments: request.arguments,
+                    table: request.table,
+                    identity: None,
+                }
+            }
+            (None, ..) => {
+                return Err(AgentError::invalid(
+                    "give either `ref` (from list_routines) or both `kind` and `name`",
+                ))
+            }
+        };
+        let Some(kind) = RoutineKind::from_object_kind(reference.kind) else {
+            return Err(AgentError::invalid(format!(
+                "`{}` objects are not covered by this tool; use function, procedure, trigger or event",
+                reference.kind.as_str()
+            )));
+        };
+        let name = clean_name(&reference.name, MAX_NAME_CHARS);
+        let source = slot.session.routine_source(&reference)?;
+        // Masked first, so a cut can never leave half of a secret.
+        let source = clean_multiline(&slot.masks.redact(&source));
+        let cut = truncate_text(&source, self.limits.max_ddl_bytes);
+        Ok(GetRoutineSourceResult {
+            kind,
+            name,
+            truncated: cut.is_some(),
+            source: cut.unwrap_or(source),
+        })
+    }
+
     fn describe_table(
         &self,
         request: DescribeTableRequest,
@@ -1087,15 +1465,50 @@ impl ToolLayer {
     ) -> Result<StatementResult, AgentError> {
         let (info, access) = self.authorize(ToolName::ExecuteQuery, &request.connection_id)?;
         Self::check_database(request.database.as_deref())?;
-        let slot = self.open_slot(&info, trace)?;
+        // A statement of a transaction runs on the transaction's own session.
+        let transaction = match &request.transaction_id {
+            Some(id) if self.transactions_enabled => Some(self.use_transaction(id, &info)?),
+            Some(_) => {
+                return Err(AgentError::invalid(
+                    "transactions are not available in this front end",
+                ))
+            }
+            None => None,
+        };
+        let slot = match &transaction {
+            Some(used) => Arc::clone(&used.tx.slot),
+            None => self.open_slot(&info, trace)?,
+        };
+        if transaction.is_some() {
+            trace.secrets.clone_from(&slot.secrets);
+        }
         Self::require_sql(&slot, ToolName::ExecuteQuery)?;
+        if transaction.is_some() {
+            Self::check_transaction_database(&slot, request.database.as_deref())?;
+        }
         self.check_length(&request.statement)?;
         trace.statement = Some(request.statement.clone());
+        if let Some(used) = &transaction {
+            let state = lock(&used.tx.state);
+            if state.aborted {
+                return Err(Self::aborted(&used.tx.id));
+            }
+            if state.committing {
+                return Err(Self::committing(&used.tx.id));
+            }
+        }
         let lex = slot
             .info
             .lex
             .ok_or_else(|| AgentError::Internal("a SQL session without lexer settings".into()))?;
         let classified = classify_sql(&request.statement, slot.info.kind, &lex);
+        // `COPY` reads or writes server files and programs, which a rollback does not undo.
+        if transaction.is_some() && classified.verb == "COPY" {
+            return Err(AgentError::Unsupported(
+                "COPY is not available inside a transaction: what it does to files and programs on the server is not undone by a rollback"
+                    .into(),
+            ));
+        }
         self.run_policy_checked(
             ToolName::ExecuteQuery,
             &info,
@@ -1108,6 +1521,7 @@ impl ToolLayer {
             request.database.as_deref(),
             request.row_limit,
             request.dangerous.unwrap_or(false),
+            transaction.as_ref(),
             cancel,
             trace,
         )
@@ -1170,6 +1584,7 @@ impl ToolLayer {
             request.database.as_deref(),
             None,
             false,
+            None,
             cancel,
             trace,
         )
@@ -1210,6 +1625,7 @@ impl ToolLayer {
             request.database.as_deref(),
             request.row_limit,
             request.dangerous.unwrap_or(false),
+            None,
             cancel,
             trace,
         )
@@ -1308,6 +1724,7 @@ impl ToolLayer {
         database: Option<&str>,
         row_limit: Option<usize>,
         flagged_dangerous: bool,
+        transaction: Option<&TxUse>,
         cancel: &CancelToken,
         trace: &mut Trace,
     ) -> Result<QueryResult, AgentError> {
@@ -1334,7 +1751,36 @@ impl ToolLayer {
                 if self.audit.as_ref().is_some_and(|audit| !audit.is_healthy()) {
                     return Err(AgentError::AuditUnavailable);
                 }
-                let resolved_database = self.approval_database(slot, database);
+                if let Some(used) = transaction {
+                    // The commit question has to show every write: one more must still fit, and
+                    // the approver must still be able to put the whole list to the user.
+                    let (held, held_bytes, mut all) = {
+                        let state = lock(&used.tx.state);
+                        (state.writes.len(), state.write_bytes, state.writes.clone())
+                    };
+                    let reviewable = if held >= MAX_TRANSACTION_WRITES
+                        || held_bytes + text.len() > MAX_TRANSACTION_WRITE_BYTES
+                    {
+                        Err(String::new())
+                    } else {
+                        // The hook runs without the transaction's lock held.
+                        all.push(text.to_owned());
+                        self.approver.commit_reviewable(&all)
+                    };
+                    if let Err(reason) = reviewable {
+                        return Err(AgentError::Limit(format!(
+                            "transaction `{}` already holds {held} change(s) ({held_bytes} bytes); with one more the commit could not be shown to the user for approval{}. Commit it with commit_transaction or roll it back, then continue in a new transaction",
+                            used.tx.id,
+                            if reason.is_empty() { String::new() } else { format!(" ({reason})") },
+                        )));
+                    }
+                }
+                // A statement in a transaction runs in the connection's own database.
+                let resolved_database = if transaction.is_some() {
+                    None
+                } else {
+                    self.approval_database(slot, database)
+                };
                 let request = WriteApproval {
                     connection_id: &info.id,
                     connection_name: &info.name,
@@ -1344,6 +1790,10 @@ impl ToolLayer {
                     database: resolved_database.as_deref(),
                     statement: text,
                     dangerous: dangerous.as_deref(),
+                    transaction: transaction.map(|used| TransactionApproval {
+                        id: &used.tx.id,
+                        commit: None,
+                    }),
                 };
                 let decision = self.approver.approve(&request, cancel);
                 match decision {
@@ -1351,51 +1801,40 @@ impl ToolLayer {
                     // the driver's own check still backs up the classifier for
                     // every other write. Redis asks for it on every write.
                     ApprovalDecision::Approve => {
-                        trace.approval = Some("approved".into());
+                        trace.approval = Some(match transaction {
+                            Some(used) => {
+                                format!("approved (in transaction {}, not committed)", used.tx.id)
+                            }
+                            None => "approved".into(),
+                        });
                         // The question may have waited a long time: the connection may have been
                         // edited, its type made read-only or its access lowered since.
                         self.recheck_after_approval(tool, info, &request, cancel, trace)?;
                         dangerous.is_some() || language == Language::Redis
                     }
-                    ApprovalDecision::Refuse { reason } => {
-                        if cancel.is_cancelled() {
-                            trace.approval = Some("cancelled".into());
-                            return Err(AgentError::Cancelled);
-                        }
-                        trace.approval = Some(format!("refused: {}", clean(&reason, 200)));
-                        return Err(AgentError::WriteRefused(format!(
-                            "this {what} was not run, and the user was not asked: {reason}"
-                        )));
-                    }
-                    ApprovalDecision::Unanswered { reason } => {
-                        if cancel.is_cancelled() {
-                            trace.approval = Some("cancelled".into());
-                            return Err(AgentError::Cancelled);
-                        }
-                        trace.approval = Some(format!("unanswered: {}", clean(&reason, 200)));
-                        return Err(AgentError::WriteRefused(format!(
-                            "this {what} was not run: {reason}"
-                        )));
-                    }
-                    ApprovalDecision::Deny { reason } => {
-                        if cancel.is_cancelled() {
-                            trace.approval = Some("cancelled".into());
-                            return Err(AgentError::Cancelled);
-                        }
-                        trace.approval = Some(match &reason {
-                            Some(reason) => format!("declined: {}", clean(reason, 200)),
-                            None => "declined".into(),
-                        });
-                        return Err(AgentError::WriteRefused(format!(
-                            "the user did not approve this {what}{}",
-                            reason
-                                .map(|reason| format!(": {reason}"))
-                                .unwrap_or_default()
-                        )));
-                    }
+                    declined => return Err(Self::declined(declined, what, cancel, trace)),
                 }
             }
         };
+        if let Some(used) = transaction {
+            // Rolled back (its connection closed, an explicit rollback) while the question was open.
+            if slot.closing.load(Ordering::SeqCst) {
+                return Err(AgentError::TransactionGone(format!(
+                    "transaction `{}` was rolled back while the statement waited; nothing ran",
+                    used.tx.id
+                )));
+            }
+            // A commit question opened, or an error aborted the transaction, while this waited:
+            // refused before it holds the session or leaves a "started" line (checked again where
+            // the write is recorded, under the lock the commit takes its list with).
+            let state = lock(&used.tx.state);
+            if state.committing {
+                return Err(Self::committing(&used.tx.id));
+            }
+            if state.aborted {
+                return Err(Self::aborted(&used.tx.id));
+            }
+        }
         let Some(_busy) = BusyGuard::acquire(&slot.busy) else {
             return Err(AgentError::Limit(
                 "another statement is still running on this connection; wait for it or cancel it"
@@ -1419,10 +1858,28 @@ impl ToolLayer {
                 }
             }
         }
+        // Kept for the commit question BEFORE the statement runs: a write that failed after it took
+        // effect (the result could not be read) must still be on the list the user approves.
+        if let (true, Some(used)) = (is_write, transaction) {
+            let mut state = lock(&used.tx.state);
+            // Under the lock the commit takes its list with: a write is either on that list or
+            // refused here, never run unlisted.
+            if state.committing {
+                return Err(Self::committing(&used.tx.id));
+            }
+            if state.aborted {
+                return Err(Self::aborted(&used.tx.id));
+            }
+            state.write_bytes += text.len();
+            state.writes.push(text.to_owned());
+        }
         let read_only = classified.class == StatementClass::Read && !is_write;
         let timeout = info.statement_timeout(&self.limits);
         let watchdog = Watchdog::arm(cancel, timeout);
         let started = Instant::now();
+        // A driver that panics inside `run` leaves a statement of unknown fate: the transaction is
+        // aborted then too (a caller catches the panic; nothing else would say so).
+        let unwinding = transaction.map(|used| AbortOnUnwind(&used.tx));
         let outcome = slot.session.run(
             &RunRequest {
                 language,
@@ -1436,6 +1893,9 @@ impl ToolLayer {
             cancel,
         );
         drop(watchdog);
+        if let Some(unwinding) = unwinding {
+            unwinding.disarm();
+        }
         match outcome {
             Ok(mut result) => {
                 result.elapsed_ms =
@@ -1448,11 +1908,727 @@ impl ToolLayer {
                 trace.rows = Some(result.affected_rows.unwrap_or(result.row_count as u64));
                 Ok(result)
             }
-            Err(AgentError::Cancelled) if cancel.timed_out() => Err(AgentError::Limit(format!(
-                "the statement was cancelled after the {} s statement timeout",
-                timeout.as_secs()
-            ))),
+            Err(error) => {
+                let error = match error {
+                    AgentError::Cancelled if cancel.timed_out() => AgentError::Limit(format!(
+                        "the statement was cancelled after the {} s statement timeout",
+                        timeout.as_secs()
+                    )),
+                    error => error,
+                };
+                // Any error ends the transaction's usefulness: PostgreSQL refuses everything but
+                // ROLLBACK after one (and turns a COMMIT of the aborted transaction into a silent
+                // ROLLBACK); SQLite may have rolled the whole transaction back by itself and gone
+                // back to autocommit (`INSERT OR ROLLBACK`, `RAISE(ROLLBACK)`, a write interrupted by
+                // the timeout, a full disk), where the next write would commit with no commit
+                // question. So only ROLLBACK is left, and the error says so.
+                match transaction {
+                    Some(used) => {
+                        lock(&used.tx.state).aborted = true;
+                        Err(Self::not_retryable(Self::annotate(
+                            error,
+                            &format!(
+                                "transaction `{}` is aborted; roll it back with rollback_transaction",
+                                used.tx.id
+                            ),
+                        )))
+                    }
+                    None => Err(error),
+                }
+            }
+        }
+    }
+
+    /// `error` that a retry cannot fix (the transaction it ran in is over).
+    fn not_retryable(error: AgentError) -> AgentError {
+        match error {
+            AgentError::Driver { code, message, .. } => AgentError::Driver {
+                code,
+                message,
+                retryable: false,
+            },
+            other => other,
+        }
+    }
+
+    /// `error` with `note` added to its message (the code stays).
+    fn annotate(error: AgentError, note: &str) -> AgentError {
+        let with = |message: String| format!("{message}. {note}");
+        match error {
+            AgentError::Driver {
+                code,
+                message,
+                retryable,
+            } => AgentError::Driver {
+                code,
+                message: with(message),
+                retryable,
+            },
+            AgentError::Limit(message) => AgentError::Limit(with(message)),
+            AgentError::NotConnected(message) => AgentError::NotConnected(with(message)),
+            AgentError::WriteRefused(message) => AgentError::WriteRefused(with(message)),
+            AgentError::AccessDenied(message) => AgentError::AccessDenied(with(message)),
+            other => other,
+        }
+    }
+
+    /// The error for a decision that is not a yes (what the model is told, and the audit line).
+    fn declined(
+        decision: ApprovalDecision,
+        what: &str,
+        cancel: &CancelToken,
+        trace: &mut Trace,
+    ) -> AgentError {
+        match decision {
+            ApprovalDecision::Approve => {
+                AgentError::Internal("an approval was treated as a refusal".into())
+            }
+            ApprovalDecision::Refuse { reason } => {
+                if cancel.is_cancelled() {
+                    trace.approval = Some("cancelled".into());
+                    return AgentError::Cancelled;
+                }
+                trace.approval = Some(format!("refused: {}", clean(&reason, 200)));
+                AgentError::WriteRefused(format!(
+                    "this {what} was not run, and the user was not asked: {reason}"
+                ))
+            }
+            ApprovalDecision::Unanswered { reason } => {
+                if cancel.is_cancelled() {
+                    trace.approval = Some("cancelled".into());
+                    return AgentError::Cancelled;
+                }
+                trace.approval = Some(format!("unanswered: {}", clean(&reason, 200)));
+                AgentError::WriteRefused(format!("this {what} was not run: {reason}"))
+            }
+            ApprovalDecision::Deny { reason } => {
+                if cancel.is_cancelled() {
+                    trace.approval = Some("cancelled".into());
+                    return AgentError::Cancelled;
+                }
+                trace.approval = Some(match &reason {
+                    Some(reason) => format!("declined: {}", clean(reason, 200)),
+                    None => "declined".into(),
+                });
+                AgentError::WriteRefused(format!(
+                    "the user did not approve this {what}{}",
+                    reason
+                        .map(|reason| format!(": {reason}"))
+                        .unwrap_or_default()
+                ))
+            }
+        }
+    }
+}
+
+// ------------------------------------------------------------------ transactions
+
+impl Ended {
+    fn text(self, idle: Duration) -> String {
+        match self {
+            Self::Idle => {
+                let seconds = idle.as_secs();
+                if seconds == 0 {
+                    format!("was rolled back after {} ms idle", idle.as_millis())
+                } else if seconds >= 60 && seconds % 60 == 0 {
+                    format!("was rolled back after {} minutes idle", seconds / 60)
+                } else {
+                    format!("was rolled back after {seconds} seconds idle")
+                }
+            }
+            Self::Closed => "was rolled back when its connection's session was closed".into(),
+            Self::Changed => "was rolled back because its connection was edited or removed, or the agent access was lowered".into(),
+            Self::Committed => "was already committed".into(),
+            Self::RolledBack => "was already rolled back".into(),
+            Self::CommitFailed => "ended when its COMMIT did not complete; it is not committed and its session is closed".into(),
+        }
+    }
+}
+
+impl ToolLayer {
+    /// Rolls back every transaction nobody has called for the idle timeout (5 minutes unless
+    /// [`with_transaction_idle_timeout`](Self::with_transaction_idle_timeout) says otherwise)
+    /// and closes its session. Returns how many it ended. Cheap when none is open (a lock and a
+    /// length check). Each rollback waits for its server up to `ABANDON_TIMEOUT` (3 s) and then
+    /// the session is closed, so with the driver's disconnect on top it can block for a few seconds
+    /// per transaction: call it from a worker thread (the MCP server's timer does). A transaction
+    /// with a call in progress (a statement running, a question open) is left. The layer itself
+    /// sweeps at the start of every tool call too, but there it only closes the session of an
+    /// expired transaction (no ROLLBACK round trip: the server rolls back a dropped connection), so
+    /// a call is never held up by a server that does not answer.
+    pub fn expire_idle_transactions(&self) -> usize {
+        self.expire_idle(true)
+    }
+
+    fn expire_idle(&self, send_rollback: bool) -> usize {
+        if !self.transactions_enabled {
+            return 0;
+        }
+        let expired = {
+            let mut table = lock(&self.txs);
+            if table.open.is_empty() {
+                return 0;
+            }
+            let now = Instant::now();
+            let idle = self.transaction_idle;
+            table.take_where(
+                |tx| {
+                    tx.in_use.load(Ordering::SeqCst) == 0
+                        && now.saturating_duration_since(lock(&tx.state).last_used) >= idle
+                },
+                Ended::Idle,
+            )
+        };
+        let count = expired.len();
+        for tx in expired {
+            self.abandon(&tx, "expire_transaction", "idle timeout", send_rollback);
+        }
+        count
+    }
+
+    /// The open transaction `id` of the connection `info`, counted as in use.
+    fn use_transaction(&self, id: &str, info: &ConnectionInfo) -> Result<TxUse, AgentError> {
+        let used = self.use_transaction_by_id(id)?;
+        if used.tx.connection_id != info.id {
+            return Err(AgentError::invalid(format!(
+                "transaction `{}` belongs to another connection; pass the connection_id it was begun for",
+                used.tx.id
+            )));
+        }
+        Ok(used)
+    }
+
+    /// The error for a transaction that is not open.
+    fn gone(&self, table: &TxTable, id: &str) -> AgentError {
+        let shown = clean(id, 64);
+        AgentError::TransactionGone(match table.why_ended(id) {
+            Some(why) => format!("transaction `{shown}` {}", why.text(self.transaction_idle)),
+            None => format!(
+                "no open transaction `{shown}`; begin_transaction returns the ids"
+            ),
+        })
+    }
+
+    fn check_not_closing(closing: &AtomicUsize) -> Result<(), AgentError> {
+        if closing.load(Ordering::SeqCst) > 0 {
+            return Err(Self::closing_error());
+        }
+        Ok(())
+    }
+
+    fn closing_error() -> AgentError {
+        AgentError::NotConnected(
+            "the server is shutting down, so no transaction was begun".into(),
+        )
+    }
+
+    fn committing(id: &str) -> AgentError {
+        AgentError::Limit(format!(
+            "a commit of transaction `{id}` is waiting for the user's answer; no statement runs in it until that is decided"
+        ))
+    }
+
+    fn aborted(id: &str) -> AgentError {
+        AgentError::TransactionAborted(format!(
+            "transaction `{id}` is aborted by an earlier error and refuses every statement; roll it back with rollback_transaction"
+        ))
+    }
+
+    /// A transaction's statements run in the connection's own database: PostgreSQL gives every
+    /// database its own connection, so a statement for another one would run outside the transaction.
+    fn check_transaction_database(
+        slot: &OpenSession,
+        database: Option<&str>,
+    ) -> Result<(), AgentError> {
+        if slot.info.kind == ConnectionKind::PostgreSql && database.is_some_and(|d| !d.is_empty()) {
+            return Err(AgentError::invalid(
+                "a statement in a transaction runs in the connection's own database; leave `database` out",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Why a connection cannot have a transaction, whatever its access.
+    fn transactions_unsupported(info: &ConnectionInfo) -> Option<&'static str> {
+        const ONLY: &str = "transactions are available on PostgreSQL and SQLite connections";
+        if !matches!(info.kind, ConnectionKind::PostgreSql | ConnectionKind::Sqlite) {
+            return Some(ONLY);
+        }
+        if info.connection_type.read_only {
+            return Some(
+                "transactions are not available on a connection whose type is read-only: the server refuses BEGIN in a read-only run",
+            );
+        }
+        None
+    }
+
+    fn begin_transaction(
+        &self,
+        connection_id: &str,
+        cancel: &CancelToken,
+        trace: &mut Trace,
+    ) -> Result<BeginTransactionResult, AgentError> {
+        Self::check_not_cancelled(cancel)?;
+        Self::check_not_closing(&self.closing_all)?;
+        // The kind and the type first, for a connection the agent may see at all (one with access
+        // `off` is not described): "unsupported" is the better answer than "needs read_write".
+        if let Some(known) = self.catalog.get(connection_id) {
+            if known.effective_access() > AgentAccess::Off {
+                if let Some(reason) = Self::transactions_unsupported(&known) {
+                    return Err(AgentError::Unsupported(reason.into()));
+                }
+            }
+        }
+        let (info, _) = self.authorize(ToolName::BeginTransaction, connection_id)?;
+        if let Some(reason) = Self::transactions_unsupported(&info) {
+            return Err(AgentError::Unsupported(reason.into()));
+        }
+        if let Some(reason) = self.provider.transactions_unavailable(&info) {
+            return Err(AgentError::Unsupported(reason));
+        }
+        // Refused up front with the reason a write would get: a transaction nobody can write in
+        // (switch off, production, a client that cannot be asked) is not begun.
+        let asked = WriteApproval {
+            connection_id: &info.id,
+            connection_name: &info.name,
+            connection_type: &info.connection_type.name,
+            production: info.connection_type.production,
+            language: Language::Sql,
+            database: None,
+            statement: TxControl::Begin.sql(),
+            dangerous: None,
+            transaction: None,
+        };
+        if let Err(reason) = self.approver.check_writable(&asked) {
+            trace.approval = Some(format!("refused: {}", clean(&reason, 200)));
+            return Err(AgentError::WriteRefused(format!(
+                "no transaction was begun, and the user was not asked: {reason}"
+            )));
+        }
+        if self.audit.as_ref().is_some_and(|audit| !audit.is_healthy()) {
+            return Err(AgentError::AuditUnavailable);
+        }
+        trace.statement = Some(TxControl::Begin.sql().into());
+        // One open or close per connection at a time, shared with `revoke` and `close_session`: one
+        // that comes after this begin started sees the transaction and rolls it back.
+        let Some(_gate) = self.enter(&info.id, Some(cancel)) else {
+            return Err(AgentError::Cancelled);
+        };
+        let id = format!("tx-{}", self.tx_numbers.fetch_add(1, Ordering::Relaxed) + 1);
+        let beginning = {
+            let mut table = lock(&self.txs);
+            if let Some(open) = table
+                .open
+                .values()
+                .find(|tx| tx.connection_id == info.id)
+            {
+                return Err(AgentError::Limit(format!(
+                    "this connection already has the open transaction `{}`; commit it or roll it back first (one per connection)",
+                    open.id
+                )));
+            }
+            if table.beginning.contains(&info.id) {
+                return Err(AgentError::Limit(
+                    "a transaction is being begun on this connection already (one per connection)"
+                        .into(),
+                ));
+            }
+            if table.open.len() + table.beginning.len() >= MAX_OPEN_TRANSACTIONS {
+                return Err(AgentError::Limit(format!(
+                    "{MAX_OPEN_TRANSACTIONS} transactions are open already (the most in all); commit or roll one back first"
+                )));
+            }
+            table.beginning.insert(info.id.clone());
+            Beginning {
+                layer: self,
+                connection_id: info.id.clone(),
+            }
+        };
+        // A session of its own: the connection's shared one runs statements read-only and one at
+        // a time for everything else, and a transaction lives on one session.
+        let slot = self.connect_slot(&info, trace)?;
+        let after_connect = self.catalog.get(&info.id).filter(|now| {
+            !now.revision.differs_from(info.revision)
+                && now.effective_access() >= AgentAccess::ReadWrite
+        });
+        if after_connect.is_none() {
+            self.disconnect(&slot);
+            return Err(AgentError::NotConnected(
+                "the connection was edited, removed or its access lowered while the transaction was being begun; no transaction was begun"
+                    .into(),
+            ));
+        }
+        let timeout = info.statement_timeout(&self.limits);
+        let began = {
+            let _watchdog = Watchdog::arm(cancel, timeout);
+            slot.session.control(TxControl::Begin, cancel)
+        };
+        if let Err(error) = began {
+            self.disconnect(&slot);
+            return Err(match error {
+                AgentError::Cancelled if cancel.timed_out() => AgentError::Limit(format!(
+                    "BEGIN did not finish within the {} s statement timeout",
+                    timeout.as_secs()
+                )),
+                error => error,
+            });
+        }
+        let transaction = Arc::new(Transaction {
+            id: id.clone(),
+            connection_id: info.id.clone(),
+            slot,
+            state: Mutex::new(TxState {
+                last_used: Instant::now(),
+                writes: Vec::new(),
+                write_bytes: 0,
+                aborted: false,
+                committing: false,
+            }),
+            in_use: AtomicUsize::new(0),
+        });
+        lock(&self.txs).open.insert(id.clone(), Arc::clone(&transaction));
+        drop(beginning);
+        // `close_all` counts itself before it takes the open transactions: either it takes this one,
+        // or this sees it counted and ends the transaction itself.
+        if self.closing_all.load(Ordering::SeqCst) > 0 {
+            let taken = lock(&self.txs).take(&id, Ended::Closed);
+            if let Some(tx) = taken {
+                self.rollback_abandoned(&tx, "rollback_transaction", "layer closing");
+            }
+            return Err(Self::closing_error());
+        }
+        if cancel.is_cancelled() {
+            // The caller is gone: nobody will ever hear of this id.
+            let taken = lock(&self.txs).take(&id, Ended::RolledBack);
+            if let Some(tx) = taken {
+                self.rollback_abandoned(&tx, "rollback_transaction", "begin cancelled");
+            }
+            return Err(AgentError::Cancelled);
+        }
+        Ok(BeginTransactionResult {
+            transaction_id: id,
+            connection_id: info.id,
+            idle_timeout_secs: self.transaction_idle.as_secs(),
+        })
+    }
+
+    fn commit_transaction(
+        &self,
+        id: &str,
+        cancel: &CancelToken,
+        trace: &mut Trace,
+    ) -> Result<CommitTransactionResult, AgentError> {
+        Self::check_not_cancelled(cancel)?;
+        let used = self.use_transaction_by_id(id)?;
+        let tx = Arc::clone(&used.tx);
+        let slot = &tx.slot;
+        trace.connection_id = Some(tx.connection_id.chars().take(128).collect());
+        trace.statement = Some(TxControl::Commit.sql().into());
+        trace.secrets.clone_from(&slot.secrets);
+        if lock(&tx.state).aborted {
+            return Err(Self::aborted(&tx.id));
+        }
+        // The connection as it is now: the transaction was begun for it, with `read_write`.
+        let rolled_back = |layer: &Self, why: &str| {
+            // Out of the table first: the lock is not held while the server is asked.
+            let taken = lock(&layer.txs).take(&tx.id, Ended::Changed);
+            if let Some(tx) = taken {
+                layer.rollback_abandoned(&tx, "rollback_transaction", why);
+            }
+        };
+        let Some(info) = self.catalog.get(&tx.connection_id) else {
+            rolled_back(self, "connection removed");
+            return Err(AgentError::NotConnected(
+                "the connection was removed, so the transaction was rolled back and nothing was committed"
+                    .into(),
+            ));
+        };
+        if slot.revision.differs_from(info.revision) {
+            rolled_back(self, "connection edited");
+            return Err(AgentError::NotConnected(format!(
+                "connection `{}` was edited, so the transaction was rolled back and nothing was committed",
+                info.name
+            )));
+        }
+        let access = info.effective_access();
+        if access < AgentAccess::ReadWrite {
+            rolled_back(self, "access lowered");
+            return Err(AgentError::AccessDenied(format!(
+                "{} The transaction was rolled back and nothing was committed.",
+                denial_message(&info, access, ToolName::CommitTransaction, AgentAccess::ReadWrite)
+            )));
+        }
+        // The list the user approves is taken now, and no statement runs on the transaction until
+        // this commit is decided (a refusal or decline lets them run again): otherwise a write
+        // approved while the question is open would be committed without being on the list.
+        let (_committing, writes) = {
+            let mut state = lock(&tx.state);
+            if state.aborted {
+                return Err(Self::aborted(&tx.id));
+            }
+            if state.committing {
+                return Err(AgentError::Limit(format!(
+                    "a commit of transaction `{}` is already waiting for the user's answer",
+                    tx.id
+                )));
+            }
+            let writes = state.writes.clone();
+            state.committing = true;
+            (Committing(&tx), writes)
+        };
+        let changes = writes.len();
+        let still_open = "The transaction is still open and nothing is committed: roll it back with rollback_transaction.";
+        if changes > 0 {
+            // The user approves the COMMIT with the list of what it makes final.
+            if self.audit.as_ref().is_some_and(|audit| !audit.is_healthy()) {
+                return Err(AgentError::AuditUnavailable);
+            }
+            let request = WriteApproval {
+                connection_id: &info.id,
+                connection_name: &info.name,
+                connection_type: &info.connection_type.name,
+                production: info.connection_type.production,
+                language: Language::Sql,
+                database: None,
+                statement: TxControl::Commit.sql(),
+                dangerous: None,
+                transaction: Some(TransactionApproval {
+                    id: &tx.id,
+                    commit: Some(&writes),
+                }),
+            };
+            match self.approver.approve(&request, cancel) {
+                ApprovalDecision::Approve => {
+                    trace.approval = Some("approved".into());
+                    if let Err(error) =
+                        self.recheck_after_approval(ToolName::CommitTransaction, &info, &request, cancel, trace)
+                    {
+                        return Err(match error {
+                            // The connection is no longer the one the question was about.
+                            AgentError::NotConnected(_) | AgentError::AccessDenied(_) => {
+                                rolled_back(self, "connection changed while the commit question was open");
+                                Self::annotate(
+                                    error,
+                                    "The transaction was rolled back and nothing was committed",
+                                )
+                            }
+                            error => Self::annotate(error, still_open),
+                        });
+                    }
+                }
+                declined => {
+                    return Err(Self::annotate(
+                        Self::declined(declined, "commit", cancel, trace),
+                        still_open,
+                    ))
+                }
+            }
+        }
+        // From here the transaction is ours alone.
+        let Some(_busy) = BusyGuard::acquire(&slot.busy) else {
+            return Err(AgentError::Limit(format!(
+                "a statement that was started before the commit is still running in this transaction; wait for it or cancel it, then commit again. {still_open}"
+            )));
+        };
+        // What is committed is what was approved: the same writes, and the transaction not aborted
+        // meanwhile (PostgreSQL turns a COMMIT of an aborted transaction into a silent ROLLBACK).
+        {
+            let state = lock(&tx.state);
+            if state.aborted {
+                return Err(Self::aborted(&tx.id));
+            }
+            if state.writes != writes {
+                return Err(AgentError::Limit(format!(
+                    "the transaction changed while the commit was being approved, so nothing was committed. {still_open}"
+                )));
+            }
+        }
+        // Out of the table before anything is written about it: an id that is being committed
+        // cannot be rolled back, expired or used by anyone else.
+        if lock(&self.txs).take(&tx.id, Ended::Committed).is_none() {
+            return Err(AgentError::TransactionGone(format!(
+                "transaction `{}` was rolled back while the commit was being prepared; nothing was committed",
+                tx.id
+            )));
+        }
+        if changes > 0 {
+            if let Some(audit) = &self.audit {
+                let mut entry = AuditEntry::now(&self.front_end, ToolName::CommitTransaction.as_str());
+                entry.connection_id = Some(info.id.chars().take(128).collect());
+                entry.statement = Some(TxControl::Commit.sql().into());
+                entry.outcome = "started".into();
+                entry.rows = Some(changes as u64);
+                entry.approval = trace.approval.clone();
+                if audit.record_blocking(entry).is_err() {
+                    // The commit cannot be recorded, so it does not happen: the transaction ends
+                    // in a rollback.
+                    if let Some(entry) = lock(&self.txs).ended.iter_mut().find(|(ended, _)| *ended == tx.id) {
+                        entry.1 = Ended::RolledBack;
+                    }
+                    let _ = self.rollback_and_close(&tx, ABANDON_TIMEOUT, false);
+                    return Err(Self::annotate(
+                        AgentError::AuditUnavailable,
+                        "The transaction was rolled back and nothing was committed",
+                    ));
+                }
+            }
+        }
+        trace.rows = Some(changes as u64);
+        let timeout = info.statement_timeout(&self.limits);
+        let committed = match ActiveStatement::begin(slot, cancel) {
+            Ok(active) => {
+                let result = {
+                    let _watchdog = Watchdog::arm(cancel, timeout);
+                    slot.session.control(TxControl::Commit, cancel)
+                };
+                drop(active);
+                result
+            }
             Err(error) => Err(error),
+        };
+        // After a COMMIT, done or not, the session is closed: a commit that did not complete must
+        // not leave a transaction open, and closing the session ends it on the server.
+        self.disconnect(slot);
+        match committed {
+            Ok(()) => Ok(CommitTransactionResult {
+                transaction_id: tx.id.clone(),
+                committed: true,
+                changes,
+            }),
+            Err(error) => {
+                if let Some(entry) = lock(&self.txs).ended.iter_mut().find(|(ended, _)| *ended == tx.id) {
+                    entry.1 = Ended::CommitFailed;
+                }
+                let why = match error {
+                    AgentError::Cancelled if cancel.timed_out() => format!(
+                        "the {} s statement timeout passed",
+                        timeout.as_secs()
+                    ),
+                    error => clean(&error.to_string(), 300),
+                };
+                Err(AgentError::Driver {
+                    code: "transaction.commit_failed".into(),
+                    message: format!(
+                        "COMMIT did not complete ({why}). The session was closed, so the server rolls the transaction back unless it had already committed it: check the data before relying on it"
+                    ),
+                    retryable: false,
+                })
+            }
+        }
+    }
+
+    /// An open transaction by id alone (`commit_transaction`), counted as in use.
+    fn use_transaction_by_id(&self, id: &str) -> Result<TxUse, AgentError> {
+        let table = lock(&self.txs);
+        match table.open.get(id) {
+            Some(tx) => {
+                tx.in_use.fetch_add(1, Ordering::SeqCst);
+                Ok(TxUse {
+                    tx: Arc::clone(tx),
+                })
+            }
+            None => Err(self.gone(&table, id)),
+        }
+    }
+
+    fn rollback_transaction(
+        &self,
+        id: &str,
+        trace: &mut Trace,
+    ) -> Result<RollbackTransactionResult, AgentError> {
+        let tx = {
+            let mut table = lock(&self.txs);
+            match table.take(id, Ended::RolledBack) {
+                Some(tx) => tx,
+                // Gone already (idle, closed with its session, committed, rolled back): nothing
+                // to undo, and no error for a model that is making sure.
+                None if table.why_ended(id).is_some() => {
+                    return Ok(RollbackTransactionResult {
+                        transaction_id: clean(id, 64),
+                        rolled_back: false,
+                        changes: 0,
+                    })
+                }
+                None => return Err(self.gone(&table, id)),
+            }
+        };
+        trace.connection_id = Some(tx.connection_id.chars().take(128).collect());
+        trace.statement = Some(TxControl::Rollback.sql().into());
+        trace.secrets.clone_from(&tx.slot.secrets);
+        let changes = lock(&tx.state).writes.len();
+        trace.rows = Some(changes as u64);
+        // Whatever the server answers, the session is closed after this: the transaction is over.
+        let _ = self.rollback_and_close(&tx, ROLLBACK_TIMEOUT, true);
+        Ok(RollbackTransactionResult {
+            transaction_id: tx.id.clone(),
+            rolled_back: true,
+            changes,
+        })
+    }
+
+    /// Ends the transaction on its session and closes the session. With nothing running on the
+    /// session and `send_rollback`, ROLLBACK is sent first, waiting `timeout` for the server at
+    /// most. A statement that is running is cancelled and NO ROLLBACK is sent (it would queue behind
+    /// the statement: the driver waits up to 30 s for the session and 10 s for a cancel to land):
+    /// closing the session ends the transaction, on PostgreSQL and SQLite alike, because the
+    /// server rolls back what a dropped connection left open.
+    fn rollback_and_close(
+        &self,
+        tx: &Transaction,
+        timeout: Duration,
+        send_rollback: bool,
+    ) -> Result<(), AgentError> {
+        let slot = &tx.slot;
+        slot.closing.store(true, Ordering::SeqCst);
+        let running = lock(&slot.active).take();
+        let statement_running = running.is_some() || slot.busy.load(Ordering::SeqCst);
+        if let Some(running) = running {
+            // Never waits for the driver's own cancel (a new connection to the server).
+            running.cancel_detached();
+        }
+        let result = if send_rollback && !statement_running {
+            let cancel = CancelToken::new();
+            let _watchdog = Watchdog::arm(&cancel, timeout);
+            slot.session.control(TxControl::Rollback, &cancel)
+        } else {
+            Ok(())
+        };
+        self.disconnect(slot);
+        result
+    }
+
+    /// Ends a transaction that already left the table without the model asking (idle, session
+    /// closed, connection changed, shutdown), and leaves an audit line saying so.
+    fn rollback_abandoned(&self, tx: &Transaction, tool: &str, reason: &str) {
+        self.abandon(tx, tool, reason, true);
+    }
+
+    fn abandon(&self, tx: &Transaction, tool: &str, reason: &str, send_rollback: bool) {
+        let result = self.rollback_and_close(tx, ABANDON_TIMEOUT, send_rollback);
+        let Some(audit) = &self.audit else {
+            return;
+        };
+        let mut entry = AuditEntry::now(&self.front_end, tool);
+        entry.connection_id = Some(tx.connection_id.chars().take(128).collect());
+        entry.statement = Some(format!("ROLLBACK ({reason})"));
+        entry.outcome = match result {
+            Ok(()) => "ok".into(),
+            // The session was closed all the same.
+            Err(error) => error.code().to_owned(),
+        };
+        entry.rows = Some(lock(&tx.state).writes.len() as u64);
+        audit.record(entry);
+    }
+
+    /// Rolls back every open transaction of the connection (the caller holds its gate or needs
+    /// none: the transactions are out of the table before they are touched).
+    fn end_transactions_of(&self, connection_id: &str, why: Ended, reason: &str) {
+        if !self.transactions_enabled {
+            return;
+        }
+        let doomed = lock(&self.txs).take_where(|tx| tx.connection_id == connection_id, why);
+        for tx in doomed {
+            self.rollback_abandoned(&tx, "rollback_transaction", reason);
         }
     }
 }
@@ -1471,6 +2647,19 @@ impl Drop for ToolLayer {
     fn drop(&mut self) {
         self.close_all();
     }
+}
+
+/// A reference from the driver as the model may see it: names one line and length-capped like the
+/// other listings. (A name that had to be changed no longer finds its object.)
+fn clean_reference(mut reference: SchemaObjectRef) -> SchemaObjectRef {
+    let name = |text: String| clean_name(&text, MAX_NAME_CHARS);
+    reference.database = reference.database.map(name);
+    reference.schema = reference.schema.map(name);
+    reference.name = name(reference.name);
+    reference.arguments = reference.arguments.map(|text| clean(&text, 1000));
+    reference.table = reference.table.map(name);
+    reference.identity = reference.identity.map(|text| clean(&text, 1000));
+    reference
 }
 
 fn to_value<T: serde::Serialize>(result: T) -> Result<Value, AgentError> {

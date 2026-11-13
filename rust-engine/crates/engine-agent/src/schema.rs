@@ -62,6 +62,7 @@ fn object(properties: Vec<(&str, Value)>, required: &[&str]) -> Value {
 
 const CONNECTION_ID: &str = "Connection id from list_connections.";
 const ACCESS_LEVELS: [&str; 4] = ["off", "schema_only", "read", "read_write"];
+const ROUTINE_KINDS: [&str; 4] = ["function", "procedure", "trigger", "event"];
 const KINDS: [&str; 7] = [
     "postgresql",
     "mysql",
@@ -82,6 +83,22 @@ fn name_item() -> Value {
             ),
         ],
         &["name", "kind"],
+    )
+}
+
+/// The reference `list_routines` returns and `get_routine_source` takes back as `ref`.
+fn routine_ref() -> Value {
+    object(
+        vec![
+            ("database", string("Database name.")),
+            ("schema", string("Schema name.")),
+            ("kind", string_enum(&ROUTINE_KINDS, "Kind of object.")),
+            ("name", string("Object name.")),
+            ("arguments", string("Input argument types of a PostgreSQL function or procedure.")),
+            ("table", string("The table of a trigger.")),
+            ("identity", string("Opaque key the database uses to find the object again.")),
+        ],
+        &["kind", "name"],
     )
 }
 
@@ -145,12 +162,41 @@ fn statement_output() -> Value {
     )
 }
 
-/// Every tool, in a stable order.
+/// Every tool, in a stable order, with the transaction tools and `execute_query`'s
+/// `transaction_id`.
 pub fn tool_specs() -> Vec<ToolSpec> {
-    ToolName::ALL.into_iter().map(spec).collect()
+    tool_specs_for(true)
 }
 
+/// The tools a layer offers: the transaction tools (and `execute_query`'s `transaction_id`)
+/// only when `transactions` is true.
+pub fn tool_specs_for(transactions: bool) -> Vec<ToolSpec> {
+    ToolName::ALL
+        .into_iter()
+        .filter(|tool| transactions || !tool.is_transaction_tool())
+        .map(|tool| spec_for(tool, transactions))
+        .collect()
+}
+
+/// The spec with every optional part (`transaction_id`).
 pub fn spec(tool: ToolName) -> ToolSpec {
+    spec_for(tool, true)
+}
+
+macro_rules! execute_query_text {
+    () => {
+        "Run exactly one SQL statement. Needs access `read` or more; a statement that changes data \
+        needs `read_write` and may be put to the user for approval when the connection allows it. \
+        A refusal or a decline is final for this request: do not retry the statement or reword it to get \
+        around it, tell the user instead. Multi-statement scripts are refused. At most 1000 rows (default \
+        200) and a total size limit are returned; check `truncated`. Dangerous statements (DROP, TRUNCATE, \
+        DELETE or UPDATE without WHERE, ...) are refused; a front end that can ask the user about them \
+        says to pass `dangerous` true, one that cannot (the MCP server) says so and the user has to run \
+        the statement themselves."
+    };
+}
+
+fn spec_for(tool: ToolName, transactions: bool) -> ToolSpec {
     let connection = ("connection_id", string(CONNECTION_ID));
     let database = |text: &str| ("database", string(text));
     match tool {
@@ -352,29 +398,36 @@ pub fn spec(tool: ToolName) -> ToolSpec {
             ),
             example: json!({"connection_id": "c1", "budget": 2000}),
         },
-        ToolName::ExecuteQuery => ToolSpec {
-            name: tool.as_str(),
-            description: "Run exactly one SQL statement. Needs access `read` or more; a statement that changes data \
-                needs `read_write` and may be put to the user for approval when the connection allows it. \
-                A refusal or a decline is final for this request: do not retry the statement or reword it to get \
-                around it, tell the user instead. Multi-statement scripts are refused. At most 1000 rows (default \
-                200) and a total size limit are returned; check `truncated`. Dangerous statements (DROP, TRUNCATE, \
-                DELETE or UPDATE without WHERE, ...) are refused; a front end that can ask the user about them \
-                says to pass `dangerous` true, one that cannot (the MCP server) says so and the user has to run \
-                the statement themselves.",
-            input_schema: object(
-                vec![
-                    connection.clone(),
-                    ("statement", string("One SQL statement.")),
-                    database("Database to run in."),
-                    ("row_limit", integer("Rows to return (default 200, at most 1000).")),
-                    ("dangerous", boolean("Ask the user to approve a dangerous statement.")),
-                ],
-                &["connection_id", "statement"],
-            ),
-            output_schema: statement_output(),
-            example: json!({"connection_id": "c1", "statement": "SELECT id, name FROM users ORDER BY id", "row_limit": 50}),
-        },
+        ToolName::ExecuteQuery => {
+            let mut properties = vec![
+                connection.clone(),
+                ("statement", string("One SQL statement.")),
+                database("Database to run in."),
+                ("row_limit", integer("Rows to return (default 200, at most 1000).")),
+                ("dangerous", boolean("Ask the user to approve a dangerous statement.")),
+            ];
+            if transactions {
+                properties.push((
+                    "transaction_id",
+                    string("Run in this open transaction (from begin_transaction) instead of committing by itself; omit `database` then."),
+                ));
+            }
+            ToolSpec {
+                name: tool.as_str(),
+                description: if transactions {
+                    concat!(
+                        execute_query_text!(),
+                        " With `transaction_id` the statement runs inside that transaction: a change is \
+                        approved one statement at a time and is NOT committed until commit_transaction."
+                    )
+                } else {
+                    execute_query_text!()
+                },
+                input_schema: object(properties, &["connection_id", "statement"]),
+                output_schema: statement_output(),
+                example: json!({"connection_id": "c1", "statement": "SELECT id, name FROM users ORDER BY id", "row_limit": 50}),
+            }
+        }
         ToolName::ExplainQuery => ToolSpec {
             name: tool.as_str(),
             description: "Show the execution plan of one SQL statement (EXPLAIN, never ANALYZE; the statement \
@@ -389,6 +442,132 @@ pub fn spec(tool: ToolName) -> ToolSpec {
             ),
             output_schema: statement_output(),
             example: json!({"connection_id": "c1", "statement": "SELECT * FROM orders WHERE user_id = 1"}),
+        },
+        ToolName::ListRoutines => ToolSpec {
+            name: tool.as_str(),
+            description: "List the functions, procedures, triggers or events of a namespace, sorted by name. \
+                `database` may be omitted when the connection has a single database; `schema` is needed for \
+                engines with schemas. Each item has a `ref` to pass to get_routine_source. A database without \
+                objects of that kind returns an empty list. SQL databases only.",
+            input_schema: object(
+                vec![
+                    connection.clone(),
+                    ("kind", string_enum(&ROUTINE_KINDS, "Which objects to list.")),
+                    database("Database name."),
+                    ("schema", string("Schema name.")),
+                    ("filter", string("Case-insensitive substring of the name.")),
+                    ("cursor", string("`next_cursor` of the previous page.")),
+                    ("limit", integer("Items per page (default 100, at most 500).")),
+                ],
+                &["connection_id", "kind"],
+            ),
+            output_schema: object(
+                vec![
+                    (
+                        "routines",
+                        array(
+                            object(
+                                vec![
+                                    ("name", string("Object name.")),
+                                    ("kind", string_enum(&ROUTINE_KINDS, "Kind of object.")),
+                                    ("arguments", string("Input argument types (PostgreSQL overloads).")),
+                                    ("table", string("The table of a trigger.")),
+                                    ("ref", routine_ref()),
+                                ],
+                                &["name", "kind", "ref"],
+                            ),
+                            "Functions, procedures, triggers or events.",
+                        ),
+                    ),
+                    ("next_cursor", string("Pass as `cursor` for the next page.")),
+                ],
+                &["routines"],
+            ),
+            example: json!({"connection_id": "c1", "kind": "function", "schema": "public", "database": "app"}),
+        },
+        ToolName::GetRoutineSource => ToolSpec {
+            name: tool.as_str(),
+            description: "The CREATE statement or source text of one function, procedure, trigger or event. Pass \
+                the `ref` from list_routines, or `kind` and `name` (with `database` and `schema` as for \
+                list_tables, `arguments` for a PostgreSQL overload, `table` for a trigger). The source is cut to a \
+                size limit. SQL databases only.",
+            input_schema: object(
+                vec![
+                    connection.clone(),
+                    ("ref", routine_ref()),
+                    ("kind", string_enum(&ROUTINE_KINDS, "Kind of object, when no `ref` is given.")),
+                    ("name", string("Object name, when no `ref` is given.")),
+                    database("Database name."),
+                    ("schema", string("Schema name.")),
+                    ("arguments", string("Input argument types of a PostgreSQL overload, e.g. `integer, text`.")),
+                    ("table", string("The table of a trigger.")),
+                ],
+                &["connection_id"],
+            ),
+            output_schema: object(
+                vec![
+                    ("kind", string_enum(&ROUTINE_KINDS, "Kind of object.")),
+                    ("name", string("Object name.")),
+                    ("source", string("The CREATE statement or source text.")),
+                    ("truncated", boolean("The source was cut.")),
+                ],
+                &["kind", "name", "source", "truncated"],
+            ),
+            example: json!({"connection_id": "c1", "kind": "trigger", "name": "audit_orders", "table": "orders", "schema": "public", "database": "app"}),
+        },
+        ToolName::BeginTransaction => ToolSpec {
+            name: tool.as_str(),
+            description: "Begin a transaction on a PostgreSQL or SQLite connection, on a session of its own. \
+                Needs access `read_write` and the user's permission to change data through this front end. \
+                Run statements in it with execute_query and `transaction_id`; nothing a write does is \
+                committed until commit_transaction, and the user is asked to approve the commit with the list \
+                of changes. One open transaction per connection, a few in all. A transaction is rolled back \
+                after 5 minutes without a call on it, and when its connection's session is closed. \
+                Always end it with commit_transaction or rollback_transaction.",
+            input_schema: object(vec![connection.clone()], &["connection_id"]),
+            output_schema: object(
+                vec![
+                    ("transaction_id", string("Pass to execute_query, commit_transaction and rollback_transaction.")),
+                    connection.clone(),
+                    ("idle_timeout_secs", integer("The transaction is rolled back after this many seconds without a call on it.")),
+                ],
+                &["transaction_id", "connection_id", "idle_timeout_secs"],
+            ),
+            example: json!({"connection_id": "c1"}),
+        },
+        ToolName::CommitTransaction => ToolSpec {
+            name: tool.as_str(),
+            description: "Commit an open transaction and close its session. When statements changed data the \
+                user is asked to approve the commit with the list of those statements; a decline is final: \
+                the transaction stays open, nothing is committed, roll it back. A transaction with no changes \
+                is committed without asking. A PostgreSQL transaction that hit an error cannot be committed: \
+                roll it back.",
+            input_schema: object(vec![("transaction_id", string("From begin_transaction."))], &["transaction_id"]),
+            output_schema: object(
+                vec![
+                    ("transaction_id", string("The transaction.")),
+                    ("committed", boolean("The transaction was committed.")),
+                    ("changes", integer("Write statements that were sent in the transaction.")),
+                ],
+                &["transaction_id", "committed", "changes"],
+            ),
+            example: json!({"transaction_id": "tx-1"}),
+        },
+        ToolName::RollbackTransaction => ToolSpec {
+            name: tool.as_str(),
+            description: "Roll back an open transaction (undoing everything it changed) and close its session. \
+                No approval needed. A transaction that is already gone (rolled back after the idle timeout) \
+                answers `rolled_back` false.",
+            input_schema: object(vec![("transaction_id", string("From begin_transaction."))], &["transaction_id"]),
+            output_schema: object(
+                vec![
+                    ("transaction_id", string("The transaction.")),
+                    ("rolled_back", boolean("The transaction was open and is rolled back.")),
+                    ("changes", integer("Write statements that were sent in the transaction, all undone.")),
+                ],
+                &["transaction_id", "rolled_back", "changes"],
+            ),
+            example: json!({"transaction_id": "tx-1"}),
         },
         ToolName::ExecuteRedisCommand => ToolSpec {
             name: tool.as_str(),
@@ -545,6 +724,7 @@ fn kind_of(value: &Value) -> &'static str {
 mod tests {
     use super::*;
     use crate::tools::*;
+    use engine_driver_api::sql::{SchemaObjectKind, SchemaObjectRef};
 
     const ALLOWED_KEYWORDS: &[&str] = &[
         "type",
@@ -626,8 +806,22 @@ mod tests {
                 "execute_query",
                 "explain_query",
                 "execute_redis_command",
+                "list_routines",
+                "get_routine_source",
+                "begin_transaction",
+                "commit_transaction",
+                "rollback_transaction",
             ]
         );
+        // Off by default: neither the tools nor `transaction_id` exist for the model.
+        let plain = tool_specs_for(false);
+        assert_eq!(plain.len(), 12);
+        let execute = plain.iter().find(|spec| spec.name == "execute_query").unwrap();
+        assert!(execute.input_schema["properties"].get("transaction_id").is_none());
+        assert!(!execute.description.contains("transaction"));
+        assert!(spec(ToolName::ExecuteQuery).input_schema["properties"]
+            .get("transaction_id")
+            .is_some());
         for tool in ToolName::ALL {
             assert_eq!(ToolName::parse(tool.as_str()), Some(tool));
         }
@@ -656,6 +850,12 @@ mod tests {
                 ToolName::ExecuteQuery => parses::<ExecuteQueryRequest>(example),
                 ToolName::ExplainQuery => parses::<ExplainQueryRequest>(example),
                 ToolName::ExecuteRedisCommand => parses::<ExecuteRedisCommandRequest>(example),
+                ToolName::ListRoutines => parses::<ListRoutinesRequest>(example),
+                ToolName::GetRoutineSource => parses::<GetRoutineSourceRequest>(example),
+                ToolName::BeginTransaction => parses::<ConnectionRequest>(example),
+                ToolName::CommitTransaction | ToolName::RollbackTransaction => {
+                    parses::<TransactionRequest>(example)
+                }
             }
         }
     }
@@ -789,6 +989,7 @@ mod tests {
                     database: Some("d".into()),
                     row_limit: Some(1),
                     dangerous: Some(true),
+                    transaction_id: Some("tx-1".into()),
                 })
                 .unwrap(),
             ),
@@ -798,6 +999,41 @@ mod tests {
                     connection_id: "c".into(),
                     statement: "s".into(),
                     database: Some("d".into()),
+                })
+                .unwrap(),
+            ),
+            (
+                ToolName::ListRoutines,
+                serde_json::to_value(ListRoutinesRequest {
+                    connection_id: "c".into(),
+                    kind: RoutineKind::Function,
+                    database: Some("d".into()),
+                    schema: Some("s".into()),
+                    filter: Some("f".into()),
+                    cursor: Some("1".into()),
+                    limit: Some(5),
+                })
+                .unwrap(),
+            ),
+            (
+                ToolName::GetRoutineSource,
+                serde_json::to_value(GetRoutineSourceRequest {
+                    connection_id: "c".into(),
+                    reference: Some(SchemaObjectRef {
+                        database: Some("d".into()),
+                        schema: Some("s".into()),
+                        kind: SchemaObjectKind::Trigger,
+                        name: "n".into(),
+                        arguments: Some("integer".into()),
+                        table: Some("t".into()),
+                        identity: Some("23".into()),
+                    }),
+                    kind: Some(RoutineKind::Trigger),
+                    name: Some("n".into()),
+                    database: Some("d".into()),
+                    schema: Some("s".into()),
+                    arguments: Some("integer".into()),
+                    table: Some("t".into()),
                 })
                 .unwrap(),
             ),

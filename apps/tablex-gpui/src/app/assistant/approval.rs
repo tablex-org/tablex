@@ -369,6 +369,7 @@ pub(super) mod tests {
             database: Some("main"),
             statement,
             dangerous: None,
+            transaction: None,
         }
     }
 

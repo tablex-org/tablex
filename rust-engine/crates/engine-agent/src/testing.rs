@@ -8,14 +8,15 @@ use crate::error::AgentError;
 use crate::limits::RowCollector;
 use crate::ports::{
     ApprovalDecision, ConnectionCatalog, ConnectionInfo, ConnectionKind, Node, NodeLevel, NodePage,
-    NodeQuery, Revision, RunRequest, Session, SessionInfo, SessionProvider, TableRef,
-    WriteApproval, WriteApprover,
+    NodeQuery, Revision, RoutinePage, RoutineQuery, RunRequest, Session, SessionInfo, SessionProvider, TableRef,
+    TxControl, WriteApproval, WriteApprover,
 };
 use crate::result::{QueryResult, ResultColumn};
 use crate::secret::SecretText;
 use crate::table::TableDescription;
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use engine_driver_api::sql::SchemaObjectRef;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -67,10 +68,16 @@ impl ConnectionCatalog for FakeCatalog {
     }
 }
 
-/// Hands out the sessions it was given, by connection id.
+/// Hands out the sessions it was given, by connection id. The first open of a connection gets
+/// its main session; later opens (a transaction's own session) get the extra sessions given with
+/// [`with_extra_session`](Self::with_extra_session) in order, else the main one again.
 #[derive(Default)]
 pub struct FakeProvider {
     sessions: Mutex<HashMap<String, Arc<FakeSession>>>,
+    extras: Mutex<HashMap<String, VecDeque<Arc<FakeSession>>>>,
+    handed_out: Mutex<HashSet<String>>,
+    /// What `transactions_unavailable` answers.
+    pub transactions_unavailable: Mutex<Option<String>>,
     pub opened: AtomicUsize,
     pub closed: AtomicUsize,
     failure: Mutex<Option<AgentError>>,
@@ -92,6 +99,19 @@ impl FakeProvider {
         Arc::clone(self)
     }
 
+    /// A session for a later open of the connection (see the type's docs).
+    pub fn with_extra_session(
+        self: &Arc<Self>,
+        connection_id: &str,
+        session: Arc<FakeSession>,
+    ) -> Arc<Self> {
+        lock(&self.extras)
+            .entry(connection_id.to_owned())
+            .or_default()
+            .push_back(session);
+        Arc::clone(self)
+    }
+
     /// The next `open` fails with `error`.
     pub fn fail_open(&self, error: AgentError) {
         *lock(&self.failure) = Some(error);
@@ -104,6 +124,15 @@ impl SessionProvider for FakeProvider {
             return Err(error);
         }
         self.opened.fetch_add(1, Ordering::SeqCst);
+        let again = !lock(&self.handed_out).insert(connection.id.clone());
+        if again {
+            if let Some(extra) = lock(&self.extras)
+                .get_mut(&connection.id)
+                .and_then(VecDeque::pop_front)
+            {
+                return Ok(extra);
+            }
+        }
         let session = lock(&self.sessions)
             .get(&connection.id)
             .cloned()
@@ -111,6 +140,10 @@ impl SessionProvider for FakeProvider {
                 AgentError::invalid("the fake provider has no session for this connection")
             })?;
         Ok(session)
+    }
+
+    fn transactions_unavailable(&self, _connection: &ConnectionInfo) -> Option<String> {
+        lock(&self.transactions_unavailable).clone()
     }
 
     fn secrets(&self, _connection: &ConnectionInfo) -> Vec<SecretText> {
@@ -146,6 +179,10 @@ pub struct FakeSession {
     /// The fake driver can run statements read-only.
     pub read_only_capable: bool,
     pub tables: Mutex<Vec<TableDescription>>,
+    /// Functions, procedures, triggers and events, each with its source text.
+    pub routines: Mutex<Vec<(SchemaObjectRef, String)>>,
+    /// Every reference `routine_source` was asked for, in order.
+    pub routine_lookups: Mutex<Vec<SchemaObjectRef>>,
     pub databases: Vec<String>,
     pub schemas: Vec<String>,
     pub behavior: Mutex<Behavior>,
@@ -155,6 +192,12 @@ pub struct FakeSession {
     pub read_only_runs: Mutex<Vec<bool>>,
     pub disconnects: AtomicUsize,
     pub secrets: Vec<SecretText>,
+    /// Every `control` call, in order.
+    pub controls: Mutex<Vec<TxControl>>,
+    /// `control` fails with this error.
+    pub control_error: Mutex<Option<AgentError>>,
+    /// `control` waits until its token is cancelled (a server that does not answer).
+    pub control_hangs: AtomicBool,
 }
 
 impl FakeSession {
@@ -169,6 +212,8 @@ impl FakeSession {
                 rich_describe: true,
             },
             tables: Mutex::new(Vec::new()),
+            routines: Mutex::new(Vec::new()),
+            routine_lookups: Mutex::new(Vec::new()),
             databases: vec!["main".into()],
             schemas: Vec::new(),
             behavior: Mutex::new(Behavior::Numbers { count: 3 }),
@@ -176,7 +221,15 @@ impl FakeSession {
             read_only_runs: Mutex::new(Vec::new()),
             disconnects: AtomicUsize::new(0),
             secrets: Vec::new(),
+            controls: Mutex::new(Vec::new()),
+            control_error: Mutex::new(None),
+            control_hangs: AtomicBool::new(false),
         }
+    }
+
+    /// The `control` calls so far.
+    pub fn control_calls(&self) -> Vec<TxControl> {
+        lock(&self.controls).clone()
     }
 
     pub fn arc(self) -> Arc<Self> {
@@ -191,13 +244,13 @@ impl FakeSession {
         lock(&self.runs).len()
     }
 
-    fn page_of<T>(items: Vec<T>, query: &NodeQuery) -> (Vec<T>, Option<String>) {
-        let offset = query
-            .cursor
-            .as_deref()
-            .and_then(|c| c.parse().ok())
-            .unwrap_or(0);
-        let limit = query.limit.max(1);
+    fn page_of<T>(
+        items: Vec<T>,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> (Vec<T>, Option<String>) {
+        let offset = cursor.and_then(|c| c.parse().ok()).unwrap_or(0);
+        let limit = limit.max(1);
         let total = items.len();
         let page: Vec<T> = items.into_iter().skip(offset).take(limit).collect();
         let next = (offset + page.len() < total).then(|| (offset + page.len()).to_string());
@@ -234,7 +287,7 @@ impl Session for FakeSession {
                 tables.into_iter().map(|n| (n, "table")).collect()
             }
         };
-        let (page, next_cursor) = Self::page_of(names, query);
+        let (page, next_cursor) = Self::page_of(names, query.cursor.as_deref(), query.limit);
         Ok(NodePage {
             nodes: page
                 .into_iter()
@@ -256,6 +309,49 @@ impl Session for FakeSession {
                 AgentError::driver(
                     "describe.not_found",
                     format!("no table named `{}`", table.name),
+                    false,
+                )
+            })
+    }
+
+    fn list_routines(&self, query: &RoutineQuery) -> Result<RoutinePage, AgentError> {
+        let filter = query.filter.as_deref().map(str::to_lowercase);
+        let mut found: Vec<SchemaObjectRef> = lock(&self.routines)
+            .iter()
+            .map(|(reference, _)| reference)
+            .filter(|r| r.kind == query.kind && r.schema == query.schema)
+            .filter(|r| {
+                filter
+                    .as_ref()
+                    .is_none_or(|f| r.name.to_lowercase().contains(f))
+            })
+            .cloned()
+            .collect();
+        found.sort_by(|a, b| a.name.cmp(&b.name));
+        let (routines, next_cursor) =
+            Self::page_of(found, query.cursor.as_deref(), query.limit);
+        Ok(RoutinePage {
+            routines,
+            next_cursor,
+        })
+    }
+
+    fn routine_source(&self, reference: &SchemaObjectRef) -> Result<String, AgentError> {
+        lock(&self.routine_lookups).push(reference.clone());
+        lock(&self.routines)
+            .iter()
+            .find(|(known, _)| {
+                known.kind == reference.kind
+                    && known.name == reference.name
+                    && known.schema == reference.schema
+                    && known.arguments == reference.arguments
+                    && known.table == reference.table
+            })
+            .map(|(_, source)| source.clone())
+            .ok_or_else(|| {
+                AgentError::driver(
+                    "describe.not_found",
+                    format!("no object named `{}`", reference.name),
                     false,
                 )
             })
@@ -305,6 +401,20 @@ impl Session for FakeSession {
         }
     }
 
+    fn control(&self, action: TxControl, cancel: &CancelToken) -> Result<(), AgentError> {
+        lock(&self.controls).push(action);
+        if self.control_hangs.load(Ordering::SeqCst) {
+            while !cancel.is_cancelled() {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            return Err(AgentError::Cancelled);
+        }
+        match lock(&self.control_error).clone() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
     fn disconnect(&self) {
         self.disconnects.fetch_add(1, Ordering::SeqCst);
     }
@@ -321,6 +431,10 @@ pub struct ScriptedApprover {
     pub asked: Mutex<Vec<(String, Option<String>)>>,
     /// The database of each approval request.
     pub databases: Mutex<Vec<Option<String>>>,
+    /// The transaction of each approval request: its id, and the statements when it is a commit.
+    pub transactions: Mutex<Vec<Option<(String, Option<Vec<String>>)>>>,
+    /// The answer to a commit question, when it differs from `decision`.
+    pub commit_decision: Mutex<Option<ApprovalDecision>>,
 }
 
 impl ScriptedApprover {
@@ -330,6 +444,8 @@ impl ScriptedApprover {
             allow_dangerous,
             asked: Mutex::new(Vec::new()),
             databases: Mutex::new(Vec::new()),
+            transactions: Mutex::new(Vec::new()),
+            commit_decision: Mutex::new(None),
         })
     }
 }
@@ -341,7 +457,25 @@ impl WriteApprover for ScriptedApprover {
             request.statement.to_owned(),
             request.dangerous.map(str::to_owned),
         ));
+        lock(&self.transactions).push(request.transaction.map(|transaction| {
+            (
+                transaction.id.to_owned(),
+                transaction.commit.map(<[String]>::to_vec),
+            )
+        }));
+        if request.transaction.is_some_and(|t| t.commit.is_some()) {
+            if let Some(decision) = lock(&self.commit_decision).clone() {
+                return decision;
+            }
+        }
         self.decision.clone()
+    }
+
+    fn check_writable(&self, _request: &WriteApproval<'_>) -> Result<(), String> {
+        match &self.decision {
+            ApprovalDecision::Refuse { reason } => Err(reason.clone()),
+            _ => Ok(()),
+        }
     }
 
     fn allows_dangerous(&self) -> bool {

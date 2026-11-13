@@ -29,7 +29,10 @@ list_connections. A statement that changes data may be put to the user for appro
 your client, when the connection's access is read_write and the user has allowed changes through \
 MCP in TableX (Settings → AI); it is never allowed on a connection of a production type. A refusal or a \
 decline is final for that request: do not retry the statement or reword it to get around it, \
-tell the user instead.";
+tell the user instead. On a PostgreSQL or SQLite connection with read_write access, \
+begin_transaction opens a transaction: each change in it is approved one by one and is not final until \
+commit_transaction, which the user approves with the list of changes; roll back (rollback_transaction) \
+what you do not need. An unused transaction is rolled back after 5 minutes.";
 
 /// The layer's code for a tool name it does not have; a protocol error here, not a tool result.
 const UNKNOWN_TOOL: &str = "agent.unknown_tool";
@@ -42,6 +45,10 @@ pub const MAX_CONCURRENT_CALLS: usize = 16;
 /// How long end-of-session cleanup (`ToolLayer::close_all`: driver disconnects, tunnels) may take
 /// before the process gives up and exits.
 pub const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(5);
+
+/// How often open transactions are checked for the idle timeout (the layer also checks at the
+/// start of every call). Each check runs on the blocking pool, one at a time.
+pub const IDLE_SWEEP_INTERVAL: Duration = Duration::from_secs(15);
 
 /// Why a server cannot be built.
 #[derive(Debug, thiserror::Error)]
@@ -63,6 +70,7 @@ pub struct McpServer {
     /// The client's `initialize` was answered; a second one is refused.
     initialized: Arc<AtomicBool>,
     shutdown_deadline: Duration,
+    sweep_interval: Duration,
 }
 
 impl McpServer {
@@ -79,7 +87,19 @@ impl McpServer {
             calls: Arc::new(Semaphore::new(MAX_CONCURRENT_CALLS)),
             initialized: Arc::new(AtomicBool::new(false)),
             shutdown_deadline: SHUTDOWN_DEADLINE,
+            sweep_interval: IDLE_SWEEP_INTERVAL,
         })
+    }
+
+    /// Replaces [`IDLE_SWEEP_INTERVAL`] (tests).
+    #[must_use]
+    pub fn with_idle_sweep_interval(mut self, interval: Duration) -> Self {
+        self.sweep_interval = interval;
+        self
+    }
+
+    pub(crate) fn sweep_interval(&self) -> Duration {
+        self.sweep_interval
     }
 
     /// The permits of the running calls: all [`MAX_CONCURRENT_CALLS`] are back once every call

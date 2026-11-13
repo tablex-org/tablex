@@ -15,6 +15,8 @@ pub const CANCELLED: &str = "agent.cancelled";
 pub const BLOCKED_FUNCTION: &str = "agent.blocked_function";
 pub const AUDIT_UNAVAILABLE: &str = "agent.audit_unavailable";
 pub const UNSUPPORTED: &str = "agent.unsupported";
+pub const TRANSACTION_GONE: &str = "agent.transaction_gone";
+pub const TRANSACTION_ABORTED: &str = "agent.transaction_aborted";
 pub const INTERNAL: &str = "agent.internal";
 
 /// Why a tool call did not produce a result. Every variant has a stable
@@ -55,6 +57,13 @@ pub enum AgentError {
     Cancelled,
     #[error("{0}")]
     Unsupported(String),
+    /// The transaction is not open any more (unknown id, rolled back after the idle timeout, or
+    /// with its session) or is not usable.
+    #[error("{0}")]
+    TransactionGone(String),
+    /// PostgreSQL: an earlier statement failed, so the transaction only accepts a rollback.
+    #[error("{0}")]
+    TransactionAborted(String),
     /// A driver error, passed through (its message is redacted before it
     /// leaves the tool layer).
     #[error("{message}")]
@@ -82,6 +91,8 @@ impl AgentError {
             Self::NotConnected(_) => NOT_CONNECTED,
             Self::Cancelled => CANCELLED,
             Self::Unsupported(_) => UNSUPPORTED,
+            Self::TransactionGone(_) => TRANSACTION_GONE,
+            Self::TransactionAborted(_) => TRANSACTION_ABORTED,
             Self::Driver { code, .. } => code,
             Self::Internal(_) => INTERNAL,
         }

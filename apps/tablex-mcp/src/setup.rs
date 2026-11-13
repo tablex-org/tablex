@@ -49,6 +49,9 @@ pub fn build_layer(connector: Connector, audit: Arc<AuditLog>) -> ToolLayer {
     };
     let connections = Arc::new(connections);
     ToolLayer::new(connections.clone(), connections, FRONT_END)
+        // Explicit transactions (PostgreSQL, SQLite): every write and the commit are put to the
+        // user, and an abandoned transaction is always rolled back (see `McpServer::serve`).
+        .with_transactions()
         .with_approver(Arc::new(ElicitingApprover::new(settings_path)))
         .with_audit(audit)
 }

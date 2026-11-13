@@ -14,6 +14,20 @@ async fn tools_list_is_exactly_what_the_layer_says() {
     let listed = harness.peer().list_all_tools().await.unwrap();
     let specs = harness.fixture.layer.tools();
     assert_eq!(listed.len(), specs.len());
+    for name in [
+        "list_routines",
+        "get_routine_source",
+        "begin_transaction",
+        "commit_transaction",
+        "rollback_transaction",
+    ] {
+        assert!(listed.iter().any(|tool| tool.name == name), "{name} is listed");
+    }
+    let execute = listed.iter().find(|tool| tool.name == "execute_query").unwrap();
+    assert!(
+        execute.input_schema["properties"].get("transaction_id").is_some(),
+        "execute_query takes a transaction_id"
+    );
     for (tool, spec) in listed.iter().zip(specs) {
         assert_eq!(tool.name, spec.name);
         assert_eq!(tool.description.as_deref(), Some(spec.description));

@@ -1312,6 +1312,34 @@ impl SessionProvider for AgentConnections {
         let removed = self.tunnels().remove(&key);
         drop(removed);
     }
+
+    fn transactions_unavailable(&self, connection: &ConnectionInfo) -> Option<String> {
+        if connection.kind != engine_agent::ConnectionKind::Sqlite {
+            return None;
+        }
+        // A record that cannot be read fails the open that follows, with its own error.
+        let record = Connector::record(&connection.id).ok()?;
+        is_in_memory_sqlite(&record.uri).then(|| {
+            "an in-memory SQLite database exists for one session only, so a transaction's own \
+             session would not see it; transactions are available on SQLite database files"
+                .to_owned()
+        })
+    }
+}
+
+/// A SQLite URI of a database that lives in memory or is private to one connection: `:memory:`,
+/// `mode=memory`, and a URI with no path at all (`sqlite://`, `sqlite://?x=1`), which SQLite opens
+/// as a temporary database of its own. A second session would see another, empty database.
+fn is_in_memory_sqlite(uri: &str) -> bool {
+    let lower = uri.trim().to_ascii_lowercase();
+    if lower.contains(":memory:") || lower.contains("mode=memory") {
+        return true;
+    }
+    let rest = lower
+        .strip_prefix("sqlite://")
+        .or_else(|| lower.strip_prefix("sqlite:"))
+        .unwrap_or(&lower);
+    rest.split(['?', '#']).next().unwrap_or_default().is_empty()
 }
 
 #[cfg(test)]
@@ -1898,6 +1926,30 @@ mod tests {
     }
 
     #[test]
+    fn an_in_memory_sqlite_uri_is_recognised() {
+        for uri in [
+            "sqlite://:memory:",
+            "sqlite::memory:",
+            "sqlite://file:x?mode=memory&cache=shared",
+            "SQLITE://:MEMORY:",
+        ] {
+            assert!(is_in_memory_sqlite(uri), "{uri}");
+        }
+        // No path at all: a temporary database of the connection's own.
+        for uri in ["sqlite://", "sqlite:", "", "sqlite://?mode=rwc", "sqlite://#x"] {
+            assert!(is_in_memory_sqlite(uri), "{uri:?}");
+        }
+        for uri in [
+            "sqlite:///Users/me/data.db",
+            "sqlite://relative.db",
+            "sqlite:data.db",
+            "sqlite://C:/data/x.db?mode=rwc",
+        ] {
+            assert!(!is_in_memory_sqlite(uri), "{uri:?}");
+        }
+    }
+
+    #[test]
     fn closing_one_open_never_drops_the_tunnel_of_a_later_open_of_the_connection() {
         let rig = rig(Scripted::default());
         let agent = AgentConnections::new(rig.connector.clone(), rig.dyn_prompts());
@@ -1966,6 +2018,21 @@ mod tests {
             1,
             "the other connection's tunnel stays"
         );
+    }
+
+    #[test]
+    fn the_credential_hint_is_appended_to_the_unavailable_error_only_when_set() {
+        let rig = rig(Scripted::default());
+        let error = CredentialError::Platform("keychain locked".into());
+        let plain = AgentConnections::new(rig.connector.clone(), rig.dyn_prompts());
+        let without = plain.credentials_unavailable(&error).to_string();
+        assert!(without.contains("the credential store could not be read"), "{without}");
+        assert!(without.ends_with("so the session was not opened"), "{without}");
+        let hinted = AgentConnections::new(rig.connector.clone(), rig.dyn_prompts())
+            .with_credential_hint("run the authorize command once.".into());
+        let with = hinted.credentials_unavailable(&error).to_string();
+        assert!(with.starts_with(&without), "{with}");
+        assert!(with.ends_with(". run the authorize command once."), "{with}");
     }
 
     #[test]
@@ -2065,21 +2132,6 @@ mod tests {
         })
         .agent_error(&info);
         assert!(error.to_string().contains("`sqlite` driver"), "{error}");
-    }
-
-    #[test]
-    fn the_credential_hint_is_appended_to_the_unavailable_error_only_when_set() {
-        let rig = rig(Scripted::default());
-        let error = CredentialError::Platform("keychain locked".into());
-        let plain = AgentConnections::new(rig.connector.clone(), rig.dyn_prompts());
-        let without = plain.credentials_unavailable(&error).to_string();
-        assert!(without.contains("the credential store could not be read"), "{without}");
-        assert!(without.ends_with("so the session was not opened"), "{without}");
-        let hinted = AgentConnections::new(rig.connector.clone(), rig.dyn_prompts())
-            .with_credential_hint("run the authorize command once.".into());
-        let with = hinted.credentials_unavailable(&error).to_string();
-        assert!(with.starts_with(&without), "{with}");
-        assert!(with.ends_with(". run the authorize command once."), "{with}");
     }
 
     #[test]

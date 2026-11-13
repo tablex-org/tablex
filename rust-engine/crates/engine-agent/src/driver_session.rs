@@ -14,15 +14,18 @@
 
 use crate::cancel::CancelToken;
 use crate::error::AgentError;
-use crate::limits::RowCollector;
+use crate::limits::{Limits, RowCollector};
 use crate::ports::{
-    ConnectionKind, Language, Node, NodeLevel, NodePage, NodeQuery, RunRequest, Session,
-    SessionInfo, TableRef,
+    ConnectionKind, Language, Node, NodeLevel, NodePage, NodeQuery, RoutinePage, RoutineQuery,
+    RunRequest, Session, SessionInfo, TableRef, TxControl,
 };
 use crate::result::{QueryResult, ResultColumn};
 use crate::secret::SecretText;
 use crate::table::TableDescription;
-use engine_driver_api::sql::{SqlColumnNode, SqlObjectRef, TableColumn, TableProperties};
+use engine_driver_api::sql::{
+    SchemaObjectKind, SchemaObjectRef, SchemaObjectSource, SqlColumnNode, SqlObjectRef,
+    TableColumn, TableProperties,
+};
 use engine_driver_api::{
     CancelRequest, Capability, NavigatorRequest, QueryRequest, SqlDialectInfo,
 };
@@ -116,6 +119,22 @@ impl DriverSessionAdapter {
         self.handle
             .capabilities()
             .has(Capability::MetadataTableProperties)
+    }
+
+    fn supports_schemas(&self) -> bool {
+        self.handle
+            .capabilities()
+            .sql_dialect
+            .as_ref()
+            .is_some_and(|dialect| dialect.supports_schemas)
+    }
+
+    /// Whether the driver advertises `kind` among its navigator kinds (an empty list is a driver
+    /// that does not say). A driver that does not know a kind would answer a listing of its
+    /// tables instead of nothing.
+    fn lists_kind(&self, kind: SchemaObjectKind) -> bool {
+        let kinds = &self.handle.capabilities().navigator_kinds;
+        kinds.is_empty() || kinds.iter().any(|known| known == kind.as_str())
     }
 
     fn describe_from_columns(&self, table: &TableRef) -> Result<TableDescription, AgentError> {
@@ -250,12 +269,11 @@ fn session_lex(
 
 impl Session for DriverSessionAdapter {
     fn info(&self) -> SessionInfo {
-        let dialect = self.handle.capabilities().sql_dialect.as_ref();
         SessionInfo {
             kind: self.kind,
             language: self.kind.language(),
             lex: self.lex,
-            supports_schemas: dialect.is_some_and(|dialect| dialect.supports_schemas),
+            supports_schemas: self.supports_schemas(),
             rich_describe: self.rich_describe(),
         }
     }
@@ -330,6 +348,72 @@ impl Session for DriverSessionAdapter {
             properties,
             usize::MAX,
         ))
+    }
+
+    fn list_routines(&self, query: &RoutineQuery) -> Result<RoutinePage, AgentError> {
+        if !self.lists_kind(query.kind) {
+            return Ok(RoutinePage::default());
+        }
+        // The request the navigator sends for a schema's objects of one kind.
+        let schemas = self.supports_schemas();
+        let mut payload = serde_json::Map::new();
+        let mut parent = None;
+        if let Some(database) = &query.database {
+            payload.insert("database".into(), json!(database));
+            parent = Some(format!("database:{database}"));
+            if let (true, Some(schema)) = (schemas, &query.schema) {
+                payload.insert("schema".into(), json!(schema));
+                parent = Some(format!("schema:{database}:{schema}"));
+            }
+        }
+        if let Some(filter) = &query.filter {
+            payload.insert("filter".into(), json!(filter));
+        }
+        payload.insert("kind".into(), json!(query.kind.as_str()));
+        let page = self.navigate(&NavigatorRequest {
+            parent,
+            database: query.database.clone(),
+            payload: Some(Value::Object(payload)),
+            cursor: query.cursor.clone(),
+            limit: query.limit as u64,
+        })?;
+        let routines = page
+            .nodes
+            .into_iter()
+            .filter(|node| node.kind == query.kind.as_str())
+            .map(|node| {
+                serde_json::from_value::<SchemaObjectRef>(node.payload).unwrap_or_else(|_| {
+                    SchemaObjectRef {
+                        database: query.database.clone(),
+                        schema: query.schema.clone(),
+                        kind: query.kind,
+                        name: node.label,
+                        arguments: None,
+                        table: None,
+                        identity: None,
+                    }
+                })
+            })
+            .collect();
+        Ok(RoutinePage {
+            routines,
+            next_cursor: page.next_cursor,
+        })
+    }
+
+    fn routine_source(&self, reference: &SchemaObjectRef) -> Result<String, AgentError> {
+        if !self.rich_describe() || !self.lists_kind(reference.kind) {
+            return Err(AgentError::Unsupported(format!(
+                "this database has no readable {} objects",
+                reference.kind.as_str()
+            )));
+        }
+        let request =
+            serde_json::to_value(reference).map_err(|e| AgentError::Internal(e.to_string()))?;
+        let response = self.session.describe_object(&request).map_err(map_error)?;
+        serde_json::from_value::<SchemaObjectSource>(response)
+            .map(|described| described.source)
+            .map_err(|error| AgentError::driver("describe.malformed", error.to_string(), false))
     }
 
     fn run(
@@ -416,6 +500,30 @@ impl Session for DriverSessionAdapter {
         let mut result = collector.finish(page.flags.truncated, affected);
         result.read_only_enforced = read_only;
         Ok(result)
+    }
+
+    /// `BEGIN` / `COMMIT` / `ROLLBACK` as a plain driver query, not read-only and not through
+    /// the agent policy (which refuses statements that change transaction state). Only for the
+    /// engines whose transaction lives on one session: PostgreSQL and SQLite.
+    fn control(&self, action: TxControl, cancel: &CancelToken) -> Result<(), AgentError> {
+        if !matches!(self.kind, ConnectionKind::PostgreSql | ConnectionKind::Sqlite) {
+            return Err(AgentError::Unsupported(
+                "transactions are available on PostgreSQL and SQLite connections".into(),
+            ));
+        }
+        self.run(
+            &RunRequest {
+                language: Language::Sql,
+                text: action.sql(),
+                database: None,
+                limits: &Limits::default(),
+                row_limit: 1,
+                confirmed: false,
+                read_only: false,
+            },
+            cancel,
+        )
+        .map(drop)
     }
 
     fn disconnect(&self) {

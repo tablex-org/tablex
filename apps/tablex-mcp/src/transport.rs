@@ -12,6 +12,8 @@ use rmcp::ServiceExt;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_util::sync::CancellationToken;
 
+use engine_agent::ToolLayer;
+
 use crate::server::{McpServer, MAX_CONCURRENT_CALLS};
 
 /// The longest single message (one line of JSON) a client may send. rmcp reads a line into a
@@ -32,6 +34,19 @@ pub enum ServeError {
          closed cleanly"
     )]
     TeardownIncomplete,
+}
+
+/// Rolls back transactions nobody has called for the idle timeout, every `interval`, on the
+/// blocking pool (a rollback waits for its server). The layer also does it at the start of every
+/// call; this is for the model that went quiet. Ends when its task is aborted.
+async fn sweep_idle_transactions(layer: Arc<ToolLayer>, interval: std::time::Duration) {
+    let mut ticks = tokio::time::interval(interval);
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        ticks.tick().await;
+        let layer = Arc::clone(&layer);
+        let _ = tokio::task::spawn_blocking(move || layer.expire_idle_transactions()).await;
+    }
 }
 
 /// A reader that cancels `gone` when the peer is gone (end of input or a read error), and ends
@@ -142,6 +157,10 @@ impl McpServer {
         let calls = self.calls();
         let oversized = Arc::new(AtomicBool::new(false));
         let mut signalled = false;
+        let sweeper = tokio::spawn(sweep_idle_transactions(
+            Arc::clone(&layer),
+            self.sweep_interval(),
+        ));
         let result = self
             .run(
                 reader,
@@ -153,6 +172,7 @@ impl McpServer {
             )
             .await;
         gone.cancel();
+        sweeper.abort();
         // `close_all` blocks (drivers disconnect, tunnels close, an open in flight finishes), and
         // a driver may hang: wait for it, but not past the deadline or a second signal. A hung
         // blocking thread cannot keep the process alive (see `main`).

@@ -919,7 +919,7 @@ mod assistant_panel_tests {
         );
         assert_eq!(
             super::assistant::panel::access_sentence(AgentAccess::SchemaOnly),
-            "Schema only: table and column names, no row data"
+            "Schema only: table, column and routine definitions, no row data"
         );
         assert_eq!(
             super::assistant::panel::access_sentence(AgentAccess::Read),

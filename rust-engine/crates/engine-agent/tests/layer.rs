@@ -8,9 +8,10 @@ use engine_agent::{
     read_entries, AgentAccess, AgentError, ApprovalDecision, AuditConfig, AuditLog, CancelToken,
     ConnectionInfo, ConnectionKind, ConnectionTypeInfo, Limits, ToolLayer, ToolOutcome,
 };
+use engine_driver_api::sql::{SchemaObjectKind, SchemaObjectRef};
 use serde_json::{json, Value};
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const SQL: &str = "sql1";
@@ -62,6 +63,7 @@ fn fixture_with(
     sql.databases = vec!["app".into(), "other".into()];
     sql.schemas = vec!["public".into()];
     sql.info.supports_schemas = true;
+    sql.routines = Mutex::new(seeded_routines());
     let sql = sql.arc();
     let redis = FakeSession::new(ConnectionKind::Redis).arc();
     let provider = FakeProvider::new();
@@ -96,6 +98,53 @@ fn fixture_with(
         audit_path,
         _dir: dir,
     }
+}
+
+fn routine(
+    kind: SchemaObjectKind,
+    name: &str,
+    arguments: Option<&str>,
+    table: Option<&str>,
+) -> SchemaObjectRef {
+    SchemaObjectRef {
+        database: Some("app".into()),
+        schema: Some("public".into()),
+        kind,
+        name: name.into(),
+        arguments: arguments.map(str::to_owned),
+        table: table.map(str::to_owned),
+        identity: arguments.map(|text| format!("oid:{text}")),
+    }
+}
+
+fn seeded_routines() -> Vec<(SchemaObjectRef, String)> {
+    use SchemaObjectKind::{Function, Procedure, Trigger};
+    vec![
+        (
+            routine(Function, "add", Some("integer, integer"), None),
+            "CREATE FUNCTION public.add(a integer, b integer) RETURNS integer AS 'select a + b'".into(),
+        ),
+        (
+            routine(Function, "add", Some("text, text"), None),
+            "CREATE FUNCTION public.add(a text, b text) RETURNS text AS 'select a || b'".into(),
+        ),
+        (
+            routine(Function, "Audit_Fn", Some(""), None),
+            "CREATE FUNCTION public.\"Audit_Fn\"() RETURNS trigger".into(),
+        ),
+        (
+            routine(Function, "refresh_totals", Some(""), None),
+            "CREATE FUNCTION public.refresh_totals() RETURNS void".into(),
+        ),
+        (
+            routine(Procedure, "purge_old", Some("integer"), None),
+            "CREATE PROCEDURE public.purge_old(days integer)".into(),
+        ),
+        (
+            routine(Trigger, "audit_orders", None, Some("orders")),
+            "CREATE TRIGGER audit_orders AFTER INSERT ON public.orders FOR EACH ROW EXECUTE FUNCTION public.\"Audit_Fn\"()".into(),
+        ),
+    ]
 }
 
 fn fixture(setting: Option<AgentAccess>) -> Fixture {
@@ -257,7 +306,7 @@ fn expected(case: &str, effective: usize) -> &'static str {
     const OK: &str = "ok";
     let row: [&str; 4] = match case {
         "open_session" | "list_namespaces" | "list_tables" | "describe_table"
-        | "get_schema_context" => [D, OK, OK, OK],
+        | "get_schema_context" | "list_routines" | "get_routine_source" => [D, OK, OK, OK],
         "select" | "explain" | "redis_get" | "redis_scan" => [D, D, OK, OK],
         "insert" | "redis_set" => [D, D, W, OK],
         "drop" | "redis_flushdb" => [D, D, W, X],
@@ -297,6 +346,16 @@ fn matrix_calls() -> Vec<(&'static str, &'static str, Value)> {
             "get_schema_context",
             "get_schema_context",
             json!({"connection_id": SQL, "database": "app", "schema": "public"}),
+        ),
+        (
+            "list_routines",
+            "list_routines",
+            json!({"connection_id": SQL, "kind": "function", "database": "app", "schema": "public"}),
+        ),
+        (
+            "get_routine_source",
+            "get_routine_source",
+            json!({"connection_id": SQL, "kind": "trigger", "name": "audit_orders", "table": "orders", "database": "app", "schema": "public"}),
         ),
         ("select", "execute_query", sql("SELECT 1")),
         ("explain", "explain_query", sql("SELECT 1")),
@@ -370,6 +429,8 @@ fn access_by_connection_type_by_tool_by_statement_class() {
                                     | "list_tables"
                                     | "describe_table"
                                     | "get_schema_context"
+                                    | "list_routines"
+                                    | "get_routine_source"
                             )
                     ),
                     "{case}: what reached the driver"
@@ -2246,4 +2307,291 @@ fn a_name_with_a_zero_width_joiner_reaches_the_model_spelled_not_altered() {
         digest.contains("200C") && digest.contains("FE0F"),
         "{digest}"
     );
+}
+
+// ------------------------------------------------------------ routines
+
+fn routine_names(listed: &Value) -> Vec<&str> {
+    listed["routines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["name"].as_str().unwrap())
+        .collect()
+}
+
+fn list_functions(fx: &Fixture, extra: Value) -> Value {
+    let mut args = json!({"connection_id": SQL, "kind": "function", "database": "app", "schema": "public"});
+    for (key, value) in extra.as_object().unwrap() {
+        args[key] = value.clone();
+    }
+    fx.ok("list_routines", args)
+}
+
+#[test]
+fn routine_tools_need_schema_access_and_a_session() {
+    let list = json!({"connection_id": SQL, "kind": "function", "database": "app", "schema": "public"});
+    let source = json!({"connection_id": SQL, "kind": "trigger", "name": "audit_orders", "table": "orders", "database": "app", "schema": "public"});
+    for setting in [None, Some(AgentAccess::Off)] {
+        let fx = fixture(setting);
+        for (tool, args) in [("list_routines", list.clone()), ("get_routine_source", source.clone())] {
+            let outcome = fx.call(tool, args);
+            assert_eq!(code(&outcome), "agent.access_denied", "{tool}: {outcome:?}");
+        }
+        assert!(fx.sql.routine_lookups.lock().unwrap().is_empty());
+    }
+    for setting in [AgentAccess::SchemaOnly, AgentAccess::Read, AgentAccess::ReadWrite] {
+        let fx = fixture(Some(setting));
+        fx.open_all();
+        assert_eq!(code(&fx.call("list_routines", list.clone())), "ok", "{setting:?}");
+        assert_eq!(code(&fx.call("get_routine_source", source.clone())), "ok", "{setting:?}");
+    }
+}
+
+#[test]
+fn routine_tools_refuse_redis_with_a_clear_message() {
+    let fx = fixture(Some(AgentAccess::Read));
+    fx.open_all();
+    for (tool, args) in [
+        ("list_routines", json!({"connection_id": REDIS, "kind": "function"})),
+        ("get_routine_source", json!({"connection_id": REDIS, "kind": "function", "name": "f"})),
+    ] {
+        let outcome = fx.call(tool, args);
+        assert_eq!(code(&outcome), "agent.unsupported", "{tool}");
+        assert!(outcome.to_text().contains("Redis"), "{}", outcome.to_text());
+    }
+}
+
+#[test]
+fn routine_tools_refuse_mongodb() {
+    let fx = fixture(Some(AgentAccess::Read));
+    let mongo = FakeSession::new(ConnectionKind::MongoDb).arc();
+    fx.provider.with_session("mongo1", mongo);
+    let catalog = FakeCatalog::new(vec![connection("mongo1", ConnectionKind::MongoDb, Some(AgentAccess::Read))]);
+    let layer = ToolLayer::new(catalog, fx.provider.clone(), "test");
+    layer.call("open_session", json!({"connection_id": "mongo1"}));
+    for (tool, args) in [
+        ("list_routines", json!({"connection_id": "mongo1", "kind": "trigger"})),
+        ("get_routine_source", json!({"connection_id": "mongo1", "kind": "trigger", "name": "t"})),
+    ] {
+        let outcome = layer.call(tool, args);
+        assert_eq!(code(&outcome), "agent.unsupported", "{tool}");
+        assert!(outcome.to_text().contains("mongodb"), "{}", outcome.to_text());
+    }
+}
+
+#[test]
+fn routine_requests_are_validated() {
+    let fx = fixture(Some(AgentAccess::Read));
+    fx.open_all();
+    let invalid = |tool: &str, args: Value| code(&fx.call(tool, args)).to_owned();
+    // `kind` is required and limited to the four kinds.
+    assert_eq!(invalid("list_routines", json!({"connection_id": SQL})), "agent.invalid_arguments");
+    assert_eq!(
+        invalid("list_routines", json!({"connection_id": SQL, "kind": "sequence"})),
+        "agent.invalid_arguments"
+    );
+    // Neither a ref nor kind + name; or both.
+    assert_eq!(invalid("get_routine_source", json!({"connection_id": SQL})), "agent.invalid_arguments");
+    assert_eq!(
+        invalid("get_routine_source", json!({"connection_id": SQL, "kind": "function"})),
+        "agent.invalid_arguments"
+    );
+    let reference = json!({"kind": "function", "name": "add"});
+    assert_eq!(
+        invalid("get_routine_source", json!({"connection_id": SQL, "ref": reference, "name": "add"})),
+        "agent.invalid_arguments"
+    );
+    // A ref of a kind this tool does not cover.
+    assert_eq!(
+        invalid("get_routine_source", json!({"connection_id": SQL, "ref": {"kind": "sequence", "name": "s"}})),
+        "agent.invalid_arguments"
+    );
+    // Two databases and a schema level: both must be named.
+    assert_eq!(
+        invalid("list_routines", json!({"connection_id": SQL, "kind": "function"})),
+        "agent.invalid_arguments"
+    );
+    assert_eq!(
+        invalid("get_routine_source", json!({"connection_id": SQL, "kind": "function", "name": "add"})),
+        "agent.invalid_arguments"
+    );
+}
+
+#[test]
+fn list_routines_filters_pages_and_keeps_overloads_apart() {
+    let fx = fixture(Some(AgentAccess::SchemaOnly));
+    fx.open_all();
+    let all = list_functions(&fx, json!({}));
+    assert_eq!(routine_names(&all), ["Audit_Fn", "add", "add", "refresh_totals"]);
+    assert!(all.get("next_cursor").is_none());
+    let overloads = all["routines"].as_array().unwrap();
+    assert_eq!(overloads[1]["arguments"], "integer, integer");
+    assert_eq!(overloads[2]["arguments"], "text, text");
+    assert_eq!(overloads[1]["kind"], "function");
+    assert_eq!(
+        overloads[1]["ref"],
+        json!({"database": "app", "schema": "public", "kind": "function", "name": "add",
+               "arguments": "integer, integer", "identity": "oid:integer, integer"})
+    );
+
+    let first = list_functions(&fx, json!({"limit": 3}));
+    assert_eq!(routine_names(&first), ["Audit_Fn", "add", "add"]);
+    let cursor = first["next_cursor"].as_str().unwrap();
+    let rest = list_functions(&fx, json!({"limit": 3, "cursor": cursor}));
+    assert_eq!(routine_names(&rest), ["refresh_totals"]);
+    assert!(rest.get("next_cursor").is_none());
+
+    // Case-insensitive substring, like list_tables.
+    assert_eq!(routine_names(&list_functions(&fx, json!({"filter": "AUDIT"}))), ["Audit_Fn"]);
+    assert!(routine_names(&list_functions(&fx, json!({"filter": "nothing"}))).is_empty());
+
+    // Each kind lists its own objects; a trigger names its table.
+    let triggers = fx.ok(
+        "list_routines",
+        json!({"connection_id": SQL, "kind": "trigger", "database": "app", "schema": "public"}),
+    );
+    assert_eq!(routine_names(&triggers), ["audit_orders"]);
+    assert_eq!(triggers["routines"][0]["table"], "orders");
+    let procedures = fx.ok(
+        "list_routines",
+        json!({"connection_id": SQL, "kind": "procedure", "database": "app", "schema": "public"}),
+    );
+    assert_eq!(routine_names(&procedures), ["purge_old"]);
+    let events = fx.ok(
+        "list_routines",
+        json!({"connection_id": SQL, "kind": "event", "database": "app", "schema": "public"}),
+    );
+    assert_eq!(events["routines"], json!([]));
+}
+
+#[test]
+fn a_listed_ref_round_trips_to_its_source() {
+    let fx = fixture(Some(AgentAccess::SchemaOnly));
+    fx.open_all();
+    let all = list_functions(&fx, json!({}));
+    for (index, wanted) in [(1, "a integer"), (2, "a text")] {
+        let item = &all["routines"][index];
+        let source = fx.ok("get_routine_source", json!({"connection_id": SQL, "ref": item["ref"]}));
+        assert_eq!(source["kind"], "function");
+        assert_eq!(source["name"], "add");
+        assert_eq!(source["truncated"], false);
+        assert!(source["source"].as_str().unwrap().contains(wanted), "{source}");
+    }
+    // What reached the session is the very reference the listing returned.
+    let lookups = fx.sql.routine_lookups.lock().unwrap();
+    assert_eq!(lookups.len(), 2);
+    for (lookup, index) in lookups.iter().zip([1, 2]) {
+        assert_eq!(serde_json::to_value(lookup).unwrap(), all["routines"][index]["ref"]);
+    }
+}
+
+#[test]
+fn a_routine_can_be_named_by_kind_and_name() {
+    let fx = fixture(Some(AgentAccess::SchemaOnly));
+    fx.open_all();
+    let source = fx.ok(
+        "get_routine_source",
+        json!({"connection_id": SQL, "kind": "function", "name": "add", "arguments": "text, text",
+               "database": "app", "schema": "public"}),
+    );
+    assert!(source["source"].as_str().unwrap().contains("a text"), "{source}");
+    let trigger = fx.ok(
+        "get_routine_source",
+        json!({"connection_id": SQL, "kind": "trigger", "name": "audit_orders", "table": "orders",
+               "database": "app", "schema": "public"}),
+    );
+    assert!(trigger["source"].as_str().unwrap().starts_with("CREATE TRIGGER"), "{trigger}");
+    let lookup = fx.sql.routine_lookups.lock().unwrap()[1].clone();
+    assert_eq!(lookup.table.as_deref(), Some("orders"));
+    assert_eq!(lookup.database.as_deref(), Some("app"));
+    assert_eq!(lookup.identity, None);
+}
+
+#[test]
+fn a_missing_routine_is_not_found() {
+    let fx = fixture(Some(AgentAccess::SchemaOnly));
+    fx.open_all();
+    let outcome = fx.call(
+        "get_routine_source",
+        json!({"connection_id": SQL, "kind": "function", "name": "gone", "database": "app", "schema": "public"}),
+    );
+    assert_eq!(code(&outcome), "describe.not_found", "{outcome:?}");
+}
+
+#[test]
+fn a_long_source_is_cut_to_the_ddl_limit_and_says_so() {
+    let fx = fixture(Some(AgentAccess::SchemaOnly));
+    fx.open_all();
+    let limit = Limits::default().max_ddl_bytes;
+    fx.sql.routines.lock().unwrap().push((
+        routine(SchemaObjectKind::Function, "huge", Some(""), None),
+        format!("CREATE FUNCTION huge() AS $$ {} $$", "x".repeat(limit * 3)),
+    ));
+    let source = fx.ok(
+        "get_routine_source",
+        json!({"connection_id": SQL, "kind": "function", "name": "huge", "arguments": "", "database": "app", "schema": "public"}),
+    );
+    assert_eq!(source["truncated"], true);
+    let text = source["source"].as_str().unwrap();
+    assert!(text.starts_with("CREATE FUNCTION huge()"), "{text}");
+    assert!(text.contains("[truncated, "), "{text}");
+    assert!(text.len() < limit + 100, "{} bytes", text.len());
+    // A source within the limit is whole.
+    let short = fx.ok(
+        "get_routine_source",
+        json!({"connection_id": SQL, "kind": "procedure", "name": "purge_old", "arguments": "integer", "database": "app", "schema": "public"}),
+    );
+    assert_eq!(short["truncated"], false);
+}
+
+#[test]
+fn secrets_in_a_routine_source_are_masked() {
+    let secret = "Zq7-s3cr3t-pw";
+    let fx = fixture_with(
+        Some(AgentAccess::SchemaOnly),
+        false,
+        false,
+        None,
+        Limits::default(),
+        vec![engine_agent::SecretText::from(secret)],
+    );
+    fx.open_all();
+    fx.sql.routines.lock().unwrap().push((
+        routine(SchemaObjectKind::Function, "leaky", Some(""), None),
+        format!(
+            "CREATE FUNCTION leaky() AS $$ connect('postgres://admin:other-pw@db.internal/app'); \
+             connect('host=x password={secret}'); select '{secret}' $$"
+        ),
+    ));
+    let outcome = fx.call(
+        "get_routine_source",
+        json!({"connection_id": SQL, "kind": "function", "name": "leaky", "arguments": "", "database": "app", "schema": "public"}),
+    );
+    let text = outcome.to_text();
+    assert!(!text.contains(secret), "{text}");
+    assert!(!text.contains("other-pw"), "{text}");
+    assert!(text.contains("db.internal"), "{text}");
+}
+
+#[test]
+fn routine_calls_are_audited_without_the_source() {
+    let fx = fixture(Some(AgentAccess::SchemaOnly));
+    fx.open_all();
+    list_functions(&fx, json!({}));
+    fx.ok(
+        "get_routine_source",
+        json!({"connection_id": SQL, "kind": "trigger", "name": "audit_orders", "table": "orders", "database": "app", "schema": "public"}),
+    );
+    fx.call("get_routine_source", json!({"connection_id": SQL, "kind": "function", "name": "gone", "database": "app", "schema": "public"}));
+    let entries = fx.audit();
+    let line = |tool: &str| entries.iter().filter(|entry| entry.tool == tool).collect::<Vec<_>>();
+    assert_eq!(line("list_routines").len(), 1);
+    assert_eq!(line("list_routines")[0].outcome, "ok");
+    let sources = line("get_routine_source");
+    assert_eq!(sources.len(), 2);
+    assert!(sources.iter().any(|entry| entry.outcome == "ok"));
+    assert!(sources.iter().any(|entry| entry.outcome == "describe.not_found"));
+    assert!(sources.iter().all(|entry| entry.connection_id.as_deref() == Some(SQL)));
+    assert!(sources.iter().all(|entry| entry.statement.is_none()));
 }

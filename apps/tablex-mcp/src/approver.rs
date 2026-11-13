@@ -46,7 +46,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use engine_agent::sanitize::{is_right_to_left, spell_out};
-use engine_agent::{ApprovalDecision, CancelToken, Language, WriteApproval, WriteApprover};
+use engine_agent::{
+    ApprovalDecision, CancelToken, Language, TransactionApproval, WriteApproval, WriteApprover,
+};
 use engine_connect::profile::mcp_writes_enabled;
 use rmcp::model::{
     ClientResult, ElicitRequest, ElicitRequestParams, ElicitResult, ElicitationAction,
@@ -78,6 +80,11 @@ pub const REASON_TOO_LONG: &str = "too long to be shown for approval through MCP
 pub const REASON_HIDDEN_BLANKS: &str = "a line has a run of more than 24 spaces or tabs (a tab counts \
      as 8) followed by more text, which a code block can hide off-screen; the user can run it in the \
      TableX app";
+/// Refusal: the writes of a transaction cannot be reviewed in one commit question.
+pub const REASON_COMMIT_NOT_REVIEWABLE: &str = "the changes in this transaction are too long to be \
+     shown for approval through MCP (more than 200 lines, 8000 characters in all or 400 in one line, \
+     or a line hides text behind a run of blanks); roll the transaction back, the user can run the \
+     changes in the TableX app";
 /// Refusal: [`MAX_OPEN_QUESTIONS`] questions are open.
 pub const REASON_BUSY: &str = "other changes are waiting for the user's answer";
 /// Refusal: the layer should never send a dangerous statement here.
@@ -97,6 +104,8 @@ const REASON_CANCELLED: &str = "cancelled";
 pub const ANSWER_PROPERTY: &str = "run";
 /// Its title, as the client shows it next to the control.
 pub const ANSWER_TITLE: &str = "Run this statement";
+/// The title when the question is the COMMIT of a transaction.
+pub const COMMIT_TITLE: &str = "Commit this transaction";
 
 /// Declines of one connection after which it is closed to MCP writes for the rest of the session.
 pub const MAX_DECLINES: u32 = 3;
@@ -242,6 +251,13 @@ impl ElicitingApprover {
     /// says so), right-to-left letters are announced, and the size is stated in lines and
     /// characters.
     pub fn message(request: &WriteApproval<'_>) -> String {
+        if let Some(TransactionApproval {
+            id,
+            commit: Some(statements),
+        }) = request.transaction
+        {
+            return Self::commit_message(request, id, statements);
+        }
         let noun = match request.language {
             Language::Redis => "command",
             Language::Sql | Language::Other => "statement",
@@ -264,6 +280,13 @@ impl ElicitingApprover {
         );
         if let Some(database) = request.database {
             message.push_str(&format!("Database: {}\n\n", label(database)));
+        }
+        if let Some(transaction) = request.transaction {
+            message.push_str(&format!(
+                "The {noun} runs inside transaction {}. It is NOT committed until you approve the \
+                 commit of the transaction; a rollback undoes it.\n\n",
+                label(transaction.id)
+            ));
         }
         message.push_str(&format!(
             "The {noun} has {lines} line{} and {characters} character{}.\n\n",
@@ -307,12 +330,84 @@ impl ElicitingApprover {
         message
     }
 
+    /// The commit question: the connection, the transaction, and every write statement that ran
+    /// in it, each in a code block of its own built like the statement of [`message`](Self::message)
+    /// (a fence longer than any backtick run in it, characters without a shape spelled out). The
+    /// text around the blocks is ours; a statement cannot end its block early, so it cannot add to it.
+    fn commit_message(
+        request: &WriteApproval<'_>,
+        transaction: &str,
+        statements: &[String],
+    ) -> String {
+        let label = |text: &str| code_span(&spell_out(text, false).0);
+        let connection_type = if request.connection_type.trim().is_empty() {
+            "No type".to_owned()
+        } else {
+            label(request.connection_type)
+        };
+        let plural = |n: usize| if n == 1 { "" } else { "s" };
+        let total = statements.len();
+        let mut message = format!(
+            "An MCP client asks to COMMIT a transaction. The {total} change{} below ran inside it \
+             and none is final yet: they become final only if you accept. Nothing is committed \
+             unless you accept.\n\nConnection: {} ({connection_type})\n\nTransaction: {}\n\n",
+            plural(total),
+            label(request.connection_name),
+            label(transaction),
+        );
+        let names = [Some(request.connection_name), Some(request.connection_type)];
+        if names
+            .into_iter()
+            .flatten()
+            .any(|name| name.chars().any(is_right_to_left))
+        {
+            message.push_str(
+                "Warning: a name above has right-to-left letters, which can change how the text \
+                 around it is displayed. Read it with care.\n\n",
+            );
+        }
+        let mut spelled_total = 0;
+        let mut right_to_left = false;
+        for statement in statements {
+            let (_, spelled) = spell_out(statement, true);
+            spelled_total += spelled;
+            right_to_left |= statement.chars().any(is_right_to_left);
+        }
+        if spelled_total > 0 {
+            message.push_str(&format!(
+                "Note: the changes have {spelled_total} character{} without a shape of their own \
+                 (controls, direction changes, zero-width characters), written as <U+XXXX> below. \
+                 The statements that ran have the original characters.\n\n",
+                plural(spelled_total)
+            ));
+        }
+        if right_to_left {
+            message.push_str(
+                "Warning: a change has right-to-left letters, which can change how the text \
+                 around them is displayed. Read it with care.\n\n",
+            );
+        }
+        for (index, statement) in statements.iter().enumerate() {
+            let (shown, _) = spell_out(statement, true);
+            let fence = "`".repeat(longest_backtick_run(&shown).max(2) + 1);
+            message.push_str(&format!(
+                "Change {} of {total}: exactly one statement is between the two lines of {} \
+                 backticks below.\n\n{fence}\n{shown}\n{fence}\n\n",
+                index + 1,
+                fence.len(),
+            ));
+        }
+        message.truncate(message.trim_end().len());
+        message
+    }
+
     /// The requested schema: one required boolean, [`ANSWER_PROPERTY`], whose default is `false`
     /// (a client that fills in defaults declines).
-    fn schema() -> Option<ElicitationSchema> {
+    fn schema(commit: bool) -> Option<ElicitationSchema> {
+        let title = if commit { COMMIT_TITLE } else { ANSWER_TITLE };
         ElicitationSchema::builder()
             .required_bool_with(ANSWER_PROPERTY, |boolean| {
-                boolean.title(ANSWER_TITLE).with_default(false)
+                boolean.title(title).with_default(false)
             })
             .build()
             .ok()
@@ -401,31 +496,52 @@ pub fn code_span(text: &str) -> String {
     }
 }
 
+impl ElicitingApprover {
+    /// Conditions 1-3 of the module docs (and: no dangerous statement), in that order. The caller
+    /// that can be asked, or the fixed reason a write is refused without asking.
+    fn preflight(&self, request: &WriteApproval<'_>) -> Result<Caller, &'static str> {
+        if request.dangerous.is_some() {
+            return Err(REASON_DANGEROUS);
+        }
+        if !self.switch_on() {
+            return Err(REASON_SWITCH_OFF);
+        }
+        if request.production {
+            return Err(REASON_PRODUCTION);
+        }
+        Caller::current()
+            .filter(Caller::can_ask)
+            .ok_or(REASON_NO_ELICITATION)
+    }
+}
+
 impl WriteApprover for ElicitingApprover {
     fn approve(&self, request: &WriteApproval<'_>, cancel: &CancelToken) -> ApprovalDecision {
         let refuse = |reason: &str| ApprovalDecision::Refuse {
             reason: reason.to_owned(),
         };
-        if request.dangerous.is_some() {
-            return refuse(REASON_DANGEROUS);
-        }
-        if !self.switch_on() {
-            return refuse(REASON_SWITCH_OFF);
-        }
-        if request.production {
-            return refuse(REASON_PRODUCTION);
-        }
-        let Some(caller) = Caller::current().filter(Caller::can_ask) else {
-            return refuse(REASON_NO_ELICITATION);
+        let caller = match self.preflight(request) {
+            Ok(caller) => caller,
+            Err(reason) => return refuse(reason),
         };
-        if let Some(reason) = Self::review_problem(request.statement) {
-            return refuse(reason);
+        let commit = request.transaction.and_then(|transaction| transaction.commit);
+        let reviewed = match commit {
+            // Every statement of the commit is shown: the whole list has to be reviewable.
+            Some(statements) => statements.join("\n"),
+            None => request.statement.to_owned(),
+        };
+        if let Some(reason) = Self::review_problem(&reviewed) {
+            return refuse(if commit.is_some() {
+                REASON_COMMIT_NOT_REVIEWABLE
+            } else {
+                reason
+            });
         }
         let open = match self.open_question(request.connection_id) {
             Ok(open) => open,
             Err(reason) => return refuse(reason),
         };
-        let Some(schema) = Self::schema() else {
+        let Some(schema) = Self::schema(commit.is_some()) else {
             return refuse(REASON_NOT_DELIVERED);
         };
         let params = ElicitRequestParams::FormElicitationParams {
@@ -440,6 +556,22 @@ impl WriteApprover for ElicitingApprover {
         // The place is given back after the decline is counted, so the two never both miss it.
         drop(open);
         Self::decide(answer)
+    }
+
+    /// The commit question lists every write, so the whole list has to pass the same review as
+    /// one statement does (lines, characters, line width, hidden blanks).
+    fn commit_reviewable(&self, statements: &[String]) -> Result<(), String> {
+        match Self::review_problem(&statements.join("\n")) {
+            Some(_) => Err(REASON_COMMIT_NOT_REVIEWABLE.to_owned()),
+            None => Ok(()),
+        }
+    }
+
+    /// Before a transaction is begun: the reasons a write would be refused without asking.
+    fn check_writable(&self, request: &WriteApproval<'_>) -> Result<(), String> {
+        self.preflight(request)
+            .map(drop)
+            .map_err(str::to_owned)
     }
 
     /// The question may have waited a long time: the layer asks again, after a yes, whether the
@@ -589,6 +721,7 @@ mod tests {
             database,
             statement,
             dangerous: None,
+            transaction: None,
         }
     }
 
@@ -689,6 +822,47 @@ mod tests {
         }
         // The block is the last thing: the message ends with the closing fence.
         assert!(message.ends_with('`'), "{message}");
+    }
+
+    #[test]
+    fn a_commit_question_shows_every_statement_in_a_code_block_of_its_own() {
+        let statements: Vec<String> = [
+            "INSERT INTO t VALUES ('```')",
+            "UPDATE t SET a = 1\n-- ```\n```\n# a heading\n[x](http://example.com)",
+            "DELETE FROM t WHERE a = 2",
+        ]
+        .map(str::to_owned)
+        .into();
+        let mut commit = request("COMMIT", None);
+        commit.transaction = Some(TransactionApproval {
+            id: "tx-1",
+            commit: Some(&statements),
+        });
+        let message = ElicitingApprover::message(&commit);
+        assert!(message.contains("Change 3 of 3"), "{message}");
+        for (name, options) in parsers() {
+            let (blocks, spans, kinds) = parsed(&message, &options);
+            assert_eq!(blocks, statements, "{name}: one block per statement\n{message}");
+            assert_eq!(spans, ["`Warehouse`", "`Development`", "`tx-1`"].map(|s| s.trim_matches('`')), "{name}");
+            for kind in &kinds {
+                assert!(
+                    matches!(kind.as_str(), "Root" | "Paragraph" | "Text"),
+                    "{name}: {kind} in\n{message}"
+                );
+            }
+        }
+        // A statement inside the transaction says it is not committed yet.
+        let mut inside = request("INSERT INTO t VALUES (1)", None);
+        inside.transaction = Some(TransactionApproval {
+            id: "tx-1",
+            commit: None,
+        });
+        let message = ElicitingApprover::message(&inside);
+        assert!(message.contains("runs inside transaction `tx-1`"), "{message}");
+        assert!(message.contains("NOT committed"), "{message}");
+        // The commit of too many lines is refused with the roll-back reason, not asked.
+        let long: Vec<String> = (0..MAX_LINES + 1).map(|n| format!("INSERT INTO t VALUES ({n})")).collect();
+        assert!(ElicitingApprover::review_problem(&long.join("\n")).is_some());
     }
 
     #[test]
@@ -945,7 +1119,7 @@ mod tests {
 
     #[test]
     fn the_requested_schema_is_one_required_boolean_that_defaults_to_no() {
-        let schema = serde_json::to_value(ElicitingApprover::schema().unwrap()).unwrap();
+        let schema = serde_json::to_value(ElicitingApprover::schema(false).unwrap()).unwrap();
         assert_eq!(
             schema,
             json!({

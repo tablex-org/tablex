@@ -65,7 +65,9 @@ impl Live {
         let catalog = FakeCatalog::new(vec![connection(ID, kind, Some(access))]);
         let approver = ScriptedApprover::new(ApprovalDecision::Approve, true);
         let layer = Arc::new(
-            ToolLayer::new(catalog.clone(), provider, "live-test").with_approver(approver.clone()),
+            ToolLayer::new(catalog.clone(), provider, "live-test")
+                .with_transactions()
+                .with_approver(approver.clone()),
         );
         Self {
             layer,
@@ -933,5 +935,111 @@ fn redis_tools_and_policy() {
             redis(&format!("DEL {string_key} {hash_key}"))
         )),
         "ok"
+    );
+}
+
+fn tx_sql(live: &Live, tx: &str, statement: &str) -> ToolOutcome {
+    live.sql(statement, json!({"transaction_id": tx}))
+}
+
+fn first_cell(outcome: &ToolOutcome) -> String {
+    match outcome {
+        ToolOutcome::Success(value) => value["rows"][0][0].as_str().unwrap().to_owned(),
+        ToolOutcome::Failure(error) => panic!("{error:?}"),
+    }
+}
+
+#[test]
+#[ignore = "needs TABLEX_TEST_PG_URI"]
+fn postgresql_transactions() {
+    let Ok(uri) = std::env::var("TABLEX_TEST_PG_URI") else {
+        return;
+    };
+    let mut live = Live::new(
+        ConnectionKind::PostgreSql,
+        "dbengine-postgres",
+        &uri,
+        AgentAccess::ReadWrite,
+    );
+    let table = unique("tablex_agent_tx");
+    live.cleanup = vec![(format!("DROP TABLE IF EXISTS {table}"), None)];
+    live.ok("open_session", json!({"connection_id": ID}));
+    let created = live.sql(&format!("CREATE TABLE {table}(id integer PRIMARY KEY, v text)"), json!({}));
+    assert_eq!(code(&created), "ok", "{created:?}");
+    let begin = |live: &Live| {
+        live.ok("begin_transaction", json!({"connection_id": ID}))["transaction_id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let shared_count = |live: &Live| {
+        first_cell(&live.sql(&format!("SELECT count(*) FROM {table}"), json!({})))
+    };
+
+    // Rolled back: the write is visible inside (to a read-only read, in a savepoint) and nowhere else.
+    let tx = begin(&live);
+    let inserted = tx_sql(&live, &tx, &format!("INSERT INTO {table} VALUES (1, 'a')"));
+    assert_eq!(code(&inserted), "ok", "{inserted:?}");
+    let inside = tx_sql(&live, &tx, &format!("SELECT count(*) FROM {table}"));
+    assert_eq!(first_cell(&inside), "1");
+    assert!(matches!(&inside, ToolOutcome::Success(v) if v["read_only_enforced"] == true));
+    // After a read-only read the transaction is still writable (the savepoint scope was left).
+    let more = tx_sql(&live, &tx, &format!("INSERT INTO {table} VALUES (2, 'b')"));
+    assert_eq!(code(&more), "ok", "{more:?}");
+    // Both writes are still there after the read-only read in its savepoint was left.
+    assert_eq!(first_cell(&tx_sql(&live, &tx, &format!("SELECT count(*) FROM {table}"))), "2");
+    // COPY (files, programs) is not undone by a rollback: refused in a transaction.
+    assert_eq!(
+        code(&tx_sql(&live, &tx, &format!("COPY {table} TO '/tmp/tablex_agent_copy.csv'"))),
+        "agent.unsupported"
+    );
+    assert_eq!(shared_count(&live), "0", "an uncommitted row is invisible to another session");
+    let rolled = live.ok("rollback_transaction", json!({"transaction_id": tx}));
+    assert_eq!(rolled["changes"], 2);
+    assert_eq!(shared_count(&live), "0");
+
+    // Committed: the rows stay, and the commit was asked with both writes.
+    let tx = begin(&live);
+    tx_sql(&live, &tx, &format!("INSERT INTO {table} VALUES (3, 'c')"));
+    let committed = live.ok("commit_transaction", json!({"transaction_id": tx}));
+    assert_eq!(committed["committed"], true);
+    assert_eq!(shared_count(&live), "1");
+
+    // A failed statement aborts the transaction: everything but rollback is refused.
+    let tx = begin(&live);
+    let failed = tx_sql(&live, &tx, &format!("INSERT INTO {table} VALUES (3, 'duplicate key')"));
+    assert!(failed.is_error());
+    assert_eq!(code(&tx_sql(&live, &tx, "SELECT 1")), "agent.transaction_aborted");
+    assert_eq!(
+        code(&live.call("commit_transaction", json!({"transaction_id": tx}))),
+        "agent.transaction_aborted"
+    );
+    live.ok("rollback_transaction", json!({"transaction_id": tx}));
+    assert_eq!(shared_count(&live), "1");
+
+    // A failing READ aborts the transaction in the layer's eyes too (a savepoint may have saved it
+    // on the server, but a cancel or timeout cannot be told apart): a committed-after-error
+    // transaction never silently becomes a rollback.
+    let tx = begin(&live);
+    tx_sql(&live, &tx, &format!("INSERT INTO {table} VALUES (5, 'e')"));
+    let failed_read = tx_sql(&live, &tx, "SELECT * FROM tablex_agent_no_such_table");
+    assert!(failed_read.is_error());
+    assert_eq!(code(&tx_sql(&live, &tx, "SELECT 1")), "agent.transaction_aborted");
+    assert_eq!(
+        code(&live.call("commit_transaction", json!({"transaction_id": tx}))),
+        "agent.transaction_aborted"
+    );
+    live.ok("rollback_transaction", json!({"transaction_id": tx}));
+    assert_eq!(shared_count(&live), "1");
+
+    // Closing the connection's session rolls an open transaction back.
+    let tx = begin(&live);
+    tx_sql(&live, &tx, &format!("INSERT INTO {table} VALUES (4, 'd')"));
+    live.ok("close_session", json!({"connection_id": ID}));
+    live.ok("open_session", json!({"connection_id": ID}));
+    assert_eq!(shared_count(&live), "1");
+    assert_eq!(
+        live.ok("rollback_transaction", json!({"transaction_id": tx}))["rolled_back"],
+        false
     );
 }

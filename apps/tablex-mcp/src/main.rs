@@ -61,11 +61,12 @@ fn install_panic_hook() {
 
 /// The blocking pool is shared by everything that blocks: up to [`MAX_CONCURRENT_CALLS`] tool
 /// calls (16), the stdin read (tokio reads stdin on this pool), the stdout write (one at a time),
-/// and `close_all` at shutdown: 16 + 1 + 1 + 1 = 19 threads at most, so 32 can never be exhausted
+/// `close_all` at shutdown, and the idle-transaction sweep (one at a time): 16 + 1 + 1 + 1 + 1 = 20
+/// threads at most, so 32 can never be exhausted
 /// and the protocol never starves behind running statements. (Left alone it is 512, which more
 /// than 512 calls could exhaust.)
 const MAX_BLOCKING_THREADS: usize = 32;
-const _: () = assert!(MAX_CONCURRENT_CALLS + 3 <= MAX_BLOCKING_THREADS);
+const _: () = assert!(MAX_CONCURRENT_CALLS + 4 <= MAX_BLOCKING_THREADS);
 
 fn serve() -> ExitCode {
     for notice in setup::startup_notices() {

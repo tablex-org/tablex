@@ -346,7 +346,7 @@ pub fn access_sentence(access: engine_agent::AgentAccess) -> &'static str {
     use engine_agent::AgentAccess;
     match access {
         AgentAccess::Off => "Off: the assistant cannot use this connection",
-        AgentAccess::SchemaOnly => "Schema only: table and column names, no row data",
+        AgentAccess::SchemaOnly => "Schema only: table, column and routine definitions, no row data",
         AgentAccess::Read => "Read: schema and query results",
         AgentAccess::ReadWrite => "Read and write: every change asks first",
     }
@@ -2417,7 +2417,7 @@ impl AssistantPanel {
                 }
             )))
             .child(line(
-                "Schema only: the names and types of the tables and columns of this connection."
+                "Schema only: the names and types of the tables and columns of this connection, and the definitions of its functions, procedures and triggers."
                     .to_owned(),
             ))
             .child(line(

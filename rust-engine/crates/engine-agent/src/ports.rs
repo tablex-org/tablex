@@ -8,6 +8,7 @@ use crate::limits::Limits;
 use crate::result::QueryResult;
 use crate::secret::SecretText;
 use crate::table::TableDescription;
+use engine_driver_api::sql::{SchemaObjectKind, SchemaObjectRef};
 use engine_driver_kit::sql::SqlLexOptions;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -232,6 +233,32 @@ pub trait SessionProvider: Send + Sync {
         let _ = generation;
         self.close(connection);
     }
+
+    /// Why a transaction cannot be run on a session of its own for `connection` (a SQLite
+    /// database that lives in memory for one session only: a second session would not see it),
+    /// or `None`. Asked before `begin_transaction` opens that second session. Default: `None`.
+    fn transactions_unavailable(&self, _connection: &ConnectionInfo) -> Option<String> {
+        None
+    }
+}
+
+/// What [`Session::control`] sends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TxControl {
+    Begin,
+    Commit,
+    Rollback,
+}
+
+impl TxControl {
+    /// The statement the driver runs.
+    pub const fn sql(self) -> &'static str {
+        match self {
+            Self::Begin => "BEGIN",
+            Self::Commit => "COMMIT",
+            Self::Rollback => "ROLLBACK",
+        }
+    }
 }
 
 /// What the layer needs to know about an open session.
@@ -286,6 +313,25 @@ pub struct TableRef {
     pub name: String,
 }
 
+/// Which functions, procedures, triggers or events of a namespace to list. `database` and `schema`
+/// are as for [`NodeQuery`]; `filter` is a case-insensitive substring of the name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutineQuery {
+    pub kind: SchemaObjectKind,
+    pub database: Option<String>,
+    pub schema: Option<String>,
+    pub filter: Option<String>,
+    pub cursor: Option<String>,
+    pub limit: usize,
+}
+
+/// One page of objects of the queried kind, ordered by name, as the driver names them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RoutinePage {
+    pub routines: Vec<SchemaObjectRef>,
+    pub next_cursor: Option<String>,
+}
+
 /// One statement to run.
 #[derive(Debug, Clone)]
 pub struct RunRequest<'a> {
@@ -315,6 +361,22 @@ pub trait Session: Send + Sync {
 
     fn describe_table(&self, table: &TableRef) -> Result<TableDescription, AgentError>;
 
+    /// Lists functions, procedures, triggers or events (`agent.unsupported` by default). A
+    /// database without objects of that kind answers an empty page.
+    fn list_routines(&self, _query: &RoutineQuery) -> Result<RoutinePage, AgentError> {
+        Err(AgentError::Unsupported(
+            "this session cannot list functions, procedures, triggers or events".into(),
+        ))
+    }
+
+    /// The statement that creates `reference`, as the driver reports it (`agent.unsupported` by
+    /// default; `describe.not_found` when the object is gone).
+    fn routine_source(&self, _reference: &SchemaObjectRef) -> Result<String, AgentError> {
+        Err(AgentError::Unsupported(
+            "this session cannot read the source of functions, procedures, triggers or events".into(),
+        ))
+    }
+
     /// Runs one statement and collects at most `request.row_limit` rows within
     /// the byte limits (see [`crate::limits::RowCollector`]).
     fn run(
@@ -322,6 +384,16 @@ pub trait Session: Send + Sync {
         request: &RunRequest<'_>,
         cancel: &CancelToken,
     ) -> Result<QueryResult, AgentError>;
+
+    /// Begins, commits or rolls back a transaction on this session (`agent.unsupported` by
+    /// default). Internal to the tool layer: the text goes to the driver as it is, NOT through
+    /// the agent policy, which refuses statements that change transaction state. Stops promptly
+    /// once `cancel` fires, like [`run`](Self::run).
+    fn control(&self, _action: TxControl, _cancel: &CancelToken) -> Result<(), AgentError> {
+        Err(AgentError::Unsupported(
+            "this session cannot run transactions".into(),
+        ))
+    }
 
     /// Closes the driver session. Idempotent.
     fn disconnect(&self);
@@ -350,6 +422,20 @@ pub struct WriteApproval<'a> {
     pub statement: &'a str,
     /// Why the statement is dangerous, if it is.
     pub dangerous: Option<&'a str>,
+    /// Set when the question is about a transaction (`execute_query` with a `transaction_id`, or
+    /// the commit): the change is not final until the transaction is committed.
+    pub transaction: Option<TransactionApproval<'a>>,
+}
+
+/// The transaction a [`WriteApproval`] belongs to.
+#[derive(Debug, Clone, Copy)]
+pub struct TransactionApproval<'a> {
+    /// The id the model uses for the transaction.
+    pub id: &'a str,
+    /// `Some`: the question is the COMMIT itself (`statement` is `COMMIT`), and these are the
+    /// write statements that ran in the transaction, each already approved when it ran.
+    /// `None`: the statement is one more change inside the transaction, not committed yet.
+    pub commit: Option<&'a [String]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -388,6 +474,22 @@ pub trait WriteApprover: Send + Sync {
         Ok(())
     }
 
+    /// `Err(reason)`: a write to this connection would be refused without asking right now (the
+    /// switch is off, a production connection, no way to ask). Checked before a transaction is
+    /// begun, so it is refused up front with the reason a write would get. Only the connection
+    /// facts of `request` are meaningful. Default: nothing to check.
+    fn check_writable(&self, _request: &WriteApproval<'_>) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// `Err(reason)`: the COMMIT question for a transaction that holds exactly these write
+    /// statements could not be reviewed (too long to show). The layer asks before it puts the next
+    /// write of a transaction to the user, so a transaction never ends up with changes that were
+    /// each approved but cannot be committed. Default: always reviewable.
+    fn commit_reviewable(&self, _statements: &[String]) -> Result<(), String> {
+        Ok(())
+    }
+
     /// `false`: dangerous statements are refused without asking (MCP mode).
     fn allows_dangerous(&self) -> bool {
         false
@@ -399,6 +501,10 @@ pub trait WriteApprover: Send + Sync {
 pub struct RefuseWrites;
 
 impl WriteApprover for RefuseWrites {
+    fn check_writable(&self, _request: &WriteApproval<'_>) -> Result<(), String> {
+        Err("this front end cannot ask the user to approve writes".into())
+    }
+
     fn approve(&self, _request: &WriteApproval<'_>, _cancel: &CancelToken) -> ApprovalDecision {
         ApprovalDecision::Refuse {
             reason: "this front end cannot ask the user to approve writes".into(),

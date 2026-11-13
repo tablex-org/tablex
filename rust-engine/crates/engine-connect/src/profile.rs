@@ -167,7 +167,7 @@ impl AgentLevel {
     pub const fn description(self) -> &'static str {
         match self {
             Self::Off => "No AI agent can use this connection.",
-            Self::Schema => "Agents see table and column definitions, never rows.",
+            Self::Schema => "Agents see table, column and routine definitions, never rows.",
             Self::Read => "Agents may also run statements that only read data.",
             Self::ReadWrite => "Agents may propose writes; each one is approved first.",
         }

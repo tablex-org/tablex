@@ -1,17 +1,18 @@
 //! The agent tool layer: what an AI agent may do with a TableX connection,
 //! behind one policy, shared by the MCP server and the in-app assistant.
 //!
-//! * **Tools** (ten, names stable): `list_connections`, `open_session`,
+//! * **Tools** (twelve, names stable; three more with [`ToolLayer::with_transactions`]: `begin_transaction`,
+//!   `commit_transaction`, `rollback_transaction`): `list_connections`, `open_session`,
 //!   `close_session`, `list_namespaces`, `list_tables`, `describe_table`,
 //!   `get_schema_context`, `execute_query`, `explain_query`,
-//!   `execute_redis_command`. Typed requests and results live in [`tools`],
+//!   `execute_redis_command`, `list_routines`, `get_routine_source`. Typed requests and results live in [`tools`],
 //!   their JSON Schemas in [`schema`].
 //! * **One entry**: [`ToolLayer::call`] takes a tool name and JSON arguments
 //!   and returns a [`ToolOutcome`] (a result, or a typed error whose
 //!   `code` is stable: `agent.access_denied`, `agent.write_refused`,
 //!   `agent.dangerous_refused`, `agent.multi_statement`, `agent.limit`,
 //!   `agent.unknown_tool`, `agent.invalid_arguments`, `agent.not_connected`,
-//!   `agent.cancelled`, `agent.unsupported`, or the driver's own code).
+//!   `agent.cancelled`, `agent.unsupported`, `agent.transaction_gone`, or the driver's own code).
 //! * **Policy**: [`AgentAccess`] (`off` < `schema_only` < `read` <
 //!   `read_write`) combined with the connection type by
 //!   [`AgentAccess::effective`]; every statement is classified with the
@@ -55,7 +56,8 @@ pub use layer::{ToolLayer, ToolOutcome};
 pub use limits::Limits;
 pub use ports::{
     ApprovalDecision, ConnectionCatalog, ConnectionInfo, ConnectionKind, Language, OpenGeneration,
-    RefuseWrites, Revision, Session, SessionProvider, WriteApproval, WriteApprover,
+    RefuseWrites, Revision, Session, SessionProvider, TransactionApproval, TxControl, WriteApproval,
+    WriteApprover,
 };
 pub use schema::ToolSpec;
 pub use secret::SecretText;
