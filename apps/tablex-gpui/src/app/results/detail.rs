@@ -4,6 +4,9 @@ use super::super::*;
 pub(in crate::app) struct DetailUiState {
     pub(in crate::app) edit: Option<CellDetailEdit>,
     pub(in crate::app) error: Option<String>,
+    /// Why the cell at this (display) position cannot be edited, e.g. a Mongo `_id`. Shown only
+    /// while that cell is the selected one, so it never follows the selection to another cell.
+    pub(in crate::app) cell_refusal: Option<(CellPosition, String)>,
     /// Formatted / canonical / raw presentation of JSON-like values.
     pub(in crate::app) value_mode: crate::cell_value::ValueMode,
     /// Active convert preview, scoped to the tab and cell it was chosen for.
@@ -70,6 +73,23 @@ impl AppRoot {
         };
         let start = range.normalized().start;
         self.begin_inline_edit(tab_id, start.row, start.column, window, cx);
+    }
+
+    /// The message under the cell detail and in the footer: the tab's error, else the refusal of
+    /// the selected cell (a refusal of another cell is not shown).
+    pub(in crate::app) fn detail_message(&self, tab_id: u64) -> Option<String> {
+        let view = self.view(tab_id);
+        view.detail_ui.error.clone().or_else(|| {
+            let (cell, message) = view.detail_ui.cell_refusal.as_ref()?;
+            (view.grid_ui.selection.borrow().anchor == Some(*cell)).then(|| message.clone())
+        })
+    }
+
+    /// Says why the cell at `position` cannot be edited, for as long as it stays selected.
+    pub(in crate::app) fn refuse_cell_edit(&mut self, tab_id: u64, position: CellPosition, message: String) {
+        let detail_ui = &mut self.view_mut(tab_id).detail_ui;
+        detail_ui.error = None;
+        detail_ui.cell_refusal = Some((position, message));
     }
 
     pub(in crate::app) fn select_grid_cell(&mut self, tab_id: u64, position: CellPosition) {
@@ -1098,7 +1118,7 @@ impl AppRoot {
                     .ok()
                     .and_then(|row| mongo_edit_refusal(&row, &detail.column_name));
                 if let Some(refusal) = refusal {
-                    self.view_mut(tab_id).detail_ui.error = Some(refusal.to_string());
+                    self.refuse_cell_edit(tab_id, detail.position, refusal.to_string());
                     self.notify_tab(tab_id, cx);
                 }
             }

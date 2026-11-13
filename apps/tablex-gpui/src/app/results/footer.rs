@@ -727,7 +727,7 @@ impl AppRoot {
                 .as_ref()
                 .and_then(|edit| edit.error.clone())
         })
-        .or_else(|| self.view(tab_id).detail_ui.error.clone());
+        .or_else(|| self.detail_message(tab_id));
         // Auto-refresh only exists for tabs with a read-only driver query
         // (Mongo find); elsewhere the control is not rendered at all.
         let auto_control = is_mongo.then(|| {

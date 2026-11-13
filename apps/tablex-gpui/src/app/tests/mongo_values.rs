@@ -577,3 +577,66 @@ fn duplicate_and_insert_keep_every_numeric_type_whatever_its_sign_or_size() {
         assert_eq!(canonical[&field.name], field.value, "{}\n{text}", field.name);
     }
 }
+
+/// Double-clicking `_id` says it cannot be changed, but only while `_id` is the selected cell:
+/// moving to another cell (and its detail) no longer shows that refusal.
+#[gpui::test]
+fn the_id_refusal_stays_with_the_id_cell_and_does_not_follow_the_selection(
+    cx: &mut TestAppContext,
+) {
+    let (app, visual, row, other_column) = mongo_missing_field_app(cx);
+    let id_column = app.read_with(visual, |this, _| {
+        let tab_id = this.active_id();
+        (0..this.display_column_count(tab_id))
+            .find(|column| {
+                this.source_column_for_display(tab_id, *column)
+                    .and_then(|source| this.active_grid().column_name(source))
+                    == Some("_id")
+            })
+            .expect("_id column")
+    });
+    let double_click = |visual: &mut gpui::VisualTestContext, column: usize| {
+        let center = visual
+            .debug_bounds(Box::leak(format!("grid-body-cell-{row}-{column}").into_boxed_str()))
+            .expect("the cell is painted")
+            .center();
+        visual.simulate_click(center, Default::default());
+        visual.simulate_event(gpui::MouseDownEvent {
+            position: center,
+            modifiers: Default::default(),
+            button: gpui::MouseButton::Left,
+            click_count: 2,
+            first_mouse: false,
+        });
+        visual.simulate_event(gpui::MouseUpEvent {
+            position: center,
+            modifiers: Default::default(),
+            button: gpui::MouseButton::Left,
+            click_count: 2,
+        });
+        settle(visual);
+    };
+    let message = |app: &gpui::Entity<AppRoot>, visual: &mut gpui::VisualTestContext| {
+        app.read_with(visual, |this, _| this.detail_message(this.active_id()))
+    };
+    double_click(visual, id_column);
+    assert_eq!(message(&app, visual).as_deref(), Some("_id cannot be changed."));
+
+    // Another cell of the same row: the refusal is not its message.
+    let center = visual
+        .debug_bounds(Box::leak(format!("grid-body-cell-{row}-{other_column}").into_boxed_str()))
+        .expect("the other cell is painted")
+        .center();
+    visual.simulate_click(center, Default::default());
+    settle(visual);
+    assert_eq!(message(&app, visual), None, "the _id refusal does not follow the selection");
+
+    // Back on _id it is still the reason.
+    let center = visual
+        .debug_bounds(Box::leak(format!("grid-body-cell-{row}-{id_column}").into_boxed_str()))
+        .expect("the _id cell is painted")
+        .center();
+    visual.simulate_click(center, Default::default());
+    settle(visual);
+    assert_eq!(message(&app, visual).as_deref(), Some("_id cannot be changed."));
+}

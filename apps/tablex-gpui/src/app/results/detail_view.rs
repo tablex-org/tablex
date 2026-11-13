@@ -1421,7 +1421,7 @@ impl AppRoot {
                         .child(column_title)
                         .child(metadata)
                         .child(value)
-                        .when_some(self.view(tab_id).detail_ui.error.clone(), |this, error| {
+                        .when_some(self.detail_message(tab_id), |this, error| {
                             this.child(
                                 div()
                                     .debug_selector(|| "cell-detail-error".into())

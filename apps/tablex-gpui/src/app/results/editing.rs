@@ -679,11 +679,12 @@ impl AppRoot {
             };
             // Never silent: the user double-clicked expecting an editor.
             if let Some(refusal) = mongo_edit_refusal(&row_fields, &column_name) {
-                self.view_mut(tab.id).detail_ui.error = Some(refusal.to_string());
+                self.refuse_cell_edit(tab.id, position, refusal.to_string());
                 self.notify_tab(tab.id, cx);
                 return;
             }
             self.view_mut(tab.id).detail_ui.error = None;
+            self.view_mut(tab.id).detail_ui.cell_refusal = None;
             // A field the document lacks is created by the write: its editor
             // opens empty and a value typed in shell syntax gives it its type.
             // A field a staged `$unset` removes is missing, whatever the page holds.
