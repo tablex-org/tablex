@@ -13,7 +13,7 @@
 //! UI thread; a cancel is `cancel_detached`, never `cancel`.
 
 mod approval;
-mod ask;
+pub(in crate::app) mod ask;
 mod blocks;
 mod dock;
 mod history;

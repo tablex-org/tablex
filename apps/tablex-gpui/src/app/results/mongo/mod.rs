@@ -950,7 +950,17 @@ impl AppRoot {
                             .line_height(px(18.0))
                             .text_color(theme::text())
                             .whitespace_nowrap()
-                            .child(command_text),
+                            .child(match &command {
+                                // Highlighted like the pipeline editors, and selectable so part of
+                                // it (the sort, say) can be copied.
+                                Some(command) => gpui_component::text::TextView::markdown(
+                                    ("mongo-query-code-text", tab_id),
+                                    crate::app::assistant::ask::fenced("javascript", command),
+                                )
+                                .selectable(true)
+                                .into_any_element(),
+                                None => command_text.into_any_element(),
+                            }),
                     ),
             );
         let root = cx.entity().downgrade();
