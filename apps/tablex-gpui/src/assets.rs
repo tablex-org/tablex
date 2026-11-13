@@ -120,6 +120,9 @@ impl AssetSource for Assets {
                 "info.svg",
                 "network.svg",
                 "chart-column-big.svg",
+                "sun.svg",
+                "moon.svg",
+                "monitor.svg",
             ]
             .into_iter()
             .map(SharedString::from)
@@ -251,6 +254,9 @@ pub fn asset(path: &str) -> Option<&'static [u8]> {
         "icons/crosshair.svg" => Some(include_bytes!("../assets/icons/crosshair.svg")),
         "icons/network.svg" => Some(include_bytes!("../assets/icons/network.svg")),
         "icons/chart-column-big.svg" => Some(include_bytes!("../assets/icons/chart-column-big.svg")),
+        "icons/sun.svg" => Some(include_bytes!("../assets/icons/sun.svg")),
+        "icons/moon.svg" => Some(include_bytes!("../assets/icons/moon.svg")),
+        "icons/monitor.svg" => Some(include_bytes!("../assets/icons/monitor.svg")),
         _ => None,
     }
 }
@@ -260,6 +266,9 @@ mod tests {
     #[test]
     fn component_icon_assets_are_available() {
         assert!(super::asset("icons/plus.svg").is_some());
+        assert!(super::asset("icons/sun.svg").is_some());
+        assert!(super::asset("icons/moon.svg").is_some());
+        assert!(super::asset("icons/monitor.svg").is_some());
         assert!(super::asset("icons/building-2.svg").is_some());
         assert!(super::asset("icons/chart-column-big.svg").is_some());
         assert!(super::asset("icons/filter.svg").is_some());

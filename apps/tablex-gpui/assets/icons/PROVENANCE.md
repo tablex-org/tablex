@@ -104,3 +104,9 @@ them the panel's case, replace-mode and previous-match buttons are empty squares
 
 `chart-column-big.svg` (rail "Chart" button of the result pane) is copied verbatim from the pinned
 `gpui-kit-assets 0.8.0` Lucide set, ISC licensed like the glyphs above.
+
+## Title bar theme picker glyphs
+
+`sun.svg`, `moon.svg` and `monitor.svg` (the Light / Dark / System entries and the
+button of the title bar's theme picker) are copied verbatim from the pinned
+`gpui-kit-assets 0.8.0` Lucide set, ISC licensed like the glyphs above.

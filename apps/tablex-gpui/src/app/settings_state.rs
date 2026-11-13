@@ -223,6 +223,21 @@ impl AppRoot {
         }
     }
 
+    /// The title bar's theme picker: the same change as picking the theme on the
+    /// Settings page and pressing Apply (applied at once, saved after the debounce,
+    /// and an open page's draft follows unless it holds an edit of its own).
+    pub(super) fn set_theme_choice(
+        &mut self,
+        choice: ThemeChoice,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut next = (*self.settings).clone();
+        next.appearance.theme = choice;
+        self.apply_settings(next, Some(window), cx);
+        self.notify_pane_views(cx);
+    }
+
     /// A sidebar / tab-bar control changed one of the settings it mirrors
     /// (connection sort, global search, tab group-by, compact titles, second
     /// row): record it in the settings without pushing it back.

@@ -53,6 +53,60 @@ impl AppRoot {
             _ => format!("{app} - {label}").into(),
         }
     }
+
+    /// The title bar's theme picker: a ghost icon button showing the current
+    /// choice, opening Light / Dark / System with the current one checked.
+    fn render_theme_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let current = self.settings.appearance.theme;
+        let root = cx.entity().downgrade();
+        Button::new("title-theme")
+            .debug_selector(|| "title-theme-button".into())
+            .icon(Icon::empty().path(theme_icon(current)).size(px(14.0)))
+            .compact()
+            .ghost()
+            .tooltip("Theme")
+            .dropdown_menu_with_anchor(gpui::Anchor::TopRight, move |menu, _, _| {
+                // Icon on the left, check on the right: both show at once.
+                theme_menu_items(current, &root)
+                    .into_iter()
+                    .fold(menu.check_side(gpui_component::Side::Right), |menu, item| {
+                        menu.item(item)
+                    })
+            })
+    }
+}
+
+pub(super) fn theme_icon(choice: crate::settings::ThemeChoice) -> &'static str {
+    use crate::settings::ThemeChoice;
+    match choice {
+        ThemeChoice::Light => "icons/sun.svg",
+        ThemeChoice::Dark => "icons/moon.svg",
+        ThemeChoice::System => "icons/monitor.svg",
+    }
+}
+
+/// The theme picker's entries; `current` is the checked one.
+pub(super) fn theme_menu_items(
+    current: crate::settings::ThemeChoice,
+    root: &gpui::WeakEntity<AppRoot>,
+) -> Vec<PopupMenuItem> {
+    use crate::settings::ThemeChoice;
+    [
+        (ThemeChoice::Light, "Light", "title-theme-light"),
+        (ThemeChoice::Dark, "Dark", "title-theme-dark"),
+        (ThemeChoice::System, "System", "title-theme-system"),
+    ]
+    .into_iter()
+    .map(|(choice, label, selector)| {
+        let root = root.clone();
+        PopupMenuItem::element(move |_, _| div().debug_selector(|| selector.into()).child(label))
+            .icon(Icon::empty().path(theme_icon(choice)))
+            .checked(choice == current)
+            .on_click(move |_, window, app| {
+                let _ = root.update(app, |this, cx| this.set_theme_choice(choice, window, cx));
+            })
+    })
+    .collect()
 }
 
 impl Render for AppRoot {
@@ -119,6 +173,7 @@ impl Render for AppRoot {
                     .flex_shrink_0()
                     .items_center()
                     .pr(px(8.0))
+                    .child(self.render_theme_button(cx))
                     .child(
                         Button::new("open-settings")
                             .debug_selector(|| "open-settings".into())

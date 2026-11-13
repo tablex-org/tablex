@@ -1250,6 +1250,137 @@ fn the_theme_switches_dark_light_system_on_apply_and_system_follows_the_os(
     assert_eq!(theme::mode(), gpui_component::theme::ThemeMode::Dark);
 }
 
+/// Which entries the title bar's theme menu checks.
+fn theme_menu_checked(current: crate::settings::ThemeChoice) -> Vec<bool> {
+    use gpui_component::menu::PopupMenuItem;
+    super::shell::theme_menu_items(current, &gpui::WeakEntity::new_invalid())
+        .iter()
+        .map(|item| match item {
+            PopupMenuItem::ElementItem { checked, .. } => *checked,
+            _ => panic!("theme entries are plain items"),
+        })
+        .collect()
+}
+
+fn open_theme_menu(visual: &mut gpui::VisualTestContext) {
+    assert!(!rendered(visual, "title-theme-dark".into()), "closed");
+    click(visual, "title-theme-button".into());
+    for entry in ["light", "dark", "system"] {
+        assert!(
+            rendered(visual, format!("title-theme-{entry}")),
+            "{entry} is listed"
+        );
+    }
+}
+
+#[gpui::test]
+fn the_title_bar_theme_menu_switches_the_theme_like_the_settings_page(cx: &mut TestAppContext) {
+    use crate::settings::ThemeChoice;
+    use gpui::WindowAppearance as Os;
+    cx.dispatcher.allow_parking();
+    let (app, visual) = settings_app(cx);
+    let path = settings_temp_path();
+    app.update(visual, |this, _| this.settings_ui.path = Some(path.clone()));
+    visual.update(|window, cx| AppRoot::follow_system_appearance(&app, window, cx));
+    assert_eq!(theme::mode(), gpui_component::theme::ThemeMode::Dark);
+
+    // The button sits immediately left of the gear, in the same bar.
+    let button = visual.debug_bounds("title-theme-button").expect("theme button");
+    let gear = visual.debug_bounds("open-settings").expect("gear");
+    let title = visual.debug_bounds("window-title").expect("title");
+    assert!(button.right() <= gear.left(), "left of the gear");
+    assert!(gear.left() - button.right() < gpui::px(16.0), "next to the gear");
+    assert!(title.right() <= button.left(), "the title stays left of both");
+    assert_eq!(button.center().y, gear.center().y, "same bar");
+    assert_eq!(button.size.height, gear.size.height, "same height");
+
+    // Opens with the three entries; Escape dismisses without a change.
+    open_theme_menu(visual);
+    visual.simulate_keystrokes("escape");
+    settle(visual);
+    assert!(!rendered(visual, "title-theme-dark".into()), "Escape closes");
+    assert_eq!(applied(&app, visual).appearance.theme, ThemeChoice::Dark);
+    assert!(component_is_dark(visual));
+    // A click outside dismisses too.
+    open_theme_menu(visual);
+    visual.simulate_click(gpui::point(gpui::px(600.0), gpui::px(1500.0)), Default::default());
+    settle(visual);
+    assert!(!rendered(visual, "title-theme-dark".into()), "click outside closes");
+    assert_eq!(applied(&app, visual).appearance.theme, ThemeChoice::Dark);
+
+    // The current choice is the checked entry.
+    let checked = theme_menu_checked;
+    assert_eq!(checked(ThemeChoice::Light), [true, false, false]);
+    assert_eq!(checked(ThemeChoice::Dark), [false, true, false]);
+    assert_eq!(checked(ThemeChoice::System), [false, false, true]);
+
+    // Light: applied at once (no Apply click), written after the debounce.
+    open_theme_menu(visual);
+    click(visual, "title-theme-light".into());
+    assert!(!rendered(visual, "title-theme-light".into()), "choosing closes the menu");
+    assert_eq!(applied(&app, visual).appearance.theme, ThemeChoice::Light);
+    assert_eq!(theme::mode(), gpui_component::theme::ThemeMode::Light);
+    assert!(!component_is_dark(visual));
+    visual
+        .executor()
+        .advance_clock(std::time::Duration::from_millis(400));
+    wait_until(visual, "Light on disk", |_| {
+        crate::settings::store::load(&path, &crate::settings::store::Legacy::default())
+            .settings
+            .appearance
+            .theme
+            == ThemeChoice::Light
+    });
+
+    // Reopening: the menu is rebuilt around the applied choice (Light), and
+    // choosing Dark switches back.
+    open_theme_menu(visual);
+    click(visual, "title-theme-dark".into());
+    assert_eq!(applied(&app, visual).appearance.theme, ThemeChoice::Dark);
+    assert_eq!(theme::mode(), gpui_component::theme::ThemeMode::Dark);
+    assert!(component_is_dark(visual));
+    visual
+        .executor()
+        .advance_clock(std::time::Duration::from_millis(400));
+    wait_until(visual, "Dark on disk", |_| {
+        crate::settings::store::load(&path, &crate::settings::store::Legacy::default())
+            .settings
+            .appearance
+            .theme
+            == ThemeChoice::Dark
+    });
+
+    // System follows the OS: the test window reports a light OS, then both ways live.
+    open_theme_menu(visual);
+    click(visual, "title-theme-system".into());
+    assert_eq!(applied(&app, visual).appearance.theme, ThemeChoice::System);
+    assert_eq!(theme::mode(), gpui_component::theme::ThemeMode::Light, "OS is light");
+    app.update(visual, |this, cx| this.system_appearance_changed(Os::Dark, cx));
+    assert_eq!(theme::mode(), gpui_component::theme::ThemeMode::Dark);
+    assert!(component_is_dark(visual));
+    app.update(visual, |this, cx| this.system_appearance_changed(Os::Light, cx));
+    assert!(!component_is_dark(visual));
+
+    // An open Settings page shows the new value, and its draft is not left dirty.
+    open_settings_page(&app, visual);
+    settings_nav(visual, "appearance");
+    assert_eq!(draft_of(&app, visual).appearance.theme, ThemeChoice::System);
+    open_theme_menu(visual);
+    click(visual, "title-theme-dark".into());
+    assert_eq!(draft_of(&app, visual).appearance.theme, ThemeChoice::Dark);
+    assert_eq!(draft_of(&app, visual), applied(&app, visual), "nothing pending");
+    assert!(component_is_dark(visual));
+    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn the_theme_button_shows_the_current_choice() {
+    use crate::settings::ThemeChoice;
+    assert_eq!(super::shell::theme_icon(ThemeChoice::Light), "icons/sun.svg");
+    assert_eq!(super::shell::theme_icon(ThemeChoice::Dark), "icons/moon.svg");
+    assert_eq!(super::shell::theme_icon(ThemeChoice::System), "icons/monitor.svg");
+}
+
 #[gpui::test]
 fn a_saved_theme_applies_at_startup_and_the_user_fonts_survive_a_switch(cx: &mut TestAppContext) {
     use crate::settings::ThemeChoice;
@@ -1492,6 +1623,61 @@ fn a_retry_of_the_mcp_switch_off_that_fails_too_still_says_the_switch_is_on(
 }
 
 #[gpui::test]
+fn the_default_agent_access_is_picked_from_its_dropdown_and_a_lowered_one_is_written_at_once(
+    cx: &mut TestAppContext,
+) {
+    use engine_connect::profile::{AgentLevel, ProfileSettings};
+    cx.dispatcher.allow_parking();
+    let (app, visual) = settings_app(cx);
+    let path = settings_temp_path();
+    app.update(visual, |this, _| this.settings_ui.path = Some(path.clone()));
+    open_settings_page(&app, visual);
+    settings_nav(visual, "ai");
+    let on_disk = || {
+        ProfileSettings::load(&path)
+            .map(|settings| settings.globals().agent_access)
+            .unwrap_or_default()
+    };
+    let selected = |app: &gpui::Entity<AppRoot>, visual: &mut gpui::VisualTestContext| {
+        app.read_with(visual, |this, cx| {
+            let page = this.settings_ui.page.as_ref().unwrap();
+            page.select_for_test("ai.agent_access")
+                .read(cx)
+                .selected_value()
+                .map(|label| label.to_string())
+        })
+    };
+    assert_eq!(draft_of(&app, visual).ai.agent_access, AgentLevel::Off);
+    assert_eq!(selected(&app, visual).as_deref(), Some("Off"));
+
+    // Off -> Read through the dropdown; raising waits for the debounce like any setting.
+    click(visual, "setting-control-ai.agent_access".into());
+    visual.simulate_keystrokes("down down enter");
+    settle(visual);
+    assert_eq!(draft_of(&app, visual).ai.agent_access, AgentLevel::Read);
+    assert_eq!(applied(&app, visual).ai.agent_access, AgentLevel::Off, "still a draft");
+    click(visual, "settings-apply".into());
+    visual
+        .executor()
+        .advance_clock(std::time::Duration::from_millis(400));
+    wait_until(visual, "Read on disk", |_| on_disk() == AgentLevel::Read);
+
+    // Reopen on the chosen value, then lower it to Schema only: on disk at once, no debounce.
+    assert_eq!(selected(&app, visual).as_deref(), Some("Read"));
+    click(visual, "setting-control-ai.agent_access".into());
+    visual.simulate_keystrokes("up enter");
+    settle(visual);
+    click(visual, "settings-apply".into());
+    assert_eq!(applied(&app, visual).ai.agent_access, AgentLevel::Schema);
+    assert_eq!(on_disk(), AgentLevel::Schema, "written without waiting");
+    assert!(
+        app.read_with(visual, |this, _| this.settings_ui.pending.is_none()),
+        "no debounce is left running"
+    );
+    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[gpui::test]
 fn the_model_and_effort_dropdowns_open_select_and_reopen_on_the_chosen_value(
     cx: &mut TestAppContext,
 ) {
@@ -1592,61 +1778,6 @@ fn a_base_url_that_would_send_the_key_in_clear_text_blocks_apply(cx: &mut TestAp
         "http://localhost:8080",
         "this machine is fine"
     );
-}
-
-#[gpui::test]
-fn the_default_agent_access_is_picked_from_its_dropdown_and_a_lowered_one_is_written_at_once(
-    cx: &mut TestAppContext,
-) {
-    use engine_connect::profile::{AgentLevel, ProfileSettings};
-    cx.dispatcher.allow_parking();
-    let (app, visual) = settings_app(cx);
-    let path = settings_temp_path();
-    app.update(visual, |this, _| this.settings_ui.path = Some(path.clone()));
-    open_settings_page(&app, visual);
-    settings_nav(visual, "ai");
-    let on_disk = || {
-        ProfileSettings::load(&path)
-            .map(|settings| settings.globals().agent_access)
-            .unwrap_or_default()
-    };
-    let selected = |app: &gpui::Entity<AppRoot>, visual: &mut gpui::VisualTestContext| {
-        app.read_with(visual, |this, cx| {
-            let page = this.settings_ui.page.as_ref().unwrap();
-            page.select_for_test("ai.agent_access")
-                .read(cx)
-                .selected_value()
-                .map(|label| label.to_string())
-        })
-    };
-    assert_eq!(draft_of(&app, visual).ai.agent_access, AgentLevel::Off);
-    assert_eq!(selected(&app, visual).as_deref(), Some("Off"));
-
-    // Off -> Read through the dropdown; raising waits for the debounce like any setting.
-    click(visual, "setting-control-ai.agent_access".into());
-    visual.simulate_keystrokes("down down enter");
-    settle(visual);
-    assert_eq!(draft_of(&app, visual).ai.agent_access, AgentLevel::Read);
-    assert_eq!(applied(&app, visual).ai.agent_access, AgentLevel::Off, "still a draft");
-    click(visual, "settings-apply".into());
-    visual
-        .executor()
-        .advance_clock(std::time::Duration::from_millis(400));
-    wait_until(visual, "Read on disk", |_| on_disk() == AgentLevel::Read);
-
-    // Reopen on the chosen value, then lower it to Schema only: on disk at once, no debounce.
-    assert_eq!(selected(&app, visual).as_deref(), Some("Read"));
-    click(visual, "setting-control-ai.agent_access".into());
-    visual.simulate_keystrokes("up enter");
-    settle(visual);
-    click(visual, "settings-apply".into());
-    assert_eq!(applied(&app, visual).ai.agent_access, AgentLevel::Schema);
-    assert_eq!(on_disk(), AgentLevel::Schema, "written without waiting");
-    assert!(
-        app.read_with(visual, |this, _| this.settings_ui.pending.is_none()),
-        "no debounce is left running"
-    );
-    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }
 
 #[gpui::test]
