@@ -335,13 +335,15 @@ impl AppRoot {
         if self.block_sql_filter_for_staged_changes(tab_id, cx) {
             return;
         }
+        // The popover stays open on one fresh rule, ready for the next filter.
+        let first = self.sql_filter_columns(tab_id).into_iter().next();
         if let Some(tab) = self.workspace.tab_mut(tab_id) {
             tab.table_filter.rules.clear();
+            tab.table_filter.ensure_rule(first.unwrap_or_default());
             tab.table_filter.generated_where = None;
         }
         self.sql_table_ui.filter.remove_tab(tab_id);
         if let Some(runtime) = self.workspace.runtime_mut(tab_id) {
-            runtime.sql_table.filter_open = false;
             runtime.sql_table.filter_error = None;
         }
         self.write_sql_table_field(tab_id, super::sql_table::SqlField::Where, "", window, cx);

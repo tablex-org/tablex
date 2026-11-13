@@ -231,7 +231,8 @@ fn clear_filter_drops_rules_and_where_and_reruns(cx: &mut TestAppContext) {
     click_selector(visual, "sql-filter-clear");
     app.read_with(visual, |this, cx| {
         let tab = this.workspace.active_tab().unwrap();
-        assert!(tab.table_filter.rules.is_empty());
+        assert_eq!(tab.table_filter.rules.len(), 1, "one fresh rule is left");
+        assert_eq!(tab.table_filter.rules[0].value, "");
         assert_eq!(tab.table_filter.generated_where, None);
         assert_eq!((tab.table_where.as_str(), tab.applied_where.as_str()), ("", ""));
         assert_eq!(
@@ -241,15 +242,13 @@ fn clear_filter_drops_rules_and_where_and_reruns(cx: &mut TestAppContext) {
             Some("")
         );
         assert!(this.workspace.runtime(tab_id).unwrap().query.generation() > generation, "re-ran");
-        assert_eq!(this.sql_table_ui.filter.row_count(tab_id), 0, "rule editors are dropped");
+        assert!(this.workspace.runtime(tab_id).unwrap().sql_table.filter_open);
     });
     assert_eq!(grid_ids(&app, visual).len(), 200, "full first page again");
-    assert!(visual.debug_bounds("sql-filter-panel").is_none(), "Clear Filter closes the popover");
+    assert!(visual.debug_bounds("sql-filter-panel").is_some(), "Clear Filter keeps the popover open");
     assert!(visual.debug_bounds("sql-filter-badge").is_none());
-
-    // Reopening starts from one blank rule again.
-    open_filter_popover(visual);
-    assert_eq!(filter_tab(&app, visual).table_filter.rules.len(), 1);
+    // The fresh rule has its editors, ready to type into.
+    assert_eq!(app.read_with(visual, |this, _| this.sql_table_ui.filter.row_count(tab_id)), 1);
 }
 
 #[gpui::test]

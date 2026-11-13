@@ -249,7 +249,7 @@ impl AppRoot {
             .ghost()
             .tooltip("Clear Find Query")
             .on_click(cx.listener(move |this, _, window, cx| {
-                this.clear_mongo_filters(tab_id, window, cx);
+                this.clear_mongo_filters(tab_id, false, window, cx);
             }));
         let find_control = div()
             .debug_selector(|| "mongo-find-expand".into())

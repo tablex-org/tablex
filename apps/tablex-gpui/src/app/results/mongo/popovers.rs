@@ -465,6 +465,7 @@ impl AppRoot {
                 this.reset_mongo_filter_builder(tab_id, cx);
             }));
         let clear = Button::new(("mongo-filter-clear", tab_id))
+            .debug_selector(|| "mongo-filter-clear".into())
             .with_size(gpui_component::Size::XSmall)
             .icon(Icon::new(IconName::Delete).size(px(14.0)))
             .label("Clear Filter")
@@ -472,7 +473,7 @@ impl AppRoot {
             .ghost()
             .h(px(28.0))
             .on_click(cx.listener(move |this, _, window, cx| {
-                this.clear_mongo_filters(tab_id, window, cx);
+                this.clear_mongo_filters(tab_id, true, window, cx);
             }));
         let apply = Button::new(("mongo-filter-apply", tab_id))
             .with_size(gpui_component::Size::XSmall)

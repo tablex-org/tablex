@@ -81,16 +81,24 @@ impl AppRoot {
         }
     }
 
+    /// Clears the find filter and re-runs. `keep_builder_open`: the filter builder's own Clear
+    /// Filter, which leaves the builder open on one fresh rule; the toolbar's clear closes it.
     pub(in crate::app) fn clear_mongo_filters(
         &mut self,
         tab_id: u64,
+        keep_builder_open: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.clear_mongo_filter_rule_editors(tab_id);
+        let first_field = self.grid(tab_id).column_name(0).unwrap_or("").to_string();
         if let Some(runtime) = self.workspace.runtime_mut(tab_id) {
             runtime.mongo.clear_filters();
-            runtime.mongo.filter_open = false;
+            if keep_builder_open {
+                runtime.mongo.ensure_filter_rule(first_field);
+            } else {
+                runtime.mongo.filter_open = false;
+            }
             runtime.pagination.reset();
         }
         if let Some(editor) = self.mongo_ui.filter_editors.get(&tab_id).cloned() {

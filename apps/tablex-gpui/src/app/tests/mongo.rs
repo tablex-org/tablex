@@ -2235,3 +2235,57 @@ fn live_mongo_clear_sort_then_execute_on_an_empty_result(cx: &mut TestAppContext
     assert_eq!(sort, "");
     assert_eq!(status, crate::query::QueryStatus::Ready { rows: 0 }, "Execute ran and the empty result is not an error");
 }
+
+/// The builder's Clear Filter clears the find filter but leaves the builder open on one fresh
+/// rule; the toolbar's clear (the X) still closes it.
+#[gpui::test]
+fn mongo_clear_filter_keeps_the_builder_open_on_a_fresh_rule(cx: &mut TestAppContext) {
+    cx.update(gpui_component::init);
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        let view = cx.new(AppRoot::new_for_test);
+        gpui_component::Root::new(view, window, cx)
+    });
+    let app = cx.cx.read(|app| {
+        root.read(app)
+            .view()
+            .clone()
+            .downcast::<AppRoot>()
+            .expect("root should contain AppRoot")
+    });
+    app.update(cx, |this, cx| {
+        let tab_id = this.workspace.open_query_tab("Mongo");
+        this.workspace.active_tab_mut().expect("active tab").query_mode = Some(QueryMode::MongoFind);
+        let runtime = this.workspace.runtime_mut(tab_id).expect("query runtime");
+        runtime.query.begin();
+        runtime.mongo.known_columns = vec!["_id".into(), "name".into()];
+        runtime.mongo.add_filter_rule("_id");
+        runtime.mongo.add_filter_rule("name");
+        runtime.mongo.filter_rules[1].value = "x".into();
+        runtime.mongo.filter = r#"{"name":"x"}"#.into();
+        cx.notify();
+    });
+    cx.simulate_resize(gpui::size(gpui::px(900.0), gpui::px(600.0)));
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let filter = cx.debug_bounds("mongo-filter-label").expect("filter trigger should render");
+    cx.simulate_click(filter.center(), Default::default());
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("mongo-filter-panel").is_some());
+
+    let clear = cx.debug_bounds("mongo-filter-clear").expect("Clear Filter should render");
+    cx.simulate_click(clear.center(), Default::default());
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("mongo-filter-panel").is_some(), "the builder stays open");
+    app.read_with(cx, |this, _| {
+        let tab_id = this.workspace.active_tab().expect("active tab").id;
+        let mongo = &this.workspace.runtime(tab_id).expect("query runtime").mongo;
+        assert!(mongo.filter_open);
+        assert_eq!(mongo.filter, "{}");
+        assert_eq!(mongo.filter_rules.len(), 1, "one fresh rule");
+        assert_eq!(mongo.filter_rules[0].value, "");
+    });
+}
