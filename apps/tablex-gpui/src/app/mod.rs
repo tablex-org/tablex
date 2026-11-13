@@ -691,6 +691,8 @@ mod tests {
     include!("tests/mongo_values.rs");
     include!("tests/mongo_value_panel.rs");
     include!("tests/mongo_document_edit.rs");
+    include!("tests/mongo_tree_copy.rs");
+    include!("tests/mongo_tree_perf.rs");
     include!("tests/mongo_admin.rs");
     include!("tests/results.rs");
     include!("tests/value_correctness.rs");

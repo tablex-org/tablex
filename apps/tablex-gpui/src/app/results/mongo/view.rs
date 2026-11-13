@@ -1,4 +1,5 @@
 use super::super::super::*;
+use super::controls::MongoTreeCopy;
 
 impl AppRoot {
     fn render_mongo_json_panel(
@@ -107,77 +108,166 @@ impl AppRoot {
                 .into_any_element();
         };
         let rows = crate::mongo_result::flatten_tree(&snapshot.document, expanded_paths);
+        let selected_path = self
+            .workspace
+            .runtime(tab_id)
+            .and_then(|runtime| runtime.mongo.inspector.selected_path.clone());
+        // Set by a right-press on a row, taken by the menu when it opens: a
+        // right-click below the last row opens no menu.
+        let context_hit = std::rc::Rc::new(std::cell::Cell::new(false));
+        let row_hit = context_hit.clone();
+        // The list measures one item for its scrollable width: the one with the most text.
+        let widest = rows
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, row)| row.depth * 3 + row.key.len() + row.value.len())
+            .map(|(index, _)| index);
+        let scroll = self.view(tab_id).mongo_detail_scroll.clone();
         let list = uniform_list(
             "mongo-tree-lines",
             rows.len(),
             cx.processor(move |this, range: Range<usize>, _window, cx| {
+                // A row spans the visible width, and the scrolled-in content to its
+                // right (the list lays items out at viewport + scroll distance), so a
+                // click anywhere on it, and its highlight, reach the edge.
+                let row_width = {
+                    let state = scroll.0.borrow();
+                    state.base_handle.bounds().size.width + state.base_handle.offset().x.abs()
+                };
                 range
                     .map(|index| {
                         let row = rows[index].clone();
-                        let path = row.path.clone();
+                        let path = row.path;
                         let expandable = row.container;
-                        let is_expanded = this
-                            .workspace
-                            .runtime(tab_id)
-                            .map(|runtime| runtime.mongo.inspector.expanded_paths.contains(&path))
-                            .unwrap_or(false);
+                        let is_expanded = expandable
+                            && this
+                                .workspace
+                                .runtime(tab_id)
+                                .map(|runtime| runtime.mongo.inspector.expanded_paths.contains(&path))
+                                .unwrap_or(false);
+                        // Row state (the value's text selection) is keyed by the
+                        // path, so it stays with its row when rows above change.
                         let mut element = div()
-                            .id(("mongo-tree-row", index))
+                            .id(gpui::ElementId::Name(path.clone().into()))
                             .h(px(24.0))
+                            .min_w(row_width)
+                            .flex_none()
+                            .cursor_text()
+                            .whitespace_nowrap()
                             .debug_selector(|| format!("mongo-tree-row-{index}"))
                             .flex()
                             .items_center()
                             .pl(px((row.depth as f32) * 18.0 + 10.0))
                             .gap(px(6.0))
                             .text_size(px(12.0));
-                        if expandable {
-                            element = element.child(
-                                div()
-                                    .w(px(12.0))
-                                    .text_color(theme::text_muted())
-                                    .child(if is_expanded { "v" } else { ">" }),
-                            );
-                            element = element.on_click(cx.listener(move |this, _, _, cx| {
-                                if let Some(runtime) = this.workspace.runtime_mut(tab_id) {
-                                    if !runtime.mongo.inspector.expanded_paths.remove(&path) {
-                                        runtime.mongo.inspector.expanded_paths.insert(path.clone());
-                                    }
-                                }
-                                this.notify_tab(tab_id, cx);
-                            }));
-                        } else {
-                            element = element.child(div().w(px(12.0)));
+                        // The selected row looks like the JSON view's current line, so a
+                        // text selection (the editor's selection colour) stands out on it.
+                        if selected_path.as_ref() == Some(&path) {
+                            let theme = gpui_component::ActiveTheme::theme(&**cx);
+                            element = element.bg(theme
+                                .highlight_theme
+                                .style
+                                .editor_active_line
+                                .unwrap_or(theme.list_active));
                         }
+                        element = element.child(if expandable {
+                            div()
+                                .w(px(12.0))
+                                .text_color(theme::text_muted())
+                                .child(if is_expanded { "v" } else { ">" })
+                        } else {
+                            div().w(px(12.0))
+                        });
+                        let hit = row_hit.clone();
+                        let press_path = path.clone();
+                        let left_path = path.clone();
                         element
-                            .when(!row.key.is_empty(), |element| {
-                                element.child(
-                                    div()
-                                        .text_color(theme::accent())
-                                        .child(format!("{}:", row.key)),
-                                )
-                            })
-                            .child(
-                                div()
-                                    .text_color(mongo_tree_value_color(&row.type_name, row.container))
-                                    .child(row.value),
+                            // The row is selected on the press, not the release, so the
+                            // highlight follows the pointer at once; the press also focuses
+                            // the panel for Cmd+C (a drag may start a text selection in the
+                            // value). Toggling a container waits for the click below.
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, window, cx| {
+                                    this.select_mongo_tree_row(tab_id, left_path.clone(), false, window, cx);
+                                }),
                             )
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(move |this, _, window, cx| {
+                                    hit.set(true);
+                                    this.select_mongo_tree_row(tab_id, press_path.clone(), false, window, cx);
+                                }),
+                            )
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                // A drag or double-click selected text in the value:
+                                // that is not a click on the row.
+                                if !expandable || gpui_base::TextSelection::has_selection(window, cx) {
+                                    return;
+                                }
+                                this.select_mongo_tree_row(tab_id, path.clone(), true, window, cx);
+                            }))
+                            .child({
+                                // `key: value` is one run of text (so it copies as it
+                                // reads), the key coloured by a range of it.
+                                let (text, key_len) = if row.key.is_empty() {
+                                    (row.value, 0)
+                                } else {
+                                    (format!("{}: {}", row.key, row.value), row.key.len() + 1)
+                                };
+                                div()
+                                    .debug_selector(|| format!("mongo-tree-value-{index}"))
+                                    .text_color(mongo_tree_value_color(&row.type_name, row.container))
+                                    .child(super::tree_text::TreeRowText::new(
+                                        "mongo-tree-text",
+                                        text,
+                                        0..key_len,
+                                        theme::accent().into(),
+                                        index as u64,
+                                    ))
+                            })
                             .into_any_element()
                     })
                     .collect()
             }),
         )
         .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
+        .with_width_from_item(widest)
         .flex_1()
         .h_full()
         .min_h_0()
         .track_scroll(&self.view(tab_id).mongo_detail_scroll);
+        let root = cx.entity().downgrade();
+        let tree_focus = self.view(tab_id).grid_focus.clone();
         div()
+            .id(("mongo-tree", tab_id))
             .size_full()
             .flex()
             .flex_col()
             .flex_1()
             .min_h_0()
             .child(list)
+            .context_menu(move |menu, window, cx| {
+                if !context_hit.replace(false) {
+                    // The menu focuses itself even when empty: hand focus back.
+                    if let Some(focus) = tree_focus.clone() {
+                        window.defer(cx, move |window, cx| focus.focus(window, cx));
+                    }
+                    return menu;
+                }
+                let item = |label: &'static str, icon: &'static str, what: MongoTreeCopy| {
+                    let root = root.clone();
+                    PopupMenuItem::new(label)
+                        .icon(super::super::grid::cell_menu_icon(icon))
+                        .on_click(move |_, _, app| {
+                            let _ = root.update(app, |this, cx| this.copy_mongo_tree(tab_id, what, cx));
+                        })
+                };
+                menu.item(item("Copy Value", "icons/copy.svg", MongoTreeCopy::Value))
+                    .item(item("Copy Field Name", "icons/copy.svg", MongoTreeCopy::FieldName))
+                    .item(item("Copy Path", "icons/copy.svg", MongoTreeCopy::Path))
+                    .item(item("Copy as JSON", "icons/braces.svg", MongoTreeCopy::Json))
+            })
             .into_any_element()
     }
 
@@ -328,6 +418,7 @@ impl AppRoot {
                 None => "no _id in this page".to_string(),
             })
             .unwrap_or_default();
+        let tree_keys = document_view == crate::mongo_result::MongoDocumentView::Tree && !editing;
         let body = if let Some(edit) = view.mongo.document_edit.as_ref() {
             self.render_mongo_document_editor(tab_id, edit, cx)
         } else if let Some(error) = error {
@@ -353,6 +444,25 @@ impl AppRoot {
             .debug_selector(|| "mongo-document-panel".into())
             // A landing place for focus when the editor closes.
             .when_some(view.grid_focus.clone(), |this, focus| this.track_focus(&focus))
+            // The Tree view's keys: Cmd+C is the grid's copy chord, Up / Down move the row.
+            .when(tree_keys, |this| {
+                this.key_context("grid")
+                    .on_action(cx.listener(move |this, _: &CopyGridSelection, window, cx| {
+                        this.copy_mongo_tree_shortcut(tab_id, window, cx);
+                    }))
+                    .on_action(cx.listener(move |this, _: &gpui_component::input::Copy, window, cx| {
+                        this.copy_mongo_tree_shortcut(tab_id, window, cx);
+                    }))
+                    .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
+                        let down = match event.keystroke.key.as_str() {
+                            "up" => false,
+                            "down" => true,
+                            _ => return,
+                        };
+                        this.move_mongo_tree_selection(tab_id, down, cx);
+                        cx.stop_propagation();
+                    }))
+            })
             .flex_1()
             .min_w(px(0.0))
             .min_h_0()

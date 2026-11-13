@@ -746,6 +746,138 @@ impl AppRoot {
     }
 }
 
+/// What a Tree view row puts on the clipboard.
+#[derive(Clone, Copy)]
+pub(in crate::app) enum MongoTreeCopy {
+    Value,
+    FieldName,
+    Path,
+    Json,
+}
+
+impl AppRoot {
+    /// The Tree view's document: the snapshot with the staged updates applied.
+    fn mongo_displayed_document(&self, tab_id: u64) -> Option<serde_json::Value> {
+        let runtime = self.workspace.runtime(tab_id)?;
+        let snapshot = runtime.mongo.inspector.snapshot.as_ref()?;
+        Some(match runtime.mongo.inspector.selected {
+            Some(key) if !runtime.mongo.mutations.is_empty() => crate::mongo_result::apply_staged_updates(
+                &snapshot.document,
+                key.row_index as usize,
+                &runtime.mongo.mutations,
+            ),
+            _ => snapshot.document.clone(),
+        })
+    }
+
+    /// Selects a Tree view row (`path` is its `MongoTreeRow::path`); a
+    /// container row also toggles open or closed when `toggle`.
+    pub(in crate::app) fn select_mongo_tree_row(
+        &mut self,
+        tab_id: u64,
+        path: String,
+        toggle: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut changed = toggle;
+        if let Some(runtime) = self.workspace.runtime_mut(tab_id) {
+            let inspector = &mut runtime.mongo.inspector;
+            if toggle && !inspector.expanded_paths.remove(&path) {
+                inspector.expanded_paths.insert(path.clone());
+            }
+            changed |= inspector.selected_path.as_ref() != Some(&path);
+            inspector.selected_path = Some(path);
+        }
+        // Focusing redraws the window: only when the panel does not have focus yet.
+        let focus = self.view_mut(tab_id).grid_focus(cx);
+        if !focus.is_focused(window) {
+            focus.focus(window, cx);
+        }
+        if changed {
+            self.notify_tab(tab_id, cx);
+        }
+    }
+
+    /// Up / Down in the Tree view: the previous / next visible row (the first
+    /// when none is selected).
+    pub(in crate::app) fn move_mongo_tree_selection(&mut self, tab_id: u64, down: bool, cx: &mut Context<Self>) {
+        let Some(document) = self.mongo_displayed_document(tab_id) else {
+            return;
+        };
+        let Some(runtime) = self.workspace.runtime_mut(tab_id) else {
+            return;
+        };
+        let inspector = &mut runtime.mongo.inspector;
+        let rows = crate::mongo_result::flatten_tree(&document, &inspector.expanded_paths);
+        let current = inspector
+            .selected_path
+            .as_ref()
+            .and_then(|path| rows.iter().position(|row| &row.path == path));
+        let next = match current {
+            None => 0,
+            Some(index) if down => (index + 1).min(rows.len().saturating_sub(1)),
+            Some(index) => index.saturating_sub(1),
+        };
+        let Some(row) = rows.get(next) else {
+            return;
+        };
+        inspector.selected_path = Some(row.path.clone());
+        self.view(tab_id)
+            .mongo_detail_scroll
+            .scroll_to_item(next, gpui::ScrollStrategy::Nearest);
+        self.notify_tab(tab_id, cx);
+    }
+
+    /// The text `what` copies for the selected Tree view row.
+    pub(in crate::app) fn mongo_tree_copy_text(&self, tab_id: u64, what: MongoTreeCopy) -> Option<String> {
+        let path = self.workspace.runtime(tab_id)?.mongo.inspector.selected_path.clone()?;
+        let document = self.mongo_displayed_document(tab_id)?;
+        let (keys, value) = crate::mongo_result::tree_node(&document, &path)?;
+        let key = keys.last()?;
+        // Containers read as the JSON view does, in its Shell / Canonical mode.
+        let json = |value: &serde_json::Value| {
+            super::super::json_view::document_json_text(
+                value,
+                &crate::mongo_result::pretty_json(value),
+                self.view(tab_id).mongo.document_json_mode,
+            )
+        };
+        Some(match what {
+            MongoTreeCopy::FieldName => key.clone(),
+            MongoTreeCopy::Path => keys.join("."),
+            MongoTreeCopy::Value => crate::mongo_result::tree_scalar_text(value).unwrap_or_else(|| json(value)),
+            MongoTreeCopy::Json => {
+                let mut field = serde_json::Map::new();
+                field.insert(key.clone(), value.clone());
+                json(&serde_json::Value::Object(field))
+            }
+        })
+    }
+
+    pub(in crate::app) fn copy_mongo_tree(&mut self, tab_id: u64, what: MongoTreeCopy, cx: &mut Context<Self>) {
+        if let Some(text) = self.mongo_tree_copy_text(tab_id, what) {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        }
+    }
+
+    /// Cmd+C in the Tree view: the text selected inside a value, else the
+    /// selected row's value.
+    pub(in crate::app) fn copy_mongo_tree_shortcut(
+        &mut self,
+        tab_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let selected = gpui_base::TextSelection::selected_text(window, cx);
+        if selected.is_empty() {
+            self.copy_mongo_tree(tab_id, MongoTreeCopy::Value, cx);
+        } else {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(selected));
+        }
+    }
+}
+
 /// Where the fields of one Mongo result row are read from.
 enum MongoRowInspection {
     /// Already available (the UI scenario fixture).

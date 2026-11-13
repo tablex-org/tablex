@@ -8375,6 +8375,7 @@ dependencies = [
  "engine-net",
  "engine-plan",
  "engine-storage",
+ "gpui-base",
  "gpui-component",
  "gpui-pre",
  "gpui-pre-platform",

@@ -91,7 +91,7 @@ fn sticky_divider() -> Div {
         .bg(theme::border_strong())
 }
 
-fn cell_menu_icon(path: &'static str) -> Icon {
+pub(super) fn cell_menu_icon(path: &'static str) -> Icon {
     Icon::empty().path(path).size(px(12.0))
 }
 

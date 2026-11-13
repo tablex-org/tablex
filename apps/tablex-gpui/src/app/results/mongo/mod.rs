@@ -7,6 +7,7 @@ pub(in crate::app) mod mutations;
 pub(in crate::app) mod popovers;
 pub(in crate::app) mod query;
 pub(in crate::app) mod toolbar;
+mod tree_text;
 pub(in crate::app) mod view;
 
 pub(in crate::app) fn mongo_columns_button_label(

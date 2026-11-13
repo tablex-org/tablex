@@ -525,6 +525,8 @@ pub struct MongoInspectorState {
     pub loading: bool,
     pub error: Option<String>,
     pub expanded_paths: HashSet<String>,
+    /// The Tree view's selected row, as `MongoTreeRow::path`.
+    pub selected_path: Option<String>,
 }
 
 impl MongoInspectorState {
@@ -534,6 +536,7 @@ impl MongoInspectorState {
         self.loading = true;
         self.error = None;
         self.expanded_paths.clear();
+        self.selected_path = None;
     }
 
     pub fn accept_snapshot(&mut self, snapshot: MongoDocumentSnapshot) -> bool {
@@ -612,6 +615,62 @@ pub fn apply_staged_updates(
         }
     }
     document
+}
+
+/// The value at a `MongoTreeRow::path` and the field names leading to it
+/// (array items by index). `None` when the document has no such row.
+pub fn tree_node<'a>(
+    document: &'a serde_json::Value,
+    path: &str,
+) -> Option<(Vec<String>, &'a serde_json::Value)> {
+    let mut keys = Vec::new();
+    let mut value = document;
+    let mut rest = path;
+    while !rest.is_empty() {
+        rest = rest.strip_prefix('/')?;
+        // A name ends the path or is followed by the next `/`.
+        let at = |key: &str| {
+            rest.strip_prefix(key)
+                .filter(|tail| tail.is_empty() || tail.starts_with('/'))
+        };
+        let (key, child, tail) = match value {
+            serde_json::Value::Object(fields) => fields
+                .iter()
+                .find_map(|(key, child)| at(key).map(|tail| (key.clone(), child, tail)))?,
+            serde_json::Value::Array(items) => items
+                .iter()
+                .enumerate()
+                .find_map(|(index, child)| {
+                    let key = index.to_string();
+                    at(&key).map(|tail| (key, child, tail))
+                })?,
+            _ => return None,
+        };
+        keys.push(key);
+        value = child;
+        rest = tail;
+    }
+    Some((keys, value))
+}
+
+/// What a scalar tree row copies: strings without quotes, an ObjectId as its
+/// hex, a date as ISO text, a binary in full. `None` for containers, which
+/// copy as JSON.
+pub fn tree_scalar_text(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(text) => Some(text.clone()),
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            Some(value.to_string())
+        }
+        _ => {
+            let (display, type_name) = ejson_scalar(value)?;
+            Some(match type_name {
+                // The row shows a binary cut short; the copy is whole.
+                "binary" => crate::cell_value::shell_text(value, false).unwrap_or(display),
+                _ => display,
+            })
+        }
+    }
 }
 
 fn append_tree_rows(
@@ -1162,6 +1221,31 @@ pub fn duplicate_document_without_id(document: &serde_json::Value) -> Option<ser
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tree_node_resolves_row_paths_and_the_copy_text_of_scalars() {
+        let document = serde_json::json!({
+            "_id": {"$oid": "000000000000000000000002"},
+            "logs": [{"status": "ok"}, {"status": "a b", "a/b": 1}],
+            "name": "x\"y",
+            "bin": {"$binary": {"base64": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+P0BBQkNERUZHSElKS0xNTk9QUVJTVFVWV1hZWltcXV5fYGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn8=", "subType": "00"}},
+        });
+        let (keys, value) = tree_node(&document, "/logs/1/status").unwrap();
+        assert_eq!(keys, ["logs", "1", "status"]);
+        assert_eq!(value, "a b");
+        let (keys, _) = tree_node(&document, "/logs/1/a/b").unwrap();
+        assert_eq!(keys, ["logs", "1", "a/b"], "a name with a slash resolves too");
+        assert!(tree_node(&document, "/logs/2").is_none());
+        assert!(tree_node(&document, "/nam").is_none(), "a name must match whole");
+        assert_eq!(tree_node(&document, "").unwrap().0.len(), 0);
+
+        assert_eq!(tree_scalar_text(&document["name"]).as_deref(), Some("x\"y"), "no quotes, no escapes");
+        assert_eq!(tree_scalar_text(&document["_id"]).as_deref(), Some("000000000000000000000002"));
+        assert_eq!(tree_scalar_text(&document["logs"]), None, "containers copy as JSON");
+        let shown = ejson_scalar(&document["bin"]).unwrap().0;
+        let copied = tree_scalar_text(&document["bin"]).unwrap();
+        assert!(copied.len() > shown.len(), "the row's cut-short binary copies whole: {shown} / {copied}");
+    }
 
     #[test]
     fn mongo_query_preview_builds_find_sort_and_projection() {
