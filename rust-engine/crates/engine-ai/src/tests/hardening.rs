@@ -998,50 +998,60 @@ fn hostile_names_cannot_write_into_the_system_prompt() {
 
 // ---- item 7: the strict-tool limits ------------------------------------------------------------
 
-/// Public limits of strict tool use as the lead and the reviewer recall them; they are NOT in the
-/// bundled API reference. Confirm with one live request.
-const MAX_STRICT_TOOLS: usize = 20;
-const MAX_OPTIONAL_PARAMETERS: usize = 24;
-const MAX_UNION_PARAMETERS: usize = 16;
-
-fn count(schema: &Value, optional: &mut usize, unions: &mut usize) {
-    let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
-        return;
-    };
-    let required: Vec<&str> = schema["required"]
-        .as_array()
-        .map(|r| r.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
-    for (name, property) in properties {
-        if !required.contains(&name.as_str()) {
-            *optional += 1;
-        }
-        if property["type"].is_array() || property.get("anyOf").is_some() {
-            *unions += 1;
-        }
-        count(property, optional, unions);
-        if let Some(items) = property.get("items") {
-            count(items, optional, unions);
-        }
-    }
-}
+// The limits (20 strict tools, 24 optional and 16 union-typed parameters over all strict schemas
+// of a request) are in the structured outputs docs, "Schema complexity limits".
+use crate::anthropic::request::{
+    schema_cost, strict_tools, MAX_STRICT_OPTIONAL, MAX_STRICT_TOOLS, MAX_STRICT_UNIONS,
+};
 
 #[test]
 fn the_tool_schemas_stay_inside_the_strict_tool_limits() {
     let harness = Harness::new(vec![]);
     let tools = harness.layer.tools();
-    let (mut optional, mut unions) = (0, 0);
-    for tool in tools {
-        count(&tool.input_schema, &mut optional, &mut unions);
+    let strict = strict_tools(tools);
+    let (mut count, mut optional, mut unions) = (0, 0, 0);
+    for (tool, strict) in tools.iter().zip(&strict) {
+        let (o, u) = schema_cost(&tool.input_schema);
+        assert_eq!(u, 0, "{}: the request schemas use no null unions", tool.name);
+        if *strict {
+            count += 1;
+            optional += o;
+            unions += u;
+        }
     }
-    assert!(tools.len() <= MAX_STRICT_TOOLS, "{} tools", tools.len());
-    assert!(
-        optional <= MAX_OPTIONAL_PARAMETERS,
-        "{optional} optional parameters"
-    );
-    assert!(
-        unions <= MAX_UNION_PARAMETERS,
-        "{unions} union-typed parameters"
-    );
-    assert_eq!(unions, 0, "the request schemas use no null unions");
+    assert!(count <= MAX_STRICT_TOOLS, "{count} strict tools");
+    assert!(optional <= MAX_STRICT_OPTIONAL, "{optional} optional parameters");
+    assert!(unions <= MAX_STRICT_UNIONS, "{unions} union-typed parameters");
+    // The tools that run statements are always strict.
+    for name in ["execute_query", "execute_redis_command", "explain_query"] {
+        let index = tools.iter().position(|tool| tool.name == name).unwrap();
+        assert!(strict[index], "{name} is strict");
+    }
+}
+
+#[test]
+fn strict_is_given_while_the_budget_lasts_and_never_past_it() {
+    use engine_agent::ToolSpec;
+    let schema = |optional: usize| {
+        let properties: serde_json::Map<String, Value> = (0..optional)
+            .map(|i| (format!("p{i}"), serde_json::json!({"type": "string"})))
+            .collect();
+        serde_json::json!({"type": "object", "properties": properties, "required": []})
+    };
+    let spec = |name: &'static str, optional: usize| ToolSpec {
+        name,
+        description: "",
+        input_schema: schema(optional),
+        output_schema: Value::Null,
+        example: Value::Null,
+    };
+    // 10 + 10 fit, the next 10 would make 30, the 4 after it fit again (24).
+    let specs = [spec("a", 10), spec("b", 10), spec("c", 10), spec("d", 4)];
+    assert_eq!(strict_tools(&specs), [true, true, false, true]);
+    // `execute_query` goes first even when it is listed last.
+    let specs = [spec("a", 20), spec("execute_query", 10)];
+    assert_eq!(strict_tools(&specs), [false, true]);
+    // At most 20 strict tools.
+    let many: Vec<ToolSpec> = (0..25).map(|_| spec("x", 0)).collect();
+    assert_eq!(strict_tools(&many).iter().filter(|s| **s).count(), MAX_STRICT_TOOLS);
 }

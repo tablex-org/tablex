@@ -16,7 +16,7 @@
 //! once, and the request is sent again; a second 400 is an error.
 
 mod models;
-mod request;
+pub(crate) mod request;
 mod stream;
 #[cfg(test)]
 mod tests;

@@ -9,18 +9,22 @@ use engine_agent::AgentAccess;
 use serde_json::{json, Value};
 
 fn expected_tools(harness: &Harness, eager: bool) -> Value {
+    let strict = crate::anthropic::request::strict_tools(harness.layer.tools());
     Value::Array(
         harness
             .layer
             .tools()
             .iter()
-            .map(|spec| {
+            .zip(strict)
+            .map(|(spec, strict)| {
                 let mut tool = json!({
                     "name": spec.name,
                     "description": spec.description,
                     "input_schema": spec.input_schema,
-                    "strict": true,
                 });
+                if strict {
+                    tool["strict"] = json!(true);
+                }
                 if eager {
                     tool["eager_input_streaming"] = json!(true);
                 }

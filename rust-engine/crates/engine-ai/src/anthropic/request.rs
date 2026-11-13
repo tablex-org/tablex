@@ -118,20 +118,82 @@ struct Tools<'a> {
 
 impl Serialize for Tools<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let strict = strict_tools(self.specs);
         let mut seq = serializer.serialize_seq(Some(self.specs.len()))?;
-        for spec in self.specs {
+        for (spec, strict) in self.specs.iter().zip(strict) {
             seq.serialize_element(&Tool {
                 spec,
                 eager: self.eager,
+                strict,
             })?;
         }
         seq.end()
     }
 }
 
+/// The API's complexity limits for strict schemas, summed over every `strict: true` tool of a
+/// request (structured outputs docs, "Schema complexity limits"); over them the request is a 400.
+pub(crate) const MAX_STRICT_TOOLS: usize = 20;
+pub(crate) const MAX_STRICT_OPTIONAL: usize = 24;
+pub(crate) const MAX_STRICT_UNIONS: usize = 16;
+
+/// Tools whose input runs something on the database: strict first, so their arguments always
+/// match the schema; the rest are strict while the budget lasts.
+const STRICT_FIRST: [&str; 3] = ["execute_query", "execute_redis_command", "explain_query"];
+
+/// Optional and union-typed parameters of a schema, nested objects and array items included (how
+/// the API counts them).
+pub(crate) fn schema_cost(schema: &serde_json::Value) -> (usize, usize) {
+    let mut cost = (0, 0);
+    let Some(properties) = schema.get("properties").and_then(serde_json::Value::as_object) else {
+        return cost;
+    };
+    let required: Vec<&str> = schema
+        .get("required")
+        .and_then(serde_json::Value::as_array)
+        .map(|names| names.iter().filter_map(serde_json::Value::as_str).collect())
+        .unwrap_or_default();
+    for (name, property) in properties {
+        cost.0 += usize::from(!required.contains(&name.as_str()));
+        cost.1 += usize::from(property["type"].is_array() || property.get("anyOf").is_some());
+        for nested in [Some(property), property.get("items")].into_iter().flatten() {
+            let (optional, unions) = schema_cost(nested);
+            cost.0 += optional;
+            cost.1 += unions;
+        }
+    }
+    cost
+}
+
+/// Which of `specs` (same order) go out with `strict: true`: the [`STRICT_FIRST`] tools, then the
+/// others in list order, each one only while the request stays inside the limits. Depends on the
+/// specs alone, so the cached tools block stays byte-identical between requests.
+pub(crate) fn strict_tools(specs: &[ToolSpec]) -> Vec<bool> {
+    let mut strict = vec![false; specs.len()];
+    let (mut tools, mut optional, mut unions) = (0, 0, 0);
+    let first = |spec: &ToolSpec| STRICT_FIRST.contains(&spec.name);
+    let order = (0..specs.len())
+        .filter(|&i| first(&specs[i]))
+        .chain((0..specs.len()).filter(|&i| !first(&specs[i])));
+    for index in order {
+        let (o, u) = schema_cost(&specs[index].input_schema);
+        if tools < MAX_STRICT_TOOLS
+            && optional + o <= MAX_STRICT_OPTIONAL
+            && unions + u <= MAX_STRICT_UNIONS
+        {
+            strict[index] = true;
+            tools += 1;
+            optional += o;
+            unions += u;
+        }
+    }
+    strict
+}
+
 struct Tool<'a> {
     spec: &'a ToolSpec,
     eager: bool,
+    strict: bool,
 }
 
 impl Serialize for Tool<'_> {
@@ -140,7 +202,9 @@ impl Serialize for Tool<'_> {
         map.serialize_entry("name", self.spec.name)?;
         map.serialize_entry("description", self.spec.description)?;
         map.serialize_entry("input_schema", &self.spec.input_schema)?;
-        map.serialize_entry("strict", &true)?;
+        if self.strict {
+            map.serialize_entry("strict", &true)?;
+        }
         if self.eager {
             map.serialize_entry("eager_input_streaming", &true)?;
         }
