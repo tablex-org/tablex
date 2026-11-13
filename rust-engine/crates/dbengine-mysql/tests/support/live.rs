@@ -3352,6 +3352,50 @@ fn read_only_text_cannot_leave_its_scope_with_transaction_control() {
     session.disconnect().unwrap();
 }
 
+/// `START TRANSACTION READ ONLY` implicitly COMMITs a transaction that is already open, so a
+/// READ ONLY run on a session with pending writes (`SET autocommit = 0`, `BEGIN`) is refused
+/// before anything is sent: the pending row stays pending and a `ROLLBACK` still removes it.
+#[test]
+#[ignore = "needs a live server (see module docs)"]
+fn read_only_run_is_refused_instead_of_committing_an_open_transaction() {
+    let database = database_name();
+    let table = unique("ro_open");
+    let _cleanup = Cleanup(vec![table.clone()]);
+    admin_exec(&[
+        &format!("DROP TABLE IF EXISTS `{database}`.`{table}`"),
+        &format!("CREATE TABLE `{database}`.`{table}` (id INT PRIMARY KEY) ENGINE=InnoDB"),
+    ]);
+    let committed = || {
+        admin_rows(&format!("SELECT COUNT(*) FROM `{database}`.`{table}`"))[0][0]
+            .clone()
+            .unwrap()
+    };
+    let mut session = connect();
+    for opener in ["SET autocommit = 0", "BEGIN"] {
+        let page = run(&mut session, opener, 0, 10).unwrap();
+        session.release_page(page.page_id).unwrap();
+        let page = run(
+            &mut session,
+            &format!("INSERT INTO `{table}` VALUES (1)"),
+            0,
+            10,
+        )
+        .unwrap();
+        session.release_page(page.page_id).unwrap();
+        let (code, message) = rejected(run_read_only(&mut session, "SELECT 1").unwrap_err());
+        assert_eq!(code, "query.read_only_unavailable", "{opener}: {message}");
+        assert!(message.contains("transaction is open"), "{message}");
+        assert_eq!(committed(), "0", "{opener}: the refused run committed");
+        let page = run(&mut session, "ROLLBACK", 0, 10).unwrap();
+        session.release_page(page.page_id).unwrap();
+        assert_eq!(committed(), "0", "{opener}: the row survived the ROLLBACK");
+        // Nothing pending any more: the same run goes through.
+        let page = run_read_only(&mut session, "SELECT 1").expect("read only after ROLLBACK");
+        session.release_page(page.page_id).unwrap();
+    }
+    session.disconnect().unwrap();
+}
+
 /// A versioned comment (`/*!99999 ... */`) is code only to a server at or above its version;
 /// to an older one it is a comment closed by the first `*/`. The classifier must read it
 /// with the SERVER's version, or `SELECT 1 /*!99999 ' */ ; COMMIT; DELETE ...; -- '` is one
