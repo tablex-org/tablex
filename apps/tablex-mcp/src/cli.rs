@@ -34,7 +34,8 @@ pub const USAGE: &str = "\
 Usage: tablex-mcp [OPTION]
 
 MCP server (stdio) for TableX. With no option it serves: the MCP client starts it and talks to it
-on stdin / stdout. Access is per connection and off by default; set it in
+on stdin / stdout. Access is off by default; set a default for all connections in
+TableX > Settings > AI > Default agent access, or one per connection in
 TableX > connection > Overrides > Agent access.
 
 Options:

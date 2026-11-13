@@ -91,6 +91,7 @@ impl Settings {
                 keep_alive_secs: self.query.keep_alive_secs,
                 page_size: self.results.page_size,
                 confirm_dangerous: self.editor.confirm_dangerous,
+                agent_access: self.ai.agent_access,
             },
             &self.connection_types,
             profile,
@@ -274,5 +275,28 @@ mod tests {
         let effective = settings.for_connection(&production);
         assert!(effective.read_only);
         assert_eq!(effective.agent_access, AgentAccess::Read, "a read-only type caps the agent");
+    }
+
+    #[test]
+    fn the_global_agent_default_reaches_every_connection_without_its_own_level() {
+        let mut settings = Settings::default();
+        let plain = profile("", &[]);
+        let development = profile(DEVELOPMENT, &[]);
+        let production = profile(PRODUCTION, &[]);
+        let off = profile(DEVELOPMENT, &[(AGENT_ACCESS, OverrideValue::Text("off".into()))]);
+        assert_eq!(settings.for_connection(&plain).agent_access, AgentAccess::Off);
+        settings.ai.agent_access = AgentLevel::Read;
+        assert_eq!(settings.for_connection(&plain).agent_access, AgentAccess::Read);
+        assert_eq!(settings.for_connection(&development).agent_access, AgentAccess::Read);
+        assert_eq!(settings.for_connection(&production).agent_access, AgentAccess::Off);
+        assert_eq!(settings.for_connection(&off).agent_access, AgentAccess::Off);
+        // The shared reader of settings.json (tablex-mcp) agrees with what the app writes.
+        let json = serde_json::to_string(&settings).unwrap();
+        let path = std::env::temp_dir().join(format!("tablex-global-agent-{}.json", std::process::id()));
+        std::fs::write(&path, json).unwrap();
+        let shared = engine_connect::profile::ProfileSettings::load(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(shared.effective(&development).agent_access, AgentAccess::Read);
+        assert_eq!(shared.effective(&production).agent_access, AgentAccess::Off);
     }
 }

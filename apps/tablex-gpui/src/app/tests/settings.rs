@@ -1595,6 +1595,61 @@ fn a_base_url_that_would_send_the_key_in_clear_text_blocks_apply(cx: &mut TestAp
 }
 
 #[gpui::test]
+fn the_default_agent_access_is_picked_from_its_dropdown_and_a_lowered_one_is_written_at_once(
+    cx: &mut TestAppContext,
+) {
+    use engine_connect::profile::{AgentLevel, ProfileSettings};
+    cx.dispatcher.allow_parking();
+    let (app, visual) = settings_app(cx);
+    let path = settings_temp_path();
+    app.update(visual, |this, _| this.settings_ui.path = Some(path.clone()));
+    open_settings_page(&app, visual);
+    settings_nav(visual, "ai");
+    let on_disk = || {
+        ProfileSettings::load(&path)
+            .map(|settings| settings.globals().agent_access)
+            .unwrap_or_default()
+    };
+    let selected = |app: &gpui::Entity<AppRoot>, visual: &mut gpui::VisualTestContext| {
+        app.read_with(visual, |this, cx| {
+            let page = this.settings_ui.page.as_ref().unwrap();
+            page.select_for_test("ai.agent_access")
+                .read(cx)
+                .selected_value()
+                .map(|label| label.to_string())
+        })
+    };
+    assert_eq!(draft_of(&app, visual).ai.agent_access, AgentLevel::Off);
+    assert_eq!(selected(&app, visual).as_deref(), Some("Off"));
+
+    // Off -> Read through the dropdown; raising waits for the debounce like any setting.
+    click(visual, "setting-control-ai.agent_access".into());
+    visual.simulate_keystrokes("down down enter");
+    settle(visual);
+    assert_eq!(draft_of(&app, visual).ai.agent_access, AgentLevel::Read);
+    assert_eq!(applied(&app, visual).ai.agent_access, AgentLevel::Off, "still a draft");
+    click(visual, "settings-apply".into());
+    visual
+        .executor()
+        .advance_clock(std::time::Duration::from_millis(400));
+    wait_until(visual, "Read on disk", |_| on_disk() == AgentLevel::Read);
+
+    // Reopen on the chosen value, then lower it to Schema only: on disk at once, no debounce.
+    assert_eq!(selected(&app, visual).as_deref(), Some("Read"));
+    click(visual, "setting-control-ai.agent_access".into());
+    visual.simulate_keystrokes("up enter");
+    settle(visual);
+    click(visual, "settings-apply".into());
+    assert_eq!(applied(&app, visual).ai.agent_access, AgentLevel::Schema);
+    assert_eq!(on_disk(), AgentLevel::Schema, "written without waiting");
+    assert!(
+        app.read_with(visual, |this, _| this.settings_ui.pending.is_none()),
+        "no debounce is left running"
+    );
+    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[gpui::test]
 fn the_key_is_saved_to_the_store_at_once_and_never_shown_again(cx: &mut TestAppContext) {
     cx.dispatcher.allow_parking();
     let (app, visual) = settings_app(cx);

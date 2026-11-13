@@ -976,6 +976,7 @@ impl AppRoot {
         let info = engine_connect::profile::ConnectionType::agent_info_in(
             &self.settings.connection_types,
             &type_id,
+            self.settings.ai.agent_access,
         );
         [AgentLevel::Schema, AgentLevel::Read, AgentLevel::ReadWrite]
             .into_iter()

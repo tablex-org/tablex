@@ -204,14 +204,19 @@ impl AppRoot {
         // only on this change), and the pending timer is dropped since there is nothing left to save.
         // If that write fails the file still says ON while the page says off: that is said, in the
         // way a failed debounced save is said, and the debounce stays armed to try again.
-        if old.ai.mcp_writes && !self.settings.ai.mcp_writes && self.settings_ui.path.is_some() {
+        // Lowering the default agent access is the same kind of switch: `tablex-mcp` reads it from
+        // the file when it lists connections and opens sessions.
+        let mcp_off = old.ai.mcp_writes && !self.settings.ai.mcp_writes;
+        let agent_lowered =
+            self.settings.ai.agent_access.access() < old.ai.agent_access.access();
+        if (mcp_off || agent_lowered) && self.settings_ui.path.is_some() {
             match self.flush_settings_blocking() {
                 Ok(()) => {
                     self.settings_ui.pending = None;
                     self.settings_reached_the_file(cx);
                 }
                 Err(error) => {
-                    self.settings_ui.mcp_off_unsaved = true;
+                    self.settings_ui.mcp_off_unsaved |= mcp_off;
                     self.settings_save_failed(&error, "TableX will try again", cx);
                 }
             }
@@ -340,10 +345,13 @@ impl AppRoot {
         if touches(Section::Results) || touches(Section::Appearance) {
             self.relayout_grids();
         }
-        // Connection types decide the agent access a chat shows, and a connection whose
-        // effective access went down (a type made read-only, its preset lowered) loses its
+        // Connection types and the global default decide the agent access a chat shows, and a
+        // connection whose effective access went down (a type made read-only, a preset or the
+        // default lowered) loses its
         // agent session now: a statement already running is cancelled, not left to finish.
-        if old.connection_types != self.settings.connection_types {
+        if old.connection_types != self.settings.connection_types
+            || old.ai.agent_access != self.settings.ai.agent_access
+        {
             self.revoke_agent_access_lowered_since(old);
         }
         self.assistant_sync(cx);

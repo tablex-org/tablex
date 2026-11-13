@@ -13,6 +13,7 @@ pub mod store;
 
 use crate::sidebar_preferences::{ConnectionSort, TabGroupBy};
 use engine_ai::Effort;
+use engine_connect::profile::AgentLevel;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -157,6 +158,21 @@ impl_choice!(Effort {
     XHigh => ("xhigh", "Extra high"),
     Max => ("max", "Max"),
 });
+
+/// The levels a global default can take (`AgentLevel::TYPE_PRESETS`; never `read_write`).
+impl Choice for AgentLevel {
+    const OPTIONS: &'static [(&'static str, &'static str)] = &[
+        (AgentLevel::Off.id(), AgentLevel::Off.label()),
+        (AgentLevel::Schema.id(), AgentLevel::Schema.label()),
+        (AgentLevel::Read.id(), AgentLevel::Read.label()),
+    ];
+    fn id(self) -> &'static str {
+        AgentLevel::id(self.type_preset())
+    }
+    fn from_id(id: &str) -> Option<Self> {
+        Self::TYPE_PRESETS.into_iter().find(|level| level.id() == id)
+    }
+}
 
 /// Who answers the assistant's questions. The API key (account = the id), the model and the
 /// address are kept for each one.
@@ -630,6 +646,9 @@ pub struct AiSettings {
     /// connections). Off by default; the MCP server reads this file at the time of each write and
     /// treats anything but `true` as off.
     pub mcp_writes: bool,
+    /// "Default agent access": the level of every connection that sets none itself and is not of a
+    /// production type (never `read_write`). Off by default; `tablex-mcp` reads it from this file.
+    pub agent_access: AgentLevel,
     #[serde(flatten)]
     legacy: LegacyAi,
 }
@@ -643,6 +662,7 @@ impl Default for AiSettings {
             fallback: true,
             keep_conversations: true,
             mcp_writes: false,
+            agent_access: AgentLevel::Off,
             legacy: LegacyAi::default(),
         }
     }
@@ -677,6 +697,8 @@ impl AiSettings {
     /// Puts back what a hand-edited file made unusable, for each provider: an empty Anthropic
     /// model, an address the API key must not be sent to.
     pub fn normalize(&mut self) {
+        // A hand-edited `read_write` is not offered globally; it acts as `read`.
+        self.agent_access = self.agent_access.type_preset();
         for provider in AiProvider::ALL {
             let entry = self.providers.entry_mut(provider);
             if provider == AiProvider::Anthropic && entry.model.trim().is_empty() {
@@ -805,6 +827,7 @@ mod tests {
     #[test]
     fn choice_ids_match_their_serde_names() {
         assert_serde_names_match::<ConnectionSort>();
+        assert_serde_names_match::<AgentLevel>();
         assert_serde_names_match::<TabGroupBy>();
         assert_serde_names_match::<RunScope>();
         assert_serde_names_match::<OnScriptError>();

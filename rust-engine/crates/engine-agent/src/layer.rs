@@ -1503,7 +1503,10 @@ fn denial_message(
     } else if info.connection_type.production && info.agent_access.is_none() {
         message.push_str(" (production connections stay `off` until the user sets agent access on the connection)");
     }
-    message.push_str(". Only the user can raise it, in the connection's settings.");
+    message.push_str(
+        ". Only the user can raise it in TableX: for all connections in Settings \u{2192} AI \u{2192} \
+         Default agent access, or for this connection in its Overrides \u{2192} Agent access.",
+    );
     message
 }
 

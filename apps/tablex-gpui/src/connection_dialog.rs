@@ -1248,7 +1248,7 @@ impl ConnectionDialogInputs {
     pub fn agent_note_for_test(&self, visual: &mut gpui::VisualTestContext) -> String {
         visual.update(|_, cx| {
             let profile = self.read_profile(cx);
-            AgentResolution::of(&self.global.connection_types, &profile).note
+            AgentResolution::of(&self.global.connection_types, self.global.ai.agent_access, &profile).note
         })
     }
 
@@ -1305,9 +1305,9 @@ impl ConnectionDialogInputs {
         let explanation = if custom {
             self.agent_level.get().description().to_owned()
         } else {
-            "Follows the connection type's default. Off unless a type or this connection says otherwise.".to_owned()
+            "Follows the connection type's default, else the default for all connections (Settings \u{2192} AI). Off unless one of them says otherwise.".to_owned()
         };
-        let resolution = AgentResolution::of(&self.global.connection_types, &profile);
+        let resolution = AgentResolution::of(&self.global.connection_types, self.global.ai.agent_access, &profile);
         div()
             .debug_selector(|| "override-row-agent.access".into())
             .flex()

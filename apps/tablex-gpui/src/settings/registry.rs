@@ -7,7 +7,7 @@
 use super::{AiProvider, Choice, FormatterChoice, Settings, ThemeChoice};
 use crate::sidebar_preferences::{ConnectionSort, TabGroupBy};
 use engine_ai::Effort;
-use engine_connect::profile;
+use engine_connect::profile::{self, AgentLevel};
 use std::fmt;
 use std::sync::OnceLock;
 
@@ -1010,6 +1010,12 @@ fn build_registry() -> Vec<SettingDescriptor> {
             place!("ai.keep_conversations", Ai, "Conversations", "Keep conversations on this computer", "Each finished conversation is saved as a file in TableX's data folder (assistant/conversations), so History can reopen it. The files can contain query results. Turning this off stops saving; it does not delete what is saved."),
             |s| s.ai.keep_conversations,
             |s, v| s.ai.keep_conversations = v,
+            d,
+        ),
+        choice::<AgentLevel>(
+            place!("ai.agent_access", Ai, "Agent access", "Default agent access", "How far the assistant and MCP clients may go on a connection that sets no level itself. Production connections stay off; writes always need Read and write on the connection."),
+            |s| s.ai.agent_access,
+            |s, v| s.ai.agent_access = v,
             d,
         ),
         toggle(

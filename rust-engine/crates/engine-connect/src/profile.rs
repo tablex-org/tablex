@@ -361,10 +361,24 @@ impl ConnectionType {
     /// at `read`): the type may have been a read-only one that was deleted or lost with a damaged
     /// settings file. An empty id is "no type", as before. Interactive (non-agent) handling is not
     /// affected.
-    pub fn agent_info_in(types: &[Self], type_id: &str) -> ConnectionTypeInfo {
+    ///
+    /// `global` is the default level of Settings -> AI: a type that is not production gets
+    /// `max(its preset, global)` (capped at `read`), and so does a connection without a type.
+    /// A production type keeps its own (the policy gives it no preset without a setting).
+    pub fn agent_info_in(types: &[Self], type_id: &str, global: AgentLevel) -> ConnectionTypeInfo {
         match find_type(types, type_id) {
-            Some(ty) => ty.agent_info(),
-            None if type_id.is_empty() => ConnectionTypeInfo::default(),
+            Some(ty) => {
+                let mut info = ty.agent_info();
+                if !info.production {
+                    let preset = ty.agent_access.access().max(global.access());
+                    info.default_agent_access = Some(AgentLevel::from_access(preset).type_preset().access());
+                }
+                info
+            }
+            None if type_id.is_empty() => ConnectionTypeInfo {
+                default_agent_access: Some(global.type_preset().access()),
+                ..ConnectionTypeInfo::default()
+            },
             None => ConnectionTypeInfo {
                 name: "(unknown type)".into(),
                 read_only: true,
@@ -708,9 +722,9 @@ pub struct AgentResolution {
 }
 
 impl AgentResolution {
-    pub fn of(types: &[ConnectionType], profile: &ConnectionProfile) -> Self {
+    pub fn of(types: &[ConnectionType], global: AgentLevel, profile: &ConnectionProfile) -> Self {
         let connection_type = find_type(types, &profile.type_id);
-        let info = ConnectionType::agent_info_in(types, &profile.type_id);
+        let info = ConnectionType::agent_info_in(types, &profile.type_id, global);
         let explicit = profile.agent_level();
         let effective = AgentAccess::effective(explicit.map(AgentLevel::access), &info);
         let label = |access: AgentAccess| AgentLevel::from_access(access).label();
@@ -742,6 +756,14 @@ impl AgentResolution {
                     label(effective)
                 )
             }
+            None if effective > AgentAccess::Off
+                && connection_type.is_none_or(|ty| effective > ty.agent_access.access()) =>
+            {
+                format!(
+                    "{} \u{2014} the default for all connections (Settings \u{2192} AI)",
+                    label(effective)
+                )
+            }
             None => match connection_type {
                 Some(ty) if effective > AgentAccess::Off => format!(
                     "{} \u{2014} the default of connection type {}",
@@ -763,6 +785,8 @@ pub struct Globals {
     pub keep_alive_secs: u32,
     pub page_size: u32,
     pub confirm_dangerous: bool,
+    /// Settings -> AI "Default agent access" (never `read_write`).
+    pub agent_access: AgentLevel,
 }
 
 impl Default for Globals {
@@ -773,6 +797,7 @@ impl Default for Globals {
             keep_alive_secs: DEFAULT_KEEP_ALIVE_SECS,
             page_size: DEFAULT_PAGE_SIZE,
             confirm_dangerous: true,
+            agent_access: AgentLevel::Off,
         }
     }
 }
@@ -842,7 +867,7 @@ impl Effective {
             auto_commit: true,
             ..ConnectionType::default()
         });
-        let type_info = ConnectionType::agent_info_in(types, &profile.type_id);
+        let type_info = ConnectionType::agent_info_in(types, &profile.type_id, globals.agent_access);
         Self {
             query_timeout: (values.query_timeout_secs > 0)
                 .then(|| Duration::from_secs(u64::from(values.query_timeout_secs))),
@@ -876,6 +901,26 @@ pub struct ProfileSettings {
     query: QueryValues,
     results: ResultValues,
     editor: EditorValues,
+    #[serde(deserialize_with = "lenient_ai")]
+    ai: AiValues,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+struct AiValues {
+    agent_access: AgentLevel,
+}
+
+/// The `ai` section as far as this reader needs it. Lenient: `read_write` reads as `read`, and a
+/// value that is not a level id (or an `ai` that is not an object) is `off`; a bad value never
+/// fails the whole file.
+fn lenient_ai<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<AiValues, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let agent_access = value
+        .get("agent_access")
+        .and_then(serde_json::Value::as_str)
+        .and_then(AgentLevel::from_id)
+        .map_or(AgentLevel::Off, AgentLevel::type_preset);
+    Ok(AiValues { agent_access })
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -931,6 +976,7 @@ impl Default for ProfileSettings {
             query: QueryValues::default(),
             results: ResultValues::default(),
             editor: EditorValues::default(),
+            ai: AiValues::default(),
         }
     }
 }
@@ -981,6 +1027,7 @@ impl ProfileSettings {
             keep_alive_secs: self.query.keep_alive_secs,
             page_size: self.results.page_size,
             confirm_dangerous: self.editor.confirm_dangerous,
+            agent_access: self.ai.agent_access,
         }
     }
 
@@ -1002,6 +1049,7 @@ impl ProfileSettings {
             connection_type: ConnectionType::agent_info_in(
                 &self.connection_types,
                 &profile.type_id,
+                self.ai.agent_access,
             ),
             agent_access: profile.agent_level().map(AgentLevel::access),
             statement_timeout_secs: effective.query_timeout.map(|timeout| timeout.as_secs()),
@@ -1461,12 +1509,12 @@ mod tests {
         let info = settings.agent_info(&record).unwrap();
         assert_eq!(info.effective_access(), AgentAccess::Read);
         assert!(info.connection_type.read_only && info.connection_type.production);
-        let note = AgentResolution::of(&types, &gone(Some("read_write"))).note;
+        let note = AgentResolution::of(&types, AgentLevel::Off, &gone(Some("read_write"))).note;
         assert_eq!(
             note,
             "Read and write \u{2014} limited to Read: connection type not found"
         );
-        assert!(AgentResolution::of(&types, &gone(None))
+        assert!(AgentResolution::of(&types, AgentLevel::Off, &gone(None))
             .note
             .contains("connection type not found"));
     }
@@ -1701,7 +1749,7 @@ mod tests {
             if let Some(level) = level {
                 profile.overrides.set(AGENT_ACCESS, text(level));
             }
-            AgentResolution::of(types, &profile)
+            AgentResolution::of(types, AgentLevel::Off, &profile)
         };
         assert_eq!(of(&types, "", None).note, "Off");
         assert_eq!(
@@ -1741,6 +1789,125 @@ mod tests {
             AgentLevel::from_access(AgentAccess::SchemaOnly),
             AgentLevel::Schema
         );
+    }
+
+    #[test]
+    fn the_global_agent_default_fills_in_what_nothing_else_sets() {
+        let mut types = ConnectionType::builtins();
+        let with_global = |types: &[ConnectionType],
+                           global: AgentLevel,
+                           type_id: &str,
+                           level: Option<&str>| {
+            let mut profile = ConnectionProfile {
+                type_id: type_id.into(),
+                ..Default::default()
+            };
+            if let Some(level) = level {
+                profile.overrides.set(AGENT_ACCESS, text(level));
+            }
+            let globals = Globals {
+                agent_access: global,
+                ..Globals::default()
+            };
+            let effective = Effective::resolve(globals, types, &profile).agent_access;
+            let resolution = AgentResolution::of(types, global, &profile);
+            assert_eq!(resolution.effective, effective, "the dialog agrees");
+            (effective, resolution.note)
+        };
+        // No type: the global is the level.
+        assert_eq!(
+            with_global(&types, AgentLevel::Read, "", None),
+            (
+                AgentAccess::Read,
+                "Read \u{2014} the default for all connections (Settings \u{2192} AI)".into()
+            )
+        );
+        assert_eq!(with_global(&types, AgentLevel::Off, "", None).0, AgentAccess::Off);
+        // A type whose preset is lower is raised; a higher preset stays.
+        assert_eq!(
+            with_global(&types, AgentLevel::Read, DEVELOPMENT, None),
+            (
+                AgentAccess::Read,
+                "Read \u{2014} the default for all connections (Settings \u{2192} AI)".into()
+            )
+        );
+        assert_eq!(
+            with_global(&types, AgentLevel::Schema, DEVELOPMENT, None).0,
+            AgentAccess::SchemaOnly
+        );
+        for ty in &mut types {
+            ty.agent_access = AgentLevel::Read;
+        }
+        assert_eq!(
+            with_global(&types, AgentLevel::Off, DEVELOPMENT, None),
+            (
+                AgentAccess::Read,
+                "Read \u{2014} the default of connection type Development".into()
+            )
+        );
+        let (level, note) = with_global(&types, AgentLevel::Schema, DEVELOPMENT, None);
+        assert_eq!(level, AgentAccess::Read);
+        assert!(note.contains("default of connection type"), "{note}");
+        // Production keeps no default; an explicit level (even off) wins; a dangling type stays closed.
+        assert_eq!(
+            with_global(&types, AgentLevel::Read, PRODUCTION, None).0,
+            AgentAccess::Off
+        );
+        assert_eq!(
+            with_global(&types, AgentLevel::Read, "", Some("off")).0,
+            AgentAccess::Off
+        );
+        assert_eq!(
+            with_global(&types, AgentLevel::Read, DEVELOPMENT, Some("schema")).0,
+            AgentAccess::SchemaOnly
+        );
+        assert_eq!(
+            with_global(&types, AgentLevel::Read, "custom-gone", None).0,
+            AgentAccess::Off
+        );
+        // Writes are never granted by the global.
+        assert_eq!(
+            with_global(&types, AgentLevel::ReadWrite, "", None).0,
+            AgentAccess::Read
+        );
+    }
+
+    #[test]
+    fn the_settings_file_gives_the_global_agent_level_and_never_fails_on_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let level = |text: &str| {
+            std::fs::write(&path, text).unwrap();
+            ProfileSettings::load(&path).unwrap().globals().agent_access
+        };
+        assert_eq!(level("{}"), AgentLevel::Off);
+        assert_eq!(level(r#"{"ai": {"agent_access": "schema"}}"#), AgentLevel::Schema);
+        assert_eq!(level(r#"{"ai": {"agent_access": "read"}}"#), AgentLevel::Read);
+        assert_eq!(level(r#"{"ai": {"agent_access": "read_write"}}"#), AgentLevel::Read);
+        for bad in [
+            r#"{"ai": {"agent_access": "everything"}}"#,
+            r#"{"ai": {"agent_access": 3}}"#,
+            r#"{"ai": {"agent_access": null}}"#,
+            r#"{"ai": "on"}"#,
+            r#"{"ai": null}"#,
+        ] {
+            assert_eq!(level(bad), AgentLevel::Off, "{bad}");
+        }
+        // The rest of the file still loads next to a bad value.
+        std::fs::write(
+            &path,
+            r#"{"ai": {"agent_access": "bogus"}, "results": {"page_size": 75}}"#,
+        )
+        .unwrap();
+        let settings = ProfileSettings::load(&path).unwrap();
+        assert_eq!(settings.globals().page_size, 75);
+        // The agent's view of a connection carries the global.
+        std::fs::write(&path, r#"{"ai": {"agent_access": "read"}}"#).unwrap();
+        let settings = ProfileSettings::load(&path).unwrap();
+        let record = crate::records::tests_record_for("0F8FAD5B-D9CB-469F-A165-70867728950E");
+        let info = settings.agent_info(&record).expect("a connection");
+        assert_eq!(info.effective_access(), AgentAccess::Read);
+        assert_eq!(info.agent_access, None);
     }
 
     #[test]
