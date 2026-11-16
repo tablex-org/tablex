@@ -3,7 +3,7 @@
 //!
 //! * **Wake.** The system's wake notification (GPUI's `on_system_wake`, NSWorkspace's
 //!   `DidWakeNotification` on macOS) and, as a fallback, a wall-clock gap between two ticks of a
-//!   5 s timer (DBeaver's monitor does the same: a gap over 20 s is a suspend) mark every live
+//!   5 s timer (a gap over 20 s is taken as a suspend) mark every live
 //!   session *stale*. Nothing is sent, nothing closes: the next use (a run, a navigator load)
 //!   reopens a stale session first. Sessions of tabs in manual commit mode are never touched.
 //! * **Read, reconnect, retry once.** A read-only request that fails with `*.not_connected`

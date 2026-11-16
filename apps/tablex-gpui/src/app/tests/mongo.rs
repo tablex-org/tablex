@@ -519,7 +519,7 @@ fn mongo_query_preview_opens_copies_and_closes_with_icons(cx: &mut TestAppContex
             .expect("root should contain AppRoot")
     });
     app.update(cx, |this, cx| {
-        let tab_id = this.workspace.open_query_tab("trans-his");
+        let tab_id = this.workspace.open_query_tab("order-items");
         this.workspace
             .active_tab_mut()
             .expect("active tab")
@@ -527,7 +527,7 @@ fn mongo_query_preview_opens_copies_and_closes_with_icons(cx: &mut TestAppContex
         this.workspace
             .active_tab_mut()
             .expect("active tab")
-            .collection = "trans-his".into();
+            .collection = "order-items".into();
         let runtime = this.workspace.runtime_mut(tab_id).expect("query runtime");
         runtime.query.begin();
         runtime.mongo.filter = r#"{"status":"open"}"#.into();
@@ -560,7 +560,7 @@ fn mongo_query_preview_opens_copies_and_closes_with_icons(cx: &mut TestAppContex
     cx.run_until_parked();
     assert_eq!(
         cx.read_from_clipboard().and_then(|item| item.text()),
-        Some(r#"db["trans-his"].find({"status":"open"}, {"name":1}).sort({"_id":1})"#.into())
+        Some(r#"db["order-items"].find({"status":"open"}, {"name":1}).sort({"_id":1})"#.into())
     );
     app.read_with(cx, |this, _| {
         let tab_id = this.workspace.active_tab().expect("active tab").id;

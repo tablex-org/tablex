@@ -664,7 +664,7 @@ fn tr_chip_keys(
 }
 
 /// User report: two groups in a pane; two tabs dragged into a split, regrouped
-/// (group-by switched), then dragged back. Chips read "Mongo 2", "trans_his",
+/// (group-by switched), then dragged back. Chips read "Mongo 2", "ledger_v3",
 /// "Mongo 1": two chips of one connection that looked identical.
 ///
 /// Evidence (this test dumps the keys): in Database mode the chips of the same
@@ -682,7 +682,7 @@ fn dragging_tabs_back_after_regrouping_keeps_keys_unique_adjacent_and_readable(
     tb_open(&app, visual, "orders", mongo, "shop");
     tb_open(&app, visual, "invoices", mongo, "shop");
     let script = tb_open(&app, visual, "Mongo Script", mongo, "banvietbank");
-    let trans = tb_open(&app, visual, "trans-his", pg, "trans_his_v3");
+    let trans = tb_open(&app, visual, "ledger", pg, "ledger_v3");
     tb_set_group_by(&app, visual, TabGroupBy::Database);
     app.update(visual, |this, cx| this.set_tab_rows(true, cx));
     tb_settle(visual);
@@ -770,7 +770,7 @@ fn dragging_tabs_back_in_connection_mode_merges_them_into_the_existing_group(
     let (mongo, pg) = (crate::ui_fixture::MONGO_ID, crate::ui_fixture::POSTGRES_ID);
     let first = tb_open(&app, visual, "orders", mongo, "shop");
     let script = tb_open(&app, visual, "Mongo Script", mongo, "banvietbank");
-    let trans = tb_open(&app, visual, "trans-his", pg, "trans_his_v3");
+    let trans = tb_open(&app, visual, "ledger", pg, "ledger_v3");
     tb_set_group_by(&app, visual, TabGroupBy::Connection);
     app.update(visual, |this, cx| this.set_tab_rows(true, cx));
     tb_settle(visual);
