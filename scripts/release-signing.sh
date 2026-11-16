@@ -38,6 +38,9 @@ setup)
     security unlock-keychain -p "$password" "$keychain"
     security import "$work/cert.p12" -k "$keychain" -P "$TABLEX_CODESIGN_P12_PASSWORD" -T /usr/bin/codesign >/dev/null
     security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" >/dev/null
+    # codesign finds the identity only in a keychain of the search list, even with --keychain
+    # (`cleanup` deletes the keychain, which takes it off the list again).
+    security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
     # The one identity in it must be the pinned certificate: a different key would change what every
     # user allowed, and the updater refuses it.
     identity="$(security find-identity -p codesigning "$keychain" | awk '/^ *1\)/ {print tolower($2)}')"
