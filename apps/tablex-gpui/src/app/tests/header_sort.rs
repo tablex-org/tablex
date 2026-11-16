@@ -74,7 +74,7 @@ fn header_sort_menu_lists_both_scopes_and_checks_the_active_sort() {
             })
             .collect::<Vec<_>>()
     };
-    let unsorted = ColumnSort { database: None, page: None, can_database_sort: true, menu_open: true };
+    let unsorted = ColumnSort { database: None, page: None, can_database_sort: true };
     assert_eq!(
         entries(unsorted),
         [

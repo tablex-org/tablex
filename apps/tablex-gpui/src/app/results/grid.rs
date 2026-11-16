@@ -122,7 +122,6 @@ pub(in crate::app) struct ColumnSort {
     /// Page-only sort on this column (`true` = descending).
     pub page: Option<bool>,
     pub can_database_sort: bool,
-    pub menu_open: bool,
 }
 
 /// Entries of a header sort menu: the same sorts as the cell context menu,
@@ -1315,7 +1314,6 @@ impl AppRoot {
             .is_some_and(|tab| tab.query_mode.is_table_data());
         let header_sort = self.header_sort(tab_id);
         let can_database_sort = can_stage_row || can_sql_database_sort;
-        let sort_menu = view.grid_ui.sort_menu;
         let pinned_segment = crate::grid::ColumnSegment {
             columns: 0..frozen,
             spacer: 0.0,
@@ -1428,7 +1426,6 @@ impl AppRoot {
                             .filter(|(sorted, _)| *sorted == source_column)
                             .map(|(_, descending)| descending),
                         can_database_sort,
-                        menu_open: sort_menu == Some(column),
                     };
                     let header_cell = div()
                         .id(("grid-header-cell", column))
