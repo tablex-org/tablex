@@ -833,3 +833,80 @@ fn counted(work: impl FnOnce()) -> (u64, u64) {
     work();
     (crate::grid_bench::allocation_count() - allocs, crate::grid_bench::allocation_bytes() - bytes)
 }
+
+/// Three inserts, one per line.
+const THREE_INSERTS: &str = "INSERT INTO items(name) VALUES ('s1');\n\
+     INSERT INTO items(name) VALUES ('s2');\n\
+     INSERT INTO items(name) VALUES ('s3')";
+
+impl SqlRig<'_> {
+    /// Fills the focused editor with `text` and puts the cursor on `line` (the way `run_script`
+    /// sets the text), then leaves the keyboard focus in the editor.
+    fn focus_editor_with(&mut self, text: &str, line: u32) {
+        let (tab, text) = (self.tab, text.to_owned());
+        let area = self.visual.debug_bounds("query-editor-area").expect("editor area");
+        self.visual
+            .simulate_click(gpui::point(area.center().x, area.bottom() - gpui::px(40.0)), Default::default());
+        settle(self.visual);
+        let editor = self.app.read_with(self.visual, |this, _| this.query_editors.by_tab[&tab].clone());
+        self.visual.update(|window, cx| {
+            editor.update(cx, |state, cx| {
+                state.set_value(text.clone(), window, cx);
+                state.set_cursor_position(gpui_component::input::Position::new(line, 3), window, cx);
+            });
+        });
+        self.app.update(self.visual, |this, _| this.workspace.tab_mut(tab).unwrap().sql = text);
+        settle(self.visual);
+    }
+
+    fn editor_value(&self) -> String {
+        let tab = self.tab;
+        self.app.read_with(self.visual, |this, cx| this.query_editors.by_tab[&tab].read(cx).value().to_string())
+    }
+}
+
+#[gpui::test]
+fn option_x_runs_every_statement_and_option_p_those_from_the_cursor(cx: &mut TestAppContext) {
+    let db = SqliteDb::new(SCRIPT_SEED);
+    let mut rig = SqlRig::sqlite(cx, &db);
+    rig.visual.update(|_, cx| actions::bind_keys(cx));
+    // "Run executes" the statement at the cursor: the shortcuts do not follow it.
+    rig.set_settings(|settings| settings.editor.run_scope = crate::settings::RunScope::Current);
+    let names = "SELECT group_concat(name) FROM (SELECT name FROM items WHERE name LIKE 's%' ORDER BY id)";
+
+    // Run Script, cursor on the first statement: all three run, and the chord types nothing.
+    rig.focus_editor_with(THREE_INSERTS, 0);
+    rig.visual.simulate_keystrokes("alt-x");
+    rig.wait_script_done();
+    assert_eq!(rig.statements().len(), 3);
+    assert_eq!(db.sql("SELECT count(*) FROM items"), "8");
+    assert_eq!(rig.editor_value(), THREE_INSERTS);
+
+    // Run From Cursor, cursor on the second: it and the third run.
+    db.sql("DELETE FROM items WHERE name LIKE 's%'");
+    rig.focus_editor_with(THREE_INSERTS, 1);
+    rig.visual.simulate_keystrokes("alt-p");
+    rig.wait_script_done();
+    assert_eq!(rig.statements().len(), 2);
+    assert_eq!(db.sql(names), "s2,s3");
+    assert_eq!(rig.editor_value(), THREE_INSERTS);
+
+    // On the last statement it is that one alone; on the first, all of them.
+    db.sql("DELETE FROM items WHERE name LIKE 's%'");
+    rig.focus_editor_with(THREE_INSERTS, 2);
+    rig.visual.simulate_keystrokes("alt-p");
+    rig.wait_script_done();
+    assert_eq!(db.sql(names), "s3");
+    db.sql("DELETE FROM items WHERE name LIKE 's%'");
+    rig.focus_editor_with(THREE_INSERTS, 0);
+    rig.visual.simulate_keystrokes("alt-p");
+    rig.wait_script_done();
+    assert_eq!(db.sql(names), "s1,s2,s3");
+
+    // The Run button still follows the setting: the statement at the cursor.
+    db.sql("DELETE FROM items WHERE name LIKE 's%'");
+    rig.focus_editor_with(THREE_INSERTS, 1);
+    rig.click("run-query");
+    rig.wait_script_done();
+    assert_eq!(db.sql(names), "s2");
+}

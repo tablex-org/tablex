@@ -89,6 +89,15 @@ pub(super) fn restore_tabs_into(
     }
 }
 
+/// What the Run Script and Run From Cursor shortcuts execute, instead of the "Run executes" setting.
+#[derive(Clone, Copy)]
+pub(super) enum RunSpan {
+    /// Every statement of the editor.
+    Script,
+    /// The statement at the cursor and all after it.
+    FromCursor,
+}
+
 #[derive(Default)]
 pub(super) struct AutoRefreshState {
     pub(super) tasks: HashMap<u64, Task<()>>,
@@ -1120,19 +1129,33 @@ impl AppRoot {
     /// Runs `tab_id` because the user asked for it (Run, Cmd+Enter, a history
     /// entry): a script tab runs its editor text, a shell script included.
     pub(super) fn run_tab_query_explicit(&mut self, tab_id: u64, cx: &mut Context<Self>) {
-        self.run_tab_query_as(tab_id, true, cx);
+        self.run_tab_query_as(tab_id, true, None, cx);
+    }
+
+    /// Run Script / Run From Cursor on the active tab when it is an SQL or Mongo script editor:
+    /// the Run path with `span` instead of the "Run executes" setting. Elsewhere it does nothing.
+    pub(super) fn run_active_tab_span(&mut self, span: RunSpan, cx: &mut Context<Self>) {
+        let Some(tab_id) = self
+            .workspace
+            .active_tab()
+            .filter(|tab| super::assistant::is_sql_editor(tab) || tab.query_mode.is_mongo_script())
+            .map(|tab| tab.id)
+        else {
+            return;
+        };
+        self.run_tab_query_as(tab_id, true, Some(span), cx);
     }
 
     /// Re-runs `tab_id`'s result: paging, Refresh, a Limit change, a staged
     /// edit's reload, a reconnect. A script tab re-runs only the read that is on
     /// screen, never the editor text and never a shell script.
     pub(super) fn run_tab_query(&mut self, tab_id: u64, cx: &mut Context<Self>) {
-        self.run_tab_query_as(tab_id, false, cx);
+        self.run_tab_query_as(tab_id, false, None, cx);
     }
 
     /// Runs `tab_id`'s SQL. Falls back to the smoke demo when the tab has no
     /// connection bound (the Welcome/standalone tabs).
-    fn run_tab_query_as(&mut self, tab_id: u64, explicit: bool, cx: &mut Context<Self>) {
+    fn run_tab_query_as(&mut self, tab_id: u64, explicit: bool, span: Option<RunSpan>, cx: &mut Context<Self>) {
         if self.refuse_while_editing_mongo_document(tab_id, cx)
             || self.refuse_run_over_staged_changes(tab_id, cx)
         {
@@ -1156,7 +1179,10 @@ impl AppRoot {
             .is_some_and(|tab| tab.query_mode.is_mongo_script())
         {
             if explicit {
-                self.run_mongo_script_tab(tab_id, cx);
+                match span {
+                    Some(RunSpan::FromCursor) => self.run_mongo_script_from_cursor(tab_id, cx),
+                    _ => self.run_mongo_script_tab(tab_id, cx),
+                }
             } else {
                 self.rerun_mongo_script_tab(tab_id, cx);
             }
@@ -1254,8 +1280,8 @@ impl AppRoot {
             .map(|sort| sort.sorted.clone());
         let (sql, from_scope) = match (table_sql, sorted) {
             (Some(table_sql), _) => (table_sql, false),
-            (None, Some(sorted)) => (sorted, false),
-            (None, None) => (self.sql_in_run_scope(tab_id, tab_sql, cx), true),
+            (None, Some(sorted)) if span.is_none() => (sorted, false),
+            (None, _) => (self.sql_in_run_scope(tab_id, tab_sql, span, cx), true),
         };
         // The text the user typed may have `:name` / `${name}` parameters: ask for them first.
         if typed_in_editor && from_scope && self.prompt_parameters(tab_id, &sql, AfterParams::Run, cx) {
@@ -1281,8 +1307,20 @@ impl AppRoot {
     /// The part of the editor's script that Run executes (the "Run executes"
     /// setting). A selection wins unless the setting says the whole script;
     /// without one, the statement at the cursor or the whole script.
-    pub(super) fn sql_in_run_scope(&self, tab_id: u64, script: String, cx: &gpui::App) -> String {
+    ///
+    /// A `span` a shortcut asked for wins over the setting (and over what is selected): the
+    /// whole script, or the statements from the one at the cursor on.
+    pub(super) fn sql_in_run_scope(&self, tab_id: u64, script: String, span: Option<RunSpan>, cx: &gpui::App) -> String {
         use crate::settings::RunScope;
+        match span {
+            Some(RunSpan::Script) => return script,
+            Some(RunSpan::FromCursor) => {
+                let cursor = self.query_editors.by_tab.get(&tab_id).map_or(0, |editor| editor.read(cx).cursor());
+                return crate::sql_script::statement_at(&script, cursor, &self.sql_lex(tab_id))
+                    .map_or(script.clone(), |range| script[range.start..].to_string());
+            }
+            None => {}
+        }
         let scope = self.settings.editor.run_scope;
         if scope == RunScope::All {
             return script;

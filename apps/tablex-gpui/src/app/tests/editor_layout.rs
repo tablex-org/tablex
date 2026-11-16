@@ -164,6 +164,49 @@ fn keyboard_run_and_a_failed_run_both_reveal_the_results_area(cx: &mut TestAppCo
     assert_eq!(editor_text(&app, visual, tab).trim_end(), "db.fixture_collection_00.find({})");
 }
 
+/// Ctrl+Enter, the chord other database clients use, runs the query too (on macOS, where
+/// Cmd+Enter is the editor's own; elsewhere Ctrl+Enter is that same editor binding).
+#[gpui::test]
+fn ctrl_enter_runs_the_query_like_cmd_enter(cx: &mut TestAppContext) {
+    let (app, visual) = layout_app(cx);
+    visual.update(|_, cx| actions::bind_keys(cx));
+    open_mongo_script_tab_in_default_scenario(&app, visual);
+    let tab = active_tab(&app, visual);
+    type_in_editor(visual, "db.fixture_collection_00.find({})");
+    visual.simulate_keystrokes("ctrl-enter");
+    settle(visual);
+    assert_results_revealed(visual, "after Ctrl+Enter");
+    app.read_with(visual, |this, _| {
+        assert!(matches!(
+            this.workspace.runtime(tab).unwrap().query.status(),
+            crate::query::QueryStatus::Failed(error) if error.contains("unavailable in a UI scenario")
+        ), "the run was started");
+    });
+    assert_eq!(editor_text(&app, visual, tab).trim_end(), "db.fixture_collection_00.find({})");
+}
+
+/// Option+X (Run Script) and Option+P (Run From Cursor) run a Mongo script tab, and type nothing.
+#[gpui::test]
+fn option_x_and_option_p_run_a_mongo_script_tab(cx: &mut TestAppContext) {
+    for chord in ["alt-x", "alt-p"] {
+        let (app, visual) = layout_app(cx);
+        visual.update(|_, cx| actions::bind_keys(cx));
+        open_mongo_script_tab_in_default_scenario(&app, visual);
+        let tab = active_tab(&app, visual);
+        type_in_editor(visual, "db.fixture_collection_00.find({})");
+        visual.simulate_keystrokes(chord);
+        settle(visual);
+        assert_results_revealed(visual, chord);
+        app.read_with(visual, |this, _| {
+            assert!(matches!(
+                this.workspace.runtime(tab).unwrap().query.status(),
+                crate::query::QueryStatus::Failed(error) if error.contains("unavailable in a UI scenario")
+            ), "{chord} started the run");
+        });
+        assert_eq!(editor_text(&app, visual, tab).trim_end(), "db.fixture_collection_00.find({})");
+    }
+}
+
 fn open_mongo_script_tab_in_default_scenario(
     app: &gpui::Entity<AppRoot>,
     visual: &mut gpui::VisualTestContext,

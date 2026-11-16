@@ -291,6 +291,36 @@ static DEFS: &[ShortcutDef] = &[
         bind!(FormatSql),
     )
     .per_platform(&["alt-shift-f"], &["secondary-shift-f"]),
+    // Run: Cmd+Enter in the editor is the code editor's own secondary Enter (Ctrl+Enter off macOS).
+    // On macOS Ctrl+Enter, the chord other database clients use, runs it too; elsewhere the editor
+    // already gives Ctrl+Enter.
+    ShortcutDef::new(
+        "editor.run",
+        "Editor",
+        "Run Query",
+        ANY,
+        &[],
+        bind!(RunActiveQuery),
+    )
+    .per_platform(&["ctrl-enter"], &[]),
+    // Run Script and Run From Cursor ignore the "Run executes" setting. Option+X / Alt+X and
+    // Option+P / Alt+P are not text the editor needs: the binding wins over typing the character.
+    ShortcutDef::new(
+        "editor.run_script",
+        "Editor",
+        "Run Script",
+        ANY,
+        &["alt-x"],
+        bind!(RunScript),
+    ),
+    ShortcutDef::new(
+        "editor.run_from_cursor",
+        "Editor",
+        "Run From Cursor",
+        ANY,
+        &["alt-p"],
+        bind!(RunFromCursor),
+    ),
     // Explain Execution Plan chord (Ctrl+Shift+E; Cmd+Shift+E on macOS). Neither the
     // keymap nor the code editor binds it. Explain Analyze runs the statement, so it has no default
     // chord (Ctrl+Alt is AltGr on Windows layouts and types characters): the button menu and the
@@ -1067,8 +1097,13 @@ mod tests {
     fn default_chords_use_secondary_for_primary_shortcuts() {
         let mut secondary = 0;
         for def in DEFS {
-            for chord in def.mac.iter().chain(def.other) {
+            for (chord, macos) in def.mac.iter().map(|c| (c, true)).chain(def.other.iter().map(|c| (c, false))) {
                 for needle in ["cmd-", "super-", "win-", "ctrl-"] {
+                    // A macOS-only chord may name Control on purpose (Ctrl+Enter runs a query):
+                    // there it is not the primary modifier, so it is no misspelled `secondary-`.
+                    if macos && needle == "ctrl-" {
+                        continue;
+                    }
                     assert!(
                         !chord.starts_with(needle) && !chord.contains(&format!("-{needle}")),
                         "{chord}"
@@ -1101,8 +1136,9 @@ mod tests {
     fn every_default_parses_and_the_defaults_do_not_conflict_with_each_other() {
         let none = Overrides::new();
         // Bound by the user only: a chord with Alt would be AltGr on some Windows layouts.
-        const UNBOUND_BY_DEFAULT: [&str; 4] =
-            ["editor.explain_analyze", "editor.commit", "editor.rollback", "editor.toggle_auto_commit"];
+        // `editor.run` has none off macOS: there the code editor's own Ctrl+Enter runs the query.
+        const UNBOUND_BY_DEFAULT: [&str; 5] =
+            ["editor.explain_analyze", "editor.commit", "editor.rollback", "editor.toggle_auto_commit", "editor.run"];
         for def in all() {
             assert!(
                 !def.default_chords().is_empty() || UNBOUND_BY_DEFAULT.contains(&def.id),

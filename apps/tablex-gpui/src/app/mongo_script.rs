@@ -46,6 +46,18 @@ impl AppRoot {
         self.run_mongo_script_tab_with_run(tab_id, None, None, true, cx);
     }
 
+    /// Run From Cursor: the statement at the cursor and every one after it.
+    pub(super) fn run_mongo_script_from_cursor(&mut self, tab_id: u64, cx: &mut Context<Self>) {
+        let Some(editor) = self.query_editors.by_tab.get(&tab_id).cloned() else {
+            return;
+        };
+        let (text, cursor) = editor.read_with(cx, |state, _| (state.value().to_string(), state.cursor()));
+        match crate::mongo_script::statement_at(&text, cursor) {
+            Some(range) => self.run_mongo_script_text(tab_id, text[range.start..].to_string(), cx),
+            None => self.run_mongo_script_tab(tab_id, cx),
+        }
+    }
+
     /// Runs only `script` (the selection or the statement at the cursor)
     /// instead of the tab's whole text. The user asked for it (Run Selected).
     pub(super) fn run_mongo_script_text(

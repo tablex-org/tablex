@@ -252,7 +252,7 @@ fn the_read_only_guard_and_run_current_statement_read_a_line_comment_as_the_serv
         this.settings = std::sync::Arc::new(settings);
     });
     let run_scope = |rig: &ExplainRig| {
-        rig.app.read_with(rig.visual, |this, cx| this.sql_in_run_scope(tab, script.to_owned(), cx))
+        rig.app.read_with(rig.visual, |this, cx| this.sql_in_run_scope(tab, script.to_owned(), None, cx))
     };
     assert_eq!(run_scope(&rig), "SELECT 2");
     // MySQL runs the comment to the line feed: its one statement before the `;` is the comment's.

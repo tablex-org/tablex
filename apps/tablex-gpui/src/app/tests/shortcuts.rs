@@ -118,6 +118,8 @@ fn old_binding_table(cx: &gpui::App) -> Vec<gpui::KeyBinding> {
             FormatSql,
             None,
         ),
+        shortcuts::key_binding(cx, "alt-x", RunScript, None),
+        shortcuts::key_binding(cx, "alt-p", RunFromCursor, None),
     ];
     if !cfg!(target_os = "macos") {
         table.push(shortcuts::key_binding(cx, 
@@ -133,6 +135,8 @@ fn old_binding_table(cx: &gpui::App) -> Vec<gpui::KeyBinding> {
     }
     if cfg!(target_os = "macos") {
         table.extend([
+            // The editor's own Cmd+Enter runs too; Ctrl+Enter is the other clients' chord.
+            shortcuts::key_binding(cx, "ctrl-enter", RunActiveQuery, None),
             shortcuts::key_binding(cx, "secondary-h", Hide, None),
             shortcuts::key_binding(cx, "secondary-alt-h", HideOtherApps, None),
             shortcuts::key_binding(cx, "secondary-m", Minimize, None),
@@ -585,4 +589,34 @@ fn the_menus_and_palette_show_the_chord_in_force(cx: &mut TestAppContext) {
         )),
         "{detail}"
     );
+}
+
+#[gpui::test]
+fn the_run_shortcuts_are_listed_and_rebindable(cx: &mut TestAppContext) {
+    cx.dispatcher.allow_parking();
+    let (app, visual) = settings_app(cx);
+    open_shortcuts_page(&app, visual);
+    for id in ["editor.run", "editor.run_script", "editor.run_from_cursor"] {
+        assert!(rendered(visual, format!("shortcut-{id}")), "{id} is listed");
+    }
+    // The keymap holds the binding of `chord` (as `key_binding` makes it, the way the old table
+    // test compares).
+    let bound = |visual: &mut gpui::VisualTestContext, make: fn(&gpui::App) -> gpui::KeyBinding| {
+        visual.update(|_, cx| app_bindings(cx).contains(&format!("{:?}", make(cx))))
+    };
+    assert!(bound(visual, |cx| shortcuts::key_binding(cx, "alt-x", actions::RunScript, None)));
+    assert!(bound(visual, |cx| shortcuts::key_binding(cx, "alt-p", actions::RunFromCursor, None)));
+
+    // Option+X is taken by Run Script: Run From Cursor cannot have it.
+    record_chord(visual, "shortcut-chip-editor.run_from_cursor-0".into(), "alt-x");
+    assert!(page_error(&app, visual, "editor.run_from_cursor").is_some_and(|error| error.contains("Run Script")));
+
+    // A free chord rebinds Run Script like any other entry.
+    record_chord(visual, "shortcut-chip-editor.run_script-0".into(), "alt-shift-x");
+    assert_eq!(
+        draft_shortcuts(&app, visual).get("editor.run_script"),
+        Some(&vec!["alt-shift-x".to_owned()])
+    );
+    click(visual, "settings-apply".into());
+    assert!(bound(visual, |cx| shortcuts::key_binding(cx, "alt-shift-x", actions::RunScript, None)));
 }

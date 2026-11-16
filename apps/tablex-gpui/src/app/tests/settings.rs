@@ -13,7 +13,7 @@ fn settings_app(cx: &mut TestAppContext) -> (gpui::Entity<AppRoot>, &mut gpui::V
         cx.set_reduce_motion(true);
     });
     // Tall enough that every row of the longest page is on screen.
-    visual.simulate_resize(gpui::size(gpui::px(1300.0), gpui::px(2300.0)));
+    visual.simulate_resize(gpui::size(gpui::px(1300.0), gpui::px(2600.0)));
     visual.update(|window, _| window.activate_window());
     settle(visual);
     (app, visual)
@@ -588,7 +588,7 @@ fn run_executes_the_setting_scope(cx: &mut TestAppContext) {
     });
     let run = |app: &gpui::Entity<AppRoot>, visual: &mut gpui::VisualTestContext| {
         app.read_with(visual, |this, cx| {
-            this.sql_in_run_scope(tab, script.to_string(), cx)
+            this.sql_in_run_scope(tab, script.to_string(), None, cx)
         })
     };
     // The default runs the whole script.
@@ -713,7 +713,7 @@ fn restore_tabs_on_start_honours_none_and_pinned(cx: &mut TestAppContext) {
         this.workspace.tab_mut(pinned).unwrap().is_pinned = true;
         this.workspace.normalize();
         let bytes = crate::gpui_session::encode(&this.workspace.snapshot()).unwrap();
-        std::fs::write(&session_path, bytes).unwrap();
+        crate::gpui_session::save(&session_path, &bytes).unwrap();
     });
     let titles = |app: &gpui::Entity<AppRoot>, visual: &mut gpui::VisualTestContext| {
         app.read_with(visual, |this, _| {
