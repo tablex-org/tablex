@@ -5,7 +5,9 @@
 //! |---|---|
 //! | [`platform`] | where TableX keeps its files; the OS credential store's name |
 //! | [`records`] | the saved connection model, kinds, URI helpers, export / duplicate redaction |
-//! | [`credentials`] | the keyring-backed secret store and its entry naming |
+//! | [`credentials`] | the secret store trait, the OS store (legacy items) and [`credentials::default_store`] |
+//! | [`secret_store`] | the encrypted secrets table of the app database and its one master key in the OS store |
+//! | [`session_passwords`] | the passwords typed for connections that save none, in memory for this run |
 //! | [`tool_endpoint`] | the parts of a connection's URI a native client tool (`pg_dump`, `mysqldump`) connects with |
 //! | [`tunnel`] | the SSH tunnel plan (URI rewrite), settings, secrets and the `engine-net` seam |
 //! | [`drivers`] | driver store, manifest trust keys and policy, verified loading |
@@ -25,5 +27,7 @@ pub mod drivers;
 pub mod platform;
 pub mod profile;
 pub mod records;
+pub mod secret_store;
+pub mod session_passwords;
 pub mod tool_endpoint;
 pub mod tunnel;

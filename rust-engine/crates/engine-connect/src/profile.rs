@@ -110,6 +110,22 @@ pub const CONFIRM_DANGEROUS: &str = "editor.confirm_dangerous";
 /// How far an AI agent may go on the connection (see [`AgentLevel`]).
 pub const AGENT_ACCESS: &str = "agent.access";
 
+/// Stored beside the overrides, but not a setting (it is not in the registry, nothing resolves it
+/// against a global value): `true` = the connection lists only the database its address names.
+/// Absent (every connection saved before it existed) = every database, so nothing disappears.
+pub const ONLY_CONNECTION_DATABASE: &str = "navigator.only_connection_database";
+
+/// Kinds whose navigator lists databases of one server, so that listing can be narrowed to one.
+pub const fn supports_database_scope(kind: ConnectionKind) -> bool {
+    matches!(
+        kind,
+        ConnectionKind::Postgres
+            | ConnectionKind::Mysql
+            | ConnectionKind::Mariadb
+            | ConnectionKind::Clickhouse
+    )
+}
+
 /// Seconds an open connection may sit idle before the app checks it is alive (0 = never).
 pub const DEFAULT_KEEP_ALIVE_SECS: u32 = 60;
 
@@ -580,6 +596,11 @@ impl Overrides {
     /// "Use global" again.
     pub fn clear(&mut self, id: &str) {
         self.0.remove(id);
+    }
+
+    /// The connection lists only the database its address names (see [`ONLY_CONNECTION_DATABASE`]).
+    pub fn only_connection_database(&self) -> bool {
+        matches!(self.get(ONLY_CONNECTION_DATABASE), Some(OverrideValue::Bool(true)))
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&str, &OverrideValue)> {
@@ -1082,6 +1103,36 @@ mod tests {
             .badge(),
             "STAG"
         );
+    }
+
+    #[test]
+    fn listing_one_database_is_an_override_only_when_it_is_true_and_only_for_kinds_with_databases() {
+        // Saved before the option existed, or with it off in any form: every database.
+        for json in ["", "{}", r#"{"results.page_size":50}"#, r#"{"navigator.only_connection_database":false}"#, r#"{"navigator.only_connection_database":"true"}"#] {
+            assert!(!Overrides::from_json(json).only_connection_database(), "{json}");
+        }
+        let mut overrides = Overrides::from_json(r#"{"results.page_size":50}"#);
+        overrides.set(ONLY_CONNECTION_DATABASE, OverrideValue::Bool(true));
+        assert!(overrides.only_connection_database());
+        // It is stored with the others and read back, and a copy of the record keeps it.
+        let json = overrides.to_json();
+        assert_eq!(json, r#"{"navigator.only_connection_database":true,"results.page_size":50.0}"#);
+        assert!(Overrides::from_json(&json).only_connection_database());
+        assert!(Overrides::from_json(&without_agent_access(&json)).only_connection_database());
+        // It is not a setting a connection overrides.
+        assert!(!OVERRIDABLE_IDS.contains(&ONLY_CONNECTION_DATABASE));
+        let kinds = [
+            (ConnectionKind::Postgres, true),
+            (ConnectionKind::Mysql, true),
+            (ConnectionKind::Mariadb, true),
+            (ConnectionKind::Clickhouse, true),
+            (ConnectionKind::Sqlite, false),
+            (ConnectionKind::Mongodb, false),
+            (ConnectionKind::Redis, false),
+        ];
+        for (kind, supported) in kinds {
+            assert_eq!(supports_database_scope(kind), supported, "{kind:?}");
+        }
     }
 
     #[test]

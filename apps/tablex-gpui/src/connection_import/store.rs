@@ -5,7 +5,7 @@
 
 use super::{ImportedConnection, Secret};
 use crate::connections::SavedConnection;
-use crate::credentials::{CredentialError, CredentialStore, SecretKind, SystemStore};
+use crate::credentials::{CredentialError, CredentialStore, SecretKind};
 use crate::ssh_tunnel::SshSettings;
 use engine_storage::connection::SavedConnectionRecord;
 use std::collections::{HashMap, HashSet};
@@ -199,7 +199,7 @@ impl ConnectionImportStore for SystemImportStore {
         secrets: Vec<ImportSecret>,
     ) -> Result<SaveOutcome, SaveError> {
         save_with(
-            &SystemStore::new(),
+            &*crate::credentials::default_store(),
             |records| {
                 engine_storage::connection::upsert_connections_batch(records)
                     .map_err(|error| error.to_string())

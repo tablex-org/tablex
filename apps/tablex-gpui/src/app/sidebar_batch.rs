@@ -1,5 +1,5 @@
 use super::*;
-use crate::credentials::{CredentialStore, SystemStore};
+use crate::credentials::CredentialStore;
 
 impl AppRoot {
     pub(super) fn toggle_sidebar_group_connections(
@@ -429,13 +429,14 @@ impl AppRoot {
             .iter()
             .map(|id| crate::connections::storage_connection_id(id))
             .collect();
+        let store = std::sync::Arc::clone(&self.connection_ui.credentials);
         let task = cx.background_executor().spawn(async move {
             smol::unblock(move || -> Result<Vec<String>, String> {
                 engine_storage::connection::delete_connections_batch(&storage_ids)
                     .map_err(|error| error.to_string())?;
                 let mut warnings = Vec::new();
                 for id in &storage_ids {
-                    if let Err(error) = SystemStore::new().delete_all(id) {
+                    if let Err(error) = store.delete_all(id) {
                         warnings.push(format!(
                             "Could not clear {} secrets for {id}: {error}",
                             crate::platform::CREDENTIAL_STORE_LABEL

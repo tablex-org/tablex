@@ -28,6 +28,20 @@ pub fn is_missing_password_error(message: &str) -> bool {
     message.contains(&missing_password_error())
 }
 
+/// Whether a connect failure says the server refused the credentials. The drivers report no
+/// typed code for it, so this reads their texts (PostgreSQL "password authentication failed",
+/// MySQL "Access denied", Redis "WRONGPASS", MongoDB / ClickHouse "authentication failed").
+pub fn is_auth_failure(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    ["wrongpass", "noauth", "access denied", "unauthorized", "invalid password", "wrong password", "incorrect password", "invalid username-password"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+        || (lower.contains("authentication")
+            && ["fail", "denied", "invalid", "rejected"]
+                .iter()
+                .any(|needle| lower.contains(needle)))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionKind {
     Postgres,
@@ -141,11 +155,36 @@ impl SavedConnection {
             .map(|id| id == self.id)
             .unwrap_or(false)
     }
+
+    /// The connection does not save its password and its URI names a user: the password has to
+    /// be typed (a no-user connection, `redis://:@host`, a file database, needs none).
+    pub fn expects_password(&self) -> bool {
+        if self.save_password || self.kind == ConnectionKind::Sqlite {
+            return false;
+        }
+        let Some((_, rest)) = self.uri.split_once("://") else {
+            return false;
+        };
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+        authority
+            .rsplit_once('@')
+            .is_some_and(|(userinfo, _)| !userinfo.split(':').next().unwrap_or_default().is_empty())
+    }
 }
 
-/// Every persisted record, in the store's pinned-then-name order.
+/// Every persisted record, in the store's pinned-then-name order. The error is the store's own
+/// (a database that is damaged, from a newer TableX, or an old file that cannot be moved in and
+/// cannot be used either): a front end says it instead of showing an empty list as if it were true.
+pub fn try_load_saved_records() -> Result<Vec<SavedConnectionRecord>, String> {
+    connection::list_connections().map_err(|error| error.to_string())
+}
+
+/// [`try_load_saved_records`] for a caller with nowhere to say the error: it goes to stderr.
 pub fn load_saved_records() -> Vec<SavedConnectionRecord> {
-    connection::list_connections().unwrap_or_default()
+    try_load_saved_records().unwrap_or_else(|error| {
+        eprintln!("[tablex] the saved connections could not be read: {error}");
+        Vec::new()
+    })
 }
 
 /// The id as the agent tools and logs show it: a UUID in the canonical lowercase form
@@ -714,7 +753,7 @@ pub fn encoded_password_forms(password: &str) -> Vec<String> {
 }
 
 pub use crate::credentials::SecretKind;
-use crate::credentials::{CredentialStore, SystemStore};
+use crate::credentials::{self, CredentialStore};
 
 /// A connection URI that may carry a password: wiped when dropped, `Debug` prints nothing of it,
 /// and its text can only be read inside this crate (to hand it to a driver, the tunnel plan or
@@ -770,6 +809,10 @@ pub(crate) enum RuntimeUriError {
     /// The connection saves its password and the store has none.
     #[error("{}", missing_password_error())]
     MissingPassword,
+    /// The credential store holds the password but cannot hand it over (a locked or denied key, a
+    /// damaged app database): said as it is, never as "not found".
+    #[error("Saved password could not be read: {0}")]
+    Store(String),
     /// The persisted URI cannot carry the password (see [`runtime_uri`]).
     #[error("{0}")]
     Invalid(String),
@@ -778,26 +821,39 @@ pub(crate) enum RuntimeUriError {
 /// Resolves the connectable URI for a saved connection: the persisted URI
 /// plus its saved password when the user opted into saving it.
 pub fn resolve_runtime_uri(conn: &SavedConnection) -> Result<RuntimeUri, String> {
-    resolve_runtime_uri_with(conn, &SystemStore::new())
+    resolve_runtime_uri_with(conn, &*credentials::default_store(), None)
         .map(RuntimeUri::new)
         .map_err(|error| error.to_string())
 }
 
-/// [`resolve_runtime_uri`] over any credential store (the Connector's).
+/// [`resolve_runtime_uri`] over any credential store (the Connector's). A connection that does not
+/// save its password uses `session`, the one typed for this run of the app, when there is one.
 pub(crate) fn resolve_runtime_uri_with(
     conn: &SavedConnection,
     store: &dyn CredentialStore,
+    session: Option<&str>,
 ) -> Result<String, RuntimeUriError> {
-    let saved = conn.save_password.then(|| {
+    let password = if conn.save_password {
         let account = conn.id.to_string();
-        let load = |account: &str| store.load(SecretKind::Database, account).ok().flatten();
-        load(&account.to_uppercase()).or_else(|| load(&account))
-    });
-    resolve_runtime_uri_from(conn, saved.flatten().as_deref())
+        // No store at all is "no password"; any other failure to read is its own error.
+        let load = |account: &str| match store.load(SecretKind::Database, account) {
+            Ok(password) => Ok(password),
+            Err(credentials::CredentialError::NoKeyring) => Ok(None),
+            Err(error) => Err(RuntimeUriError::Store(error.to_string())),
+        };
+        match load(&account.to_uppercase())? {
+            Some(password) => Some(password),
+            None => load(&account)?,
+        }
+    } else {
+        session.map(str::to_owned)
+    };
+    resolve_runtime_uri_from(conn, password.as_deref())
 }
 
 /// The connectable URI of a saved connection from a password that was already read (`None`: the
-/// store has none). Only a connection that saves its password needs one.
+/// store has none, or none was typed for this run). A connection that saves its password needs
+/// one; one that does not connects without it.
 pub(crate) fn resolve_runtime_uri_from(
     conn: &SavedConnection,
     password: Option<&str>,
@@ -805,7 +861,7 @@ pub(crate) fn resolve_runtime_uri_from(
     let password = if conn.save_password {
         password.ok_or(RuntimeUriError::MissingPassword)?
     } else {
-        ""
+        password.unwrap_or_default()
     };
     runtime_uri(&conn.uri, password)
         .map(with_default_postgres_database)
@@ -1203,6 +1259,41 @@ mod tests {
             RuntimeUriError::Invalid("Invalid connection URI".into())
         );
         assert_eq!(invalid.to_string(), "Invalid connection URI");
+    }
+
+    #[test]
+    fn a_store_that_cannot_be_read_is_not_reported_as_a_missing_password() {
+        struct Denied;
+        impl CredentialStore for Denied {
+            fn load(&self, _: SecretKind, _: &str) -> Result<Option<String>, credentials::CredentialError> {
+                Err(credentials::CredentialError::Platform("master key is missing".into()))
+            }
+            fn write(&self, _: SecretKind, _: &str, _: &str) -> Result<(), credentials::CredentialError> {
+                Ok(())
+            }
+            fn delete(&self, _: SecretKind, _: &str) -> Result<(), credentials::CredentialError> {
+                Ok(())
+            }
+        }
+        let saved = SavedConnection::from_record(&SavedConnectionRecord {
+            id: "ABCDEFAB-1234-4ABC-8DEF-0123456789AB".into(),
+            name: "n".into(),
+            uri: "postgresql://alice@db.example.com:5432/app".into(),
+            db_type: DB_TYPE_POSTGRESQL.into(),
+            color_hex: String::new(),
+            save_password: true,
+            save_proxy_password: false,
+            network_settings_json: "{}".into(),
+            is_pinned: false,
+            last_connected: None,
+            created_at: 0.0,
+            updated_at: 0.0,
+            connection_type: String::new(),
+            overrides_json: String::new(),
+        });
+        let error = resolve_runtime_uri_with(&saved, &Denied, None).unwrap_err();
+        assert_eq!(error, RuntimeUriError::Store("master key is missing".into()));
+        assert!(!is_missing_password_error(&error.to_string()));
     }
 
     #[test]

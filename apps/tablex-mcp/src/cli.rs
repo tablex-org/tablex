@@ -46,8 +46,9 @@ TableX > connection > Overrides > Agent access.
 Options:
       --print-config   print a ready-to-paste MCP client configuration and exit
       --authorize-keychain
-                       let this program read the saved passwords of the connections agents
-                       may use (macOS); run it once after installing or updating
+                       let this program read the TableX master key (one Keychain item) and
+                       the saved passwords of the connections agents may use (macOS); run it
+                       once after installing, and again if macOS asks after an update
   -V, --version        print the version and exit
   -h, --help           print this help and exit
 ";

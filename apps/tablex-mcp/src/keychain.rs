@@ -1,8 +1,12 @@
-//! `--authorize-keychain`: read, once and up front, the saved secrets of every connection an agent
-//! may use, so macOS asks for them in one sitting (the user chooses Always Allow) and not in the
-//! middle of an agent's session. Saved passwords sit in the Keychain, one item each, and their
-//! access list trusts the app; this program is a separate, ad-hoc-signed executable, so each item
-//! asks again for it, and again after every update. Nothing here prints a secret.
+//! `--authorize-keychain`: read, once and up front, the TableX master key and the saved secrets of
+//! every connection an agent may use, so macOS asks in one sitting (the user chooses Always Allow)
+//! and not in the middle of an agent's session. Saved secrets are encrypted rows of the app
+//! database (`tablex.db`, shared with the app: SQLite WAL, so both can run at once) whose key is a
+//! single Keychain item; its access list trusts the app, and this program is a separate executable,
+//! so macOS asks once for it. Secrets an older version kept as Keychain items of their own are
+//! read as they are (macOS asks for each of those once more): this program never copies them into
+//! the database and never creates the master key, only the app does. Nothing here prints a
+//! secret.
 
 use std::io::Write;
 use std::process::{Command, ExitCode, Stdio};
@@ -53,6 +57,10 @@ impl Report {
 /// Reads the saved secrets (through `connector`, exactly the ones an open uses) of every record
 /// whose effective agent access is at least schema-only (what `open_session` needs).
 pub fn check(connector: &Connector, records: &[SavedConnectionRecord]) -> Result<Report, String> {
+    // The one item macOS asks about: the master key of the saved secrets.
+    connector
+        .unlock_credentials()
+        .map_err(|error| format!("cannot read the TableX master key ({error})"))?;
     // A settings file that cannot be read means the server treats every connection as off.
     let settings = connector
         .profile_settings()
@@ -89,6 +97,7 @@ pub fn authorize(connector: &Connector) -> ExitCode {
         println!("The Keychain is a macOS feature: there is nothing to authorize on this platform.");
         return ExitCode::SUCCESS;
     }
+    println!("macOS asks once, for the TableX master key: choose Always Allow.");
     let report = match read_report(connector) {
         Ok(report) => report,
         Err(error) => return fail(&error),
@@ -120,7 +129,7 @@ pub fn authorize(connector: &Connector) -> ExitCode {
     if report.failed().next().is_some() || !verified() {
         eprintln!(
             "tablex-mcp: access was not kept for background use. Run this command again and \
-             choose Always Allow each time macOS asks."
+             choose Always Allow when macOS asks."
         );
         return ExitCode::FAILURE;
     }
@@ -189,7 +198,7 @@ fn fail(message: &str) -> ExitCode {
 pub fn credential_hint(exe: &std::path::Path) -> String {
     let path = exe.to_string_lossy().replace('\'', "'\\''");
     format!(
-        "macOS Keychain did not let tablex-mcp read it: run '{path}' --authorize-keychain once \
+        "macOS Keychain did not let tablex-mcp read the TableX master key: run '{path}' --authorize-keychain once \
          in Terminal and choose Always Allow, then restart the MCP client."
     )
 }
@@ -216,6 +225,24 @@ mod tests {
         }
         fn delete(&self, _: SecretKind, _: &str) -> Result<(), CredentialError> {
             Ok(())
+        }
+    }
+
+    /// A store whose master key the user refused to hand over.
+    struct Locked;
+
+    impl CredentialStore for Locked {
+        fn load(&self, _: SecretKind, _: &str) -> Result<Option<String>, CredentialError> {
+            Ok(None)
+        }
+        fn write(&self, _: SecretKind, _: &str, _: &str) -> Result<(), CredentialError> {
+            Ok(())
+        }
+        fn delete(&self, _: SecretKind, _: &str) -> Result<(), CredentialError> {
+            Ok(())
+        }
+        fn unlock(&self) -> Result<(), CredentialError> {
+            Err(CredentialError::Platform("user canceled".into()))
         }
     }
 
@@ -272,6 +299,16 @@ mod tests {
         assert_eq!(report.failed().collect::<Vec<_>>(), ["read", "schema"]);
         let line = report.read[0].1.line("read");
         assert!(line.starts_with("read: not allowed ("), "{line}");
+    }
+
+    #[test]
+    fn a_master_key_that_cannot_be_read_stops_the_check_before_any_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let connector = Connector::new(Arc::new(InstalledDriverStore::new(dir.path())))
+            .with_credentials(Arc::new(Locked))
+            .with_settings_path(Some(dir.path().join("settings.json")));
+        let error = check(&connector, &[record("read", "read")]).unwrap_err();
+        assert_eq!(error, "cannot read the TableX master key (user canceled)");
     }
 
     #[test]

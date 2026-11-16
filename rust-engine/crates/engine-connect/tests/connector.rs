@@ -1327,3 +1327,42 @@ fn an_agent_open_with_a_missing_hop_secret_or_an_unknown_jump_key_fails_typed_an
     assert!(opener.trusted.lock().unwrap().is_empty());
     assert_eq!(opener.opened_count(), 1, "one attempt, no guessed answer");
 }
+
+#[test]
+fn a_password_typed_for_this_run_is_used_and_masked_for_a_connection_that_saves_none() {
+    const TYPED: &str = "7A1B2C3D-0000-4000-8000-000000000041";
+    let keys = Arc::new(Keys::default());
+    let passwords = engine_connect::session_passwords::SessionPasswords::default();
+    let connector = Connector::new(Arc::clone(&env().drivers))
+        .with_credentials(keys.clone())
+        .with_session_passwords(passwords.clone())
+        .with_settings_path(Some(env().dir.path().join("typed.json")));
+    let mut record = postgres_record(TYPED, "{}");
+    record.save_password = false;
+    upsert_connection(&record).unwrap();
+    let saved = SavedConnection::from_record(&record);
+
+    // Nothing typed: no password, and the credential store is not asked.
+    let plain = connector.saved_uri(&saved).unwrap();
+    assert_eq!(plain.expose_for_test(), "postgresql://alice@db.example.com:5432/app");
+    assert!(connector.read_saved_secrets(&record).unwrap().mask_texts().is_empty());
+
+    passwords.set(&TYPED.to_lowercase(), "ty-ped-pw-41");
+    let uri = connector.saved_uri(&saved).unwrap();
+    assert!(uri.expose_for_test().contains("alice:ty-ped-pw-41@db.example.com"), "{}", uri.expose_for_test());
+    // The agent opens with it and scrubs it from what it shows.
+    let masked = engine_agent::redact::redact(
+        "FATAL: rejected ty-ped-pw-41",
+        &connector.read_saved_secrets(&record).unwrap().mask_texts(),
+    );
+    assert_eq!(masked, "FATAL: rejected ***");
+    assert_eq!(keys.1.load(std::sync::atomic::Ordering::SeqCst), 0, "a connection that saves nothing reads nothing");
+
+    // A connection that saves its password never uses the typed one.
+    let mut saving = saved.clone();
+    saving.save_password = true;
+    assert!(connector.saved_uri(&saving).unwrap_err().contains("Saved password was not found"));
+
+    passwords.clear(TYPED);
+    assert_eq!(connector.saved_uri(&saved).unwrap().expose_for_test(), plain.expose_for_test());
+}

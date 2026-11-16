@@ -36,6 +36,7 @@ impl From<CredentialError> for KeyStoreError {
         match error {
             CredentialError::NoKeyring => Self::NoStore,
             CredentialError::Platform(message) => Self::Store(message),
+            missing @ CredentialError::MasterKeyMissing { .. } => Self::Store(missing.to_string()),
         }
     }
 }
@@ -54,7 +55,7 @@ pub struct ApiKeyStore {
 impl ApiKeyStore {
     /// The OS credential store, on Anthropic's account.
     pub fn system() -> Self {
-        Self::with_store(Box::new(crate::credentials::SystemStore::new()))
+        Self::with_store(Box::new(crate::credentials::default_store()))
     }
 
     /// An in-memory store (UI scenarios and tests never touch the real one).

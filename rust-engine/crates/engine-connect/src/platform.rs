@@ -63,6 +63,11 @@ mod tests {
         assert!(app_data_dir()
             .expect("a data dir exists")
             .ends_with("tablex"));
+        // The secret store and every storage module open this one file.
+        assert_eq!(
+            engine_storage::app_db::default_path(),
+            app_data_dir().unwrap().join(engine_storage::app_db::FILE_NAME)
+        );
         assert!(config_dir()
             .expect("a config dir exists")
             .ends_with("tablex"));

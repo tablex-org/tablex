@@ -52,11 +52,12 @@ pub(in crate::app) enum StaticAction {
     PreviousTabGroup,
     About,
     CheckForUpdates,
+    ResetSavedPasswords,
     Quit,
 }
 
 impl StaticAction {
-    pub(super) const ALL: [Self; 41] = [
+    pub(super) const ALL: [Self; 42] = [
         Self::NewQuery,
         Self::NewConnection,
         Self::SaveQuery,
@@ -97,6 +98,7 @@ impl StaticAction {
         Self::PreviousTabGroup,
         Self::About,
         Self::CheckForUpdates,
+        Self::ResetSavedPasswords,
         Self::Quit,
     ];
 
@@ -142,6 +144,7 @@ impl StaticAction {
             Self::PreviousTabGroup => "Previous Tab Group",
             Self::About => "About TableX",
             Self::CheckForUpdates => "Check for Updates",
+            Self::ResetSavedPasswords => "Reset Saved Passwords\u{2026}",
             Self::Quit => "Quit TableX",
         }
     }
@@ -217,6 +220,7 @@ impl StaticAction {
             }
             Self::About => "Show the application version".into(),
             Self::CheckForUpdates => "Ask GitHub whether a newer version of TableX exists".into(),
+            Self::ResetSavedPasswords => "Remove every saved password and the AI key, after a confirmation; connections and history are kept".into(),
             Self::Quit => hinted("Close TableX", "app.quit"),
         }
     }
@@ -264,6 +268,7 @@ impl StaticAction {
             Self::PreviousTabGroup => "switch connection chip cycle back",
             Self::About => "version info help",
             Self::CheckForUpdates => "update upgrade new version release download latest",
+            Self::ResetSavedPasswords => "master key keychain credentials forget clear delete secrets passwords ssh passphrase ai key unreadable",
             Self::Quit => "exit close application",
         }
     }
@@ -307,6 +312,7 @@ impl StaticAction {
             Self::PreviousTabGroup => "icons/chevrons-up-down.svg",
             Self::About => "icons/info.svg",
             Self::CheckForUpdates => "icons/refresh-cw.svg",
+            Self::ResetSavedPasswords => "icons/key-round.svg",
             Self::Quit => "icons/close.svg",
         };
         TabIcon::Plain(path)
@@ -375,6 +381,7 @@ impl StaticAction {
             Self::PreviousTabGroup => app.step_tab_group(-1, cx),
             Self::About => app.open_about(window, cx),
             Self::CheckForUpdates => app.check_for_updates(cx),
+            Self::ResetSavedPasswords => app.confirm_reset_saved_passwords(window, cx),
             Self::Quit => {
                 if !app.request_quit(window, cx) {
                     cx.quit();

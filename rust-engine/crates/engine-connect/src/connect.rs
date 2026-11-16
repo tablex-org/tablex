@@ -36,9 +36,10 @@ use engine_driver_host::{DriverHandle, DriverSession, InstalledDriverStore, Load
 use engine_net::{KeyboardInteractiveRequest, Prompts, Secret};
 use engine_storage::connection::SavedConnectionRecord;
 
-use crate::credentials::{CredentialError, CredentialStore, SecretKind, SystemStore};
+use crate::credentials::{self, CredentialError, CredentialStore, SecretKind};
 use crate::drivers::{load_driver, DriverLoadError};
 use crate::profile::{self, ConnectionProfile, ProfileSettings};
+use crate::session_passwords::SessionPasswords;
 use crate::records::{
     display_connection_id, resolve_runtime_uri_from, resolve_runtime_uri_with,
     storage_connection_id, with_default_connect_timeout, ConnectionKind, RuntimeUri,
@@ -472,6 +473,8 @@ pub struct Connector {
     known_hosts: Option<PathBuf>,
     /// `None` when the platform has no config directory: the profile settings are the defaults.
     settings_path: Option<PathBuf>,
+    /// What was typed for connections that save no password (empty unless the front end shares one).
+    session_passwords: SessionPasswords,
 }
 
 impl Connector {
@@ -480,11 +483,28 @@ impl Connector {
     pub fn new(store: Arc<InstalledDriverStore>) -> Self {
         Self {
             store,
-            credentials: Arc::new(SystemStore::new()),
+            credentials: credentials::default_store(),
             opener: Arc::new(EngineOpener),
             known_hosts: crate::platform::ssh_known_hosts_path(),
             settings_path: profile::default_settings_path(),
+            session_passwords: SessionPasswords::default(),
         }
+    }
+
+    /// Connections that save no password connect with the one `passwords` holds for them.
+    #[must_use]
+    pub fn with_session_passwords(mut self, passwords: SessionPasswords) -> Self {
+        self.session_passwords = passwords;
+        self
+    }
+
+    /// The connectable URI of `saved`: its saved password from the credential store, or the one
+    /// typed for this run when it saves none. Blocks (the store may be asked).
+    pub fn saved_uri(&self, saved: &SavedConnection) -> Result<RuntimeUri, String> {
+        let session = self.session_passwords.get(&saved.id.to_string());
+        resolve_runtime_uri_with(saved, &*self.credentials, session.as_ref().map(Secret::expose))
+            .map(RuntimeUri::new)
+            .map_err(|error| error.to_string())
     }
 
     #[must_use]
@@ -502,6 +522,12 @@ impl Connector {
     pub fn with_credentials(mut self, credentials: Arc<dyn CredentialStore + Send + Sync>) -> Self {
         self.credentials = credentials;
         self
+    }
+
+    /// Gets the credential store ready for reads (the encrypted store reads its master key, the one
+    /// item the OS asks about); see [`CredentialStore::unlock`].
+    pub fn unlock_credentials(&self) -> Result<(), CredentialError> {
+        self.credentials.unlock()
     }
 
     #[must_use]
@@ -590,10 +616,7 @@ impl Connector {
                 prompts,
             );
         };
-        let password = saved
-            .save_password
-            .then(|| preread.database.as_ref().map(Secret::expose))
-            .flatten();
+        let password = preread.database.as_ref().map(Secret::expose);
         let uri = RuntimeUri::new(resolve_runtime_uri_from(&saved, password)?);
         let mut request = OpenRequest::saved(saved, Some(uri), connect_timeout_secs, preread.ssh);
         request.tunnel.preread = true;
@@ -622,10 +645,13 @@ impl Connector {
                 ssh.set(hop, need, secret);
             }
         }
-        Ok(SavedSecrets {
-            database: self.load_saved(record.save_password, SecretKind::Database, &accounts)?,
-            ssh,
-        })
+        let database = if record.save_password {
+            self.load_saved(true, SecretKind::Database, &accounts)?
+        } else {
+            // Typed for this run, not saved: used (and masked) like a saved one.
+            self.session_passwords.get(&display_connection_id(&record.id))
+        };
+        Ok(SavedSecrets { database, ssh })
     }
 
     /// The first spelling of the id the store has `kind` under; asks nothing when not `wanted`.
@@ -667,9 +693,14 @@ impl Connector {
             tunnel.expected || matches!(&uri, UriSource::Saved(saved) if saved.ssh_tunnel);
         let uri = match uri {
             UriSource::Given(uri) => uri,
-            UriSource::Saved(saved) => {
-                RuntimeUri::new(resolve_runtime_uri_with(&saved, &*self.credentials)?)
-            }
+            UriSource::Saved(saved) => RuntimeUri::new(resolve_runtime_uri_with(
+                &saved,
+                &*self.credentials,
+                self.session_passwords
+                    .get(&saved.id.to_string())
+                    .as_ref()
+                    .map(Secret::expose),
+            )?),
         };
         let uri = RuntimeUri::new(with_default_connect_timeout(
             uri.expose().to_owned(),

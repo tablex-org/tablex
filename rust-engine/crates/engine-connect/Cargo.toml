@@ -18,9 +18,14 @@ engine-driver-api = { path = "../engine-driver-api" }
 engine-driver-host = { path = "../engine-driver-host" }
 engine-net = { path = "../engine-net" }
 engine-storage = { path = "../engine-storage" }
+aes = { version = "0.8", default-features = false, features = ["zeroize"] }
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc", "zeroize"] }
+base64 = "0.22"
 dirs = "5"
+getrandom = "0.2"
 keyring = "4"
 percent-encoding = "2"
+rusqlite = { version = "0.39", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"

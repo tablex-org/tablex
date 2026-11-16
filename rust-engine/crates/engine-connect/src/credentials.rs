@@ -1,11 +1,14 @@
-//! OS credential storage for saved connection passwords, behind one
-//! [`CredentialStore`] trait: macOS Keychain, Windows Credential Manager and the
-//! Linux Secret Service, all through the `keyring` crate.
+//! Saved connection passwords behind one [`CredentialStore`] trait. Front ends use
+//! [`default_store`]: the encrypted `secrets` table of the app database ([`crate::secret_store`])
+//! whose one master key sits in the OS credential store (macOS Keychain, Windows Credential
+//! Manager, Linux Secret Service, all through the `keyring` crate), so the OS asks about one item,
+//! not one per secret.
 //!
-//! macOS keeps reading the items the Swift app wrote: the `keyring` Apple store
-//! addresses a generic password by the same service (`tablex.connection.*`) and
-//! account (connection id) attributes the previous Security.framework backend
-//! used. Secrets are never logged; errors carry only the store's own message.
+//! [`SystemStore`] is the OS store itself, one item per secret. It is where the Swift app and
+//! earlier versions kept them (the `keyring` Apple store addresses a generic password by the same
+//! service (`tablex.connection.*`) and account (connection id) attributes the previous
+//! Security.framework backend used), so it stays as the source of the lazy migration into the
+//! encrypted table. Secrets are never logged; errors carry only the store's own message.
 
 use crate::platform::CREDENTIAL_STORE_LABEL;
 
@@ -16,6 +19,12 @@ const SSH_PASSWORD_SERVICE: &str = "tablex.connection.ssh.password";
 const SSH_PASSPHRASE_SERVICE: &str = "tablex.connection.ssh.passphrase";
 /// The AI assistant's provider API key (the account is the provider id, not a connection id).
 const AI_API_KEY_SERVICE: &str = "tablex.ai.api_key";
+/// The accounts of [`SecretKind::AiApiKey`]: the provider ids of the assistant's settings. What
+/// [`CredentialStore::reset`] deletes among the items of earlier versions.
+pub(crate) const AI_API_KEY_ACCOUNTS: [&str; 4] = ["anthropic", "openai", "openai_compatible", "ollama"];
+/// The one item the encrypted secrets table's key lives in (account [`MASTER_KEY_ACCOUNT`]).
+const MASTER_KEY_SERVICE: &str = "tablex.secret-store.v1";
+pub(crate) const MASTER_KEY_ACCOUNT: &str = "master-key";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SecretKind {
@@ -28,6 +37,9 @@ pub enum SecretKind {
     /// The AI assistant's API key; the account is the provider id (`anthropic`). Not a connection
     /// secret: it is not in [`SecretKind::ALL`], so deleting a connection never touches it.
     AiApiKey,
+    /// The master key of the encrypted secrets table. Reserved to [`crate::secret_store`]: not in
+    /// [`SecretKind::ALL`], and the encrypted store refuses it.
+    MasterKey,
 }
 
 /// The account of the secrets of the jump host at `index` (0 = dialled first): the connection's
@@ -38,22 +50,33 @@ pub fn jump_account(account: &str, index: usize) -> String {
 
 impl SecretKind {
     /// The secrets that belong to a connection (what `delete_all` clears).
-    const ALL: [Self; 4] = [
+    pub(crate) const ALL: [Self; 4] = [
         Self::Database,
         Self::Proxy,
         Self::SshPassword,
         Self::SshPassphrase,
     ];
 
-    fn service(self) -> &'static str {
+    pub(crate) fn service(self) -> &'static str {
         match self {
             Self::Database => DB_SERVICE,
             Self::Proxy => PROXY_SERVICE,
             Self::SshPassword => SSH_PASSWORD_SERVICE,
             Self::SshPassphrase => SSH_PASSPHRASE_SERVICE,
             Self::AiApiKey => AI_API_KEY_SERVICE,
+            Self::MasterKey => MASTER_KEY_SERVICE,
         }
     }
+}
+
+/// The name of the app action that removes every saved password and key so that new ones can be
+/// saved (the command palette entry "Reset Saved Passwords…"); the error texts that point to it
+/// carry this name, which is how [`suggests_reset`] finds them.
+pub const RESET_ACTION: &str = "Reset Saved Passwords";
+
+/// Whether an error text sends the user to [`RESET_ACTION`].
+pub fn suggests_reset(message: &str) -> bool {
+    message.contains(RESET_ACTION)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +84,12 @@ pub enum CredentialError {
     /// No credential store is running (e.g. no Secret Service on a minimal
     /// Linux session). Nothing can be saved or read; it is not a crash.
     NoKeyring,
+    /// The app database holds `secrets` saved secrets but the master key that opens
+    /// them is gone from the credential store (or is not the key of the table).
+    MasterKeyMissing {
+        secrets: usize,
+        file: std::path::PathBuf,
+    },
     Platform(String),
 }
 
@@ -70,6 +99,13 @@ impl std::fmt::Display for CredentialError {
             Self::NoKeyring => write!(
                 f,
                 "No {CREDENTIAL_STORE_LABEL} available; the password will not be saved"
+            ),
+            Self::MasterKeyMissing { secrets, .. } => write!(
+                f,
+                "The master key of {secrets} saved {} is missing from the {CREDENTIAL_STORE_LABEL} \
+                 (or does not match), so they cannot be read. Use {RESET_ACTION} (command \
+                 palette) and enter the passwords again.",
+                if *secrets == 1 { "secret" } else { "secrets" },
             ),
             Self::Platform(message) => f.write_str(message),
         }
@@ -95,6 +131,23 @@ pub trait CredentialStore {
         -> Result<(), CredentialError>;
     /// Succeeds when there is nothing to delete.
     fn delete(&self, kind: SecretKind, account: &str) -> Result<(), CredentialError>;
+
+    /// Removes every saved secret of the store so that new ones can be saved ([`RESET_ACTION`]),
+    /// the secrets that earlier versions kept as items of the OS store of their own included. The
+    /// answer is what could not be removed from the OS store (best effort: empty when all went),
+    /// for the front end to say; an error means nothing was reset. Only the encrypted store of the
+    /// app database has a table to clear; the others cannot.
+    fn reset(&self) -> Result<Vec<String>, CredentialError> {
+        Err(CredentialError::Platform(
+            "this credential store cannot be reset".into(),
+        ))
+    }
+
+    /// Gets the store ready for reads: the encrypted store reads its master key (the one item the
+    /// OS asks about). Nothing to do for a store without one.
+    fn unlock(&self) -> Result<(), CredentialError> {
+        Ok(())
+    }
 
     /// Stores `password`; an empty one clears the entry instead.
     fn save(&self, kind: SecretKind, account: &str, password: &str) -> Result<(), CredentialError> {
@@ -131,6 +184,38 @@ pub trait CredentialStore {
     }
 }
 
+/// A store shared behind an `Arc` (the app's) is a store.
+impl<T: CredentialStore + ?Sized> CredentialStore for std::sync::Arc<T> {
+    fn load(&self, kind: SecretKind, account: &str) -> Result<Option<String>, CredentialError> {
+        (**self).load(kind, account)
+    }
+    fn write(&self, kind: SecretKind, account: &str, password: &str) -> Result<(), CredentialError> {
+        (**self).write(kind, account, password)
+    }
+    fn delete(&self, kind: SecretKind, account: &str) -> Result<(), CredentialError> {
+        (**self).delete(kind, account)
+    }
+    fn unlock(&self) -> Result<(), CredentialError> {
+        (**self).unlock()
+    }
+    fn reset(&self) -> Result<Vec<String>, CredentialError> {
+        (**self).reset()
+    }
+}
+
+/// The store every front end shares: the encrypted secrets table of the app database (`tablex.db` in the app data directory) with
+/// its master key in the OS credential store. One per process, so the key is read from the OS once.
+pub fn default_store() -> std::sync::Arc<crate::secret_store::EncryptedStore> {
+    static STORE: std::sync::OnceLock<std::sync::Arc<crate::secret_store::EncryptedStore>> =
+        std::sync::OnceLock::new();
+    std::sync::Arc::clone(STORE.get_or_init(|| {
+        std::sync::Arc::new(crate::secret_store::EncryptedStore::new(
+            Box::new(SystemStore::new()),
+            Some(engine_storage::app_db::default_path()),
+        ))
+    }))
+}
+
 /// The OS credential store. `service_override` replaces both service names
 /// (isolated entries for the opt-in real-store test).
 #[derive(Debug, Default, Clone)]
@@ -155,7 +240,9 @@ impl CredentialStore for SystemStore {
     fn load(&self, kind: SecretKind, account: &str) -> Result<Option<String>, CredentialError> {
         match self.entry(kind, account)?.get_password() {
             Ok(password) => Ok(Some(password)),
-            Err(keyring::Error::NoEntry | keyring::Error::BadEncoding(_)) => Ok(None),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            // A damaged master key item must not read as "no key": a new one would orphan the secrets.
+            Err(keyring::Error::BadEncoding(_)) if kind != SecretKind::MasterKey => Ok(None),
             Err(error) => Err(error.into()),
         }
     }

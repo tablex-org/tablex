@@ -362,17 +362,16 @@ fn error_text(result: &Value) -> String {
 fn the_real_binary_reads_the_switch_from_the_apps_settings_file_and_asks_the_client() {
     use tablex_mcp::approver::{REASON_NO_ELICITATION, REASON_SWITCH_OFF};
     let conn = Fixture::new().connection(Some("read_write"));
-    // The binary gets a data directory of its own, with a copy of the connection store (a SQLite
-    // file without a write-ahead log: what is committed is in the file), so the settings file this
+    // The binary gets a data directory of its own, with a copy of the app database (`VACUUM INTO`
+    // writes one whole file, whatever is still in the write-ahead log), so the settings file this
     // test rewrites is not shared with the other tests.
     let own = tempfile::tempdir().unwrap();
     let app_dir = own.path().join("tablex");
     std::fs::create_dir_all(&app_dir).unwrap();
-    std::fs::copy(
-        shared().data_dir().join("tablex").join("connections.db"),
-        app_dir.join("connections.db"),
-    )
-    .unwrap();
+    rusqlite::Connection::open(shared().data_dir().join("tablex").join("tablex.db"))
+        .unwrap()
+        .execute("VACUUM INTO ?1", [app_dir.join("tablex.db").to_str().unwrap()])
+        .unwrap();
     let settings = app_dir.join("settings.json");
     let start = || {
         Session::spawn(
