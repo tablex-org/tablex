@@ -5,6 +5,9 @@
 //! * Navigator: table-like nodes (`table`, `view`, `materialized_view`) carry a
 //!   [`SqlObjectRef`] as their payload; `column` nodes carry a [`SqlColumnNode`].
 //!   A payload is echoed back unchanged as the next `NavigatorRequest.payload`.
+//!   A `database` node may add `"can_connect": false` to its payload when the connected user
+//!   may not connect to it (the host shows it dimmed and does not try to open it); a node
+//!   without the key is connectable, so a driver or host that predates it keeps working.
 //! * Mutations: `MutationRequest.database`/`object` name the table,
 //!   `identity` is a [`SqlTableIdentity`] and `payload` a [`SqlRowChange`]
 //!   (kinds `insert`/`update`/`delete`) or a [`SqlBatch`] (kind `batch`,

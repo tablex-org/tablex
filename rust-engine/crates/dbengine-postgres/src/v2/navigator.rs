@@ -12,6 +12,10 @@
 //! | `database` + `schema` + `kind`       | the objects of one `SchemaObjectKind` |
 //! | `database` + `schema` + `object`     | columns of that object             |
 //!
+//! The databases level lists every database that accepts connections, also those the user holds
+//! no CONNECT privilege on: their nodes carry `"can_connect": false` in the payload (absent =
+//! connectable).
+//!
 //! Extra payload key `filter`: case-insensitive literal substring on object
 //! names (object level only), pushed into SQL with bound parameters.
 //!
@@ -183,10 +187,13 @@ pub(crate) fn list(
         |inner| async move {
             match level {
                 Level::Databases => {
-                    let (names, next_cursor) =
-                        page_of(inner.list_databases().await?, offset, limit);
+                    let (databases, next_cursor) =
+                        page_of(inner.list_databases_with_access().await?, offset, limit);
                     Ok(NavigatorPage {
-                        nodes: names.iter().map(|name| database_node(name)).collect(),
+                        nodes: databases
+                            .iter()
+                            .map(|(name, can_connect)| database_node(name, *can_connect))
+                            .collect(),
                         next_cursor,
                     })
                 }
@@ -252,7 +259,13 @@ pub(crate) fn list(
     )
 }
 
-fn database_node(name: &str) -> NavigatorNode {
+/// `can_connect` is in the payload only when it is `false`: a database without the key is one
+/// the user may connect to (an older driver never sends it, and an older app ignores it).
+fn database_node(name: &str, can_connect: bool) -> NavigatorNode {
+    let mut payload = json!({ "database": name });
+    if !can_connect {
+        payload["can_connect"] = json!(false);
+    }
     NavigatorNode {
         id: format!("database:{name}"),
         kind: "database".into(),
@@ -260,7 +273,7 @@ fn database_node(name: &str) -> NavigatorNode {
         subtitle: None,
         icon: Some("database".into()),
         has_children: true,
-        payload: json!({ "database": name }),
+        payload,
         actions: vec!["refresh".into()],
     }
 }
@@ -442,6 +455,18 @@ mod tests {
         assert_eq!(window(&request).unwrap(), (40, 5000));
         request.cursor = Some("bogus".into());
         assert!(window(&request).is_err());
+    }
+
+    #[test]
+    fn a_database_without_connect_says_so_and_one_with_it_adds_nothing() {
+        let open = database_node("app", true);
+        assert_eq!(open.payload, json!({"database": "app"}), "the contract of the other nodes");
+        let closed = database_node("reports", false);
+        assert_eq!(closed.payload, json!({"database": "reports", "can_connect": false}));
+        assert_eq!((closed.id.as_str(), closed.kind.as_str()), ("database:reports", "database"));
+        // Echoed back as a request payload it still selects the schema level of that database.
+        let echoed = request(Some(&closed.id), None, Some(closed.payload));
+        assert_eq!(level(&echoed).unwrap(), Level::Schemas { database: "reports" });
     }
 
     #[test]

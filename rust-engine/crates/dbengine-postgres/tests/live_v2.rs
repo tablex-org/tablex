@@ -1458,6 +1458,122 @@ fn create_database_succeeds_once_and_is_rejected_twice() {
     assert!(!names(&databases).contains(&name));
 }
 
+/// Drops the role and database a test made, over a fresh administrator session, also when the
+/// test panicked.
+struct RoleAndDatabase {
+    handle: Arc<DriverHandle>,
+    admin_uri: String,
+    role: String,
+    database: String,
+}
+
+impl Drop for RoleAndDatabase {
+    fn drop(&mut self) {
+        let Ok(mut session) = self
+            .handle
+            .connect(&json!({ "uri": self.admin_uri }).to_string())
+        else {
+            return;
+        };
+        for sql in [
+            format!("DROP DATABASE IF EXISTS \"{}\"", self.database),
+            format!("DROP ROLE IF EXISTS \"{}\"", self.role),
+        ] {
+            if let Ok(page) = run(&mut session, &sql) {
+                let _ = session.release_page(page.page_id);
+            }
+        }
+        let _ = session.disconnect();
+    }
+}
+
+#[test]
+#[ignore = "needs TABLEX_TEST_PG_URI (dedicated PostgreSQL test server)"]
+fn databases_the_user_cannot_connect_to_are_listed_with_can_connect_false() {
+    let uri = pg_uri();
+    let mut h = Harness::new(&uri);
+    let role = format!("pgv2_nc_role_{}", std::process::id());
+    let database = format!("pgv2_nc_db_{}", std::process::id());
+    let guard = RoleAndDatabase {
+        handle: h.handle.clone(),
+        admin_uri: uri.clone(),
+        role: role.clone(),
+        database: database.clone(),
+    };
+    // Leftovers of an aborted earlier run.
+    for sql in [
+        format!("DROP DATABASE IF EXISTS \"{database}\""),
+        format!("DROP ROLE IF EXISTS \"{role}\""),
+    ] {
+        let page = h.sql(&sql).expect("clean up");
+        h.session.release_page(page.page_id).unwrap();
+    }
+    // `tablex` needs the rights to make roles and databases; a server where it has not is not
+    // the dedicated one.
+    for sql in [
+        format!("CREATE ROLE \"{role}\" LOGIN PASSWORD 'pw-{role}'"),
+        format!("CREATE DATABASE \"{database}\""),
+        format!("REVOKE CONNECT ON DATABASE \"{database}\" FROM PUBLIC"),
+    ] {
+        let page = h.sql(&sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+        h.session.release_page(page.page_id).unwrap();
+    }
+
+    let list = |h: &mut Harness| {
+        h.nav(json!({"parent":null,"database":null,"payload":null,"cursor":null,"limit":500}))
+    };
+    let can_connect = |page: &NavigatorPage, name: &str| -> Option<bool> {
+        let node = page.nodes.iter().find(|node| node.label == name)?;
+        Some(node.payload.get("can_connect").and_then(Value::as_bool).unwrap_or(true))
+    };
+
+    // The administrator may connect to everything: the new database is there, with no key.
+    let admin_view = list(&mut h);
+    assert_eq!(can_connect(&admin_view, &database), Some(true));
+    let node = admin_view.nodes.iter().find(|n| n.label == database).unwrap();
+    assert_eq!(node.payload, json!({ "database": database }));
+
+    // The role may connect to the ones PUBLIC allows, and is listed the one it may not.
+    let (scheme, rest) = uri.split_once("://").expect("a URI");
+    let (_, host) = rest.split_once('@').expect("a URI with credentials");
+    let role_uri = format!("{scheme}://{role}:pw-{role}@{host}");
+    let mut session = h
+        .handle
+        .connect(&json!({ "uri": role_uri }).to_string())
+        .expect("connect as the role");
+    let page = session
+        .list_nav_nodes(&json!({"parent":null,"database":null,"payload":null,"cursor":null,"limit":500}).to_string())
+        .expect("list databases as the role");
+    assert_eq!(can_connect(&page, &database), Some(false), "{:?}", names(&page));
+    let closed = page.nodes.iter().find(|n| n.label == database).unwrap();
+    assert_eq!(closed.payload, json!({ "database": database, "can_connect": false }));
+    assert_eq!(can_connect(&page, "postgres"), Some(true));
+    assert!(!names(&page).iter().any(|name| name == "template0" || name == "template1"));
+    // Opening it is what fails, with the server's own text.
+    let schemas = session.list_nav_nodes(
+        &json!({"parent": closed.id, "database": database, "payload": closed.payload, "cursor": null, "limit": 10}).to_string(),
+    );
+    let error = schemas.expect_err("the role may not connect").to_string();
+    assert!(error.contains("permission denied for database"), "{error}");
+    let _ = session.disconnect();
+
+    // Granted CONNECT, it is connectable again.
+    let page = h.sql(&format!("GRANT CONNECT ON DATABASE \"{database}\" TO \"{role}\"")).unwrap();
+    h.session.release_page(page.page_id).unwrap();
+    let mut session = h
+        .handle
+        .connect(&json!({ "uri": format!("{scheme}://{role}:pw-{role}@{host}") }).to_string())
+        .expect("connect as the role");
+    let page = session
+        .list_nav_nodes(&json!({"parent":null,"database":null,"payload":null,"cursor":null,"limit":500}).to_string())
+        .unwrap();
+    assert_eq!(can_connect(&page, &database), Some(true));
+    let _ = session.disconnect();
+    drop(guard);
+    // The guard dropped them: the database is gone from the administrator's list.
+    assert_eq!(can_connect(&list(&mut h), &database), None);
+}
+
 // ---------------------------------------------------------------------------
 // describe_object
 // ---------------------------------------------------------------------------

@@ -127,6 +127,15 @@ const POSTGRES_LIST_DATABASES_SQL: &str = "SELECT datname
        AND has_database_privilege(datname, 'CONNECT')
      ORDER BY datname";
 
+/// Every database the navigator lists (not a template, accepting connections) with whether the
+/// connected user holds CONNECT on it: one without is shown, but opening it would only fail.
+const POSTGRES_LIST_DATABASE_ACCESS_SQL: &str =
+    "SELECT datname, has_database_privilege(datname, 'CONNECT')
+     FROM pg_database
+     WHERE datallowconn
+       AND NOT datistemplate
+     ORDER BY datname";
+
 /// Fetch the full schema/table/column catalog in a single round-trip.
 /// Excludes pg_catalog and information_schema themselves.
 /// Capped at 20 000 rows; logs a warning if truncated.
@@ -423,6 +432,22 @@ impl PostgresConn {
             .await
             .map_err(|e| e.to_string())?;
         rows.iter().map(|row| catalog_cell(row, 0)).collect()
+    }
+
+    /// Like [`Self::list_databases`], but also the databases the user may not connect to, each with
+    /// whether it may.
+    pub async fn list_databases_with_access(&self) -> Result<Vec<(String, bool)>, String> {
+        let rows = self
+            .client
+            .query(POSTGRES_LIST_DATABASE_ACCESS_SQL, &[])
+            .await
+            .map_err(|e| e.to_string())?;
+        rows.iter()
+            .map(|row| {
+                let allowed: Option<bool> = catalog_cell(row, 1)?;
+                Ok((catalog_cell(row, 0)?, allowed.unwrap_or(true)))
+            })
+            .collect()
     }
 
     pub async fn create_database(&self, name: &str) -> Result<(), crate::error::DbEngineError> {
@@ -1773,6 +1798,17 @@ mod tests {
         assert!(POSTGRES_LIST_DATABASES_SQL.contains("datallowconn"));
         assert!(POSTGRES_LIST_DATABASES_SQL.contains("NOT datistemplate"));
         assert!(POSTGRES_LIST_DATABASES_SQL.contains("has_database_privilege"));
+    }
+
+    #[test]
+    fn database_access_sql_keeps_databases_the_user_cannot_connect_to() {
+        let sql = POSTGRES_LIST_DATABASE_ACCESS_SQL;
+        assert!(sql.contains("pg_database"));
+        assert!(sql.contains("datallowconn"));
+        assert!(sql.contains("NOT datistemplate"));
+        // The privilege is a column to report, not a filter.
+        assert!(sql.contains("SELECT datname, has_database_privilege(datname, 'CONNECT')"));
+        assert!(!sql.contains("AND has_database_privilege"));
     }
 
     #[test]
