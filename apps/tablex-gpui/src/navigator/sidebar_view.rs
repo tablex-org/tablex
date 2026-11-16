@@ -864,7 +864,40 @@ impl NavigatorState {
         visited.remove(parent);
     }
 
+    /// A database node `id` that its connection does not list (`Show only the connection's
+    /// database`). Every database list - the tree, the pickers, the search - goes through here.
+    pub(super) fn scoped_out(&self, id: &NavigatorNodeId) -> bool {
+        if self.only_databases.is_empty() {
+            return false;
+        }
+        let (connection, database) = match id {
+            NavigatorNodeId::Database {
+                connection,
+                database,
+            } => (connection, database.as_str()),
+            NavigatorNodeId::Provider { connection, node } => {
+                let Some(provider) = self.provider_nodes.get(id).filter(|provider| provider.kind == "database") else {
+                    return false;
+                };
+                let database = provider
+                    .payload
+                    .get("database")
+                    .and_then(serde_json::Value::as_str)
+                    .or_else(|| self.labels.get(id).map(String::as_str))
+                    .unwrap_or(node);
+                (connection, database)
+            }
+            _ => return false,
+        };
+        self.only_databases
+            .get(connection)
+            .is_some_and(|only| only != database)
+    }
+
     fn visible_filter_allows(&self, id: &NavigatorNodeId) -> bool {
+        if self.scoped_out(id) {
+            return false;
+        }
         let (connection, database, schema) = match id {
             NavigatorNodeId::Database {
                 connection,

@@ -113,6 +113,25 @@ impl ConnectionFormState {
         form
     }
 
+    /// The form of a new connection to the server of `saved`, for another user ("Connect as
+    /// Another User"): the address, TLS settings and options are the source's, the database is
+    /// `database`, and the user and password are empty - the source's are not copied.
+    pub fn another_user_of(saved: &SavedConnection, database: &str) -> Self {
+        let mut form = Self::from_saved(saved);
+        form.id = None;
+        form.username.clear();
+        form.password.clear();
+        form.save_password = true;
+        form.is_pinned = false;
+        form.use_uri = false;
+        form.database = database.to_owned();
+        let host = form.host.trim().to_owned();
+        form.name = if host.is_empty() { database.to_owned() } else { format!("{database} ({host})") };
+        // The URL row shows what the fields say (the source's URI names its user).
+        form.uri = if host.is_empty() { String::new() } else { form.effective_uri().unwrap_or_default() };
+        form
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if !self.kind.is_supported() {
             return Err("This database type is not supported by the current shell".to_string());
@@ -483,6 +502,13 @@ impl ConnectionFormState {
             .password()
             .map(decode_uri_component)
     }
+}
+
+/// The database a saved address names in its path (`None` when it names none).
+pub(crate) fn database_of_uri(uri: &str) -> Option<String> {
+    let url = url::Url::parse(uri).ok()?;
+    let database = decode_uri_component(url.path().trim_matches('/'));
+    (!database.is_empty()).then_some(database)
 }
 
 pub(crate) fn decode_uri_component(value: &str) -> String {

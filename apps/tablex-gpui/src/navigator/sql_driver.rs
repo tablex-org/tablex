@@ -151,8 +151,13 @@ pub fn catalog_children(load: &LoadRequest, nodes: &[NavigatorNode]) -> Vec<Load
     nodes
         .iter()
         .filter_map(|node| match load {
-            LoadRequest::Databases { .. } => (node.kind == "database")
-                .then(|| database_child(&connection, name_of(node, "database"))),
+            LoadRequest::Databases { .. } => (node.kind == "database").then(|| {
+                let mut child = database_child(&connection, name_of(node, "database"));
+                // Only an explicit `false` says so: a driver that does not know the key lists
+                // databases the user may open.
+                child.no_connect = node.payload.get("can_connect").and_then(Value::as_bool) == Some(false);
+                child
+            }),
             LoadRequest::Schemas { database, .. } => (node.kind == "schema")
                 .then(|| schema_child(&connection, database, name_of(node, "schema"))),
             LoadRequest::Objects {
@@ -281,6 +286,22 @@ mod tests {
             schema: "public".into(),
             group,
         }
+    }
+
+    #[test]
+    fn a_database_node_says_it_cannot_be_connected_to_only_when_it_says_so() {
+        let load = LoadRequest::Databases { connection: "c".into() };
+        let nodes = [
+            node("database", "app", json!({"database": "app"})),
+            node("database", "reports", json!({"database": "reports", "can_connect": false})),
+            node("database", "shared", json!({"database": "shared", "can_connect": true})),
+            node("database", "odd", json!({"database": "odd", "can_connect": "no"})),
+            node("schema", "stray", json!({"database": "stray", "can_connect": false})),
+        ];
+        let children = catalog_children(&load, &nodes);
+        let flags: Vec<(&str, bool)> = children.iter().map(|child| (child.label.as_str(), child.no_connect)).collect();
+        // A payload without the key (an older driver) is connectable; so is a value that is not `false`.
+        assert_eq!(flags, [("app", false), ("reports", true), ("shared", false), ("odd", false)]);
     }
 
     #[test]

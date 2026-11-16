@@ -199,16 +199,7 @@ impl AppRoot {
     /// The namespace a file is run in when it is asked of a whole connection: the first database the navigator lists
     /// (with its default schema), else none.
     pub(in crate::app) fn file_run_target_of_connection(&self, connection: &str) -> Namespace {
-        let database = self
-            .navigator
-            .loaded_children(&NavigatorNodeId::Connection { connection: connection.to_owned() })
-            .into_iter()
-            .flatten()
-            .find_map(|child| match child {
-                NavigatorNodeId::Database { database, .. } => Some(database.clone()),
-                _ => None,
-            })
-            .unwrap_or_default();
+        let database = self.navigator.openable_databases(connection).next().unwrap_or_default().to_owned();
         let schema = if database.is_empty() { String::new() } else { self.default_schema_of_database(connection, &database) };
         Namespace { connection: connection.to_owned(), database, schema }
     }

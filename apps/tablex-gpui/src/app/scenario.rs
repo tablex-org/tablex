@@ -694,6 +694,9 @@ impl AppRoot {
         }
         self.navigator
             .set_connections(self.saved_connections.clone());
+        self.navigator.set_database_scopes(
+            self.connection_policy.database_scopes(&self.saved_connections),
+        );
         self.emit_scenario_event("save", inputs.is_picker(), operation, None);
         cx.notify();
         Ok(form)

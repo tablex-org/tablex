@@ -199,6 +199,8 @@ impl AppRoot {
             .xsmall()
             .compact();
         let summary = problem_summary(&problem.message);
+        // A database the server refused to this user: another user's connection is the way out.
+        let another_user = self.offers_another_user(&row.id, &problem.message);
         let target = Rc::new((row.clone(), problem.message));
         let id = row.id.clone();
         let close_root = root.clone();
@@ -220,7 +222,7 @@ impl AppRoot {
                     cx.notify();
                 });
             })
-            .content(move |_, _, _| problem_panel(index, connection, &target, &root));
+            .content(move |_, _, _| problem_panel(index, connection, another_user, &target, &root));
         // The tooltip sits on a wrapper: the button's own one is text only,
         // and the tests read this one through its selector.
         div()
@@ -299,6 +301,7 @@ impl AppRoot {
 fn problem_panel(
     index: usize,
     connection: bool,
+    another_user: bool,
     target: &Rc<(NavigatorRow, SharedString)>,
     root: &WeakEntity<AppRoot>,
 ) -> AnyElement {
@@ -364,6 +367,22 @@ fn problem_panel(
                     .selectable(true),
                 ),
         )
+        .children(another_user.then(|| {
+            let (target, root) = (target.clone(), root.clone());
+            Button::new(("nav-problem-another-user", index))
+                .debug_selector(move || format!("sidebar-problem-another-user-{index}"))
+                .label("Connect as Another User\u{2026}")
+                .compact()
+                .outline()
+                .on_click(move |_, window, app| {
+                    let NavigatorNodeId::Database { connection, database } = &target.0.id else {
+                        return;
+                    };
+                    let _ = root.update(app, |this, cx| {
+                        this.connect_as_another_user(connection, database, window, cx);
+                    });
+                })
+        }))
         .child(
             div()
                 .flex()

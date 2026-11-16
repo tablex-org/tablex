@@ -6,6 +6,7 @@ use crate::sidebar_preferences::ConnectionSort;
 use gpui::img;
 use gpui::Rgba;
 use gpui::Stateful;
+use gpui_component::tooltip::Tooltip;
 
 /// Lucide glyphs vendored under `assets/icons` for the sidebar.
 /// Implemented against the pinned `gpui-component` icon contract
@@ -486,6 +487,11 @@ impl AppRoot {
             return;
         }
         if self.navigator.action_target(&row.id).is_none() {
+            return;
+        }
+        // A database the user may not connect to opens nothing: the panel says why.
+        if self.navigator.database_denied(&row.id) {
+            self.show_no_connect(&row.id, cx);
             return;
         }
         let outcome = self.navigator.toggle_expansion(&row.id);
@@ -1781,6 +1787,20 @@ impl AppRoot {
                         if row.disabled {
                             element = element.text_color(theme::text_faint());
                         }
+                        // A database the user may not connect to: dimmed, and says why.
+                        if let NavigatorNodeId::Database { connection, .. } = &row.id {
+                            if this.navigator.database_denied(&row.id) {
+                                let tip = this.no_connect_tooltip(connection);
+                                element = element.opacity(0.5).tooltip(move |window, cx| {
+                                    let tip = tip.clone();
+                                    Tooltip::element(move |_, _| {
+                                        let selector = format!("sidebar-no-connect-tooltip {tip}");
+                                        div().debug_selector(move || selector.clone()).child(tip.clone())
+                                    })
+                                    .build(window, cx)
+                                });
+                            }
+                        }
                         if matches!(row.load, Some(crate::navigator::NodeLoadState::Loading)) {
                             element = element.child(
                                 div()
@@ -2254,6 +2274,18 @@ impl AppRoot {
                             let diagram_id = this.diagram_node_supported(&row_id).then(|| row_id.clone());
                             let diagram_root = menu_root.clone();
                             let object_id = row_id.clone();
+                            // A database of a server with several: a connection of another user to it.
+                            let another_user = match &row_id {
+                                NavigatorNodeId::Database { connection, database }
+                                    if this.navigator.connection(connection).is_some_and(|saved| {
+                                        !saved.disabled
+                                            && crate::settings::connection::supports_database_scope(saved.kind)
+                                    }) =>
+                                {
+                                    Some((menu_root.clone(), connection.clone(), database.clone()))
+                                }
+                                _ => None,
+                            };
                             return base
                                 .context_menu(move |menu, window, cx| {
                                     let menu = menu.item(new_query_item());
@@ -2265,6 +2297,25 @@ impl AppRoot {
                                                     this.open_diagram_for_node(&id, cx);
                                                 });
                                             }))
+                                        }
+                                        None => menu,
+                                    };
+                                    let menu = match another_user.clone() {
+                                        Some((root, connection, database)) => {
+                                            menu.item(super::mongo_admin_view::entry_item(
+                                                super::mongo_admin_view::Entry {
+                                                    selector: "database-menu-another-user",
+                                                    label: "Connect as Another User\u{2026}",
+                                                    icon: Icon::empty().path("icons/key-round.svg").size(px(12.0)),
+                                                    disabled: None,
+                                                    destructive: false,
+                                                },
+                                                move |window, app| {
+                                                    let _ = root.update(app, |this, cx| {
+                                                        this.connect_as_another_user(&connection, &database, window, cx);
+                                                    });
+                                                },
+                                            ))
                                         }
                                         None => menu,
                                     };

@@ -268,16 +268,7 @@ impl AppRoot {
     /// The databases and schemas of `connection` the navigator has loaded, `current` included.
     pub(in crate::app) fn transfer_namespaces(&self, connection: &str, current: &Namespace) -> Vec<Namespace> {
         let mut namespaces: Vec<Namespace> = Vec::new();
-        let databases: Vec<String> = self
-            .navigator
-            .loaded_children(&NavigatorNodeId::Connection { connection: connection.to_owned() })
-            .into_iter()
-            .flatten()
-            .filter_map(|child| match child {
-                NavigatorNodeId::Database { database, .. } => Some(database.clone()),
-                _ => None,
-            })
-            .collect();
+        let databases: Vec<String> = self.navigator.openable_databases(connection).map(str::to_owned).collect();
         for database in databases {
             let id = NavigatorNodeId::Database { connection: connection.to_owned(), database: database.clone() };
             let schemas: Vec<String> = self

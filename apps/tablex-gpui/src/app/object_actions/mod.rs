@@ -67,16 +67,7 @@ impl AppRoot {
     /// New database on `connection`, from the connection's own menu: the database it is reached
     /// through is the first one the navigator lists (the apply session connects there).
     pub(in crate::app) fn open_new_database_dialog(&mut self, connection: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let database = self
-            .navigator
-            .loaded_children(&NavigatorNodeId::Connection { connection: connection.to_owned() })
-            .into_iter()
-            .flatten()
-            .find_map(|child| match child {
-                NavigatorNodeId::Database { database, .. } => Some(database.clone()),
-                _ => None,
-            })
-            .unwrap_or_default();
+        let database = self.navigator.openable_databases(connection).next().unwrap_or_default().to_owned();
         let origin = TableOrigin { connection: connection.to_owned(), database, schema: String::new(), object: String::new() };
         self.open_name_dialog(name_dialog::NameFlow::Namespace(NamespaceKind::Database), origin, window, cx);
     }

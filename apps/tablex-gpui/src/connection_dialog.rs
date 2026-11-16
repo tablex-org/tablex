@@ -2,7 +2,8 @@ use crate::connection_form::ConnectionFormState;
 use crate::connections::ConnectionKind;
 use crate::agent_access::{agent_select, AgentChoice};
 use crate::settings::connection::{
-    AgentLevel, AgentResolution, ConnectionProfile, ConnectionType, OverrideValue, OverrideValueExt as _, Overrides, AGENT_ACCESS,
+    supports_database_scope, AgentLevel, AgentResolution, ConnectionProfile, ConnectionType, OverrideValue,
+    OverrideValueExt as _, Overrides, AGENT_ACCESS, ONLY_CONNECTION_DATABASE,
 };
 use crate::settings::registry::{self, Kind, SettingDescriptor, Value};
 use crate::settings::Settings;
@@ -173,6 +174,12 @@ pub struct ConnectionDialogInputs {
     _agent_subscription: Rc<gpui::Subscription>,
     /// Overrides the record had; ones this tab cannot show are kept on save.
     initial_overrides: Rc<Overrides>,
+    /// "Show only the connection's database" (stored with the overrides, see
+    /// `ONLY_CONNECTION_DATABASE`), and whether the user has set it themselves: until then a
+    /// new connection follows its Database field (named = only that one).
+    only_database: Rc<Cell<bool>>,
+    only_database_touched: Rc<Cell<bool>>,
+    _database_subscription: Rc<gpui::Subscription>,
     global: Arc<Settings>,
     _type_subscription: Rc<gpui::Subscription>,
     pub step: Rc<Cell<ConnectionDialogStep>>,
@@ -312,6 +319,22 @@ impl ConnectionDialogInputs {
             }
         });
         let kind = Rc::new(Cell::new(form.kind));
+        let new_connection = form.id.is_none();
+        let only_database = Rc::new(Cell::new(
+            profile.overrides.only_connection_database()
+                || (new_connection && !form.database.trim().is_empty()),
+        ));
+        let only_database_touched = Rc::new(Cell::new(false));
+        let database = input(window, cx, &form.database, false);
+        let database_subscription = {
+            let (only, touched) = (only_database.clone(), only_database_touched.clone());
+            cx.subscribe(&database, move |database, event: &InputEvent, cx| {
+                if new_connection && !touched.get() && matches!(event, InputEvent::Change) {
+                    only.set(!database.read(cx).value().trim().is_empty());
+                    cx.refresh_windows();
+                }
+            })
+        };
         let this = Self {
             connect_timeout: input(window, cx, &form.connect_timeout, false),
             ca_cert: input(window, cx, &form.ca_cert, false),
@@ -333,6 +356,9 @@ impl ConnectionDialogInputs {
             agent_select,
             _agent_subscription: Rc::new(agent_subscription),
             initial_overrides: Rc::new(profile.overrides),
+            only_database,
+            only_database_touched,
+            _database_subscription: Rc::new(database_subscription),
             global: settings.clone(),
             _type_subscription: Rc::new(type_subscription),
             _color_subscription: Rc::new(color_subscription),
@@ -342,7 +368,7 @@ impl ConnectionDialogInputs {
             host: input(window, cx, &form.host, false),
             port: input(window, cx, &form.port, false),
             username: input(window, cx, &form.username, false),
-            database: input(window, cx, &form.database, false),
+            database,
             auth_database: input(window, cx, &form.auth_database, false),
             uri_options: input(window, cx, &form.uri_options, false),
             file_path: input(window, cx, &form.file_path, false),
@@ -601,6 +627,10 @@ impl ConnectionDialogInputs {
         overrides.clear(AGENT_ACCESS);
         if self.agent_custom.get() {
             overrides.set(AGENT_ACCESS, OverrideValue::Text(self.agent_level.get().id().to_owned()));
+        }
+        overrides.clear(ONLY_CONNECTION_DATABASE);
+        if self.only_database.get() && supports_database_scope(self.kind.get()) {
+            overrides.set(ONLY_CONNECTION_DATABASE, OverrideValue::Bool(true));
         }
         ConnectionProfile {
             type_id: self.type_id.borrow().clone(),
@@ -904,6 +934,9 @@ impl ConnectionDialogInputs {
             "connection-config-database",
             Input::new(&self.database).appearance(true),
         ));
+        if supports_database_scope(kind) {
+            fields = fields.child(self.only_database_row());
+        }
         if kind == ConnectionKind::Mongodb {
             fields = fields.child(config_row(
                 "Auth DB",
@@ -917,6 +950,36 @@ impl ConnectionDialogInputs {
             Input::new(&self.uri_options).appearance(true),
         ));
         fields.into_any_element()
+    }
+
+    /// "Show only the connection's database": the navigator lists the database named above and
+    /// no other of the server (a server's other databases may belong to other users).
+    fn only_database_row(&self) -> AnyElement {
+        let only_database = Checkbox::new("only-connection-database")
+            .label("Show only the connection's database")
+            .checked(self.only_database.get())
+            .on_click({
+                let (only, touched) = (self.only_database.clone(), self.only_database_touched.clone());
+                move |checked, _, cx| {
+                    only.set(*checked);
+                    touched.set(true);
+                    cx.refresh_windows();
+                }
+            });
+        div()
+            .debug_selector(|| "connection-config-only-database".into())
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .pl(px(LABEL_WIDTH + 12.0))
+            .child(only_database)
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(theme::text_muted())
+                    .child("Without a database named above, every database is listed."),
+            )
+            .into_any_element()
     }
 
     /// ClickHouse: the HTTPS toggle (it moves a default port between 8123 and

@@ -56,6 +56,25 @@ impl ConnectionPolicy {
         }
     }
 
+    /// The database each connection lists alone: the ones that asked for it (`Show only the
+    /// connection's database`), are of a kind with databases and whose saved address names one.
+    pub(super) fn database_scopes(&self, saved: &[SavedConnection]) -> HashMap<String, String> {
+        saved
+            .iter()
+            .filter(|saved| crate::settings::connection::supports_database_scope(saved.kind))
+            .filter_map(|saved| {
+                let id = saved.id.to_string();
+                let profile = self.profile(&id)?;
+                let database = profile
+                    .overrides
+                    .only_connection_database()
+                    .then(|| crate::connection_form::database_of_uri(&saved.uri))
+                    .flatten()?;
+                Some((id, database))
+            })
+            .collect()
+    }
+
     pub(super) fn profile(&self, connection: &str) -> Option<&ConnectionProfile> {
         self.profiles.get(&Uuid::parse_str(connection).ok()?)
     }

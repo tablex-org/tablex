@@ -290,6 +290,10 @@ pub struct NavigatorState {
     /// only the groups its driver can list. A connection without an entry shows its dialect's.
     driver_kinds: HashMap<String, HashSet<String>>,
     provider_nodes: HashMap<NavigatorNodeId, ProviderNode>,
+    /// Connections that list only the database their address names (connection id -> database).
+    only_databases: HashMap<String, String>,
+    /// Database nodes the connected user holds no CONNECT privilege on: shown, never opened.
+    denied_databases: HashSet<NavigatorNodeId>,
     /// Redis: the key filter and grouping of each database node.
     redis_filters: HashMap<NavigatorNodeId, crate::redis::KeyFilter>,
     provider_connections: HashSet<String>,
@@ -514,6 +518,37 @@ impl NavigatorState {
         }
     }
 
+    /// The database each connection lists alone (`Show only the connection's database`); a
+    /// connection that is not in the map lists every database.
+    pub fn set_database_scopes(&mut self, scopes: HashMap<String, String>) {
+        if self.only_databases != scopes {
+            self.only_databases = scopes;
+            self.catalog_revision += 1;
+            self.rebuild_visible();
+        }
+    }
+
+    /// The databases loaded under `connection` that it lists and the user may open, in load order
+    /// (the one a connection-level action starts in, and the ones a picker offers).
+    pub fn openable_databases(&self, connection: &str) -> impl Iterator<Item = &str> {
+        let root = NavigatorNodeId::Connection { connection: connection.to_owned() };
+        self.children
+            .get(&root)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|id| !self.scoped_out(id) && !self.denied_databases.contains(*id))
+            .filter_map(|id| match id {
+                NavigatorNodeId::Database { database, .. } => Some(database.as_str()),
+                _ => None,
+            })
+    }
+
+    /// A database node the connected user may not connect to (the driver said so).
+    pub fn database_denied(&self, id: &NavigatorNodeId) -> bool {
+        self.denied_databases.contains(id)
+    }
+
     #[cfg(test)]
     pub fn connections(&self) -> &[SavedConnection] {
         &self.connections
@@ -591,6 +626,9 @@ impl NavigatorState {
             };
             stack.extend(children.iter().rev());
             while let Some(id) = stack.pop() {
+                if self.scoped_out(id) {
+                    continue;
+                }
                 let label = self.labels.get(id).map(String::as_str);
                 match id {
                     NavigatorNodeId::Database { .. }
@@ -663,6 +701,12 @@ impl NavigatorState {
                 }
                 self.rebuild_visible();
             }
+            return ExpansionOutcome {
+                request: None,
+            };
+        }
+        // A database the user may not connect to never opens: the load could only fail.
+        if self.denied_databases.contains(id) {
             return ExpansionOutcome {
                 request: None,
             };
@@ -782,6 +826,11 @@ impl NavigatorState {
                     }
                 }
                 for child in children {
+                    if child.no_connect {
+                        self.denied_databases.insert(child.id.clone());
+                    } else if !self.denied_databases.is_empty() {
+                        self.denied_databases.remove(&child.id);
+                    }
                     self.labels.insert(child.id.clone(), child.label);
                     if let Some(kind) = child.object_kind {
                         self.object_kinds.insert(child.id.clone(), kind);
@@ -1034,6 +1083,7 @@ impl NavigatorState {
         self.reloading.remove(id);
         self.children.insert(id.clone(), None);
         self.load_states.insert(id.clone(), NodeLoadState::Failed(error));
+        self.rebuild_visible();
     }
 
     /// Whether a provider node's children were loaded (and are shown when it
@@ -1580,6 +1630,8 @@ pub struct LoadedChild {
     pub provider: Option<ProviderNode>,
     /// A schema object's reference for the driver (see [`NavigatorNodeId::SchemaObject`]).
     pub schema_object: Option<SchemaObjectRef>,
+    /// A database the connected user may not connect to (the driver said so).
+    pub no_connect: bool,
 }
 
 /// Builds child ids from catalog data for each load type.
@@ -1593,6 +1645,7 @@ pub fn database_child(connection: &str, database: &str) -> LoadedChild {
         object_kind: None,
         provider: None,
         schema_object: None,
+        no_connect: false,
     }
 }
 
@@ -1607,6 +1660,7 @@ pub fn schema_child(connection: &str, database: &str, schema: &str) -> LoadedChi
         object_kind: None,
         provider: None,
         schema_object: None,
+        no_connect: false,
     }
 }
 
@@ -1622,6 +1676,7 @@ pub fn object_group_child(
         object_kind: None,
         provider: None,
         schema_object: None,
+        no_connect: false,
     }
 }
 
@@ -1643,6 +1698,7 @@ pub fn object_child(
         object_kind: Some(kind),
         provider: None,
         schema_object: None,
+        no_connect: false,
     }
 }
 
@@ -1664,6 +1720,7 @@ pub fn schema_object_child(
         object_kind: None,
         provider: None,
         schema_object: Some(reference),
+        no_connect: false,
     }
 }
 
@@ -1702,6 +1759,7 @@ pub fn column_child(
         object_kind: None,
         provider: None,
         schema_object: None,
+        no_connect: false,
     }
 }
 
@@ -1722,6 +1780,7 @@ pub fn provider_child(connection: &str, node: engine_driver_api::NavigatorNode) 
             payload: node.payload,
             actions: node.actions,
         }),
+        no_connect: false,
     }
 }
 
@@ -4041,5 +4100,102 @@ mod tests {
         state.expanded.insert(id.clone());
         assert!(state.set_provider_has_children(&id, false));
         assert!(!state.expanded.contains(&id));
+    }
+
+    /// The connection `CONN` opened and its databases loaded.
+    fn databases_loaded(state: &mut NavigatorState, databases: Vec<LoadedChild>) -> NavigatorNodeId {
+        let root = NavigatorNodeId::Connection { connection: CONN.into() };
+        let request = state.toggle_expansion(&root).request.unwrap();
+        state.apply_load(&request, state.generation(), Ok(databases));
+        root
+    }
+
+    fn database_labels(state: &NavigatorState) -> Vec<String> {
+        state
+            .visible_rows()
+            .into_iter()
+            .filter(|row| matches!(row.id, NavigatorNodeId::Database { .. }))
+            .map(|row| row.label)
+            .collect()
+    }
+
+    fn catalog_databases(state: &NavigatorState) -> Vec<String> {
+        let mut seen = Vec::new();
+        state.visit_catalog(|id, label, _, _| {
+            if matches!(id, NavigatorNodeId::Database { .. }) {
+                seen.push(label.to_owned());
+            }
+        });
+        seen
+    }
+
+    #[test]
+    fn a_connection_that_lists_one_database_shows_only_that_one_everywhere() {
+        let mut state = NavigatorState::new(vec![postgres_conn()]);
+        let root = databases_loaded(
+            &mut state,
+            vec![database_child(CONN, "app"), database_child(CONN, "reports"), database_child(CONN, "warehouse")],
+        );
+        // Nothing asked for: every database, as before.
+        assert_eq!(database_labels(&state), ["app", "reports", "warehouse"]);
+        let names = |state: &NavigatorState| state.connection_databases(CONN).into_iter().map(|(_, name)| name).collect::<Vec<_>>();
+        assert_eq!(names(&state), ["app", "reports", "warehouse"]);
+        assert_eq!(state.openable_databases(CONN).collect::<Vec<_>>(), ["app", "reports", "warehouse"]);
+        assert_eq!(catalog_databases(&state), ["app", "reports", "warehouse"]);
+
+        let revision = state.catalog_revision();
+        state.set_database_scopes(HashMap::from([(CONN.to_owned(), "reports".to_owned())]));
+        assert_eq!(database_labels(&state), ["reports"], "the tree");
+        assert_eq!(names(&state), ["reports"], "the pickers");
+        assert_eq!(state.openable_databases(CONN).collect::<Vec<_>>(), ["reports"], "the first-database choices");
+        assert_eq!(catalog_databases(&state), ["reports"], "the search index");
+        assert!(state.catalog_revision() > revision, "the search index is rebuilt");
+        assert!(state.visible_rows().iter().any(|row| row.id == root), "the connection itself stays");
+
+        // The same scope again changes nothing; another connection is not affected.
+        let revision = state.catalog_revision();
+        state.set_database_scopes(HashMap::from([(CONN.to_owned(), "reports".to_owned())]));
+        assert_eq!(state.catalog_revision(), revision);
+        state.set_database_scopes(HashMap::from([("another".to_owned(), "app".to_owned())]));
+        assert_eq!(database_labels(&state), ["app", "reports", "warehouse"]);
+
+        // Show all again.
+        state.set_database_scopes(HashMap::from([(CONN.to_owned(), "app".to_owned())]));
+        state.set_database_scopes(HashMap::new());
+        assert_eq!(database_labels(&state), ["app", "reports", "warehouse"]);
+    }
+
+    #[test]
+    fn a_database_without_connect_is_listed_but_never_opens() {
+        let mut state = NavigatorState::new(vec![postgres_conn()]);
+        let mut closed = database_child(CONN, "reports");
+        closed.no_connect = true;
+        databases_loaded(&mut state, vec![database_child(CONN, "app"), closed]);
+        let app = NavigatorNodeId::Database { connection: CONN.into(), database: "app".into() };
+        let reports = NavigatorNodeId::Database { connection: CONN.into(), database: "reports".into() };
+        assert_eq!(database_labels(&state), ["app", "reports"], "listed");
+        assert!(state.database_denied(&reports) && !state.database_denied(&app));
+        assert_eq!(state.openable_databases(CONN).collect::<Vec<_>>(), ["app"], "not offered as a place to start in");
+
+        let outcome = state.toggle_expansion(&reports);
+        assert!(outcome.request.is_none(), "no load is started");
+        assert!(state.load_state(&reports).is_none() && !state.visible_rows().iter().any(|row| row.id == reports && row.expanded));
+        assert!(state.toggle_expansion(&app).request.is_some(), "a database the user may open loads");
+
+        // The privilege was granted and the connection refreshed: the same database opens.
+        state.reset_node(&NavigatorNodeId::Connection { connection: CONN.into() });
+        databases_loaded(&mut state, vec![database_child(CONN, "app"), database_child(CONN, "reports")]);
+        assert!(!state.database_denied(&reports));
+        assert!(state.toggle_expansion(&reports).request.is_some());
+    }
+
+    #[test]
+    fn a_failed_database_shows_the_failure_and_a_retry_does_not_hide_it() {
+        let mut state = NavigatorState::new(vec![postgres_conn()]);
+        databases_loaded(&mut state, vec![database_child(CONN, "reports")]);
+        let reports = NavigatorNodeId::Database { connection: CONN.into(), database: "reports".into() };
+        state.fail_load(&reports, "permission denied for database reports".into());
+        let row = state.visible_rows().into_iter().find(|row| row.id == reports).unwrap();
+        assert_eq!(row.load, Some(NodeLoadState::Failed("permission denied for database reports".into())), "the row carries it at once");
     }
 }
