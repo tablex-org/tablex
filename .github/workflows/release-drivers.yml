@@ -268,6 +268,15 @@ jobs:
       # stapled, so Gatekeeper would check online; the app downloads the file
       # itself, so it carries no quarantine flag and is not assessed at launch.
       # A target without a build (a failed experimental one) is skipped.
+      # tablex-mcp reads the Keychain: signed with the release certificate (scripts/release-signing.sh,
+      # the same as the app) its designated requirement is the same in every release, so the access a
+      # user allowed (`--authorize-keychain`) survives an update. The keychain is deleted at the end.
+      - name: Set up the release certificate
+        env:
+          TABLEX_CODESIGN_P12: ${{ secrets.TABLEX_CODESIGN_P12 }}
+          TABLEX_CODESIGN_P12_PASSWORD: ${{ secrets.TABLEX_CODESIGN_P12_PASSWORD }}
+        run: scripts/release-signing.sh setup
+
       - name: Package tablex-mcp (codesign, manifest entries)
         run: |
           set -euo pipefail
@@ -289,14 +298,19 @@ jobs:
                 --sign "${SIGNING_IDENTITY}" "dist/tools/${name}"
               codesign --verify --strict "dist/tools/${name}"
             elif [[ "${target}" == macos-* ]]; then
-              codesign --force --identifier org.tablex.tablex-mcp --sign - "dist/tools/${name}"
-              codesign --verify --strict "dist/tools/${name}"
+              scripts/release-signing.sh sign "dist/tools/${name}" org.tablex.tablex-mcp
+              scripts/release-signing.sh verify "dist/tools/${name}" org.tablex.tablex-mcp
             fi
             python3 scripts/driver_manifest.py tool-entry \
               --binary "dist/tools/${name}" --version "${version}" --target "${target}" \
               --url "${ARTIFACT_BASE_URL}/${name}" \
+              --min-app-version 0.1.7 \
               --out "dist/drivers/tablex-mcp-${target}-tool-entry.json"
           done
+
+      - name: Remove the release certificate
+        if: always()
+        run: scripts/release-signing.sh cleanup
 
       # The MongoDB Shell plugin: a bare executable per target like the MCP server. macOS builds
       # are Developer ID signed (package-plugin.sh) BEFORE the entry is made. The entry says it

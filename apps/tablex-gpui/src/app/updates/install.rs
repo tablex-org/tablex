@@ -605,7 +605,40 @@ pub(in crate::app) fn verify_bundle(
         let reason = String::from_utf8_lossy(&output.stderr).trim().to_owned();
         return Err(invalid(format!("code signature: {reason}")));
     }
+    // An app signed with the release certificate takes only an update signed with it too: never one
+    // signed by anyone else or ad hoc. (An ad-hoc build, before the certificate, takes either.)
+    let requirement = release_requirement(&expected);
+    if satisfies(&running.path, &requirement) && !satisfies(new, &requirement) {
+        return Err(invalid("the update is not signed with the TableX release certificate".into()));
+    }
     Ok(())
+}
+
+/// SHA-1 of the TableX release certificate (self-signed, see scripts/release-signing.sh); the same
+/// value as scripts/release-signing.sha1.
+pub(in crate::app) const RELEASE_CERTIFICATE_SHA1: &str = "e9c5169be47d243df33356bf151b83d2a025f726";
+
+/// The designated requirement of a release build of the bundle `identifier`.
+pub(in crate::app) fn release_requirement(identifier: &str) -> String {
+    // The identifier comes from an Info.plist: only plain bundle-identifier characters are put in.
+    let identifier: String = identifier
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
+        .collect();
+    format!("identifier \"{identifier}\" and certificate root = H\"{RELEASE_CERTIFICATE_SHA1}\"")
+}
+
+/// Whether the code at `path` is validly signed and meets `requirement`.
+fn satisfies(path: &Path, requirement: &str) -> bool {
+    Command::new(CODESIGN)
+        .args(["--verify", "--deep", "--strict"])
+        .arg(format!("-R={requirement}"))
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 /// Whether the Mach-O at `path` (thin or universal) has a slice for `target`.

@@ -4,9 +4,13 @@ name: Release App
 # the GitHub Release of that tag, marked latest. The tag must be the app version of
 # apps/tablex-gpui/Cargo.toml (`v0.1.0` for 0.1.0).
 #
-# There is no Developer ID: the app is ad-hoc signed and not notarized, so macOS asks
-# the user to confirm the first launch (the release notes say how). Drivers are not
-# in the app: it installs them from the signed driver catalog (release-drivers.yml).
+# There is no Developer ID: the build jobs make an ad-hoc signed bundle, and the publish job signs it
+# again with the TableX release certificate (self-signed, pinned in scripts/release-signing.sha1; the
+# .p12 is the `release` environment's TABLEX_CODESIGN_P12 / _PASSWORD) before packing the .dmg and the
+# update zip. Its designated requirement is the same in every release, so what a user allowed in the
+# Keychain survives an update. It is not notarized: macOS asks the user to confirm the first launch
+# (the release notes say how). Drivers are not in the app: it installs them from the signed driver
+# catalog (release-drivers.yml).
 #
 # In-app update: each build also packs the bundle as `TableX-<version>-macos-<arch>.app.zip`, and the
 # publish job writes `app-update.json` (version, size and SHA-256 of both zips) and signs it with the
@@ -81,22 +85,19 @@ jobs:
       - name: Build (dist profile)
         run: cargo build --locked --profile dist -p tablex-gpui --target ${{ matrix.target }}
 
-      - name: Bundle and pack
+      - name: Bundle
         run: |
           set -euo pipefail
           scripts/bundle-macos.sh --binary "target/${{ matrix.target }}/dist/tablex-gpui"
-          scripts/dmg-macos.sh target/release/bundle/TableX.app \
-            "dist/TableX-${VERSION}-macos-${{ matrix.arch }}.dmg"
-          # The zip the in-app update installs from. ditto keeps the bundle's symlinks and signature.
+          # The ad-hoc signed bundle; the publish job signs it with the release certificate and packs
+          # the .dmg and the update zip. ditto keeps the bundle's symlinks.
           ditto -c -k --keepParent target/release/bundle/TableX.app \
             "dist/TableX-${VERSION}-macos-${{ matrix.arch }}.app.zip"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: app-${{ matrix.arch }}
-          path: |
-            dist/*.dmg
-            dist/*.app.zip
+          path: dist/*.app.zip
           if-no-files-found: error
 
   release:
@@ -121,6 +122,35 @@ jobs:
           pattern: app-*
           path: dist
           merge-multiple: true
+
+      # The certificate reaches only this step and the keychain it makes (deleted at the end).
+      - name: Set up the release certificate
+        env:
+          TABLEX_CODESIGN_P12: ${{ secrets.TABLEX_CODESIGN_P12 }}
+          TABLEX_CODESIGN_P12_PASSWORD: ${{ secrets.TABLEX_CODESIGN_P12_PASSWORD }}
+        run: scripts/release-signing.sh setup
+
+      - name: Sign the apps and pack them
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          for arch in apple-silicon intel; do
+            zip="dist/TableX-${version}-macos-${arch}.app.zip"
+            work="$(mktemp -d)"
+            ditto -x -k "${zip}" "${work}"
+            scripts/release-signing.sh sign "${work}/TableX.app"
+            scripts/release-signing.sh verify "${work}/TableX.app" org.tablex.TableX
+            rm -f "${zip}"
+            ditto -c -k --keepParent "${work}/TableX.app" "${zip}"
+            scripts/dmg-macos.sh "${work}/TableX.app" "dist/TableX-${version}-macos-${arch}.dmg"
+            rm -rf "${work}"
+          done
+
+      - name: Remove the release certificate
+        if: always()
+        run: scripts/release-signing.sh cleanup
 
       # Built in a step that has no secret, so no build script or procedural macro of its dependency tree
       # can read the signing key; the signing step runs the finished binary.

@@ -785,3 +785,15 @@ fn live_latest_release_manifest_verifies_with_the_pinned_keys() {
         Err(error) => panic!("{} has a manifest this build refuses: {error}", release.version),
     }
 }
+
+#[test]
+fn the_pinned_release_certificate_is_the_one_the_release_scripts_sign_with() {
+    let pinned = include_str!("../../../../../scripts/release-signing.sha1").trim().to_ascii_lowercase();
+    assert_eq!(pinned, RELEASE_CERTIFICATE_SHA1);
+    assert_eq!(
+        release_requirement("org.tablex.TableX"),
+        format!("identifier \"org.tablex.TableX\" and certificate root = H\"{pinned}\"")
+    );
+    // Nothing but bundle-identifier characters reaches the requirement text.
+    assert!(release_requirement("a\" or anchor apple").starts_with("identifier \"aoranchorapple\" and"));
+}
