@@ -30,6 +30,10 @@ pub(crate) fn data_dir(folder: &str) -> PathBuf {
         .join(folder)
 }
 
+/// Tests that point `TABLEX_DATA_DIR` somewhere take this first: the variable is the process's.
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;

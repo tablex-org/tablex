@@ -1,9 +1,14 @@
+//! Query history: the `query_history` table of the app database ([`crate::app_db`]), one cached
+//! connection per process.
+
+use crate::app_db::{self, AppDbError};
+use crate::legacy;
 use rusqlite::{params, Connection, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 lazy_static::lazy_static! {
-    static ref HISTORY_DB: Mutex<Option<Connection>> = Mutex::new(None);
+    static ref HISTORY_DB: Mutex<Option<legacy::Store>> = Mutex::new(None);
 }
 
 #[derive(Debug, Clone)]
@@ -22,83 +27,133 @@ pub struct HistoryEntry {
     pub timestamp: f64,
 }
 
-fn get_db_path() -> PathBuf {
+/// The file the history was before `tablex.db`: `<data dir>/TableLeaf/history.db`. Read once to
+/// move its rows into the app database (see [`crate::legacy`]); no longer written.
+pub(crate) fn legacy_path() -> PathBuf {
     crate::paths::data_dir("TableLeaf").join("history.db")
 }
 
+/// The app database at `db` with the old `legacy` file moved in on first use.
+pub(crate) fn open_at(db: &Path, legacy: &Path) -> std::result::Result<Connection, AppDbError> {
+    let mut conn = app_db::open(db)?;
+    legacy::import_once(&mut conn, db, "history", legacy, |tx| import_history(tx, legacy, None))?;
+    Ok(conn)
+}
+
+/// Copies the rows of an old `history.db`, newest id first so that of two rows the old code
+/// would have deduplicated (an unique index it created on every open) the newer one stays. An
+/// old table without `conn_uuid` is from before the history was per connection: the old code
+/// dropped it on open, so it is nothing to copy. `merge`: into a database that has rows of its
+/// own already (see [`legacy::Store`]): ids are given anew (the old ones may be taken) and a row
+/// the database has stays.
+fn import_history(
+    tx: &rusqlite::Transaction<'_>,
+    path: &Path,
+    merge: Option<&legacy::Since>,
+) -> std::result::Result<(), legacy::ImportError> {
+    let old = legacy::open_old(path)?;
+    let has_connection = old
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('query_history') WHERE name = 'conn_uuid'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| legacy::ImportError::new(path, error))?
+        > 0;
+    if !has_connection {
+        return Ok(());
+    }
+    legacy::copy_table(
+        &old,
+        path,
+        tx,
+        "query_history",
+        if merge.is_some() { &HISTORY_COLUMNS[1..] } else { &HISTORY_COLUMNS },
+        "id DESC",
+        legacy::Copying::Skip,
+        merge,
+    )
+}
+
+/// The columns of `query_history`, with what a row of an old file that lacks one gets.
+const HISTORY_COLUMNS: [(&str, &str); 12] = [
+    ("id", "NULL"),
+    ("conn_uuid", "NULL"),
+    ("database", "NULL"),
+    ("collection", "NULL"),
+    ("filter", "''"),
+    ("project", "''"),
+    ("sort", "''"),
+    ("skip", "0"),
+    ("limit", "0"),
+    ("max_time_ms", "0"),
+    ("result_count", "0"),
+    ("timestamp", "NULL"),
+];
+
 fn ensure_db() -> Result<()> {
     let mut db = HISTORY_DB.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if db.is_none() {
-        let path = get_db_path();
-        eprintln!("[history] Opening DB at: {:?}", path);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
-        }
-        let conn = Connection::open(&path)?;
-        eprintln!("[history] DB opened, creating tables...");
-
-        let has_conn_uuid = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('query_history') WHERE name='conn_uuid'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap_or(0)
-            > 0;
-
-        if !has_conn_uuid {
-            conn.execute("DROP TABLE IF EXISTS query_history", [])?;
-        }
-
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS query_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                conn_uuid TEXT NOT NULL,
-                database TEXT NOT NULL,
-                collection TEXT NOT NULL,
-                filter TEXT DEFAULT '',
-                project TEXT DEFAULT '',
-                sort TEXT DEFAULT '',
-                skip INTEGER DEFAULT 0,
-                \"limit\" INTEGER DEFAULT 0,
-                max_time_ms INTEGER DEFAULT 0,
-                result_count INTEGER DEFAULT 0,
-                timestamp REAL NOT NULL
-            )",
-            [],
-        )?;
-        eprintln!("[history] Table created");
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_history_context
-                ON query_history(conn_uuid, database, collection)",
-            [],
-        )?;
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_history_timestamp
-                ON query_history(timestamp DESC)",
-            [],
-        )?;
-
-        conn.execute(
-            "DELETE FROM query_history
-             WHERE id NOT IN (
-                 SELECT MAX(id) FROM query_history
-                 GROUP BY conn_uuid, database, collection, filter, project, sort, skip, \"limit\", max_time_ms
-             )",
-            [],
-        )?;
-
-        conn.execute("DROP INDEX IF EXISTS idx_history_dedup", [])?;
-        conn.execute(
-            "CREATE UNIQUE INDEX idx_history_dedup
-                ON query_history(conn_uuid, database, collection, filter, project, sort, skip, \"limit\", max_time_ms)",
-            [],
-        )?;
-        eprintln!("[history] Indexes created");
-        *db = Some(conn);
+    match db.as_mut() {
+        None => *db = Some(open_or_fall_back(&app_db::default_path(), &legacy_path())?),
+        Some(store) => store.refresh(),
     }
     Ok(())
+}
+
+/// The store for this run (see [`legacy::open_run`]): the app database with the old file moved
+/// in; when that fails, the old file itself, so that the history is never empty because of an
+/// import error; in a process that may not import, the old file until the app has.
+pub(crate) fn open_or_fall_back(db: &Path, legacy: &Path) -> Result<legacy::Store> {
+    legacy::open_run(db, "history", legacy, &["query_history"], import_history, open_legacy_file)
+}
+
+/// The old `history.db` as the previous version opened it. Only for a run whose import failed.
+fn open_legacy_file(path: &Path) -> Result<Connection> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
+    }
+    let conn = Connection::open(path)?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    let has_conn_uuid = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('query_history') WHERE name='conn_uuid'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+        > 0;
+    if !has_conn_uuid {
+        conn.execute("DROP TABLE IF EXISTS query_history", [])?;
+    }
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS query_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, conn_uuid TEXT NOT NULL, database TEXT NOT NULL,
+            collection TEXT NOT NULL, filter TEXT DEFAULT '', project TEXT DEFAULT '', sort TEXT DEFAULT '',
+            skip INTEGER DEFAULT 0, \"limit\" INTEGER DEFAULT 0, max_time_ms INTEGER DEFAULT 0,
+            result_count INTEGER DEFAULT 0, timestamp REAL NOT NULL)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_history_context ON query_history(conn_uuid, database, collection)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_history_timestamp ON query_history(timestamp DESC)",
+        [],
+    )?;
+    conn.execute(
+        "DELETE FROM query_history WHERE id NOT IN (
+             SELECT MAX(id) FROM query_history
+             GROUP BY conn_uuid, database, collection, filter, project, sort, skip, \"limit\", max_time_ms)",
+        [],
+    )?;
+    conn.execute("DROP INDEX IF EXISTS idx_history_dedup", [])?;
+    conn.execute(
+        "CREATE UNIQUE INDEX idx_history_dedup ON query_history(
+             conn_uuid, database, collection, filter, project, sort, skip, \"limit\", max_time_ms)",
+        [],
+    )?;
+    Ok(conn)
 }
 
 // Keep FFI signatures stable; parameter objects would churn every Swift caller.
@@ -229,9 +284,7 @@ pub fn clear_entries(conn_uuid: &str, database: &str, collection: &str) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    use crate::paths::TEST_ENV_LOCK as TEST_LOCK;
 
     fn reset_db_for_test() {
         let mut db = HISTORY_DB.lock().unwrap();
@@ -291,5 +344,42 @@ mod tests {
 
         let entries = fetch_entries("conn-1", "app", "users", 10).expect("fetch history");
         assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn a_failed_import_keeps_the_old_history_in_use_for_the_run_and_the_next_start_brings_everything_in() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        use_temp_home("fallback");
+        let old = legacy_path();
+        let conn = open_legacy_file(&old).unwrap();
+        conn.execute_batch(
+            "INSERT INTO query_history (conn_uuid, database, collection, filter, timestamp) VALUES ('c', 'd', 'x', 'a', 1.0), ('c', 'd', 'x', 'b', 2.0)",
+        )
+        .unwrap();
+        drop(conn);
+        let db = app_db::default_path();
+        app_db::open(&db)
+            .unwrap()
+            .execute_batch("CREATE TRIGGER no_rows BEFORE INSERT ON query_history BEGIN SELECT RAISE(ABORT, 'disk full'); END")
+            .unwrap();
+        reset_db_for_test();
+
+        // The history is there, and a new entry goes to the old file.
+        assert_eq!(fetch_entries("c", "d", "x", 10).expect("the old file is used").len(), 2);
+        save_entry("c", "d", "x", "c", "", "", 0, 0, 0, 1).expect("written to the old file");
+        assert_eq!(fetch_entries("c", "d", "x", 10).unwrap().len(), 3);
+        let warned = crate::legacy::warnings_snapshot();
+        assert!(
+            warned.iter().any(|w| w.contains(&old.display().to_string()) && w.contains("disk full")),
+            "one warning naming the file: {warned:?}"
+        );
+        let in_new: i64 = app_db::open(&db).unwrap().query_row("SELECT COUNT(*) FROM query_history", [], |r| r.get(0)).unwrap();
+        assert_eq!(in_new, 0);
+
+        app_db::open(&db).unwrap().execute_batch("DROP TRIGGER no_rows").unwrap();
+        reset_db_for_test();
+        assert_eq!(fetch_entries("c", "d", "x", 10).unwrap().len(), 3, "the next start has all three");
+        let in_new: i64 = app_db::open(&db).unwrap().query_row("SELECT COUNT(*) FROM query_history", [], |r| r.get(0)).unwrap();
+        assert_eq!(in_new, 3);
     }
 }

@@ -1233,7 +1233,7 @@ fn dragged_positions_survive_reopening_and_relayout_forgets_them(cx: &mut TestAp
     assert_eq!(dragged[0], auto[0], "only the dragged entity moved");
 
     // Nothing is written until the debounce is over; then one write lands.
-    let files = |dir: &std::path::Path| std::fs::read_dir(dir).map(|entries| entries.count()).unwrap_or(0);
+    let files = |dir: &std::path::Path| crate::app::results::diagram::store::stored_diagrams(dir);
     assert_eq!(files(&dir), 0, "debounced");
     visual.cx.executor().advance_clock(crate::app::results::diagram::view::SAVE_DEBOUNCE + std::time::Duration::from_millis(10));
     wait_until(visual, "the saved positions", |_| files(&dir) == 1);

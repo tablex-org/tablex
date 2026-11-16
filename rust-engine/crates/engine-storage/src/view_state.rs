@@ -1,40 +1,82 @@
+//! Per-connection view state: the `connection_view_state` table of the app database
+//! ([`crate::app_db`]), one cached connection per process.
+
+use crate::app_db::{self, AppDbError};
+use crate::legacy;
 use rusqlite::{params, Connection, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 lazy_static::lazy_static! {
-    static ref VIEW_STATE_DB: Mutex<Option<Connection>> = Mutex::new(None);
+    static ref VIEW_STATE_DB: Mutex<Option<legacy::Store>> = Mutex::new(None);
 }
 
-fn get_db_path() -> PathBuf {
+/// The file the view state was before `tablex.db`: `<data dir>/TableLeaf/view_state.db`. Read once
+/// to move its rows into the app database (see [`crate::legacy`]); no longer written.
+pub(crate) fn legacy_path() -> PathBuf {
     crate::paths::data_dir("TableLeaf").join("view_state.db")
+}
+
+/// The app database at `db` with the old `legacy` file moved in on first use.
+pub(crate) fn open_at(db: &Path, legacy: &Path) -> std::result::Result<Connection, AppDbError> {
+    let mut conn = app_db::open(db)?;
+    legacy::import_once(&mut conn, db, "view_state", legacy, |tx| import_view_state(tx, legacy, None))?;
+    Ok(conn)
+}
+
+fn import_view_state(
+    tx: &rusqlite::Transaction<'_>,
+    path: &Path,
+    merge: Option<&legacy::Since>,
+) -> std::result::Result<(), legacy::ImportError> {
+    let old = legacy::open_old(path)?;
+    legacy::copy_table(
+        &old,
+        path,
+        tx,
+        "connection_view_state",
+        &[("conn_uuid", "NULL"), ("state_json", "NULL"), ("updated_at", "NULL")],
+        "rowid",
+        if merge.is_some() {
+            legacy::Copying::Newer { key: &["conn_uuid"], updated: "updated_at" }
+        } else {
+            legacy::Copying::Fresh
+        },
+        merge,
+    )
 }
 
 fn ensure_db() -> Result<()> {
     let mut db = VIEW_STATE_DB.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if db.is_none() {
-        let path = get_db_path();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
-        }
-        let conn = Connection::open(&path)?;
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS connection_view_state (
-                conn_uuid TEXT PRIMARY KEY,
-                state_json TEXT NOT NULL,
-                updated_at REAL NOT NULL
-            )",
-            [],
-        )?;
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_view_state_updated
-                ON connection_view_state(updated_at DESC)",
-            [],
-        )?;
-        *db = Some(conn);
+    match db.as_mut() {
+        None => *db = Some(open_or_fall_back(&app_db::default_path(), &legacy_path())?),
+        Some(store) => store.refresh(),
     }
     Ok(())
+}
+
+/// The store for this run (see [`legacy::open_run`]).
+pub(crate) fn open_or_fall_back(db: &Path, legacy: &Path) -> Result<legacy::Store> {
+    legacy::open_run(db, "view_state", legacy, &["connection_view_state"], import_view_state, open_legacy_file)
+}
+
+/// The old `view_state.db` as the previous version opened it. Only for a run whose import failed.
+fn open_legacy_file(path: &Path) -> Result<Connection> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
+    }
+    let conn = Connection::open(path)?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS connection_view_state (
+            conn_uuid TEXT PRIMARY KEY, state_json TEXT NOT NULL, updated_at REAL NOT NULL)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_view_state_updated ON connection_view_state(updated_at DESC)",
+        [],
+    )?;
+    Ok(conn)
 }
 
 pub fn save_state(conn_uuid: &str, state_json: &str) -> Result<()> {
@@ -91,9 +133,7 @@ pub fn delete_state(conn_uuid: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    use crate::paths::TEST_ENV_LOCK as TEST_LOCK;
 
     fn reset_db_for_test() {
         let mut db = VIEW_STATE_DB.lock().unwrap();

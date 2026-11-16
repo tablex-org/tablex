@@ -1,9 +1,16 @@
-//! Conversations kept on this computer: one JSON file each, plain files, no database.
+//! Conversations kept on this computer: one row each in the app database, `tablex.db`
+//! (`assistant_conversations`, see [`engine_storage::documents`]).
 //!
-//! `<root>/<connection id>/<conversation id>.json`, where `<root>` is
-//! `<app data dir>/assistant/conversations` (`TABLEX_DATA_DIR` moves it with every other file).
+//! A row is `(connection id, conversation id)`; its `body` is the document below, and `header`
+//! repeats the first line of it as JSON, so drawing the History list reads no body. Before the
+//! database each conversation was a file `<app data dir>/assistant/conversations/<connection
+//! id>/<conversation id>.json`: the first use moves those in (the ones that read; see
+//! [`engine_storage::documents`]) and leaves them as they were. They are not written any more.
+//! The ones that could not be moved in (unreadable, too large, damaged) are listed as problems and
+//! never tried again. A conversation can hold query results, so deleting one, a connection's or
+//! all of them deletes the old files of them too.
 //!
-//! # The file
+//! # The document
 //!
 //! ```text
 //! {"format":1,"id":"...","title":"...","created":1760000000000,"updated":1760000100000,
@@ -11,48 +18,39 @@
 //! "conversation":{ ...what `engine_ai::Conversation` serializes to... }}
 //! ```
 //!
-//! The header fields come first and end the file's first line (the only newline outside strings,
-//! `serde_json` escapes the ones inside): the list reads a bounded prefix of each file
-//! ([`HEADER_READ`]) and parses just that line, so drawing the History list never parses a
-//! conversation (up to [`MAX_FILE_BYTES`] each). There is no second file (no index): the header
-//! and the body are one write, so they cannot disagree after a crash. A header that reads but a
-//! body the engine refuses shows in the list and fails when it is opened (once reported, then
-//! left out of the list).
+//! The header fields come first and end the document's first line (the only newline outside
+//! strings, `serde_json` escapes the ones inside). A header that reads but a body the engine
+//! refuses shows in the list and fails when it is opened (once reported, then left out of the
+//! list). The header and the body are one write, so they cannot disagree after a crash.
 //!
 //! # Writes
 //!
-//! Off the UI thread. A temporary file in the same directory is written, flushed to disk and
-//! renamed over the target ([`ConversationStore::stage`], [`ConversationStore::commit`]): a crash
-//! in between leaves the old file and a `.tmp` that listing ignores and the next write or listing
-//! removes. On Unix the file is created with mode 0600 and the directories with 0700. The rename
-//! relies on `std::fs::rename` replacing an existing target atomically (POSIX `rename`; on Windows
-//! `MoveFileExW` with replace-existing, which fails, leaving the old file, when another program
-//! holds the target open without share-delete).
+//! Off the UI thread, one transaction of the database (`BEGIN IMMEDIATE`: the app and any other
+//! process wait for each other), which also keeps the connection within [`MAX_PER_CONNECTION`].
+//! The database file is private (mode 0600).
 //!
 //! # Limits and trust
 //!
-//! A conversation whose file would exceed [`MAX_FILE_BYTES`] is not written ([`StoreError::TooLarge`];
-//! the encoder stops at the limit instead of building the whole text). At most
-//! [`MAX_PER_CONNECTION`] files per connection: the ones updated longest ago go. Every id that
-//! becomes part of a path is validated first ([`valid_id`]: ASCII letters, digits, `-` and `_`, at
-//! most [`MAX_ID_CHARS`], no Windows device name), so nothing outside the root is ever read,
-//! written or deleted; a symlink where a file or a connection's directory should be is not
-//! followed. The root itself is held to the same rule: a conversations folder that is a link is
-//! not used at all ([`StoreError::RootIsLink`]: nothing is listed, read, written or deleted
-//! through it), whichever call finds out first.
+//! A conversation whose document would exceed [`MAX_FILE_BYTES`] is not written
+//! ([`StoreError::TooLarge`]; the encoder stops at the limit instead of building the whole text).
+//! At most [`MAX_PER_CONNECTION`] conversations per connection: the ones updated longest ago go.
+//! Ids are validated first ([`valid_id`]: ASCII letters, digits, `-` and `_`, at most
+//! [`MAX_ID_CHARS`], no Windows device name): they were file names and stay that restricted, so
+//! what a row holds is the same set of names whatever reads it.
 //!
 //! A delete refuses the writes that were already on their way, and no others: one connection's
 //! delete bumps that connection's epoch, "delete all" the global one ([`Epoch`]); a delete of one
-//! conversation marks its id only when a file was removed. What is on disk can hold query results: nothing of the API key or any credential is
-//! in a `Conversation`, and this module is given no secret.
+//! conversation marks its id only when a row was removed. What is stored can hold query results:
+//! nothing of the API key or any credential is in a `Conversation`, and this module is given no
+//! secret.
 
 use engine_agent::sanitize::clean;
 use engine_agent::AgentAccess;
 use engine_ai::Conversation;
 use serde::{Deserialize, Serialize};
+use engine_storage::documents::{self, ConversationDoc, PutConversation};
 use std::fmt;
-use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -60,12 +58,12 @@ use std::sync::Mutex;
 /// The version of the file format this build reads and writes.
 pub const FORMAT: u32 = 1;
 /// The largest file written (and read).
-pub const MAX_FILE_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_FILE_BYTES: usize = documents::MAX_CONVERSATION_BYTES;
 /// Conversations kept per connection; the least recently updated go.
 pub const MAX_PER_CONNECTION: usize = 50;
-/// The prefix of a file read to get its header (the header line is a few hundred bytes).
+/// The prefix of a document read to get its header (the header line is a few hundred bytes).
 pub const HEADER_READ: usize = 16 * 1024;
-/// Files of one connection looked at by a listing, whatever the directory holds.
+/// Rows of one connection looked at by a listing.
 const MAX_LISTED: usize = 200;
 /// Longest title, in characters.
 pub const TITLE_CHARS: usize = 80;
@@ -161,9 +159,10 @@ pub struct Entry {
     pub bytes: u64,
 }
 
-/// A file a listing could not use.
+/// A row a listing could not use.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Problem {
+    /// The conversation's id.
     pub file: String,
     pub bytes: u64,
     pub why: String,
@@ -200,29 +199,23 @@ impl fmt::Display for IdError {
 #[derive(Debug)]
 pub enum StoreError {
     BadId(IdError),
-    /// The file or directory is not there.
+    /// The conversation is not there.
     Missing,
-    /// A symlink or a directory where a file should be.
-    NotAFile,
     /// The conversation would not fit [`MAX_FILE_BYTES`].
     TooLarge,
-    /// The file is not a conversation of this build (bad JSON, refused by the engine, another
-    /// connection's, an id that is not its name).
+    /// The stored conversation is not one of this build (bad JSON, refused by the engine,
+    /// another connection's, an id that is not its row's).
     Damaged(String),
     /// Written by a newer version of the app.
     NewerFormat(u32),
-    /// The folder conversations are kept in is a link: it is not used at all (a link could lead
-    /// anywhere, and a delete must not follow it).
-    RootIsLink,
-    /// A newer write of the same conversation is on disk already.
+    /// A newer write of the same conversation is stored already.
     Stale,
     /// The conversation, its connection or everything was deleted after the run that made the
     /// write began: nothing is written back.
     Detached,
-    Io {
-        what: &'static str,
-        source: io::Error,
-    },
+    /// The app database could not be used (damaged, from a newer TableX, an old file that could
+    /// not be moved in, busy for too long); the text says which.
+    Db(String),
 }
 
 impl fmt::Display for StoreError {
@@ -230,40 +223,28 @@ impl fmt::Display for StoreError {
         match self {
             Self::BadId(why) => write!(f, "not a valid id: {why}"),
             Self::Missing => f.write_str("the saved conversation is not there any more"),
-            Self::NotAFile => f.write_str("it is not an ordinary file"),
             Self::TooLarge => write!(
                 f,
                 "the conversation is larger than {} MiB",
                 MAX_FILE_BYTES / (1024 * 1024)
             ),
-            Self::Damaged(why) => write!(f, "the file cannot be read: {why}"),
+            Self::Damaged(why) => write!(f, "the saved conversation cannot be read: {why}"),
             Self::NewerFormat(version) => write!(
                 f,
                 "it was saved by a newer version of TableX (format {version}; this one reads {FORMAT})"
             ),
-            Self::RootIsLink => f.write_str(
-                "the folder for conversations is a link, which TableX does not use; replace it \
-                 with a real folder",
-            ),
             Self::Stale => f.write_str("a newer version of it is saved already"),
             Self::Detached => f.write_str("it was deleted while it was being written"),
-            Self::Io { what, source } => write!(f, "{what}: {source}"),
+            Self::Db(why) => f.write_str(why),
         }
     }
 }
 
-impl std::error::Error for StoreError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io { source, .. } => Some(source),
-            _ => None,
-        }
-    }
-}
+impl std::error::Error for StoreError {}
 
-impl StoreError {
-    fn io(what: &'static str) -> impl FnOnce(io::Error) -> Self {
-        move |source| Self::Io { what, source }
+impl From<engine_storage::app_db::AppDbError> for StoreError {
+    fn from(error: engine_storage::app_db::AppDbError) -> Self {
+        Self::Db(error.to_string())
     }
 }
 
@@ -439,7 +420,7 @@ impl Write for Capped<'_> {
     }
 }
 
-/// The bytes of the file for `conversation`: the header's line, then the conversation. `updated`
+/// The bytes of the document for `conversation`: the header's line, then the conversation. `updated`
 /// is the header's own. [`StoreError::TooLarge`] when it would exceed [`MAX_FILE_BYTES`].
 pub fn encode(header: &Header, conversation: &Conversation) -> Result<Encoded, StoreError> {
     let seq = conversation.messages().len() as u64;
@@ -477,8 +458,9 @@ pub fn encode(header: &Header, conversation: &Conversation) -> Result<Encoded, S
     })
 }
 
-/// The header out of the first bytes of a file.
-fn parse_header(prefix: &[u8]) -> Result<Header, StoreError> {
+/// The header object (JSON) out of the first bytes of a document: its first line, which ends in
+/// the comma the object goes on after.
+fn header_json(prefix: &[u8]) -> Result<String, StoreError> {
     let end = prefix
         .iter()
         .position(|byte| *byte == b'\n')
@@ -488,59 +470,61 @@ fn parse_header(prefix: &[u8]) -> Result<Header, StoreError> {
         return Err(StoreError::Damaged("the header line is cut".into()));
     }
     line.push(b'}');
+    String::from_utf8(line).map_err(|error| StoreError::Damaged(format!("header: {error}")))
+}
+
+/// The header a stored header object says.
+fn header_from_json(json: &str) -> Result<Header, StoreError> {
     #[derive(Deserialize)]
     struct Probe {
         format: u32,
     }
-    let probe: Probe = serde_json::from_slice(&line)
+    let probe: Probe = serde_json::from_str(json)
         .map_err(|error| StoreError::Damaged(format!("header: {error}")))?;
     if probe.format != FORMAT {
         return Err(StoreError::NewerFormat(probe.format));
     }
-    serde_json::from_slice::<Header>(&line)
+    serde_json::from_str::<Header>(json)
         .map(Header::tidy)
         .map_err(|error| StoreError::Damaged(format!("header: {error}")))
 }
 
-/// A temporary file written and flushed, not yet renamed over its target.
-#[derive(Debug)]
-pub struct Staged {
-    temp: PathBuf,
-    target: PathBuf,
+/// The header out of the first bytes of a document.
+fn parse_header(prefix: &[u8]) -> Result<Header, StoreError> {
+    header_from_json(&header_json(prefix)?)
 }
 
 /// What a write did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Written {
-    /// Files removed to stay within [`MAX_PER_CONNECTION`].
+    /// Conversations removed to stay within [`MAX_PER_CONNECTION`].
     pub pruned: usize,
 }
 
 pub struct ConversationStore {
-    root: PathBuf,
-    /// One writer / cleaner at a time within this process (temporary files are removed under it).
+    /// The app database.
+    db: PathBuf,
+    /// One writer / deleter at a time within this process: a delete and the write it refuses
+    /// cannot interleave.
     lock: Mutex<()>,
     /// Bumped by every delete of everything.
     epoch: AtomicU64,
-    /// Bumped by every delete of one connection's conversations (by its folder name).
+    /// Bumped by every delete of one connection's conversations (by its lower-cased id).
     connection_epochs: Mutex<std::collections::HashMap<String, u64>>,
     /// Conversations deleted one by one in this process: their id is not written again.
     deleted: Mutex<std::collections::HashSet<String>>,
-    /// The root was found to be a link (by any call): Settings says so.
-    root_is_link: std::sync::atomic::AtomicBool,
 }
 
-static NONCE: AtomicU64 = AtomicU64::new(0);
-
 impl ConversationStore {
-    pub fn new(root: PathBuf) -> Self {
+    /// The conversations of the app database at `db` (the old files beside `tablex.db` are moved
+    /// in on first use; see the module docs).
+    pub fn new(db: PathBuf) -> Self {
         Self {
-            root,
+            db,
             lock: Mutex::new(()),
             epoch: AtomicU64::new(0),
             connection_epochs: Mutex::default(),
             deleted: Mutex::default(),
-            root_is_link: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -568,35 +552,16 @@ impl ConversationStore {
             .or_insert(0) += 1;
     }
 
-    /// The folder was found to be a link, by this call or an earlier one.
-    pub fn root_is_link(&self) -> bool {
-        self.root_is_link.load(Ordering::SeqCst)
+    /// Opens the database once (moving an old folder of conversations in), so a problem with it
+    /// is known before anything is listed or written.
+    pub fn check(&self) -> Result<(), StoreError> {
+        let _guard = self.locked();
+        Ok(documents::check_conversations(&self.db)?)
     }
 
-    /// The one rule for the root: if it exists it is a real folder, not a link (whatever the
-    /// other calls do with it, none of them goes through one). A root that is not there yet is
-    /// fine; it is created by the first write.
-    pub fn check_root(&self) -> Result<(), StoreError> {
-        match fs::symlink_metadata(&self.root) {
-            Ok(meta) if meta.file_type().is_symlink() => {
-                self.root_is_link.store(true, Ordering::SeqCst);
-                Err(StoreError::RootIsLink)
-            }
-            Ok(meta) if meta.is_dir() => {
-                self.root_is_link.store(false, Ordering::SeqCst);
-                Ok(())
-            }
-            Ok(_) => Err(StoreError::NotAFile),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(source) => Err(StoreError::Io {
-                what: "could not look at the folder",
-                source,
-            }),
-        }
-    }
-
-    pub fn root(&self) -> &Path {
-        &self.root
+    /// The database the conversations are in.
+    pub fn db(&self) -> &Path {
+        &self.db
     }
 
     fn locked(&self) -> std::sync::MutexGuard<'_, ()> {
@@ -605,48 +570,22 @@ impl ConversationStore {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// `<root>/<connection>`: the connection id, validated and lower-cased (ids are compared
-    /// without regard to case, and a file system may do the same).
-    fn connection_dir(&self, connection: &str) -> Result<PathBuf, StoreError> {
+    /// The connection id, validated and lower-cased (ids are compared without regard to case).
+    fn connection_key(connection: &str) -> Result<String, StoreError> {
         let id = valid_id(connection).map_err(StoreError::BadId)?;
-        Ok(self.root.join(id.to_ascii_lowercase()))
-    }
-
-    fn file_path(&self, connection: &str, id: &str) -> Result<PathBuf, StoreError> {
-        let id = valid_id(id).map_err(StoreError::BadId)?;
-        Ok(self.connection_dir(connection)?.join(format!("{id}.json")))
+        Ok(id.to_ascii_lowercase())
     }
 
     // ---- writing ------------------------------------------------------------------------------
 
-    /// Writes `encoded` as the conversation `connection` / `encoded.id`: staged, then committed,
-    /// then the connection's directory is kept within [`MAX_PER_CONNECTION`]. A file with more
-    /// messages than `encoded` has is not replaced ([`StoreError::Stale`]: two writes of one
-    /// conversation that raced, or a file that says more than it should).
+    /// Writes `encoded` as the conversation `connection` / `encoded.id`, then keeps the
+    /// connection within [`MAX_PER_CONNECTION`]. A stored conversation with more messages than
+    /// `encoded` has is not replaced ([`StoreError::Stale`]: two writes of one conversation that
+    /// raced, or a row that says more than it should).
     pub fn write(&self, connection: &str, encoded: &Encoded) -> Result<Written, StoreError> {
+        let id = valid_id(&encoded.id).map_err(StoreError::BadId)?;
+        let key = Self::connection_key(connection)?;
         let _guard = self.locked();
-        let staged = self.stage_locked(connection, encoded)?;
-        let dir = staged
-            .target
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| self.root.clone());
-        self.commit(staged)?;
-        let pruned = self.prune_locked(&dir);
-        Ok(Written { pruned })
-    }
-
-    /// The first half of a write: the temporary file, complete and flushed (tests make a crash
-    /// between the two halves).
-    #[cfg(test)]
-    pub fn stage(&self, connection: &str, encoded: &Encoded) -> Result<Staged, StoreError> {
-        let _guard = self.locked();
-        self.stage_locked(connection, encoded)
-    }
-
-    fn stage_locked(&self, connection: &str, encoded: &Encoded) -> Result<Staged, StoreError> {
-        let target = self.file_path(connection, &encoded.id)?;
-        self.check_root()?;
         if encoded.bytes.len() > MAX_FILE_BYTES {
             return Err(StoreError::TooLarge);
         }
@@ -659,169 +598,65 @@ impl ConversationStore {
         {
             return Err(StoreError::Detached);
         }
-        let dir = target
-            .parent()
-            .map(Path::to_path_buf)
-            .ok_or(StoreError::Missing)?;
-        create_private_dir(&dir).map_err(StoreError::io("could not create the folder"))?;
-        refuse_link(&dir)?;
-        Self::remove_leftovers(&dir);
-        if let Ok(existing) = read_prefix(&target) {
-            if parse_header(&existing).is_ok_and(|header| header.seq > encoded.seq) {
-                return Err(StoreError::Stale);
-            }
-        }
-        let temp = dir.join(format!(
-            ".{}.{}-{}.tmp",
-            encoded.id,
-            std::process::id(),
-            NONCE.fetch_add(1, Ordering::Relaxed)
-        ));
-        let written = (|| -> io::Result<()> {
-            let mut file = create_private_file(&temp)?;
-            file.write_all(&encoded.bytes)?;
-            file.sync_all()
-        })();
-        if let Err(source) = written {
-            let _ = fs::remove_file(&temp);
-            return Err(StoreError::Io {
-                what: "could not write the conversation",
-                source,
-            });
-        }
-        Ok(Staged { temp, target })
-    }
-
-    /// The second half: the temporary file replaces the target in one step.
-    pub fn commit(&self, staged: Staged) -> Result<(), StoreError> {
-        let renamed = fs::rename(&staged.temp, &staged.target);
-        if let Err(source) = renamed {
-            let _ = fs::remove_file(&staged.temp);
-            return Err(StoreError::Io {
-                what: "could not replace the saved conversation",
-                source,
-            });
-        }
-        sync_dir(staged.target.parent());
-        Ok(())
-    }
-
-    /// Removes temporary files a crash left behind (under the lock: no write of this process is
-    /// between its staging and its commit).
-    fn remove_leftovers(dir: &Path) {
-        let Ok(entries) = fs::read_dir(dir) else {
-            return;
+        let body = std::str::from_utf8(&encoded.bytes)
+            .map_err(|error| StoreError::Damaged(error.to_string()))?;
+        let prefix = &encoded.bytes[..encoded.bytes.len().min(HEADER_READ)];
+        let json = header_json(prefix)?;
+        let header = header_from_json(&json)?;
+        let doc = ConversationDoc {
+            connection: &key,
+            id,
+            updated: header.updated,
+            seq: encoded.seq,
+            header: &json,
+            body,
         };
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if name.starts_with('.') && name.ends_with(".tmp") {
-                let _ = fs::remove_file(entry.path());
-            }
+        match documents::put_conversation(&self.db, &doc, MAX_PER_CONNECTION)? {
+            PutConversation::Written { pruned } => Ok(Written { pruned }),
+            PutConversation::Stale => Err(StoreError::Stale),
         }
-    }
-
-    /// Deletes the least recently updated files beyond [`MAX_PER_CONNECTION`]. Returns how many.
-    fn prune_locked(&self, dir: &Path) -> usize {
-        let Ok(entries) = fs::read_dir(dir) else {
-            return 0;
-        };
-        let paths: Vec<PathBuf> = entries
-            .flatten()
-            .filter(|entry| {
-                let name = entry.file_name();
-                let name = name.to_string_lossy();
-                name.strip_suffix(".json")
-                    .is_some_and(|stem| valid_id(stem).is_ok())
-                    && entry.file_type().is_ok_and(|kind| kind.is_file())
-            })
-            .map(|entry| entry.path())
-            .collect();
-        // Only a directory over the cap has headers read: the common write costs one listing.
-        if paths.len() <= MAX_PER_CONNECTION {
-            return 0;
-        }
-        let mut files: Vec<(u64, PathBuf)> = paths
-            .into_iter()
-            .map(|path| (self.updated_of(&path), path))
-            .collect();
-        files.sort();
-        let extra = files.len() - MAX_PER_CONNECTION;
-        files
-            .into_iter()
-            .take(extra)
-            .filter(|(_, path)| fs::remove_file(path).is_ok())
-            .count()
-    }
-
-    /// When a file was last updated: its header says, else (a header that does not read, a
-    /// newer format) the file system does.
-    fn updated_of(&self, path: &Path) -> u64 {
-        read_prefix(path)
-            .ok()
-            .and_then(|prefix| parse_header(&prefix).ok())
-            .map(|header| header.updated)
-            .or_else(|| {
-                fs::metadata(path)
-                    .and_then(|meta| meta.modified())
-                    .ok()
-                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
-            })
-            .unwrap_or(0)
     }
 
     // ---- reading ------------------------------------------------------------------------------
 
-    /// The headers of `connection`'s conversations, newest first, and the files that could not be
-    /// read. Reads [`HEADER_READ`] bytes of each file at most and removes leftover temporary files.
+    /// The headers of `connection`'s conversations, newest first, and the rows that could not be
+    /// read. Reads no body.
     pub fn list(&self, connection: &str) -> Result<Listing, StoreError> {
-        let dir = self.connection_dir(connection)?;
+        let key = Self::connection_key(connection)?;
         let _guard = self.locked();
-        self.check_root()?;
         let mut listing = Listing::default();
-        match fs::symlink_metadata(&dir) {
-            Ok(meta) if meta.is_dir() => {}
-            Ok(_) => return Err(StoreError::NotAFile),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(listing),
-            Err(source) => {
-                return Err(StoreError::Io {
-                    what: "could not look at the folder",
-                    source,
-                })
+        for row in documents::list_conversations(&self.db, &key, MAX_LISTED)? {
+            // Only names this module could have written are conversations.
+            if valid_id(&row.id).is_err() {
+                continue;
             }
-        }
-        Self::remove_leftovers(&dir);
-        let entries = fs::read_dir(&dir).map_err(StoreError::io("could not read the folder"))?;
-        // Entries that are not conversations are skipped before the cap, so junk cannot hide any.
-        let ours = entries.flatten().filter_map(|entry| {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let stem = name.strip_suffix(".json")?.to_owned();
-            (valid_id(&stem).is_ok() && entry.file_type().is_ok_and(|kind| kind.is_file()))
-                .then_some((entry, name, stem))
-        });
-        for (entry, name, stem) in ours.take(MAX_LISTED) {
-            let bytes = entry.metadata().map_or(0, |meta| meta.len());
-            let read = read_prefix(&entry.path())
-                .map_err(StoreError::io("could not read the file"))
-                .and_then(|prefix| parse_header(&prefix))
-                .and_then(|header| {
-                    if header.id == stem {
-                        Ok(header)
-                    } else {
-                        Err(StoreError::Damaged(
-                            "the id inside is not the file's".into(),
-                        ))
-                    }
-                });
+            let read = header_from_json(&row.header).and_then(|header| {
+                if header.id == row.id {
+                    Ok(header)
+                } else {
+                    Err(StoreError::Damaged("the id inside is not the row's".into()))
+                }
+            });
             match read {
-                Ok(header) => listing.entries.push(Entry { header, bytes }),
+                Ok(header) => listing.entries.push(Entry {
+                    header,
+                    bytes: row.size,
+                }),
                 Err(error) => listing.problems.push(Problem {
-                    file: name,
-                    bytes,
+                    file: row.id,
+                    bytes: row.size,
                     why: error.to_string(),
                 }),
             }
+        }
+        // Old files of the previous version that were not moved in (damaged, unreadable, too
+        // large) are not lost track of: they are problems the user sees, and a delete removes them.
+        for old in documents::old_conversation_problems(&self.db, &key)? {
+            listing.problems.push(Problem {
+                file: format!("{}.json", old.id),
+                bytes: old.bytes,
+                why: old.why,
+            });
         }
         listing.entries.sort_by(|a, b| {
             b.header
@@ -833,33 +668,21 @@ impl ConversationStore {
         Ok(listing)
     }
 
-    /// Reads one conversation completely. Everything that is wrong with the file is an error;
-    /// nothing is half loaded.
+    /// Reads one conversation completely. Everything that is wrong with it is an error; nothing
+    /// is half loaded.
     pub fn load(&self, connection: &str, id: &str) -> Result<Loaded, StoreError> {
-        let path = self.file_path(connection, id)?;
-        self.check_root()?;
-        match fs::symlink_metadata(&path) {
-            Ok(meta) if meta.is_file() => {
-                if meta.len() > u64::try_from(MAX_FILE_BYTES).unwrap_or(u64::MAX) {
-                    return Err(StoreError::TooLarge);
-                }
-            }
-            Ok(_) => return Err(StoreError::NotAFile),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return Err(StoreError::Missing)
-            }
-            Err(source) => {
-                return Err(StoreError::Io {
-                    what: "could not look at the file",
-                    source,
-                })
-            }
-        }
-        let bytes = fs::read(&path).map_err(StoreError::io("could not read the file"))?;
+        let id = valid_id(id).map_err(StoreError::BadId)?;
+        let key = Self::connection_key(connection)?;
+        let body = match documents::load_conversation(&self.db, &key, id, MAX_FILE_BYTES)? {
+            Ok(Some(body)) => body,
+            Ok(None) => return Err(StoreError::Missing),
+            Err(_) => return Err(StoreError::TooLarge),
+        };
+        let bytes = body.into_bytes();
         let header = parse_header(&bytes[..bytes.len().min(HEADER_READ)])?;
         if header.id != id {
             return Err(StoreError::Damaged(
-                "the id inside is not the file's".into(),
+                "the id inside is not the conversation's".into(),
             ));
         }
         #[derive(Deserialize)]
@@ -876,7 +699,7 @@ impl ConversationStore {
                 ))
             }
         }
-        // What the file says about its level is not trusted below what the conversation shows.
+        // What the header says about its level is not trusted below what the conversation shows.
         // Nor is its message count: a wrong one would refuse every later write as stale, or
         // ask before every replace.
         let header = Header {
@@ -893,197 +716,89 @@ impl ConversationStore {
     // ---- deleting -----------------------------------------------------------------------------
 
     /// Deletes one conversation; whether there was one. Its id is not written again by this
-    /// process (a run still going that holds it) once a file was removed: a delete that finds
+    /// process (a run still going that holds it) once a row was removed: a delete that finds
     /// nothing (a stale row, another connection's id) marks nothing.
     pub fn delete(&self, connection: &str, id: &str) -> Result<bool, StoreError> {
-        let path = self.file_path(connection, id)?;
+        let id = valid_id(id).map_err(StoreError::BadId)?;
+        let key = Self::connection_key(connection)?;
         let _guard = self.locked();
-        self.check_root()?;
-        match fs::remove_file(&path) {
-            Ok(()) => {
-                self.deleted
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .insert(id.to_owned());
-                Ok(true)
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-            Err(source) => Err(StoreError::Io {
-                what: "could not delete the conversation",
-                source,
-            }),
+        let (removed, failed) = documents::delete_conversation(&self.db, &key, id)?;
+        if removed {
+            self.deleted
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(id.to_owned());
+        }
+        // The row is gone; the old file of it (the previous version's copy) is deleted too, and a
+        // failure to is said.
+        match failed {
+            Some(error) => Err(error.into()),
+            None => Ok(removed),
         }
     }
 
     /// Deletes everything kept for `connection` (the connection itself was deleted, or the user
-    /// asked). Only what this module wrote goes: `<valid id>.json` files and its temporary files,
-    /// then the folder if it is empty. Writes that were started before this are refused.
+    /// asked). Writes that were started before this are refused.
     pub fn delete_connection(&self, connection: &str) -> Result<DeleteReport, StoreError> {
-        let dir = self.connection_dir(connection)?;
+        let key = Self::connection_key(connection)?;
         let _guard = self.locked();
-        self.check_root()?;
         self.bump_connection(connection);
-        let mut report = DeleteReport::default();
-        clear_connection_dir(&dir, &mut report);
-        Ok(report)
+        let (deleted, failed) = documents::delete_conversations(&self.db, Some(&key))?;
+        Ok(DeleteReport {
+            deleted,
+            error: failed.map(StoreError::from),
+        })
     }
 
-    /// Deletes every conversation of every connection, as [`Self::delete_connection`] does for
-    /// each folder of the root whose name is a valid connection id. A failure does not stop the
-    /// others: the report has the count and the first error. A root that is itself a link is
-    /// refused, and nothing outside it is touched.
+    /// Deletes every conversation of every connection. Writes that were started before this are
+    /// refused.
     pub fn delete_all(&self) -> Result<DeleteReport, StoreError> {
         let _guard = self.locked();
         self.epoch.fetch_add(1, Ordering::SeqCst);
-        self.check_root()?;
-        if !self.root.exists() {
-            return Ok(DeleteReport::default());
-        }
-        let entries =
-            fs::read_dir(&self.root).map_err(StoreError::io("could not read the folder"))?;
-        let mut report = DeleteReport::default();
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            if valid_id(&name.to_string_lossy()).is_ok() {
-                clear_connection_dir(&entry.path(), &mut report);
-            }
-        }
-        Ok(report)
+        let (deleted, failed) = documents::delete_conversations(&self.db, None)?;
+        Ok(DeleteReport {
+            deleted,
+            error: failed.map(StoreError::from),
+        })
     }
 }
 
-/// What a delete of many conversations did: how many files went, and the first thing that went
-/// wrong (the others were still tried).
+/// What a delete of many conversations did: how many went, and the first thing that went wrong
+/// (a delete of the database rows is one transaction; what can fail on its own is the deleting
+/// of an old file of the previous version, which goes with them).
 #[derive(Debug, Default)]
 pub struct DeleteReport {
     pub deleted: usize,
     pub error: Option<StoreError>,
 }
 
-impl DeleteReport {
-    fn failed(&mut self, error: StoreError) {
-        self.error.get_or_insert(error);
-    }
-}
-
-/// Removes the conversations and temporary files this module wrote in one connection's folder
-/// (a real folder: a link or a file in its place is not ours), then the folder if it is empty.
-fn clear_connection_dir(dir: &Path, report: &mut DeleteReport) {
-    match fs::symlink_metadata(dir) {
-        Ok(meta) if meta.is_dir() => {}
-        Ok(_) => return,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return,
-        Err(source) => {
-            return report.failed(StoreError::Io {
-                what: "could not look at the folder",
-                source,
-            })
-        }
-    }
-    let entries = match fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(source) => {
-            return report.failed(StoreError::Io {
-                what: "could not read the folder",
-                source,
-            })
-        }
-    };
-    for entry in entries.flatten() {
-        // A regular file only: a link is not what this module writes.
-        if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let conversation = name
-            .strip_suffix(".json")
-            .is_some_and(|stem| valid_id(stem).is_ok());
-        let leftover = name.starts_with('.') && name.ends_with(".tmp");
-        if !(conversation || leftover) {
-            continue;
-        }
-        match fs::remove_file(entry.path()) {
-            Ok(()) => report.deleted += usize::from(conversation),
-            Err(source) => report.failed(StoreError::Io {
-                what: "could not delete a conversation",
-                source,
-            }),
-        }
-    }
-    // Empty now, or something else lives there: either way not an error.
-    let _ = fs::remove_dir(dir);
-}
-
-/// At most [`HEADER_READ`] bytes from the start of `path` (a symlink is not followed).
-fn read_prefix(path: &Path) -> io::Result<Vec<u8>> {
-    if fs::symlink_metadata(path)?.file_type().is_symlink() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "a link"));
-    }
-    let mut prefix = Vec::with_capacity(1024);
-    fs::File::open(path)?
-        .take(HEADER_READ as u64)
-        .read_to_end(&mut prefix)?;
-    Ok(prefix)
-}
-
-/// A symlink in place of the connection's directory is not followed.
-fn refuse_link(dir: &Path) -> Result<(), StoreError> {
-    match fs::symlink_metadata(dir) {
-        Ok(meta) if meta.is_dir() => Ok(()),
-        Ok(_) => Err(StoreError::NotAFile),
-        Err(source) => Err(StoreError::Io {
-            what: "could not look at the folder",
-            source,
-        }),
-    }
-}
-
-fn create_private_dir(dir: &Path) -> io::Result<()> {
-    let mut builder = fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    builder.create(dir)
-}
-
-fn create_private_file(path: &Path) -> io::Result<fs::File> {
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    options.open(path)
-}
-
-/// Makes the rename itself durable where the platform allows it (a directory can be opened and
-/// flushed on Unix); a failure here costs durability, not correctness.
-fn sync_dir(dir: Option<&Path>) {
-    #[cfg(unix)]
-    if let Some(dir) = dir {
-        if let Ok(handle) = fs::File::open(dir) {
-            let _ = handle.sync_all();
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = dir;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::fs;
 
     const CONNECTION: &str = "22222222-2222-4222-8222-222222222222";
 
     fn temp_store() -> (tempfile::TempDir, ConversationStore) {
         let dir = tempfile::tempdir().unwrap();
-        let store = ConversationStore::new(dir.path().join("assistant").join("conversations"));
+        let store = ConversationStore::new(dir.path().join("tablex.db"));
         (dir, store)
+    }
+
+    /// The stored document of a conversation, as the database has it.
+    fn stored(store: &ConversationStore, id: &str) -> String {
+        documents::load_conversation(store.db(), CONNECTION, id, usize::MAX)
+            .unwrap()
+            .unwrap()
+            .expect("a stored conversation")
+    }
+
+    /// A row put in as it is: whatever a damaged, hand-edited or newer database could hold.
+    fn plant(store: &ConversationStore, connection: &str, id: &str, header: &str, body: &str) {
+        // A sequence number above any a test writes: this replaces what is there.
+        let doc = ConversationDoc { connection, id, updated: 1, seq: 1000, header, body };
+        documents::put_conversation(store.db(), &doc, MAX_PER_CONNECTION).unwrap();
     }
 
     fn conversation(text: &str) -> Conversation {
@@ -1118,7 +833,7 @@ mod tests {
     }
 
     #[test]
-    fn a_conversation_comes_back_exactly_and_the_file_has_the_documented_shape() {
+    fn a_conversation_comes_back_exactly_and_the_document_has_the_documented_shape() {
         let (_dir, store) = temp_store();
         let original = conversation("how many orders?");
         let head = header("c1", 5);
@@ -1138,7 +853,7 @@ mod tests {
             "byte for byte through JSON"
         );
         // Header first, on its own line; the whole file is one JSON object.
-        let text = fs::read_to_string(store.file_path(CONNECTION, "c1").unwrap()).unwrap();
+        let text = stored(&store, "c1");
         let (first, rest) = text.split_once('\n').unwrap();
         assert!(
             first.starts_with("{\"format\":1,\"id\":\"c1\",\"title\":"),
@@ -1164,11 +879,11 @@ mod tests {
             .collect();
         assert_eq!(ids, ["new", "mid", "old"]);
         assert!(listing.problems.is_empty());
-        // A body that is not JSON at all does not matter to a listing: only the prefix is read.
-        let path = store.file_path(CONNECTION, "mid").unwrap();
-        let text = fs::read_to_string(&path).unwrap();
+        // A body that is not JSON at all does not matter to a listing: only the header is read.
+        let text = stored(&store, "mid");
         let (first, _) = text.split_once('\n').unwrap();
-        fs::write(&path, format!("{first}\n\"conversation\":{{ not json")).unwrap();
+        let header_json = first.strip_suffix(',').unwrap().to_owned() + "}";
+        plant(&store, CONNECTION, "mid", &header_json, &format!("{first}\n\"conversation\":{{ not json"));
         assert_eq!(store.list(CONNECTION).unwrap().entries.len(), 3);
         // ... and fails when it is opened.
         assert!(matches!(
@@ -1178,57 +893,28 @@ mod tests {
     }
 
     #[test]
-    fn a_crash_between_the_temporary_file_and_the_rename_leaves_the_old_file() {
-        let (_dir, store) = temp_store();
+    fn stores_on_one_database_see_each_other_at_once_and_a_listing_keeps_no_cache() {
+        let (dir, store) = temp_store();
+        let other = ConversationStore::new(dir.path().join("tablex.db"));
         put(&store, "c1", 10);
-        let before = store.load(CONNECTION, "c1").unwrap();
-        let newer = encode(&header("c1", 99), &conversation("a different question")).unwrap();
-        let staged = store.stage(CONNECTION, &newer).unwrap();
-        // "Crash": the staged file is never committed.
-        drop(staged);
-        let dir = store.connection_dir(CONNECTION).unwrap();
-        let leftovers: Vec<_> = fs::read_dir(&dir)
-            .unwrap()
-            .flatten()
-            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
-            .collect();
-        assert_eq!(leftovers.len(), 1, "the temporary file is on disk");
-        assert_eq!(
-            store.load(CONNECTION, "c1").unwrap().conversation,
-            before.conversation
-        );
-        let ids: Vec<_> = store
-            .list(CONNECTION)
-            .unwrap()
-            .entries
-            .iter()
-            .map(|e| e.header.id.clone())
-            .collect();
-        assert_eq!(ids, ["c1"], "the temporary file is not a conversation");
-        assert!(
-            !fs::read_dir(&dir)
-                .unwrap()
-                .flatten()
-                .any(|e| e.file_name().to_string_lossy().ends_with(".tmp")),
-            "listing cleaned it"
-        );
-        // A leftover in front of the next write is cleaned by it as well.
-        fs::write(dir.join(".x.1-1.tmp"), b"junk").unwrap();
-        put(&store, "c1", 11);
-        assert!(!dir.join(".x.1-1.tmp").exists());
+        assert_eq!(other.list(CONNECTION).unwrap().entries.len(), 1);
+        put(&other, "c2", 20);
+        let ids: Vec<_> = store.list(CONNECTION).unwrap().entries.iter().map(|e| e.header.id.clone()).collect();
+        assert_eq!(ids, ["c2", "c1"]);
+        assert!(other.delete(CONNECTION, "c1").unwrap());
+        assert!(matches!(store.load(CONNECTION, "c1"), Err(StoreError::Missing)));
     }
 
     #[test]
-    fn a_staged_file_commits_into_place() {
+    fn a_stored_conversation_is_replaced_whole_by_a_newer_write_of_it() {
         let (_dir, store) = temp_store();
         put(&store, "c1", 10);
         let newer = encode(&header("c1", 99), &conversation("second")).unwrap();
-        let staged = store.stage(CONNECTION, &newer).unwrap();
-        store.commit(staged).unwrap();
-        assert_eq!(
-            store.list(CONNECTION).unwrap().entries[0].header.updated,
-            99
-        );
+        store.write(CONNECTION, &newer).unwrap();
+        let listing = store.list(CONNECTION).unwrap();
+        assert_eq!(listing.entries.len(), 1);
+        assert_eq!(listing.entries[0].header.updated, 99);
+        assert_eq!(listing.entries[0].bytes, newer.bytes.len() as u64);
     }
 
     /// A conversation with two more turns than [`conversation`].
@@ -1310,7 +996,7 @@ mod tests {
             Err(StoreError::Detached)
         ));
         assert!(
-            !store.connection_dir(CONNECTION).unwrap().exists(),
+            store.list(CONNECTION).unwrap().entries.is_empty(),
             "nothing recreated"
         );
         other.epoch = store.epoch(CONNECTION);
@@ -1457,118 +1143,61 @@ mod tests {
     }
 
     #[test]
-    fn junk_in_the_folder_cannot_hide_conversations_from_a_listing() {
+    fn rows_with_names_this_module_never_wrote_cannot_hide_conversations_from_a_listing() {
         let (_dir, store) = temp_store();
         put(&store, "real", 1);
-        let dir = store.connection_dir(CONNECTION).unwrap();
         for n in 0..(MAX_LISTED + 50) {
-            fs::write(dir.join(format!("junk {n}.txt")), b"x").unwrap();
+            // Newer than the real one, and not an id: skipped before anything is shown.
+            let doc = ConversationDoc {
+                connection: CONNECTION,
+                id: &format!("junk {n}.txt"),
+                updated: 1000 + n as u64,
+                seq: 1,
+                header: "{}",
+                body: "x",
+            };
+            documents::put_conversation(store.db(), &doc, usize::MAX).unwrap();
         }
-        assert_eq!(store.list(CONNECTION).unwrap().entries.len(), 1);
+        let listing = store.list(CONNECTION).unwrap();
+        assert_eq!(listing.entries.len(), 1);
+        assert!(listing.problems.is_empty());
     }
 
     #[test]
-    fn delete_all_removes_only_what_the_store_wrote_and_carries_on_past_a_failure() {
-        let (dir, store) = temp_store();
+    fn delete_all_removes_every_connections_conversations_and_nothing_else_of_the_database() {
+        let (_dir, store) = temp_store();
         let other = "33333333-3333-4333-8333-333333333333";
         put(&store, "a", 1);
         store
             .write(other, &encode(&header("z", 1), &conversation("q")).unwrap())
             .unwrap();
-        // Things this module did not write: a stranger's file, a nested folder, a folder with
-        // a name that is no connection id.
-        let mine = store.connection_dir(CONNECTION).unwrap();
-        fs::write(mine.join("notes.txt"), b"mine").unwrap();
-        fs::create_dir_all(mine.join("nested")).unwrap();
-        fs::create_dir_all(store.root().join("not a connection")).unwrap();
-        fs::write(store.root().join("not a connection").join("x.json"), b"x").unwrap();
+        let session = documents::SESSION;
+        documents::put(store.db(), session, "workspace", "{}").unwrap();
         let report = store.delete_all().unwrap();
         assert_eq!((report.deleted, report.error.is_none()), (2, true));
-        assert!(mine.join("notes.txt").exists() && mine.join("nested").exists());
-        assert!(
-            !store.connection_dir(other).unwrap().exists(),
-            "an empty folder goes"
-        );
-        assert!(store
-            .root()
-            .join("not a connection")
-            .join("x.json")
-            .exists());
-        let _ = dir;
+        assert!(store.list(CONNECTION).unwrap().entries.is_empty());
+        assert!(store.list(other).unwrap().entries.is_empty());
+        assert_eq!(documents::get(store.db(), session, "workspace").unwrap().as_deref(), Some("{}"));
     }
 
-    #[cfg(unix)]
     #[test]
-    fn a_root_that_is_a_link_is_used_for_nothing_at_all() {
-        use std::os::unix::fs::symlink;
-        let (dir, _) = temp_store();
-        // A real store with a conversation, and a link to its folder where another store's root is.
-        let target = dir.path().join("elsewhere");
-        let real = ConversationStore::new(target.clone());
-        put(&real, "kept", 1);
-        let victim = target.join(CONNECTION);
-        let linked = ConversationStore::new(dir.path().join("link"));
-        symlink(&target, linked.root()).unwrap();
-        assert!(!linked.root_is_link(), "unknown until something looks");
-
-        let encoded = encode(&header("new", 5), &conversation("q")).unwrap();
-        assert!(matches!(
-            linked.write(CONNECTION, &encoded),
-            Err(StoreError::RootIsLink)
-        ));
-        assert!(matches!(
-            linked.list(CONNECTION),
-            Err(StoreError::RootIsLink)
-        ));
-        assert!(matches!(
-            linked.load(CONNECTION, "kept"),
-            Err(StoreError::RootIsLink)
-        ));
-        assert!(matches!(
-            linked.delete(CONNECTION, "kept"),
-            Err(StoreError::RootIsLink)
-        ));
-        assert!(matches!(
-            linked.delete_connection(CONNECTION),
-            Err(StoreError::RootIsLink)
-        ));
-        assert!(matches!(linked.delete_all(), Err(StoreError::RootIsLink)));
-        assert!(linked.root_is_link());
-        // Nothing was written through the link and nothing behind it was touched.
-        assert!(victim.join("kept.json").exists());
-        assert!(!victim.join("new.json").exists());
-        assert_eq!(real.list(CONNECTION).unwrap().entries.len(), 1);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn delete_all_reports_the_first_error_after_clearing_the_rest() {
-        use std::os::unix::fs::PermissionsExt;
-        let (_dir, store) = temp_store();
-        put(&store, "a", 1);
-        let other = "33333333-3333-4333-8333-333333333333";
-        store
-            .write(other, &encode(&header("z", 1), &conversation("q")).unwrap())
-            .unwrap();
-        let locked = store.connection_dir(other).unwrap();
-        fs::set_permissions(&locked, fs::Permissions::from_mode(0o500)).unwrap();
-        // A user who can write anywhere (root) cannot make this fail: say so and stop, rather
-        // than assert something else.
-        let probe = locked.join("probe");
-        let blocked = fs::File::create(&probe).is_err();
-        let _ = fs::remove_file(&probe);
-        let report = store.delete_all().unwrap();
-        fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
-        if !blocked {
-            eprintln!("skipped: this user can write into a read-only folder");
-            return;
+    fn a_database_that_is_not_valid_is_an_error_naming_it_and_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tablex.db");
+        fs::write(&path, vec![0xA5u8; 4096]).unwrap();
+        let store = ConversationStore::new(path.clone());
+        let encoded = encode(&header("c1", 5), &conversation("q")).unwrap();
+        for error in [
+            store.check().unwrap_err(),
+            store.list(CONNECTION).err().unwrap(),
+            store.write(CONNECTION, &encoded).unwrap_err(),
+            store.load(CONNECTION, "c1").err().unwrap(),
+            store.delete_all().unwrap_err(),
+        ] {
+            let StoreError::Db(why) = &error else { panic!("{error:?}") };
+            assert!(why.contains(&path.display().to_string()), "{why}");
         }
-        assert_eq!(
-            report.deleted, 1,
-            "the other folder was cleared, whatever the order"
-        );
-        assert!(report.error.is_some(), "and the failure is reported");
-        assert!(!store.connection_dir(CONNECTION).unwrap().exists());
+        assert_eq!(fs::read(&path).unwrap(), vec![0xA5u8; 4096]);
     }
 
     #[test]
@@ -1609,58 +1238,43 @@ mod tests {
     }
 
     #[test]
-    fn a_file_that_does_not_read_is_listed_as_a_problem_and_never_panics() {
+    fn a_row_that_does_not_read_is_listed_as_a_problem_and_never_panics() {
         let (_dir, store) = temp_store();
         put(&store, "good", 10);
-        let dir = store.connection_dir(CONNECTION).unwrap();
-        let good = fs::read_to_string(dir.join("good.json")).unwrap();
-        let cases: Vec<(&str, Vec<u8>)> = vec![
-            ("empty", Vec::new()),
-            ("garbage", b"\x00\xff not json at all".to_vec()),
-            (
-                "no_newline",
-                b"{\"format\":1,\"id\":\"no_newline\"}".to_vec(),
-            ),
-            (
-                "cut_header",
-                b"{\"format\":1,\"id\":\"cut_header\"\n\"conversation\":{}}".to_vec(),
-            ),
+        let good_body = stored(&store, "good");
+        let good_header = good_body.split_once('\n').unwrap().0.strip_suffix(',').unwrap().to_owned() + "}";
+        let cases: Vec<(&str, String, String)> = vec![
+            ("empty", String::new(), String::new()),
+            ("garbage", "\u{0}\u{7f} not json at all".into(), "\u{0}".into()),
+            ("cut_header", "{\"format\":1,\"id\":\"cut_header\"".into(), "{}".into()),
             (
                 "newer",
-                b"{\"format\":2,\"id\":\"newer\",\"anything\":[1,2],\n\"conversation\":{}}"
-                    .to_vec(),
+                "{\"format\":2,\"id\":\"newer\",\"anything\":[1,2]}".into(),
+                "{\"format\":2,\"id\":\"newer\",\"anything\":[1,2],\n\"conversation\":{}}".into(),
             ),
-            (
-                "other_id",
-                good.replace("\"id\":\"good\"", "\"id\":\"someone\"")
-                    .into_bytes(),
-            ),
+            ("other_id", good_header.clone(), good_body.clone()),
             (
                 "bad_access",
-                good.replace("\"id\":\"good\"", "\"id\":\"bad_access\"")
-                    .replace("\"access\":\"read\"", "\"access\":\"root\"")
-                    .into_bytes(),
+                good_header.replace("\"id\":\"good\"", "\"id\":\"bad_access\"").replace("\"access\":\"read\"", "\"access\":\"root\""),
+                good_body.replace("\"id\":\"good\"", "\"id\":\"bad_access\"").replace("\"access\":\"read\"", "\"access\":\"root\""),
             ),
         ];
-        for (name, bytes) in &cases {
-            fs::write(dir.join(format!("{name}.json")), bytes).unwrap();
+        for (name, header, body) in &cases {
+            plant(&store, CONNECTION, name, header, body);
         }
-        // Files that are not ours are not even looked at.
-        fs::write(dir.join("notes.txt"), b"x").unwrap();
-        fs::write(dir.join("bad name.json"), b"x").unwrap();
         let listing = store.list(CONNECTION).unwrap();
         assert_eq!(listing.entries.len(), 1);
         let mut files: Vec<_> = listing.problems.iter().map(|p| p.file.clone()).collect();
         files.sort();
-        let mut expected: Vec<_> = cases.iter().map(|(n, _)| format!("{n}.json")).collect();
+        let mut expected: Vec<_> = cases.iter().map(|(n, _, _)| n.to_string()).collect();
         expected.sort();
         assert_eq!(files, expected);
         assert!(listing
             .problems
             .iter()
-            .any(|p| p.file == "newer.json" && p.why.contains("newer version")));
+            .any(|p| p.file == "newer" && p.why.contains("newer version")));
         // Opening each of them fails cleanly too.
-        for (name, _) in &cases {
+        for (name, _, _) in &cases {
             assert!(store.load(CONNECTION, name).is_err(), "{name}");
         }
     }
@@ -1669,13 +1283,13 @@ mod tests {
     fn a_conversation_the_engine_refuses_or_another_connections_is_not_loaded() {
         let (_dir, store) = temp_store();
         put(&store, "good", 10);
-        let dir = store.connection_dir(CONNECTION).unwrap();
-        let text = fs::read_to_string(dir.join("good.json")).unwrap();
+        let text = stored(&store, "good");
+        let header_of = |text: &str| text.split_once('\n').unwrap().0.strip_suffix(',').unwrap().to_owned() + "}";
         // Two user messages in a row: the engine's own validation refuses it.
         let refused = text
             .replace("\"id\":\"good\"", "\"id\":\"refused\"")
             .replace("\"role\":\"assistant\"", "\"role\":\"user\"");
-        fs::write(dir.join("refused.json"), refused).unwrap();
+        plant(&store, CONNECTION, "refused", &header_of(&refused), &refused);
         assert!(matches!(
             store.load(CONNECTION, "refused"),
             Err(StoreError::Damaged(_))
@@ -1683,7 +1297,7 @@ mod tests {
         let elsewhere = text
             .replace("\"id\":\"good\"", "\"id\":\"elsewhere\"")
             .replace(CONNECTION, "99999999-9999-4999-8999-999999999999");
-        fs::write(dir.join("elsewhere.json"), elsewhere).unwrap();
+        plant(&store, CONNECTION, "elsewhere", &header_of(&elsewhere), &elsewhere);
         assert!(matches!(
             store.load(CONNECTION, "elsewhere"),
             Err(StoreError::Damaged(why)) if why.contains("another connection")
@@ -1693,9 +1307,7 @@ mod tests {
 
     #[test]
     fn an_id_that_could_leave_the_folder_is_refused_everywhere() {
-        let (dir, store) = temp_store();
-        let outside = dir.path().join("secret.json");
-        fs::write(&outside, b"do not touch").unwrap();
+        let (_dir, store) = temp_store();
         let long = "a".repeat(MAX_ID_CHARS + 1);
         let bad = [
             "", "..", ".", "../x", "a/b", "a\\b", "a b", "a.json", "nul", "COM1", "lpt9", "x\0y",
@@ -1721,43 +1333,39 @@ mod tests {
         }
         assert!(valid_id("22222222-2222-4222-8222-222222222222").is_ok());
         assert!(valid_id("Abc_123-x").is_ok());
-        assert_eq!(fs::read(&outside).unwrap(), b"do not touch");
-        assert!(!store.root().exists() || fs::read_dir(store.root()).unwrap().next().is_none());
+        assert!(store.list(CONNECTION).unwrap().entries.is_empty(), "nothing was stored");
     }
 
     #[cfg(unix)]
     #[test]
-    fn files_are_private_and_a_link_is_not_followed() {
-        use std::os::unix::fs::{symlink, PermissionsExt};
-        let (dir, store) = temp_store();
+    fn the_database_file_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, store) = temp_store();
         put(&store, "c1", 10);
-        let path = store.file_path(CONNECTION, "c1").unwrap();
-        assert_eq!(
-            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-        assert_eq!(
-            fs::metadata(path.parent().unwrap())
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o700
-        );
-        // A symlink where a file should be: not listed as a conversation, not loaded, and
-        // nothing behind it is read.
-        let outside = dir.path().join("outside.json");
-        fs::write(&outside, fs::read(&path).unwrap()).unwrap();
-        symlink(&outside, path.parent().unwrap().join("linked.json")).unwrap();
-        assert!(matches!(
-            store.load(CONNECTION, "linked"),
-            Err(StoreError::NotAFile)
-        ));
+        assert_eq!(fs::metadata(store.db()).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn conversations_saved_as_files_before_are_moved_in_once_and_the_files_stay_as_they_were() {
+        let (dir, store) = temp_store();
+        // The file the old store wrote is exactly `encode`'s bytes.
+        let encoded = encode(&header("c1", 50), &conversation("old question")).unwrap();
+        let folder = dir.path().join("assistant").join("conversations").join(CONNECTION.to_uppercase());
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join("c1.json"), &encoded.bytes).unwrap();
+        fs::write(folder.join("notes.txt"), b"mine").unwrap();
+        let loaded = store.load(CONNECTION, "c1").unwrap();
+        assert_eq!(loaded.conversation, conversation("old question"));
+        assert_eq!(loaded.header.updated, 50);
         assert_eq!(store.list(CONNECTION).unwrap().entries.len(), 1);
-        // Deleting everything leaves a link alone, and never touches what it points at.
-        assert_eq!(store.delete_all().unwrap().deleted, 1);
-        assert!(outside.exists());
-        assert!(path.parent().unwrap().join("linked.json").exists());
+        assert_eq!(fs::read(folder.join("c1.json")).unwrap(), encoded.bytes, "the old file is not touched");
+        assert_eq!(fs::read(folder.join("notes.txt")).unwrap(), b"mine");
+        // Deleted here: not brought back from the old file by the next start.
+        assert!(store.delete(CONNECTION, "c1").unwrap());
+        assert!(ConversationStore::new(dir.path().join("tablex.db")).list(CONNECTION).unwrap().entries.is_empty());
+        // It can hold query results: the user's delete took the old copy with it, and nothing else.
+        assert!(!folder.join("c1.json").exists());
+        assert_eq!(fs::read(folder.join("notes.txt")).unwrap(), b"mine");
     }
 
     #[test]
@@ -1772,7 +1380,7 @@ mod tests {
         assert!(store.delete(CONNECTION, "a").unwrap());
         assert!(!store.delete(CONNECTION, "a").unwrap(), "already gone");
         assert_eq!(store.delete_connection(CONNECTION).unwrap().deleted, 2);
-        assert!(!store.connection_dir(CONNECTION).unwrap().exists());
+        assert!(store.list(CONNECTION).unwrap().entries.is_empty());
         assert_eq!(
             store.list(other).unwrap().entries.len(),
             1,
@@ -1782,7 +1390,7 @@ mod tests {
         assert_eq!(
             store.delete_all().unwrap().deleted,
             0,
-            "nothing left, and no root is no error"
+            "nothing left is no error"
         );
     }
 

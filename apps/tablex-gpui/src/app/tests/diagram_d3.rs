@@ -300,7 +300,7 @@ fn pending_changes_survive_closing_and_reopening_the_diagram(cx: &mut TestAppCon
     settle(visual);
     let before = view.read_with(visual, |view, _| view.session.draft.changes.clone());
     assert_eq!(before.len(), 3, "rename, add column, create table: {before:?}");
-    let files = |dir: &std::path::Path| std::fs::read_dir(dir).map(|entries| entries.count()).unwrap_or(0);
+    let files = |dir: &std::path::Path| crate::app::results::diagram::store::stored_diagrams(dir);
     visual.cx.executor().advance_clock(crate::app::results::diagram::view::SAVE_DEBOUNCE + std::time::Duration::from_millis(10));
     wait_until(visual, "the saved document", |_| files(&dir) == 1);
 
@@ -1012,7 +1012,7 @@ fn the_changes_of_an_interrupted_apply_that_are_in_the_catalog_leave_the_draft_o
     });
     view.update(visual, |view, cx| view.request_apply(changes, script, cx));
     assert_eq!(view.read_with(visual, |view, _| view.applying_marker_len()), 2);
-    let files = std::fs::read_dir(&dir).map(|entries| entries.count()).unwrap_or(0);
+    let files = crate::app::results::diagram::store::stored_diagrams(&dir);
     assert_eq!(files, 1, "the marker was written synchronously");
 
     // The next start: the catalog already has `fresh` (the first statement ran), not `later`.

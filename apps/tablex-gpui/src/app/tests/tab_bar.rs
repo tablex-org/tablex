@@ -1865,7 +1865,7 @@ fn session_scenario_runs_never_point_at_the_real_application_support_file(cx: &m
         );
     });
     let real = crate::gpui_session::default_path().unwrap();
-    assert!(real.ends_with("tablex/gpui-workspace-session.json"));
+    assert!(real.ends_with("tablex/tablex.db"));
 }
 
 #[gpui::test]
@@ -1873,7 +1873,7 @@ fn session_round_trips_order_pins_active_text_filters_and_groups(cx: &mut TestAp
     use crate::sidebar_preferences::TabGroupBy;
     let (app, visual) = tb_app(cx);
     let dir = tb_session_dir();
-    let path = dir.join("gpui-workspace-session.json");
+    let path = dir.join("tablex.db");
     app.update(visual, |this, _| {
         this.shell.session.path = Some(path.clone())
     });
@@ -1995,7 +1995,7 @@ fn quit_flush_after_a_background_flush_persists_the_latest_state_and_is_not_clob
 ) {
     let (app, visual) = tb_app(cx);
     let dir = tb_session_dir();
-    let path = dir.join("gpui-workspace-session.json");
+    let path = dir.join("tablex.db");
     app.update(visual, |this, _| this.shell.session.path = Some(path.clone()));
 
     // A debounce flush is dispatched (background write queued, not yet run)...
@@ -2026,7 +2026,7 @@ fn quit_flush_writes_even_when_the_identical_background_write_has_not_run_yet(
 ) {
     let (app, visual) = tb_app(cx);
     let dir = tb_session_dir();
-    let path = dir.join("gpui-workspace-session.json");
+    let path = dir.join("tablex.db");
     app.update(visual, |this, _| this.shell.session.path = Some(path.clone()));
     tb_open_unsettled(&app, visual, "Only");
     app.update(visual, |this, cx| this.flush_session(cx));
@@ -2044,7 +2044,7 @@ fn quit_flush_writes_even_when_the_identical_background_write_has_not_run_yet(
 fn session_saves_are_debounced_and_skip_unchanged_state(cx: &mut TestAppContext) {
     let (app, visual) = tb_app(cx);
     let dir = tb_session_dir();
-    let path = dir.join("gpui-workspace-session.json");
+    let path = dir.join("tablex.db");
     app.update(visual, |this, _| {
         this.shell.session.path = Some(path.clone())
     });
@@ -2075,8 +2075,8 @@ fn session_saves_are_debounced_and_skip_unchanged_state(cx: &mut TestAppContext)
 fn session_corrupted_file_is_ignored_with_a_notice(cx: &mut TestAppContext) {
     let (app, visual) = tb_app(cx);
     let dir = tb_session_dir();
-    let path = dir.join("gpui-workspace-session.json");
-    std::fs::write(&path, "{ definitely not json").unwrap();
+    let path = dir.join("tablex.db");
+    engine_storage::documents::put(&path, engine_storage::documents::SESSION, "workspace", "{ definitely not json").unwrap();
     app.update(visual, |this, _| {
         this.shell.session.path = Some(path.clone())
     });
@@ -2097,10 +2097,54 @@ fn session_corrupted_file_is_ignored_with_a_notice(cx: &mut TestAppContext) {
         );
     });
     assert!(
-        dir.join("gpui-workspace-session.json.corrupt").exists(),
-        "bad file kept aside"
+        engine_storage::documents::get(&path, engine_storage::documents::SESSION, "workspace.corrupt")
+            .unwrap()
+            .is_some(),
+        "bad session kept aside"
     );
-    assert!(!path.exists());
+    assert!(matches!(crate::gpui_session::load(&path), crate::gpui_session::LoadOutcome::Missing));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[gpui::test]
+fn a_session_that_cannot_be_read_because_the_database_stays_busy_is_not_saved_over(cx: &mut TestAppContext) {
+    cx.dispatcher.allow_parking();
+    let (app, visual) = tb_app(cx);
+    let dir = tb_session_dir();
+    let db = dir.join("tablex.db");
+    // The session of the previous version, still to be moved in.
+    let old = crate::gpui_session::GpuiSession {
+        tabs: vec![crate::gpui_session::SessionTab { title: "Kept".into(), ..Default::default() }],
+        ..Default::default()
+    };
+    let old_text = serde_json::to_string(&old).unwrap();
+    std::fs::write(dir.join("gpui-workspace-session.json"), &old_text).unwrap();
+    app.update(visual, |this, _| this.shell.session.path = Some(db.clone()));
+    // Another process holds the write lock the move needs, for longer than the 5 s wait.
+    let mut holder = engine_storage::app_db::open(&db).unwrap();
+    let held = engine_storage::app_db::write_transaction(&mut holder).unwrap();
+    tb_relaunch(&app, visual, tb_no_swift);
+    app.read_with(visual, |this, _| {
+        assert!(this.shell.session.path.is_none(), "no saving for this run");
+        assert!(
+            this.sidebar.notice.as_deref().is_some_and(|notice| notice.contains("Could not read the saved workspace")),
+            "said: {:?}",
+            this.sidebar.notice
+        );
+    });
+    held.rollback().unwrap();
+    // Whatever the window does now, the stored session is the old one.
+    app.update(visual, |this, cx| {
+        this.workspace.open_query_tab("Something else");
+        this.flush_session_blocking();
+        this.flush_session(cx);
+    });
+    tb_settle(visual);
+    tb_advance(visual, 1500);
+    assert_eq!(
+        engine_storage::documents::get(&db, engine_storage::documents::SESSION, "workspace").unwrap().as_deref(),
+        Some(old_text.as_str())
+    );
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -2108,7 +2152,7 @@ fn session_corrupted_file_is_ignored_with_a_notice(cx: &mut TestAppContext) {
 fn session_falls_back_to_the_swift_import_when_the_gpui_file_is_missing(cx: &mut TestAppContext) {
     let (app, visual) = tb_app(cx);
     let dir = tb_session_dir();
-    let path = dir.join("gpui-workspace-session.json");
+    let path = dir.join("tablex.db");
     app.update(visual, |this, _| {
         this.shell.session.path = Some(path.clone())
     });
@@ -2171,7 +2215,7 @@ fn session_falls_back_to_the_swift_import_when_the_gpui_file_is_missing(cx: &mut
 fn session_drops_tabs_whose_connection_was_deleted(cx: &mut TestAppContext) {
     let (app, visual) = tb_app(cx);
     let dir = tb_session_dir();
-    let path = dir.join("gpui-workspace-session.json");
+    let path = dir.join("tablex.db");
     let session = crate::gpui_session::GpuiSession {
         tabs: vec![
             crate::gpui_session::SessionTab {
@@ -2187,8 +2231,7 @@ fn session_drops_tabs_whose_connection_was_deleted(cx: &mut TestAppContext) {
         active: Some(0),
         ..Default::default()
     };
-    crate::gpui_session::write_atomic(&path, &crate::gpui_session::encode(&session).unwrap())
-        .unwrap();
+    crate::gpui_session::save(&path, &crate::gpui_session::encode(&session).unwrap()).unwrap();
     app.update(visual, |this, _| {
         this.shell.session.path = Some(path.clone())
     });

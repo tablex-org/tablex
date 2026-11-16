@@ -430,7 +430,7 @@ fn splitter_drag_changes_the_stored_ratio_and_marks_the_session_dirty(cx: &mut T
 fn session_round_trip_restores_panes_ratios_and_focus(cx: &mut TestAppContext) {
     let (app, visual) = pn_app(cx);
     let dir = tb_session_dir();
-    let path = dir.join("gpui-workspace-session.json");
+    let path = dir.join("tablex.db");
     app.update(visual, |this, _| this.shell.session.path = Some(path.clone()));
     let (welcome, a, b) = pn_three(&app, visual);
     let pane = pn_focused(&app, visual);
@@ -482,10 +482,10 @@ fn session_round_trip_restores_panes_ratios_and_focus(cx: &mut TestAppContext) {
 fn sessions_without_panes_load_as_one_pane(cx: &mut TestAppContext) {
     let (app, visual) = pn_app(cx);
     let dir = tb_session_dir();
-    let path = dir.join("gpui-workspace-session.json");
+    let path = dir.join("tablex.db");
     // A file written before panes existed has no `panes` key.
     let text = r#"{"version":1,"tabs":[{"kind":"welcome","title":"Welcome"},{"kind":"query","title":"Old"}],"active":1,"collapsed_groups":[]}"#;
-    std::fs::write(&path, text).unwrap();
+    crate::gpui_session::save(&path, text.as_bytes()).unwrap();
     app.update(visual, |this, _| this.shell.session.path = Some(path.clone()));
     tb_relaunch(&app, visual, tb_no_swift);
     app.read_with(visual, |this, _| {

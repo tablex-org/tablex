@@ -4484,7 +4484,7 @@ mod assistant_panel_tests {
 
     fn kept_store() -> (tempfile::TempDir, std::sync::Arc<ConversationStore>) {
         let dir = tempfile::tempdir().unwrap();
-        let store = std::sync::Arc::new(ConversationStore::new(dir.path().join("conversations")));
+        let store = std::sync::Arc::new(ConversationStore::new(dir.path().join("tablex.db")));
         (dir, store)
     }
 
@@ -4618,17 +4618,23 @@ mod assistant_panel_tests {
         settle(visual);
     }
 
+    /// `<id>.json` of every conversation stored for the warehouse connection (the names the
+    /// conversations had as files, kept as labels).
     fn files_in(store: &ConversationStore) -> Vec<String> {
-        let mut names: Vec<String> = std::fs::read_dir(store.root().join(WAREHOUSE))
-            .map(|entries| {
-                entries
-                    .flatten()
-                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
-                    .collect()
-            })
-            .unwrap_or_default();
-        names.sort();
-        names
+        files_of(store, WAREHOUSE)
+    }
+
+    /// A row put into the store as it is (a damaged or newer one).
+    fn plant_row(store: &ConversationStore, id: &str, header: &str, body: &str) {
+        let doc = engine_storage::documents::ConversationDoc {
+            connection: WAREHOUSE,
+            id,
+            updated: 1,
+            seq: 1,
+            header,
+            body,
+        };
+        engine_storage::documents::put_conversation(store.db(), &doc, 50).unwrap();
     }
 
     #[gpui::test]
@@ -5093,7 +5099,6 @@ mod assistant_panel_tests {
             files_in(&store).is_empty(),
             "nothing is written with the switch off"
         );
-        assert!(!store.root().exists());
 
         set_switch(&app, visual, true);
         app.update(visual, |this, cx| {
@@ -5121,24 +5126,33 @@ mod assistant_panel_tests {
         let (app, visual) = assistant_app(cx);
         let (_dir, store) = kept_store();
         seed_stored(&store, "good", "a good one", 5, AgentAccess::Read);
-        let dir = store.root().join(WAREHOUSE);
-        let good = std::fs::read_to_string(dir.join("good.json")).unwrap();
-        std::fs::write(dir.join("garbage.json"), b"\x00\xff nonsense").unwrap();
-        std::fs::write(
-            dir.join("newer.json"),
-            b"{\"format\":9,\"id\":\"newer\",\n\"conversation\":{}}",
+        let good = engine_storage::documents::load_conversation(
+            store.db(),
+            &WAREHOUSE.to_ascii_lowercase(),
+            "good",
+            usize::MAX,
         )
+        .unwrap()
+        .unwrap()
         .unwrap();
+        plant_row(&store, "garbage", "\u{0} nonsense", "\u{0}");
+        plant_row(
+            &store,
+            "newer",
+            "{\"format\":9,\"id\":\"newer\"}",
+            "{\"format\":9,\"id\":\"newer\",\n\"conversation\":{}}",
+        );
         // A header that reads and a body the engine refuses (two user messages in a row).
         let (first, _) = good.split_once('\n').unwrap();
-        std::fs::write(
-            dir.join("refused.json"),
-            format!(
-                "{}\n\"conversation\":{{\"scope\":{{\"connection_id\":\"{WAREHOUSE}\"}},\"context\":null,\"messages\":[{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"a\"}}]}},{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"b\"}}]}}]}}}}",
-                first.replace("\"id\":\"good\"", "\"id\":\"refused\"")
+        let first = first.replace("\"id\":\"good\"", "\"id\":\"refused\"");
+        plant_row(
+            &store,
+            "refused",
+            &format!("{}}}", first.strip_suffix(',').unwrap()),
+            &format!(
+                "{first}\n\"conversation\":{{\"scope\":{{\"connection_id\":\"{WAREHOUSE}\"}},\"context\":null,\"messages\":[{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"a\"}}]}},{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"b\"}}]}}]}}}}"
             ),
-        )
-        .unwrap();
+        );
         arm(&app, visual, vec![], Some("read"), true);
         app.update(visual, |this, _| this.assistant.store = Some(store.clone()));
         let before = log_len(&app, visual);
@@ -5242,11 +5256,11 @@ mod assistant_panel_tests {
         app.update(visual, |this, cx| {
             this.assistant_forget_connection(WAREHOUSE, cx)
         });
-        wait_chat(visual, "the folder to go", |_| {
-            !store.root().join(WAREHOUSE).exists()
+        wait_chat(visual, "the conversations to go", |_| {
+            files_of(&store, WAREHOUSE).is_empty()
         });
         assert!(
-            store.root().join(crate::ui_fixture::SQLITE_ID).exists(),
+            !files_of(&store, crate::ui_fixture::SQLITE_ID).is_empty(),
             "another connection's stays"
         );
     }
@@ -6149,7 +6163,7 @@ mod assistant_panel_tests {
         click(visual, "assistant-approval-run".into());
         wait_chat(visual, "the end", |visual| !is_running(&app, visual));
         assert_eq!(chat_writes(&app, visual), 0, "no write was handed over");
-        assert!(!store.root().exists(), "and no new file");
+        assert!(files_in(&store).is_empty(), "and no new conversation");
         assert!(
             !chat_of(&app, visual).read_with(visual, |chat, _| chat.is_kept()),
             "History would not show this chat"
@@ -6296,8 +6310,8 @@ mod assistant_panel_tests {
         });
         assert_eq!(chat_writes(&app, visual), 0);
         assert!(
-            !store.root().join(WAREHOUSE).exists(),
-            "no folder for a deleted connection"
+            files_in(&store).is_empty(),
+            "nothing for a deleted connection"
         );
     }
 
@@ -6308,7 +6322,13 @@ mod assistant_panel_tests {
         let (app, visual, _armed, _dir, store) = kept_app(cx, vec![], "read", 2);
         open_history_menu(visual);
         // It goes while the menu is open (another window, a delete in flight).
-        std::fs::remove_file(store.root().join(WAREHOUSE).join("c1.json")).unwrap();
+        assert!(engine_storage::documents::delete_conversation(
+            store.db(),
+            &WAREHOUSE.to_ascii_lowercase(),
+            "c1"
+        )
+        .unwrap()
+        .0);
         click(visual, "assistant-history-row-1".into());
         wait_history(&app, visual, 1);
         assert_eq!(open_conversation_id(&app, visual), None);
@@ -6803,10 +6823,10 @@ mod assistant_panel_tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let file = store.root().join(WAREHOUSE).join(&files_in(&store)[0]);
             assert_eq!(
-                std::fs::metadata(file).unwrap().permissions().mode() & 0o777,
-                0o600
+                std::fs::metadata(store.db()).unwrap().permissions().mode() & 0o777,
+                0o600,
+                "the database the conversations are in is private"
             );
         }
     }
@@ -6853,14 +6873,15 @@ mod assistant_panel_tests {
     }
 
     fn files_of(store: &ConversationStore, connection: &str) -> Vec<String> {
-        let mut names: Vec<String> = std::fs::read_dir(store.root().join(connection))
-            .map(|entries| {
-                entries
-                    .flatten()
-                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
-                    .collect()
-            })
-            .unwrap_or_default();
+        let mut names: Vec<String> = engine_storage::documents::list_conversations(
+            store.db(),
+            &connection.to_ascii_lowercase(),
+            usize::MAX,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|row| format!("{}.json", row.id))
+        .collect();
         names.sort();
         names
     }
@@ -7470,19 +7491,14 @@ mod assistant_panel_tests {
         );
     }
 
-    #[cfg(unix)]
     #[gpui::test]
-    fn a_conversations_folder_that_is_a_link_is_used_for_nothing_and_said_once(
-        cx: &mut TestAppContext,
-    ) {
-        use std::os::unix::fs::symlink;
+    fn a_database_that_cannot_be_used_is_left_alone_and_said_once(cx: &mut TestAppContext) {
         cx.dispatcher.allow_parking();
         let (app, visual) = assistant_app(cx);
         let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("elsewhere");
-        std::fs::create_dir_all(&target).unwrap();
-        let store = std::sync::Arc::new(ConversationStore::new(dir.path().join("link")));
-        symlink(&target, store.root()).unwrap();
+        let broken = dir.path().join("tablex.db");
+        std::fs::write(&broken, vec![0xA5u8; 4096]).unwrap();
+        let store = std::sync::Arc::new(ConversationStore::new(broken.clone()));
         arm(
             &app,
             visual,
@@ -7492,37 +7508,29 @@ mod assistant_panel_tests {
         );
         app.update(visual, |this, cx| {
             this.assistant.store = Some(store.clone());
-            this.assistant_check_store_root(cx);
+            this.assistant_check_store(cx);
         });
         open_dock(&app, visual);
-        wait_chat(visual, "the folder to be looked at", |_| {
-            store.root_is_link()
-        });
-        for _ in 0..3 {
-            app.update(visual, |this, cx| this.assistant_refresh_history(true, cx));
-            settle(visual);
-        }
-        // Said once in the Error Log, and in Settings.
         let said = |app: &gpui::Entity<AppRoot>, visual: &gpui::VisualTestContext| {
             app.read_with(visual, |this, _| {
                 this.error_log
                     .log
                     .export_text()
                     .lines()
-                    .filter(|line| line.contains("is a link"))
+                    .filter(|line| line.contains("left untouched"))
                     .count()
             })
         };
+        wait_chat(visual, "the database to be looked at", |visual| said(&app, visual) == 1);
+        for _ in 0..3 {
+            app.update(visual, |this, cx| this.assistant_refresh_history(true, cx));
+            settle(visual);
+        }
+        // Said once in the Error Log, whichever call found it, and Settings says where.
         assert_eq!(said(&app, visual), 1);
         assert!(app
             .read_with(visual, |this, _| this.ai_conversations_place())
-            .contains("is a link"));
-        // A chat is not kept, and nothing is written behind the link.
-        visual.simulate_input("hello");
-        visual.simulate_keystrokes("enter");
-        wait_chat(visual, "the end", |visual| !is_running(&app, visual));
-        settle(visual);
-        assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
-        assert!(!chat_of(&app, visual).read_with(visual, |chat, _| chat.is_kept()));
+            .contains(&broken.display().to_string()));
+        assert_eq!(std::fs::read(&broken).unwrap(), vec![0xA5u8; 4096], "the file is left as it is");
     }
 }

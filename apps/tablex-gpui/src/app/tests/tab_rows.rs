@@ -390,7 +390,7 @@ fn turning_rows_on_without_grouping_groups_by_connection(cx: &mut TestAppContext
 fn rows_mode_survives_a_session_save_and_relaunch(cx: &mut TestAppContext) {
     let (app, visual, tabs) = tr_app(cx);
     let dir = tb_session_dir();
-    let session = dir.join("gpui-workspace-session.json");
+    let session = dir.join("tablex.db");
     app.update(visual, |this, _| this.shell.session.path = Some(session.clone()));
     let prefs = tb_prefs_file(&app, visual);
     tb_settle(visual);

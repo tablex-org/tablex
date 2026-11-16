@@ -1,10 +1,16 @@
+//! Saved connections and projects: the `saved_connections`, `projects` and
+//! `project_connection_memberships` tables of the app database ([`crate::app_db`]). The functions
+//! keep one connection per process; `tablex-mcp` reads the same rows.
+
+use crate::app_db::{self, AppDbError};
+use crate::legacy;
 use rusqlite::{params, Connection, OptionalExtension, Result};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 lazy_static::lazy_static! {
-    static ref CONNECTION_DB: Mutex<Option<Connection>> = Mutex::new(None);
+    static ref CONNECTION_DB: Mutex<Option<legacy::Store>> = Mutex::new(None);
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -43,26 +49,157 @@ pub struct ProjectRecord {
     pub updated_at: f64,
 }
 
-fn get_db_path() -> PathBuf {
+/// The file the connection store was before `tablex.db`: `<data dir>/tablex/connections.db`. It is
+/// read once to move its rows into the app database (see [`crate::legacy`]) and is no longer
+/// written: an older TableX still sees the connections as they were at that moment.
+pub(crate) fn legacy_path() -> PathBuf {
     crate::paths::data_dir("tablex").join("connections.db")
 }
 
-fn create_schema(conn: &Connection) -> Result<()> {
+/// The ids of the connections in the old `connections.db` beside the app database at `db` (none
+/// when there is no such file). For a front end that must find what belongs to a connection
+/// before the connections were moved in (the saved secrets of an earlier version, say); the error
+/// names the file when it cannot be read.
+pub fn old_connection_ids(db: &Path) -> std::result::Result<Vec<String>, String> {
+    let Some(file) = legacy::beside(db).map(|dir| dir.join("connections.db")).filter(|file| file.exists()) else {
+        return Ok(Vec::new());
+    };
+    let say = |error: &dyn std::fmt::Display| format!("{}: {error}", file.display());
+    let old = legacy::open_old(&file).map_err(|error| say(&error.message))?;
+    let has_table = old
+        .query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'saved_connections'", [], |row| row.get::<_, i64>(0))
+        .map_err(|error| say(&error))?
+        > 0;
+    if !has_table {
+        return Ok(Vec::new());
+    }
+    let mut stmt = old.prepare("SELECT id FROM saved_connections").map_err(|error| say(&error))?;
+    let ids = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .and_then(|rows| rows.collect::<std::result::Result<Vec<_>, _>>())
+        .map_err(|error| say(&error));
+    ids
+}
+
+/// The app database at `db` with the old `legacy` file moved in on first use.
+pub(crate) fn open_at(db: &Path, legacy: &Path) -> std::result::Result<Connection, AppDbError> {
+    let mut conn = app_db::open(db)?;
+    legacy::import_once(&mut conn, db, "connections", legacy, |tx| import_connections(tx, legacy, None))?;
+    Ok(conn)
+}
+
+/// Copies the rows of an old `connections.db` (`merge`: into a database that has some already, the later row
+/// wins and only what was written since a run began on the old file comes). A file from before `connection_type` and `overrides_json` (they were
+/// added after the first release) reads with the defaults those rows always had: no type, no
+/// overrides. The three tables are read in one transaction of the old file, so they agree.
+fn import_connections(
+    tx: &rusqlite::Transaction<'_>,
+    path: &Path,
+    merge: Option<&legacy::Since>,
+) -> std::result::Result<(), legacy::ImportError> {
+    use legacy::Copying;
+    let old = legacy::open_old(path)?;
+    let _snapshot = old
+        .unchecked_transaction()
+        .map_err(|error| legacy::ImportError::new(path, error))?;
+    let pick = |key: &'static [&'static str], updated: &'static str| {
+        if merge.is_some() {
+            Copying::Newer { key, updated }
+        } else {
+            Copying::Fresh
+        }
+    };
+    legacy::copy_table(
+        &old,
+        path,
+        tx,
+        "saved_connections",
+        &[
+            ("id", "NULL"),
+            ("name", "NULL"),
+            ("uri", "NULL"),
+            ("db_type", "NULL"),
+            ("color_hex", "NULL"),
+            ("save_password", "NULL"),
+            ("save_proxy_password", "NULL"),
+            ("network_settings_json", "NULL"),
+            ("is_pinned", "0"),
+            ("last_connected", "NULL"),
+            ("created_at", "NULL"),
+            ("updated_at", "NULL"),
+            ("connection_type", "''"),
+            ("overrides_json", "''"),
+        ],
+        "rowid",
+        pick(&["id"], "updated_at"),
+        merge,
+    )?;
+    legacy::copy_table(
+        &old,
+        path,
+        tx,
+        "project_connection_memberships",
+        &[("project_id", "NULL"), ("connection_id", "NULL"), ("created_at", "NULL")],
+        "rowid",
+        if merge.is_some() { Copying::Skip } else { Copying::Fresh },
+        merge,
+    )?;
+    legacy::copy_table(
+        &old,
+        path,
+        tx,
+        "projects",
+        &[
+            ("id", "NULL"),
+            ("name", "NULL"),
+            ("path", "NULL"),
+            ("uses_default_location", "NULL"),
+            ("created_at", "NULL"),
+            ("updated_at", "NULL"),
+        ],
+        "rowid",
+        pick(&["id"], "updated_at"),
+        merge,
+    )
+}
+
+fn ensure_db() -> Result<()> {
+    let mut db = CONNECTION_DB.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    match db.as_mut() {
+        None => *db = Some(open_or_fall_back(&app_db::default_path(), &legacy_path())?),
+        Some(store) => store.refresh(),
+    }
+    Ok(())
+}
+
+/// The store for this run (see [`legacy::open_run`]): the app database with the old file moved
+/// in; when that fails, the old file itself, so that the list of connections is never empty
+/// because of an import error; in a process that may not import, the old file until the app has.
+pub(crate) fn open_or_fall_back(db: &Path, legacy: &Path) -> Result<legacy::Store> {
+    legacy::open_run(
+        db,
+        "connections",
+        legacy,
+        &["saved_connections", "project_connection_memberships", "projects"],
+        import_connections,
+        open_legacy_file,
+    )
+}
+
+/// The old `connections.db` as the previous version opened it: its own tables, created or
+/// extended as that version did. Only for a run whose import failed.
+fn open_legacy_file(path: &Path) -> Result<Connection> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
+    }
+    let conn = Connection::open(path)?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
     conn.execute(
         "CREATE TABLE IF NOT EXISTS saved_connections (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            uri TEXT NOT NULL,
-            db_type TEXT NOT NULL,
-            color_hex TEXT NOT NULL,
-            save_password INTEGER NOT NULL,
-            save_proxy_password INTEGER NOT NULL,
-            network_settings_json TEXT NOT NULL,
-            is_pinned INTEGER NOT NULL DEFAULT 0,
-            last_connected REAL,
-            created_at REAL NOT NULL,
-            updated_at REAL NOT NULL
-        )",
+            id TEXT PRIMARY KEY, name TEXT NOT NULL, uri TEXT NOT NULL, db_type TEXT NOT NULL,
+            color_hex TEXT NOT NULL, save_password INTEGER NOT NULL, save_proxy_password INTEGER NOT NULL,
+            network_settings_json TEXT NOT NULL, is_pinned INTEGER NOT NULL DEFAULT 0, last_connected REAL,
+            created_at REAL NOT NULL, updated_at REAL NOT NULL)",
         [],
     )?;
     conn.execute(
@@ -72,11 +209,8 @@ fn create_schema(conn: &Connection) -> Result<()> {
     )?;
     conn.execute(
         "CREATE TABLE IF NOT EXISTS project_connection_memberships (
-            project_id TEXT NOT NULL,
-            connection_id TEXT NOT NULL,
-            created_at REAL NOT NULL,
-            PRIMARY KEY(project_id, connection_id)
-        )",
+            project_id TEXT NOT NULL, connection_id TEXT NOT NULL, created_at REAL NOT NULL,
+            PRIMARY KEY(project_id, connection_id))",
         [],
     )?;
     conn.execute(
@@ -86,13 +220,8 @@ fn create_schema(conn: &Connection) -> Result<()> {
     )?;
     conn.execute(
         "CREATE TABLE IF NOT EXISTS projects (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            path TEXT NOT NULL,
-            uses_default_location INTEGER NOT NULL,
-            created_at REAL NOT NULL,
-            updated_at REAL NOT NULL
-        )",
+            id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL,
+            uses_default_location INTEGER NOT NULL, created_at REAL NOT NULL, updated_at REAL NOT NULL)",
         [],
     )?;
     conn.execute(
@@ -100,47 +229,19 @@ fn create_schema(conn: &Connection) -> Result<()> {
             ON projects(name COLLATE NOCASE ASC, created_at ASC)",
         [],
     )?;
-    add_missing_columns(conn)?;
-    Ok(())
-}
-
-/// Columns added after the first release, as `(name, definition)`. A database
-/// created by an older build gets them on its next open; the defaults make the
-/// old rows read as "no type, no overrides".
-const ADDED_COLUMNS: &[(&str, &str)] = &[
-    ("connection_type", "TEXT NOT NULL DEFAULT ''"),
-    ("overrides_json", "TEXT NOT NULL DEFAULT ''"),
-];
-
-fn add_missing_columns(conn: &Connection) -> Result<()> {
-    let mut stmt = conn.prepare("PRAGMA table_info(saved_connections)")?;
-    let existing: Vec<String> = stmt
+    let existing: Vec<String> = conn
+        .prepare("PRAGMA table_info(saved_connections)")?
         .query_map([], |row| row.get::<_, String>(1))?
         .collect::<Result<_>>()?;
-    for (name, definition) in ADDED_COLUMNS {
+    for (name, definition) in [
+        ("connection_type", "TEXT NOT NULL DEFAULT ''"),
+        ("overrides_json", "TEXT NOT NULL DEFAULT ''"),
+    ] {
         if !existing.iter().any(|column| column == name) {
-            conn.execute(
-                &format!("ALTER TABLE saved_connections ADD COLUMN {name} {definition}"),
-                [],
-            )?;
+            conn.execute(&format!("ALTER TABLE saved_connections ADD COLUMN {name} {definition}"), [])?;
         }
     }
-    Ok(())
-}
-
-fn ensure_db() -> Result<()> {
-    let mut db = CONNECTION_DB.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if db.is_none() {
-        let path = get_db_path();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
-        }
-        let conn = Connection::open(&path)?;
-        create_schema(&conn)?;
-        *db = Some(conn);
-    }
-    Ok(())
+    Ok(conn)
 }
 
 pub fn list_connections() -> Result<Vec<SavedConnectionRecord>> {
@@ -327,7 +428,7 @@ pub fn set_connection_pinned(id: &str, is_pinned: bool) -> Result<()> {
     Ok(())
 }
 
-fn list_connections_impl(conn: &Connection) -> Result<Vec<SavedConnectionRecord>> {
+pub(crate) fn list_connections_impl(conn: &Connection) -> Result<Vec<SavedConnectionRecord>> {
     let mut stmt = conn.prepare(
         "SELECT id, name, uri, db_type, color_hex, save_password, save_proxy_password,
                 network_settings_json, is_pinned, last_connected, created_at, updated_at,
@@ -460,9 +561,7 @@ fn now_secs() -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    use crate::paths::TEST_ENV_LOCK as TEST_LOCK;
 
     fn reset_db_for_test() {
         let mut db = CONNECTION_DB.lock().expect("lock connection db");
@@ -548,8 +647,7 @@ mod tests {
 
     #[test]
     fn connection_type_and_overrides_round_trip() {
-        let mut db = Connection::open_in_memory().unwrap();
-        create_schema(&db).unwrap();
+        let mut db = app_db::open_in_memory().unwrap();
         let mut record = sample_connection("typed", "Typed");
         record.connection_type = "production".into();
         record.overrides_json = r#"{"query.query_timeout_secs":30}"#.into();
@@ -564,31 +662,6 @@ mod tests {
     }
 
     #[test]
-    fn a_database_from_before_connection_types_gains_the_columns_and_keeps_its_rows() {
-        let db = Connection::open_in_memory().unwrap();
-        // The original schema, without connection_type / overrides_json.
-        db.execute_batch(
-            "CREATE TABLE saved_connections (
-                id TEXT PRIMARY KEY, name TEXT NOT NULL, uri TEXT NOT NULL, db_type TEXT NOT NULL,
-                color_hex TEXT NOT NULL, save_password INTEGER NOT NULL,
-                save_proxy_password INTEGER NOT NULL, network_settings_json TEXT NOT NULL,
-                is_pinned INTEGER NOT NULL DEFAULT 0, last_connected REAL,
-                created_at REAL NOT NULL, updated_at REAL NOT NULL
-             );
-             INSERT INTO saved_connections VALUES
-                ('old', 'Old', 'sqlite:///tmp/a.db', 'sqlite', '#34C759', 0, 0, '{}', 0, NULL, 1.0, 1.0);",
-        )
-        .unwrap();
-        create_schema(&db).unwrap();
-        // Opening twice is harmless.
-        create_schema(&db).unwrap();
-        let old = get_connection_impl(&db, "old").unwrap().unwrap();
-        assert_eq!(old.name, "Old");
-        assert_eq!(old.connection_type, "");
-        assert_eq!(old.overrides_json, "");
-    }
-
-    #[test]
     fn a_record_json_without_the_new_fields_still_deserializes() {
         let json = r##"{"id":"a","name":"n","uri":"u","db_type":"sqlite","color_hex":"#fff",
             "save_password":false,"save_proxy_password":false,"network_settings_json":"{}",
@@ -599,8 +672,7 @@ mod tests {
 
     #[test]
     fn import_batch_rolls_back_every_record_if_later_insert_fails() {
-        let mut db = Connection::open_in_memory().unwrap();
-        create_schema(&db).unwrap();
+        let mut db = app_db::open_in_memory().unwrap();
         db.execute_batch("CREATE TRIGGER fail_import BEFORE INSERT ON saved_connections WHEN NEW.id = 'bad' BEGIN SELECT RAISE(ABORT, 'rejected'); END;").unwrap();
         let records = [
             sample_connection("good", "Good"),
@@ -614,8 +686,7 @@ mod tests {
 
     #[test]
     fn delete_batch_rejects_missing_and_rolls_back_on_later_failure() {
-        let mut db = Connection::open_in_memory().unwrap();
-        create_schema(&db).unwrap();
+        let mut db = app_db::open_in_memory().unwrap();
         upsert_connection_impl(&db, &sample_connection("one", "One")).unwrap();
         upsert_connection_impl(&db, &sample_connection("two", "Two")).unwrap();
         db.execute_batch("CREATE TRIGGER fail_second BEFORE DELETE ON saved_connections WHEN OLD.id = 'two' BEGIN SELECT RAISE(ABORT, 'blocked'); END;").unwrap();
@@ -778,5 +849,50 @@ mod tests {
             list_project_connection_ids("Warehouse").expect("new memberships"),
             vec!["conn-1".to_string()]
         );
+    }
+
+    #[test]
+    fn a_failed_import_keeps_the_old_file_in_use_for_the_run_and_the_next_start_brings_everything_in() {
+        let _guard = TEST_LOCK.lock().expect("lock test");
+        use_temp_home("fallback");
+        let old = legacy_path();
+        // The old file, as the previous version left it.
+        let conn = open_legacy_file(&old).unwrap();
+        upsert_connection_impl(&conn, &sample_connection("conn-1", "Alpha")).unwrap();
+        upsert_connection_impl(&conn, &sample_connection("conn-2", "Beta")).unwrap();
+        drop(conn);
+        // The database cannot take rows now (a full disk, a lock, a bug): the import fails.
+        let db = app_db::default_path();
+        app_db::open(&db)
+            .unwrap()
+            .execute_batch("CREATE TRIGGER no_rows BEFORE INSERT ON saved_connections BEGIN SELECT RAISE(ABORT, 'disk full'); END")
+            .unwrap();
+        reset_db_for_test();
+
+        // The list is not empty: the run works on the old file, as the previous version did.
+        let listed = list_connections().expect("the old file is used");
+        assert_eq!(listed.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["conn-1", "conn-2"]);
+        upsert_connection(&sample_connection("conn-3", "Gamma")).expect("written to the old file");
+        let warned = crate::legacy::warnings_snapshot();
+        assert!(
+            warned.iter().any(|w| w.contains(&old.display().to_string()) && w.contains("disk full")),
+            "one warning naming the file: {warned:?}"
+        );
+        let in_old: i64 = crate::legacy::open_old(&old)
+            .ok()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM saved_connections", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(in_old, 3, "the new connection is in the old file");
+        let in_new: i64 = app_db::open(&db).unwrap().query_row("SELECT COUNT(*) FROM saved_connections", [], |r| r.get(0)).unwrap();
+        assert_eq!(in_new, 0, "nothing half imported");
+
+        // The next start, the fault gone: all three are imported, the one written meanwhile too.
+        app_db::open(&db).unwrap().execute_batch("DROP TRIGGER no_rows").unwrap();
+        reset_db_for_test();
+        let listed = list_connections().unwrap();
+        assert_eq!(listed.len(), 3);
+        let in_new: i64 = app_db::open(&db).unwrap().query_row("SELECT COUNT(*) FROM saved_connections", [], |r| r.get(0)).unwrap();
+        assert_eq!(in_new, 3);
     }
 }

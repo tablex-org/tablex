@@ -707,7 +707,7 @@ fn every_annotation_is_saved_and_a_fresh_view_loads_it(cx: &mut TestAppContext) 
     assert_eq!((expected.notes.len(), expected.colors.len(), expected.groups.len(), expected.ignored.len()), (1, 1, 1, 1));
 
     // Debounced: nothing yet, then one file.
-    let files = |dir: &std::path::Path| std::fs::read_dir(dir).map(|entries| entries.count()).unwrap_or(0);
+    let files = |dir: &std::path::Path| crate::app::results::diagram::store::stored_diagrams(dir);
     assert_eq!(files(&dir), 0);
     visual.cx.executor().advance_clock(crate::app::results::diagram::view::SAVE_DEBOUNCE + std::time::Duration::from_millis(10));
     wait_until(visual, "the saved document", |_| files(&dir) == 1);
@@ -771,7 +771,7 @@ fn a_table_diagram_reopens_with_its_annotations(cx: &mut TestAppContext) {
     });
     let expected = view.read_with(visual, |view, _| (*view.annotations).clone());
     assert_eq!((expected.relations.len(), expected.notes.len(), expected.colors.len()), (1, 1, 1));
-    let files = |dir: &std::path::Path| std::fs::read_dir(dir).map(|entries| entries.count()).unwrap_or(0);
+    let files = |dir: &std::path::Path| crate::app::results::diagram::store::stored_diagrams(dir);
     visual.cx.executor().advance_clock(crate::app::results::diagram::view::SAVE_DEBOUNCE + std::time::Duration::from_millis(10));
     wait_until(visual, "the saved document", |_| files(&dir) == 1);
 

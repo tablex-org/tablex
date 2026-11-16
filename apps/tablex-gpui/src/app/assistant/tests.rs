@@ -2249,7 +2249,7 @@ mod kept {
     /// A store in a temporary folder (never the user's).
     fn temp_store() -> (tempfile::TempDir, Arc<ConversationStore>) {
         let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(ConversationStore::new(dir.path().join("conversations")));
+        let store = Arc::new(ConversationStore::new(dir.path().join("tablex.db")));
         (dir, store)
     }
 
@@ -2319,7 +2319,7 @@ mod kept {
                 .any(|item| matches!(item, ChatItem::Assistant(_)))
         });
         // Mid-answer: nothing on disk.
-        assert!(!store.root().exists(), "no write per delta");
+        assert!(store.list(CONN).unwrap().entries.is_empty(), "no write per delta");
         release.send(()).unwrap();
         wait(cx, "the end", idle(&chat));
         wait_kept(cx, &store, 1);
@@ -2361,7 +2361,7 @@ mod kept {
         send(&chat, cx, &rig, &provider, "hi");
         wait(cx, "the answer", idle(&chat));
         assert_eq!(chat.read_with(cx, |chat, _| chat.writes_started()), 0);
-        assert!(!store.root().exists());
+        assert!(store.list(CONN).unwrap().entries.is_empty());
     }
 
     /// The request a reopened conversation sends is the one the live chat would have sent.
@@ -2712,9 +2712,22 @@ mod kept {
         // after a clock was set back by something that did not count): every later write is
         // refused.
         let id = store.list(CONN).unwrap().entries[0].header.id.clone();
-        let path = store.root().join(CONN).join(format!("{id}.json"));
-        let text = std::fs::read_to_string(&path).unwrap();
-        std::fs::write(&path, text.replacen("\"seq\":2", "\"seq\":1000", 1)).unwrap();
+        let key = CONN.to_ascii_lowercase();
+        let body = engine_storage::documents::load_conversation(store.db(), &key, &id, usize::MAX)
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .replacen("\"seq\":2", "\"seq\":1000", 1);
+        let header = body.split_once('\n').unwrap().0.strip_suffix(',').unwrap().to_owned() + "}";
+        let doc = engine_storage::documents::ConversationDoc {
+            connection: &key,
+            id: &id,
+            updated: 1,
+            seq: 1000,
+            header: &header,
+            body: &body,
+        };
+        engine_storage::documents::put_conversation(store.db(), &doc, 50).unwrap();
         for text in ["second", "third"] {
             send_keeping(&chat, cx, &rig, &provider, &store, text);
             wait(cx, "the answer", idle(&chat));
@@ -2761,7 +2774,7 @@ mod kept {
             0,
             "and none were written"
         );
-        assert!(!store.root().exists());
+        assert!(store.list(CONN).unwrap().entries.is_empty());
         // Turned on again: the next run is kept (a first file now).
         chat.update(cx, |chat, _| chat.set_keeping(true));
         let more = Scripted::new(vec![say("again")]);

@@ -95,7 +95,7 @@ fn seeded_store(access: engine_agent::AgentAccess) -> (Arc<ConversationStore>, S
         uuid::Uuid::new_v4()
     ));
     let folder = ScenarioFolder(root.clone());
-    let store = Arc::new(ConversationStore::new(root));
+    let store = Arc::new(ConversationStore::new(root.join("tablex.db")));
     let now = store::now_ms();
     let stored = [
         (

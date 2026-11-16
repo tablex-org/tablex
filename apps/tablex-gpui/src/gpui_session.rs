@@ -1,18 +1,20 @@
-//! GPUI workspace session: the tabs the shell had open, persisted to its own
-//! file so a relaunch restores order, pins, the active tab, per-tab text and
-//! table filters, and collapsed tab groups.
+//! GPUI workspace session: the tabs the shell had open, persisted so a relaunch restores order,
+//! pins, the active tab, per-tab text and table filters, and collapsed tab groups.
 //!
-//! The file is `<data dir>/tablex/gpui-workspace-session.json`.
-//! The Swift app's `workspace-session.json` is never written (see `session.rs`,
-//! which stays a read-only import used when this file does not exist).
+//! The session is one row of the app database (`<data dir>/tablex/tablex.db`, document kind
+//! `session`, see [`engine_storage::documents`]). Before that it was
+//! `<data dir>/tablex/gpui-workspace-session.json`: the first read moves that file in and leaves
+//! it as it was (it is not written any more, so an older TableX still sees its last session).
+//! The Swift app's `workspace-session.json` is never written (see `session.rs`, which stays a
+//! read-only import used when there is no session at all).
 //!
-//! Format: versioned JSON with `serde(default)` on every field so older and
-//! newer files degrade instead of failing. Writes are atomic (temp file in the
-//! same directory, then rename). A corrupted file is reported to the caller
-//! and never aborts startup.
+//! Format: versioned JSON with `serde(default)` on every field so older and newer sessions degrade
+//! instead of failing. A write is one transaction of the database. A corrupted session is
+//! reported to the caller and never aborts startup.
 
 use crate::query_mode::QueryMode;
 use serde::{Deserialize, Serialize};
+use engine_storage::documents::{self, SESSION, SESSION_NAME};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,7 +22,8 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 /// Bump when the schema changes incompatibly; readers refuse newer files.
 pub const SESSION_VERSION: u32 = 1;
-const FILE_NAME: &str = "gpui-workspace-session.json";
+/// Where a damaged session is moved to (kept, not destroyed).
+const CORRUPT_NAME: &str = documents::SESSION_CORRUPT_NAME;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -153,24 +156,29 @@ impl Default for GpuiSession {
 /// What reading the session file produced.
 #[derive(Debug)]
 pub enum LoadOutcome {
-    /// No file: callers fall back to the Swift import.
+    /// No session: callers fall back to the Swift import.
     Missing,
     Loaded(GpuiSession),
-    /// The file exists but cannot be used; the message is user-facing.
+    /// The session is stored but cannot be used (damaged, or from a newer version); the message
+    /// is user-facing. [`quarantine`] moves it aside.
     Unusable(String),
+    /// The database could not be read (damaged, from a newer TableX, an old session file that
+    /// could not be moved in); the message is user-facing. Nothing is moved aside.
+    Failed(String),
 }
 
-/// `<data dir>/tablex/gpui-workspace-session.json`.
+/// The app database, `<data dir>/tablex/tablex.db`: where the session lives.
 pub fn default_path() -> Option<PathBuf> {
-    crate::platform::app_data_dir().map(|dir| dir.join(FILE_NAME))
+    Some(engine_storage::app_db::default_path())
 }
 
+/// The session stored in the database at `path`.
 pub fn load(path: &Path) -> LoadOutcome {
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return LoadOutcome::Missing,
+    let text = match documents::get(path, SESSION, SESSION_NAME) {
+        Ok(Some(text)) => text,
+        Ok(None) => return LoadOutcome::Missing,
         Err(error) => {
-            return LoadOutcome::Unusable(format!("Could not read the saved workspace: {error}"))
+            return LoadOutcome::Failed(format!("Could not read the saved workspace: {error}"))
         }
     };
     match serde_json::from_str::<GpuiSession>(&text) {
@@ -186,11 +194,23 @@ pub fn load(path: &Path) -> LoadOutcome {
 }
 
 /// Moves an unusable file aside (best effort) so the next save does not
-/// destroy it silently.
+/// destroy it silently. For files (`settings.json`); the session has [`quarantine_session`].
 pub fn quarantine(path: &Path) {
     let mut name = path.as_os_str().to_owned();
     name.push(".corrupt");
     let _ = std::fs::rename(path, PathBuf::from(name));
+}
+
+/// Moves an unusable session aside (best effort, under another name in the same table) so the
+/// next save does not destroy it silently.
+pub fn quarantine_session(path: &Path) {
+    let _ = documents::rename(path, SESSION, SESSION_NAME, CORRUPT_NAME);
+}
+
+/// Stores the encoded session in the database at `path` (one transaction).
+pub fn save(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let text = std::str::from_utf8(bytes).map_err(std::io::Error::other)?;
+    documents::put(path, SESSION, SESSION_NAME, text).map_err(std::io::Error::other)
 }
 
 /// Serializes once; the caller may hand the bytes to a background thread.
@@ -198,10 +218,10 @@ pub fn encode(session: &GpuiSession) -> Result<Vec<u8>, String> {
     serde_json::to_vec_pretty(session).map_err(|error| error.to_string())
 }
 
-/// Distinguishes the temp files of concurrent writes inside one process.
+/// Distinguishes the temp files of concurrent writes inside one process (`write_atomic`).
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Atomic write: temp file next to the target, flushed, then renamed over it.
+/// Atomic file write (`settings.json`): temp file next to the target, flushed, then renamed over it.
 /// The temp name is unique per call (pid + monotonic counter), so concurrent
 /// writers never share or truncate each other's temp file.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -214,7 +234,7 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         ".{}.tmp-{}-{}",
         path.file_name()
             .and_then(|n| n.to_str())
-            .unwrap_or(FILE_NAME),
+            .unwrap_or("file"),
         std::process::id(),
         TMP_COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
@@ -258,19 +278,39 @@ struct OnDisk {
     bytes: Option<Vec<u8>>,
 }
 
-/// Single ordered writer for the session file. Every snapshot gets a ticket;
-/// the file is only ever replaced by a snapshot newer than the one on disk,
+/// Single ordered writer for the session. Every snapshot gets a ticket;
+/// the stored session is only ever replaced by a snapshot newer than the one on disk,
 /// and writes run one at a time, so a debounce write that finishes after a
 /// quit-time write can no longer clobber it, and the "already saved" memory
 /// is only set once the bytes really are on disk.
 #[derive(Default)]
 pub struct SessionWriter {
+    /// The snapshots are rows of the app database (the session) instead of files
+    /// (`settings.json`).
+    database: bool,
     next_ticket: AtomicU64,
     submitted: Mutex<Submitted>,
     io: Mutex<OnDisk>,
 }
 
 impl SessionWriter {
+    /// A writer of the session: [`save`] to the app database at the path it is given. (`default()`
+    /// writes files atomically: `settings.json` uses that.)
+    pub fn in_database() -> Self {
+        Self {
+            database: true,
+            ..Self::default()
+        }
+    }
+
+    fn persist(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        if self.database {
+            save(path, bytes)
+        } else {
+            write_atomic(path, bytes)
+        }
+    }
+
     /// Reserves the next ticket for `bytes`. `None` when identical bytes were
     /// already submitted and have not failed (nothing new to write).
     pub fn submit(&self, bytes: &[u8]) -> Option<u64> {
@@ -292,7 +332,7 @@ impl SessionWriter {
         if ticket < disk.ticket {
             return Ok(WriteOutcome::Skipped);
         }
-        match write_atomic(path, bytes) {
+        match self.persist(path, bytes) {
             Ok(()) => {
                 disk.ticket = ticket;
                 disk.bytes = Some(bytes.to_vec());
@@ -332,6 +372,17 @@ impl SessionWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine_storage::app_db::FILE_NAME;
+
+    /// A session text put straight into the database (a hand-edited or damaged one).
+    fn plant(path: &Path, text: &str) {
+        documents::put(path, SESSION, SESSION_NAME, text).unwrap();
+    }
+
+    /// What the database holds as the session.
+    fn stored(path: &Path) -> Option<Vec<u8>> {
+        documents::get(path, SESSION, SESSION_NAME).unwrap().map(String::into_bytes)
+    }
 
     fn temp_dir() -> PathBuf {
         let dir =
@@ -402,16 +453,28 @@ mod tests {
     }
 
     #[test]
+    fn the_default_writer_writes_plain_files_the_database_writer_rows() {
+        let dir = temp_dir();
+        let file = dir.join("settings.json");
+        SessionWriter::default().write_now(&file, b"{}").unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), b"{}", "settings.json stays a file");
+        let db = dir.join(FILE_NAME);
+        SessionWriter::in_database().write_now(&db, b"{}").unwrap();
+        assert_eq!(stored(&db).unwrap(), b"{}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn a_late_background_write_never_overwrites_the_quit_time_write() {
         let dir = temp_dir();
         let path = dir.join(FILE_NAME);
-        let writer = SessionWriter::default();
+        let writer = SessionWriter::in_database();
         let older = writer.submit(b"older").unwrap();
         // Quit-time write of a newer snapshot lands first...
         assert_eq!(writer.write_now(&path, b"newer").unwrap(), WriteOutcome::Written);
         // ...then the queued older write runs and is skipped.
         assert_eq!(writer.write(&path, older, b"older").unwrap(), WriteOutcome::Skipped);
-        assert_eq!(std::fs::read(&path).unwrap(), b"newer");
+        assert_eq!(stored(&path).unwrap(), b"newer");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -419,12 +482,12 @@ mod tests {
     fn quit_write_happens_even_when_identical_bytes_are_still_in_flight() {
         let dir = temp_dir();
         let path = dir.join(FILE_NAME);
-        let writer = SessionWriter::default();
+        let writer = SessionWriter::in_database();
         let ticket = writer.submit(b"state").unwrap();
         assert!(writer.submit(b"state").is_none(), "debounce path dedups");
-        assert!(!path.exists());
+        assert_eq!(stored(&path), None);
         assert_eq!(writer.write_now(&path, b"state").unwrap(), WriteOutcome::Written);
-        assert_eq!(std::fs::read(&path).unwrap(), b"state");
+        assert_eq!(stored(&path).unwrap(), b"state");
         // The in-flight write is now a no-op and a second quit write is too.
         assert_eq!(writer.write(&path, ticket, b"state").unwrap(), WriteOutcome::Skipped);
         assert_eq!(writer.write_now(&path, b"state").unwrap(), WriteOutcome::Skipped);
@@ -438,7 +501,7 @@ mod tests {
         let blocker = dir.join("blocker");
         std::fs::write(&blocker, "x").unwrap();
         let path = blocker.join(FILE_NAME);
-        let writer = SessionWriter::default();
+        let writer = SessionWriter::in_database();
         let ticket = writer.submit(b"state").unwrap();
         assert!(writer.write(&path, ticket, b"state").is_err());
         assert!(
@@ -450,7 +513,7 @@ mod tests {
         // Once the target is writable the very same bytes land.
         let good = dir.join("good").join(FILE_NAME);
         assert_eq!(writer.write_now(&good, b"state").unwrap(), WriteOutcome::Written);
-        assert_eq!(std::fs::read(&good).unwrap(), b"state");
+        assert_eq!(stored(&good).unwrap(), b"state");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -458,7 +521,7 @@ mod tests {
     fn concurrent_background_and_quit_writes_leave_one_complete_snapshot() {
         let dir = temp_dir();
         let path = dir.join(FILE_NAME);
-        let writer = std::sync::Arc::new(SessionWriter::default());
+        let writer = std::sync::Arc::new(SessionWriter::in_database());
         let snapshots: Vec<Vec<u8>> = (0..6u8).map(|n| vec![b'a' + n; 128 * 1024]).collect();
         std::thread::scope(|scope| {
             for snapshot in &snapshots {
@@ -472,57 +535,90 @@ mod tests {
         });
         let latest = vec![b'z'; 128 * 1024];
         writer.write_now(&path, &latest).unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), latest, "quit snapshot wins");
+        assert_eq!(stored(&path).unwrap(), latest, "quit snapshot wins");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn round_trips_through_an_atomic_write() {
+    fn round_trips_through_the_database_and_leaves_one_file_family_only() {
         let dir = temp_dir();
         let path = dir.join("nested").join(FILE_NAME);
         let session = sample();
-        write_atomic(&path, &encode(&session).unwrap()).unwrap();
+        let writer = SessionWriter::in_database();
+        let bytes = encode(&session).unwrap();
+        writer.write_now(&path, &bytes).unwrap();
         match load(&path) {
             LoadOutcome::Loaded(loaded) => assert_eq!(loaded, session),
             other => panic!("expected Loaded, got {other:?}"),
         }
-        let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+        let mut names: Vec<_> = std::fs::read_dir(path.parent().unwrap())
             .unwrap()
             .filter_map(Result::ok)
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(
-            leftovers,
-            vec![FILE_NAME.to_string()],
-            "no temp file left behind"
-        );
+        names.retain(|name| !name.starts_with(FILE_NAME));
+        assert!(names.is_empty(), "no stray file next to the database: {names:?}");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn missing_corrupt_and_newer_files_are_distinguished() {
+    fn missing_corrupt_newer_and_unreadable_sessions_are_distinguished() {
         let dir = temp_dir();
         let path = dir.join(FILE_NAME);
         assert!(matches!(load(&path), LoadOutcome::Missing));
-        std::fs::write(&path, "{ not json").unwrap();
+        plant(&path, "{ not json");
         assert!(matches!(load(&path), LoadOutcome::Unusable(_)));
-        std::fs::write(&path, r#"{"version": 99, "tabs": []}"#).unwrap();
+        plant(&path, r#"{"version": 99, "tabs": []}"#);
         assert!(matches!(load(&path), LoadOutcome::Unusable(message) if message.contains("newer")));
-        quarantine(&path);
-        assert!(!path.exists());
-        assert!(dir.join(format!("{FILE_NAME}.corrupt")).exists());
+        quarantine_session(&path);
+        assert!(matches!(load(&path), LoadOutcome::Missing));
+        let kept = documents::get(&path, SESSION, CORRUPT_NAME).unwrap();
+        assert_eq!(kept.as_deref(), Some(r#"{"version": 99, "tabs": []}"#), "moved aside, not destroyed");
+        // A file that is not a database is a failure of the storage, not a damaged session: it is
+        // reported and left alone.
+        let broken = dir.join("broken").join(FILE_NAME);
+        std::fs::create_dir_all(broken.parent().unwrap()).unwrap();
+        std::fs::write(&broken, vec![0xA5u8; 4096]).unwrap();
+        assert!(matches!(load(&broken), LoadOutcome::Failed(message) if message.contains("left untouched")));
+        quarantine_session(&broken);
+        assert_eq!(std::fs::read(&broken).unwrap(), vec![0xA5u8; 4096]);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_old_session_file_is_moved_in_once_and_left_as_it_was() {
+        let dir = temp_dir();
+        let old = dir.join("gpui-workspace-session.json");
+        let text = serde_json::to_string(&sample()).unwrap();
+        std::fs::write(&old, &text).unwrap();
+        let db = dir.join(FILE_NAME);
+        match load(&db) {
+            LoadOutcome::Loaded(loaded) => assert_eq!(loaded, sample()),
+            other => panic!("expected Loaded, got {other:?}"),
+        }
+        assert_eq!(std::fs::read_to_string(&old).unwrap(), text, "the old file is not touched");
+        // A later save wins over the old file on every following start.
+        let mut newer = sample();
+        newer.active = Some(0);
+        SessionWriter::in_database().write_now(&db, &encode(&newer).unwrap()).unwrap();
+        match load(&db) {
+            LoadOutcome::Loaded(loaded) => assert_eq!(loaded.active, Some(0)),
+            other => panic!("expected Loaded, got {other:?}"),
+        }
+        assert_eq!(std::fs::read_to_string(&old).unwrap(), text);
+        // A damaged old file is moved in as it is and reported where the session is read.
+        let damaged = temp_dir();
+        std::fs::write(damaged.join("gpui-workspace-session.json"), "{ not json").unwrap();
+        assert!(matches!(load(&damaged.join(FILE_NAME)), LoadOutcome::Unusable(_)));
+        std::fs::remove_dir_all(dir).unwrap();
+        std::fs::remove_dir_all(damaged).unwrap();
     }
 
     #[test]
     fn unknown_and_missing_fields_degrade_gracefully() {
         let dir = temp_dir();
         let path = dir.join(FILE_NAME);
-        std::fs::write(
-            &path,
-            r#"{"tabs":[{"title":"A","future_field":1}],"active":0,"extra":{}}"#,
-        )
-        .unwrap();
+        plant(&path, r#"{"tabs":[{"title":"A","future_field":1}],"active":0,"extra":{}}"#);
         let LoadOutcome::Loaded(session) = load(&path) else {
             panic!("tolerant load");
         };
@@ -545,15 +641,14 @@ mod tests {
         let dir = temp_dir();
         let path = dir.join(FILE_NAME);
         // A hand-trimmed / older rule: only some fields, an unknown extra one.
-        std::fs::write(
+        plant(
             &path,
             r#"{"tabs":[{"title":"orders","query_mode":"sqlTable",
                 "table_filter_rules":[{"id":4,"column":"id","mode":"between","value":"1","end_value":"9","future":true},
                                       {"column":"name","conjunction":"or","disabled":true}],
                 "table_filter_where":"\"id\" BETWEEN 1 AND 9",
                 "table_hidden_columns":["name","payload"]}]}"#,
-        )
-        .unwrap();
+        );
         let LoadOutcome::Loaded(session) = load(&path) else {
             panic!("tolerant load");
         };
@@ -565,7 +660,7 @@ mod tests {
         assert_eq!(rules[1].mode, crate::sql_filter::SqlFilterMode::Equals);
         assert!(rules[1].disabled);
         assert_eq!(rules[1].conjunction, crate::sql_filter::SqlFilterConjunction::Or);
-        write_atomic(&path, &encode(&session).unwrap()).unwrap();
+        plant(&path, &String::from_utf8(encode(&session).unwrap()).unwrap());
         let LoadOutcome::Loaded(again) = load(&path) else {
             panic!("reload");
         };
@@ -591,7 +686,7 @@ mod tests {
             .join(",");
         let dir = temp_dir();
         let path = dir.join(FILE_NAME);
-        std::fs::write(&path, format!(r#"{{"tabs":[{tabs}]}}"#)).unwrap();
+        plant(&path, &format!(r#"{{"tabs":[{tabs}]}}"#));
         let LoadOutcome::Loaded(session) = load(&path) else {
             panic!("load");
         };
@@ -608,8 +703,9 @@ mod tests {
     }
 
     #[test]
-    fn default_path_is_the_gpui_file_never_the_swift_session() {
+    fn default_path_is_the_app_database_never_the_swift_session() {
         let path = default_path().expect("a data dir exists");
-        assert!(path.ends_with("tablex/gpui-workspace-session.json"));
+        assert!(path.ends_with("tablex/tablex.db"));
+        assert_eq!(path, engine_storage::app_db::default_path());
     }
 }

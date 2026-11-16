@@ -2,7 +2,7 @@
 //!
 //! Saving is event driven: `render` notices a changed `WorkspaceState`
 //! revision and starts one debounce task that waits for 500ms of quiet before
-//! snapshotting; the file write itself runs on the background executor. The
+//! snapshotting; the database write itself runs on the background executor. The
 //! pending task is the only timer and exists only while a change is unsaved.
 
 use super::*;
@@ -10,12 +10,12 @@ use crate::gpui_session::{self, LoadOutcome};
 use std::path::PathBuf;
 
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
-/// Scenario/test runs only persist to an injected temp-dir file.
+/// Scenario/test runs only persist to an injected temp-dir database file.
 const SCENARIO_PATH_ENV: &str = "TABLEX_GPUI_SESSION_PATH";
 
-#[derive(Default)]
 pub(super) struct SessionPersist {
-    /// Where the session lives; `None` disables restore and save entirely.
+    /// The database that holds the session (`tablex.db`); `None` disables restore and save
+    /// entirely.
     pub(super) path: Option<PathBuf>,
     /// Workspace revision already on disk (or deliberately not saved).
     saved_revision: u64,
@@ -28,7 +28,20 @@ pub(super) struct SessionPersist {
     _quit: Option<gpui::Subscription>,
 }
 
-/// Real runs use the Application Support file. Scenario runs never touch it:
+impl Default for SessionPersist {
+    fn default() -> Self {
+        Self {
+            path: None,
+            saved_revision: 0,
+            writer: std::sync::Arc::new(gpui_session::SessionWriter::in_database()),
+            pending: None,
+            writes: 0,
+            _quit: None,
+        }
+    }
+}
+
+/// Real runs use the app database in Application Support. Scenario runs never touch it:
 /// they persist only when the launcher injects an absolute temp-dir path.
 fn resolve_path(scenario_enabled: bool) -> Option<PathBuf> {
     if scenario_enabled {
@@ -105,7 +118,15 @@ impl AppRoot {
                     return;
                 }
                 LoadOutcome::Unusable(message) => {
-                    gpui_session::quarantine(&path);
+                    gpui_session::quarantine_session(&path);
+                    self.report_warning(Area::App, None, &message);
+                    self.sidebar.notice = Some(message);
+                }
+                // The database itself could not be read (busy for too long, damaged, from a newer
+                // TableX): nothing is moved aside, and nothing is saved for the rest of this run,
+                // or the first save would replace the session that is stored and was not read.
+                LoadOutcome::Failed(message) => {
+                    self.shell.session.path = None;
                     self.report_warning(Area::App, None, &message);
                     self.sidebar.notice = Some(message);
                 }

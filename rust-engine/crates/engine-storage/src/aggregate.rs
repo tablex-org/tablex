@@ -1,16 +1,15 @@
+//! Saved aggregation pipelines: the `saved_aggregates` table of the app database
+//! ([`crate::app_db`]).
+
+use crate::app_db::{self, AppDbError};
+use crate::legacy;
 use rusqlite::{params, Connection, Result};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
 
 lazy_static::lazy_static! {
-    static ref AGGREGATE_DB: Mutex<Option<Connection>> = Mutex::new(None);
+    static ref AGGREGATE_DB: Mutex<Option<legacy::Store>> = Mutex::new(None);
 }
-
-/// How long a statement waits for another process holding the database
-/// (the GPUI app and the legacy app may both be open) before failing with
-/// `SQLITE_BUSY`.
-const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub struct SavedAggregate {
@@ -36,143 +35,158 @@ fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-pub fn default_db_path() -> PathBuf {
-    get_db_path()
-}
-
-fn get_db_path() -> PathBuf {
+/// The file the saved aggregates were before `tablex.db`: `<data dir>/TableLeaf/aggregates.db`.
+/// Read once to move its rows into the app database (see [`crate::legacy`]); no longer written.
+pub(crate) fn legacy_path() -> PathBuf {
     crate::paths::data_dir("TableLeaf").join("aggregates.db")
 }
 
-fn create_schema(conn: &Connection) -> Result<()> {
+/// The app database at `db` with the old `legacy` file moved in on first use.
+pub(crate) fn open_at(db: &Path, legacy: &Path) -> std::result::Result<Connection, AppDbError> {
+    let mut conn = app_db::open(db)?;
+    legacy::import_once(&mut conn, db, "aggregates", legacy, |tx| import_aggregates(tx, legacy, None))?;
+    Ok(conn)
+}
+
+/// `kind` and `options_json` were added after the first release: a file without them reads with
+/// what such rows always had (a plain aggregate, no editor options). `merge`: into a database
+/// that has rows already, the later row wins.
+fn import_aggregates(
+    tx: &rusqlite::Transaction<'_>,
+    path: &Path,
+    merge: Option<&legacy::Since>,
+) -> std::result::Result<(), legacy::ImportError> {
+    let old = legacy::open_old(path)?;
+    legacy::copy_table(
+        &old,
+        path,
+        tx,
+        "saved_aggregates",
+        &[
+            ("id", "NULL"),
+            ("conn_uuid", "NULL"),
+            ("database", "NULL"),
+            ("collection", "''"),
+            ("name", "NULL"),
+            ("kind", "'aggregate'"),
+            ("pipeline_json", "NULL"),
+            ("created_at", "NULL"),
+            ("updated_at", "NULL"),
+            ("options_json", "NULL"),
+        ],
+        "rowid",
+        if merge.is_some() {
+            legacy::Copying::Newer { key: &["id"], updated: "updated_at" }
+        } else {
+            legacy::Copying::Fresh
+        },
+        merge,
+    )
+}
+
+/// The store for this run (see [`legacy::open_run`]): the app database with the old file moved
+/// in; when that fails, the old file itself, so that the saved pipelines are never missing because
+/// of an import error; in a process that may not import, the old file until the app has.
+pub(crate) fn open_or_fall_back(db: &Path, legacy: &Path) -> Result<legacy::Store> {
+    legacy::open_run(db, "aggregates", legacy, &["saved_aggregates"], import_aggregates, open_legacy_file)
+}
+
+/// The old `aggregates.db` as the previous version opened it. Only for a run whose import failed.
+fn open_legacy_file(path: &Path) -> Result<Connection> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
+    }
+    let conn = Connection::open(path)?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
     conn.execute(
         "CREATE TABLE IF NOT EXISTS saved_aggregates (
-            id TEXT PRIMARY KEY,
-            conn_uuid TEXT NOT NULL,
-            database TEXT NOT NULL,
-            collection TEXT NOT NULL DEFAULT '',
-            name TEXT NOT NULL,
-            kind TEXT NOT NULL DEFAULT 'aggregate',
-            pipeline_json TEXT NOT NULL,
-            created_at REAL NOT NULL,
-            updated_at REAL NOT NULL
-        )",
+            id TEXT PRIMARY KEY, conn_uuid TEXT NOT NULL, database TEXT NOT NULL,
+            collection TEXT NOT NULL DEFAULT '', name TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'aggregate',
+            pipeline_json TEXT NOT NULL, created_at REAL NOT NULL, updated_at REAL NOT NULL)",
         [],
     )?;
     let _ = conn.execute("DROP INDEX IF EXISTS idx_saved_agg_lookup", []);
     conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_saved_agg_db_lookup
-            ON saved_aggregates(conn_uuid, database)",
+        "CREATE INDEX IF NOT EXISTS idx_saved_agg_db_lookup ON saved_aggregates(conn_uuid, database)",
         [],
     )?;
-    ensure_column(
-        conn,
-        "kind",
-        "ALTER TABLE saved_aggregates ADD COLUMN kind TEXT NOT NULL DEFAULT 'aggregate'",
-    )?;
-    ensure_column(
-        conn,
-        "options_json",
-        "ALTER TABLE saved_aggregates ADD COLUMN options_json TEXT",
-    )?;
-    Ok(())
-}
-
-/// Idempotent `ALTER TABLE ... ADD COLUMN`: runs `ddl` only when the column is
-/// missing, so a real failure (read-only file, corruption) is reported
-/// instead of being swallowed like a "duplicate column" error.
-fn ensure_column(conn: &Connection, column: &str, ddl: &str) -> Result<()> {
-    let present: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM pragma_table_info('saved_aggregates') WHERE name = ?1",
-        params![column],
-        |row| row.get(0),
-    )?;
-    if present == 0 {
-        add_column(conn, ddl)?;
-    }
-    Ok(())
-}
-
-/// Runs an `ALTER TABLE ... ADD COLUMN`. Another process (the previous app
-/// shares this file) may add the same column between our check and our
-/// statement; SQLite then reports "duplicate column name", which is exactly
-/// the state we wanted, so it counts as success. Every other error is real.
-fn add_column(conn: &Connection, ddl: &str) -> Result<()> {
-    match conn.execute(ddl, []) {
-        Ok(_) => Ok(()),
-        Err(rusqlite::Error::SqliteFailure(_, Some(message)))
-            if message.contains("duplicate column name") =>
-        {
-            Ok(())
+    for (column, ddl) in [
+        ("kind", "ALTER TABLE saved_aggregates ADD COLUMN kind TEXT NOT NULL DEFAULT 'aggregate'"),
+        ("options_json", "ALTER TABLE saved_aggregates ADD COLUMN options_json TEXT"),
+    ] {
+        let present: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('saved_aggregates') WHERE name = ?1",
+            params![column],
+            |row| row.get(0),
+        )?;
+        if present == 0 {
+            conn.execute(ddl, [])?;
         }
-        Err(error) => Err(error),
     }
-}
-
-fn open_connection(path: &Path) -> Result<Connection> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
-    }
-    let conn = Connection::open(path)?;
-    conn.busy_timeout(BUSY_TIMEOUT)?;
-    create_schema(&conn)?;
     Ok(conn)
 }
 
-/// A saved-aggregates database at an explicit location. The free functions
-/// below use the shared per-process default; the GPUI app owns a store so
-/// tests can point it at a temporary file or memory.
+/// Saved aggregates in the app database at an explicit location (`open`: a file of its own, as
+/// tests use; `open_default`: `tablex.db`, with the old `aggregates.db` moved in). The free
+/// functions below use the shared per-process default; the GPUI app owns a store so tests can
+/// point it at a temporary file or memory.
 pub struct AggregateStore {
-    conn: Mutex<Connection>,
+    conn: Mutex<legacy::Store>,
 }
 
 impl AggregateStore {
     pub fn open(path: &Path) -> Result<Self> {
         Ok(Self {
-            conn: Mutex::new(open_connection(path)?),
+            conn: Mutex::new(legacy::Store::new(app_db::open(path)?)),
         })
     }
 
     pub fn open_default() -> Result<Self> {
-        Self::open(&get_db_path())
-    }
-
-    pub fn open_in_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory()?;
-        conn.busy_timeout(BUSY_TIMEOUT)?;
-        create_schema(&conn)?;
         Ok(Self {
-            conn: Mutex::new(conn),
+            conn: Mutex::new(open_or_fall_back(&app_db::default_path(), &legacy_path())?),
         })
     }
 
+    pub fn open_in_memory() -> Result<Self> {
+        let conn = app_db::open_in_memory()?;
+        Ok(Self {
+            conn: Mutex::new(legacy::Store::new(conn)),
+        })
+    }
+
+    /// The connection, after looking whether a store that worked on its old file can go on in the
+    /// database (see [`legacy::Store::refresh`]).
+    fn conn(&self) -> MutexGuard<'_, legacy::Store> {
+        let mut store = locked(&self.conn);
+        store.refresh();
+        store
+    }
+
     pub fn list(&self, conn_uuid: &str, database: &str) -> Result<Vec<SavedAggregate>> {
-        list_aggregates_impl(&locked(&self.conn), conn_uuid, database)
+        list_aggregates_impl(&self.conn(), conn_uuid, database)
     }
 
     pub fn get(&self, id: &str) -> Result<Option<SavedAggregate>> {
-        get_aggregate_impl(&locked(&self.conn), id)
+        get_aggregate_impl(&self.conn(), id)
     }
 
     /// Inserts or updates a row, including `database` and `options_json`
     /// (`None` clears it).
     pub fn upsert(&self, aggregate: &SavedAggregate) -> Result<()> {
-        upsert_full_impl(&locked(&self.conn), aggregate)
+        upsert_full_impl(&self.conn(), aggregate)
     }
 
     pub fn delete(&self, id: &str) -> Result<()> {
-        delete_aggregate_impl(&locked(&self.conn), id)
+        delete_aggregate_impl(&self.conn(), id)
     }
 }
 
 /// Runs `f` on the shared default connection, opening it on first use.
 fn with_db<T>(f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
     let mut db = locked(&AGGREGATE_DB);
-    if db.is_none() {
-        let path = get_db_path();
-        eprintln!("[aggregate] Opening DB at: {:?}", path);
-        *db = Some(open_connection(&path)?);
+    match db.as_mut() {
+        None => *db = Some(open_or_fall_back(&app_db::default_path(), &legacy_path())?),
+        Some(store) => store.refresh(),
     }
     match db.as_ref() {
         Some(conn) => f(conn),
@@ -248,7 +262,7 @@ fn list_aggregates_impl(
     rows.collect()
 }
 
-fn get_aggregate_impl(conn: &Connection, id: &str) -> Result<Option<SavedAggregate>> {
+pub(crate) fn get_aggregate_impl(conn: &Connection, id: &str) -> Result<Option<SavedAggregate>> {
     let mut stmt = conn.prepare(
         "SELECT id, conn_uuid, database, collection, name, kind, pipeline_json, created_at, updated_at, options_json
          FROM saved_aggregates
@@ -356,9 +370,7 @@ mod tests {
     use super::*;
 
     fn fresh_db() -> Connection {
-        let conn = Connection::open_in_memory().unwrap();
-        create_schema(&conn).unwrap();
-        conn
+        app_db::open_in_memory().unwrap()
     }
 
     #[test]
@@ -662,50 +674,6 @@ mod tests {
     }
 
     #[test]
-    fn old_schemas_migrate_idempotently_and_keep_their_rows() {
-        let conn = Connection::open_in_memory().unwrap();
-        // Oldest schema: no `kind`, no `options_json`, old index.
-        conn.execute(
-            "CREATE TABLE saved_aggregates (
-                id TEXT PRIMARY KEY, conn_uuid TEXT NOT NULL, database TEXT NOT NULL,
-                collection TEXT NOT NULL DEFAULT '', name TEXT NOT NULL,
-                pipeline_json TEXT NOT NULL, created_at REAL NOT NULL, updated_at REAL NOT NULL)",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "CREATE INDEX idx_saved_agg_lookup ON saved_aggregates(conn_uuid)",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO saved_aggregates VALUES ('legacy', 'c', 'd', 'coll', 'old one', '[{\"$match\":{}}]', 1.0, 2.0)",
-            [],
-        )
-        .unwrap();
-        create_schema(&conn).unwrap();
-        create_schema(&conn).expect("running the migration twice is a no-op");
-        let got = get_aggregate_impl(&conn, "legacy").unwrap().unwrap();
-        assert_eq!(got.kind, "aggregate", "kind defaults for migrated rows");
-        assert_eq!(got.options_json, None);
-        assert_eq!(got.pipeline_json, "[{\"$match\":{}}]");
-        // The intermediate schema (kind present, no options_json) migrates too.
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute(
-            "CREATE TABLE saved_aggregates (
-                id TEXT PRIMARY KEY, conn_uuid TEXT NOT NULL, database TEXT NOT NULL,
-                collection TEXT NOT NULL DEFAULT '', name TEXT NOT NULL,
-                kind TEXT NOT NULL DEFAULT 'aggregate', pipeline_json TEXT NOT NULL,
-                created_at REAL NOT NULL, updated_at REAL NOT NULL)",
-            [],
-        )
-        .unwrap();
-        create_schema(&conn).unwrap();
-        upsert_full_impl(&conn, &sample("n1", "db")).unwrap();
-        assert!(get_aggregate_impl(&conn, "n1").unwrap().is_some());
-    }
-
-    #[test]
     fn file_store_sets_a_busy_timeout_and_serves_concurrent_writers() {
         let dir = std::env::temp_dir().join(format!("tablex-agg-{}", std::process::id()));
         let path = dir.join("nested").join("aggregates.db");
@@ -714,7 +682,7 @@ mod tests {
         let timeout: i64 = locked(&store.conn)
             .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(timeout, BUSY_TIMEOUT.as_millis() as i64);
+        assert_eq!(timeout, 5000);
         // Several connections (separate stores = separate processes' view)
         // write the same file at once; the busy timeout makes them queue
         // instead of failing with "database is locked".
@@ -739,31 +707,6 @@ mod tests {
         let reopened = AggregateStore::open(&path).unwrap();
         assert_eq!(reopened.list("conn", "db").unwrap().len(), 100, "persisted");
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn adding_a_column_another_process_already_added_is_success_but_real_errors_are_not() {
-        let conn = fresh_db();
-        // `options_json` exists already: the race outcome.
-        add_column(
-            &conn,
-            "ALTER TABLE saved_aggregates ADD COLUMN options_json TEXT",
-        )
-        .expect("duplicate column is tolerated");
-        add_column(
-            &conn,
-            "ALTER TABLE saved_aggregates ADD COLUMN extra_col TEXT",
-        )
-        .unwrap();
-        add_column(
-            &conn,
-            "ALTER TABLE saved_aggregates ADD COLUMN extra_col TEXT",
-        )
-        .unwrap();
-        // A genuine failure still surfaces.
-        assert!(add_column(&conn, "ALTER TABLE no_such_table ADD COLUMN x TEXT").is_err());
-        assert!(add_column(&conn, "ALTER TABLE saved_aggregates ADD COLUMN").is_err());
-        create_schema(&conn).expect("migration still fine");
     }
 
     #[test]

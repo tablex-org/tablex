@@ -13,6 +13,9 @@ use tablex_mcp::transport::Signals;
 
 fn main() -> ExitCode {
     install_panic_hook();
+    // Only the app moves the old files into the app database: until it has, this reads them, so
+    // an older TableX running beside this one keeps one truth (see `engine_storage::legacy`).
+    engine_storage::legacy::set_import_allowed(false);
     match Command::parse(std::env::args_os().skip(1)) {
         Ok(Command::Serve) => serve(),
         Ok(Command::Version) => print_and_exit(&cli::version_line()),

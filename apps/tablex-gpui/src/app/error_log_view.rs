@@ -233,6 +233,21 @@ impl LogStore {
 impl AppRoot {
     // --- reporting ---------------------------------------------------------
 
+    /// What the storage layer has to say about moving the old files into the app database (an old
+    /// file that could not be moved in and is used for this run, one changed after it was moved
+    /// in): one non-blocking warning each, in the Error Log and under the sidebar. One atomic
+    /// read per frame when there is nothing.
+    pub(super) fn report_storage_warnings(&mut self, cx: &mut Context<Self>) {
+        if !engine_storage::legacy::warnings_pending() {
+            return;
+        }
+        for message in engine_storage::legacy::take_warnings() {
+            self.report_warning(Area::App, None, &message);
+            self.sidebar.notice = Some(message);
+        }
+        cx.notify();
+    }
+
     /// `connection` is the saved-connection key (UUID string) when known.
     pub(super) fn report_error(
         &mut self,

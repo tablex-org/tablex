@@ -1007,7 +1007,7 @@ fn build_registry() -> Vec<SettingDescriptor> {
                 .then_some("Not available: only Anthropic can retry on a fallback model.")
         }),
         toggle(
-            place!("ai.keep_conversations", Ai, "Conversations", "Keep conversations on this computer", "Each finished conversation is saved as a file in TableX's data folder (assistant/conversations), so History can reopen it. The files can contain query results. Turning this off stops saving; it does not delete what is saved."),
+            place!("ai.keep_conversations", Ai, "Conversations", "Keep conversations on this computer", "Each finished conversation is saved in TableX's app database (tablex.db in its data folder), so History can reopen it. They can contain query results. Turning this off stops saving; it does not delete what is saved."),
             |s| s.ai.keep_conversations,
             |s, v| s.ai.keep_conversations = v,
             d,

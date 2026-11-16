@@ -2,11 +2,13 @@
 //! the D2 annotations (logical relationships, ignored suggestions, notes,
 //! groups, entity colors).
 //!
-//! One JSON file per diagram in `<app data dir>/diagrams/`, named after a
-//! hash of the diagram key (connection id + database + schema, plus the focus
-//! table for table diagrams), so two diagrams never contend for a file and a
-//! write only rewrites the diagram it belongs to. The key is stored inside the
-//! file too (readable, and a hash collision cannot hand out foreign data).
+//! One row per diagram in the app database (`<app data dir>/tablex.db`, document kind `diagram`,
+//! see [`engine_storage::documents`]), named after a hash of the diagram key (connection id +
+//! database + schema, plus the focus table for table diagrams), so a write only rewrites the
+//! diagram it belongs to. The key is stored inside the document too (readable, and a hash
+//! collision cannot hand out foreign data). Before the database each diagram was a file
+//! `<app data dir>/diagrams/<hash>.json`: the first use moves those in and leaves them as they
+//! were (they are not written any more).
 //!
 //! Forward compatibility: every struct is `#[serde(default)]`, so a field a
 //! later phase adds (logical foreign keys, notes, colors, layers, ...) is
@@ -18,9 +20,10 @@
 //! All I/O here is blocking; callers run it on the background executor.
 
 use std::collections::BTreeMap;
-use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::io;
+use std::path::PathBuf;
 
+use engine_storage::documents::{self, DIAGRAM};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -291,36 +294,37 @@ impl From<io::Error> for StoreError {
     }
 }
 
-/// The directory of diagram files.
+/// The diagrams of one app database.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::app) struct LayoutStore {
-    dir: PathBuf,
+    db: PathBuf,
 }
 
 impl LayoutStore {
+    /// The store of the database `tablex.db` in `dir` (a folder of its own in tests).
     pub(in crate::app) fn new(dir: PathBuf) -> Self {
-        Self { dir }
+        Self { db: dir.join(engine_storage::app_db::FILE_NAME) }
     }
 
-    /// `<app data dir>/diagrams`; `None` when the platform has no data dir.
+    /// The store of the app's own database, `<app data dir>/tablex.db`.
     pub(in crate::app) fn default_location() -> Option<Self> {
-        crate::platform::app_data_dir().map(|dir| Self::new(dir.join("diagrams")))
+        Some(Self { db: engine_storage::app_db::default_path() })
     }
 
-    pub(in crate::app) fn path(&self, key: &DiagramKey) -> PathBuf {
+    /// The name of the document of `key`: the first 24 hex digits of the hash of the key (the
+    /// name the diagram's file had).
+    pub(in crate::app) fn name(&self, key: &DiagramKey) -> String {
         let identity = serde_json::to_vec(key).unwrap_or_default();
         let digest = Sha256::digest(identity);
-        self.dir.join(format!("{}.json", hex::encode(&digest[..12])))
+        hex::encode(&digest[..12])
     }
 
     /// `Ok(None)` when nothing was saved yet.
     pub(in crate::app) fn load(&self, key: &DiagramKey) -> Result<Option<SavedDiagram>, StoreError> {
-        let bytes = match std::fs::read(self.path(key)) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error.into()),
+        let Some(text) = documents::get(&self.db, DIAGRAM, &self.name(key)).map_err(io::Error::other)? else {
+            return Ok(None);
         };
-        let saved: SavedDiagram = serde_json::from_slice(&bytes).map_err(StoreError::Corrupt)?;
+        let saved: SavedDiagram = serde_json::from_str(&text).map_err(StoreError::Corrupt)?;
         if saved.version > SavedDiagram::VERSION {
             return Err(StoreError::Newer(saved.version));
         }
@@ -328,38 +332,50 @@ impl LayoutStore {
         Ok((saved.key == *key).then_some(saved))
     }
 
-    /// Writes `diagram` through a temporary file and a rename, so a crash
-    /// never leaves a torn file. Refuses to replace a newer build's file.
+    /// Writes `diagram` in one transaction, so a crash never leaves a torn document. Refuses to
+    /// replace a newer build's document.
     pub(in crate::app) fn save(&self, key: &DiagramKey, diagram: &SavedDiagram) -> Result<(), StoreError> {
-        let path = self.path(key);
         if let Err(newer @ StoreError::Newer(_)) = self.load(key) {
             return Err(newer);
         }
-        let data = serde_json::to_vec_pretty(diagram).map_err(StoreError::Corrupt)?;
-        std::fs::create_dir_all(&self.dir)?;
-        write_atomically(&self.dir, &path, &data)?;
+        let data = serde_json::to_string_pretty(diagram).map_err(StoreError::Corrupt)?;
+        documents::put(&self.db, DIAGRAM, &self.name(key), &data).map_err(io::Error::other)?;
         Ok(())
     }
 
-    /// Deletes the saved positions (Re-layout). A missing file is fine.
+    /// Deletes the saved positions (Re-layout). Nothing saved is fine.
     pub(in crate::app) fn forget(&self, key: &DiagramKey) -> Result<(), StoreError> {
-        match std::fs::remove_file(self.path(key)) {
-            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error.into()),
-            _ => Ok(()),
-        }
+        documents::delete(&self.db, DIAGRAM, &self.name(key)).map_err(io::Error::other)?;
+        Ok(())
+    }
+
+    /// The stored text of `key`, as it is (tests).
+    #[cfg(test)]
+    pub(in crate::app) fn raw(&self, key: &DiagramKey) -> Option<String> {
+        documents::get(&self.db, DIAGRAM, &self.name(key)).unwrap()
+    }
+
+    /// Stores `text` as the document of `key` without looking at it (tests: a newer build's, a
+    /// hand-edited, a torn one).
+    #[cfg(test)]
+    pub(in crate::app) fn put_raw(&self, key: &DiagramKey, text: &str) {
+        documents::put(&self.db, DIAGRAM, &self.name(key), text).unwrap();
+    }
+
+    /// How many diagrams are stored (tests).
+    #[cfg(test)]
+    pub(in crate::app) fn count(&self) -> usize {
+        documents::count(&self.db, DIAGRAM).unwrap()
     }
 }
 
-fn write_atomically(dir: &Path, path: &Path, data: &[u8]) -> io::Result<()> {
-    let temporary = dir.join(format!(".diagram-{}.tmp", uuid::Uuid::new_v4()));
-    let write = (|| -> io::Result<()> {
-        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&temporary)?;
-        file.write_all(data)?;
-        file.sync_all()?;
-        std::fs::rename(&temporary, path)
-    })();
-    if write.is_err() {
-        let _ = std::fs::remove_file(&temporary);
+/// How many diagrams the database in `dir` holds (0 when there is none yet; tests).
+#[cfg(test)]
+pub(in crate::app) fn stored_diagrams(dir: &std::path::Path) -> usize {
+    let db = dir.join(engine_storage::app_db::FILE_NAME);
+    if db.exists() {
+        documents::count(&db, DIAGRAM).unwrap()
+    } else {
+        0
     }
-    write
 }

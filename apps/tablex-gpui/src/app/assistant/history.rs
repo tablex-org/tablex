@@ -151,20 +151,21 @@ impl AppRoot {
         self.assistant_push_context(cx);
     }
 
-    /// Looks at the conversations folder once, off the UI thread: a link there is reported (once,
-    /// in the Error Log) and shown in Settings, and nothing is written or listed through it.
-    pub(in crate::app) fn assistant_check_store_root(&mut self, cx: &mut Context<Self>) {
+    /// Opens the conversations once, off the UI thread (moving the old folder of conversation
+    /// files in, the first time): a database that cannot be used, or an old file that cannot be
+    /// moved in, is reported (once, in the Error Log).
+    pub(in crate::app) fn assistant_check_store(&mut self, cx: &mut Context<Self>) {
         let Some(store) = self.assistant.store.clone() else {
             return;
         };
         cx.spawn(async move |this, cx| {
             let checked = cx
                 .background_executor()
-                .spawn(async move { store.check_root() })
+                .spawn(async move { store.check() })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if let Err(error) = checked {
-                    this.assistant_report_store_root(&error);
+                    this.assistant_report_store(&error);
                 }
                 cx.notify();
             });
@@ -172,22 +173,22 @@ impl AppRoot {
         .detach();
     }
 
-    /// A store call that found its folder unusable says so in the Error Log, once per run of the
-    /// app, whichever call found it first.
-    fn assistant_report_store_root(&mut self, error: &StoreError) {
-        if !matches!(error, StoreError::RootIsLink) {
+    /// A store call that found the database unusable says so in the Error Log, once per run of
+    /// the app, whichever call found it first.
+    fn assistant_report_store(&mut self, error: &StoreError) {
+        if !matches!(error, StoreError::Db(_)) {
             return;
         }
         if self
             .assistant
             .history
             .reported
-            .insert("root-link".to_owned())
+            .insert("store".to_owned())
         {
             self.report_error(
                 Area::App,
                 None,
-                format!("Assistant history: conversations are not kept ({error})"),
+                format!("Assistant history: the conversations cannot be used ({error})"),
             );
         }
     }
@@ -205,7 +206,7 @@ impl AppRoot {
         let history = &mut self.assistant.history;
         history.task = None;
         let mut reports = Vec::new();
-        let mut link = false;
+        let mut unusable = None;
         match listing {
             Ok(listing) => {
                 history.rows = listing
@@ -234,9 +235,10 @@ impl AppRoot {
                     }
                 }
             }
-            Err(StoreError::RootIsLink) => {
+            // The database itself: said once, not on every listing.
+            Err(error @ StoreError::Db(_)) => {
                 history.rows = Arc::from([]);
-                link = true;
+                unusable = Some(error);
             }
             Err(error) => {
                 history.rows = Arc::from([]);
@@ -245,8 +247,8 @@ impl AppRoot {
                 ));
             }
         }
-        if link {
-            self.assistant_report_store_root(&StoreError::RootIsLink);
+        if let Some(error) = unusable {
+            self.assistant_report_store(&error);
         }
         for report in reports {
             self.report_warning(Area::App, Some(connection), report);

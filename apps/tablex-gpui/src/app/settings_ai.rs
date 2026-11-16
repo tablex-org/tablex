@@ -281,12 +281,7 @@ impl AppRoot {
     /// Where conversations are kept, or why they are not.
     pub(super) fn ai_conversations_place(&self) -> String {
         match self.assistant_store() {
-            Some(store) if store.root_is_link() => format!(
-                "Not kept: {} is a link, and TableX does not use a link for this. Replace it \
-                 with a real folder.",
-                store.root().display()
-            ),
-            Some(store) => format!("Kept in {}.", store.root().display()),
+            Some(store) => format!("Kept in the app database, {}.", store.db().display()),
             None => "Nothing is kept in this window.".to_owned(),
         }
     }

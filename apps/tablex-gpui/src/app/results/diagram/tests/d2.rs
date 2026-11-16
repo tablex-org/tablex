@@ -426,7 +426,7 @@ fn annotations_round_trip_through_the_store() {
     let loaded = store.load(&key).unwrap().unwrap();
     assert_eq!(loaded.annotations(), annotations);
     assert_eq!(loaded, saved);
-    let text: serde_json::Value = serde_json::from_slice(&std::fs::read(store.path(&key)).unwrap()).unwrap();
+    let text: serde_json::Value = serde_json::from_str(&store.raw(&key).unwrap()).unwrap();
     assert_eq!(text["version"], 1, "additive fields need no version bump");
     assert_eq!(text["relations"][0]["child"]["table"], "customers");
     assert_eq!(text["notes"][0]["text"], "Check this\nsecond line");
@@ -455,7 +455,7 @@ fn a_d1_file_loads_with_empty_annotations_and_keeps_its_positions() {
             {"schema": "public", "table": "customers", "x": 7.0, "y": 8.0},
         ],
     });
-    std::fs::write(store.path(&key), d1.to_string()).unwrap();
+    store.put_raw(&key, &d1.to_string());
     let loaded = store.load(&key).unwrap().unwrap();
     assert!(loaded.annotations().is_empty());
     assert_eq!(loaded.entities.len(), 2);
@@ -485,7 +485,7 @@ fn unknown_fields_of_annotations_and_bad_colors_are_tolerated() {
         "colors": [{"table": "a", "color": "not-a-color"}, {"table": "b", "color": "#112233"}],
         "layers": [1, 2],
     });
-    std::fs::write(store.path(&key), future.to_string()).unwrap();
+    store.put_raw(&key, &future.to_string());
     let loaded = store.load(&key).unwrap().unwrap();
     let annotations = loaded.annotations();
     assert_eq!(annotations.colors.len(), 1, "the unreadable color is dropped");
@@ -497,7 +497,7 @@ fn unknown_fields_of_annotations_and_bad_colors_are_tolerated() {
     let graph = fixture();
     let layout = DiagramLayout::auto(&graph, AttributeMode::All, &metrics());
     store.save(&key, &loaded.clone().with_document(&graph, &layout, &[], &annotations, &Draft::default())).unwrap();
-    let text: serde_json::Value = serde_json::from_slice(&std::fs::read(store.path(&key)).unwrap()).unwrap();
+    let text: serde_json::Value = serde_json::from_str(&store.raw(&key).unwrap()).unwrap();
     assert_eq!(text["relations"][0]["style"], "bold");
     assert_eq!(text["notes"][0]["pinned"], true);
     assert_eq!(text["groups"][0]["icon"], "star");

@@ -18,7 +18,7 @@ mod blocks;
 mod dock;
 mod history;
 mod layers;
-mod markup;
+pub(in crate::app) mod markup;
 mod model;
 pub mod panel;
 mod records;
@@ -298,12 +298,9 @@ impl AssistantUi {
             Arc::new(ApiKeyStore::system()),
             transport,
             Arc::new(StorageRecords),
-            // `<app data dir>/assistant/conversations` (`TABLEX_DATA_DIR` moves it with the rest).
-            engine_connect::platform::app_data_dir().map(|dir| {
-                Arc::new(ConversationStore::new(
-                    dir.join("assistant").join("conversations"),
-                ))
-            }),
+            // The app database, `<app data dir>/tablex.db` (`TABLEX_DATA_DIR` moves it with the
+            // rest); the old `assistant/conversations` folder beside it is moved in on first use.
+            Some(Arc::new(ConversationStore::new(engine_storage::app_db::default_path()))),
             secrets,
         )
     }
@@ -485,7 +482,7 @@ impl AppRoot {
     /// The assistant's hooks into the app's life: a running chat is cancelled (without waiting) and
     /// the agent sessions closed, within a short bound, when the app quits.
     pub(super) fn init_assistant(&mut self, cx: &mut Context<Self>) {
-        self.assistant_check_store_root(cx);
+        self.assistant_check_store(cx);
         self.assistant._quit = Some(cx.on_app_quit(|this, cx| {
             this.flush_assistant_layout();
             #[cfg(any(test, feature = "ui-scenarios"))]
@@ -675,11 +672,7 @@ impl AppRoot {
         // Kept when the setting is on, there is a place for it and the connection exists; decided
         // again whenever the chat is synced and read when a run ends.
         let keeping = self.settings.ai.keep_conversations
-            && self
-                .assistant
-                .store
-                .as_ref()
-                .is_some_and(|store| !store.root_is_link())
+            && self.assistant.store.is_some()
             && chat
                 .read(cx)
                 .scope()

@@ -164,6 +164,12 @@ fn main() {
             if scenario.is_some() {
                 perf_diagnostics::install(cx);
             }
+            // Moves the old files into the app database (first start of a new version) on a
+            // thread of its own: the stores are ready before the first read, and a store read
+            // earlier just waits for its own import. A scenario never touches the user's data.
+            if scenario.is_none() {
+                std::thread::spawn(engine_storage::warm_up);
+            }
             app::open_with_scenario(scenario, cx);
         });
 }

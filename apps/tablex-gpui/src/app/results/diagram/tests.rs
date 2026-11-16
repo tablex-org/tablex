@@ -1745,7 +1745,7 @@ mod d1 {
     use crate::app::results::diagram::join_sql;
     use crate::app::results::diagram::layout::{hit_route, Minimap};
     use crate::app::results::diagram::notation::{route_directions, EndMark, RelationNotation};
-    use crate::app::results::diagram::store::{DiagramKey, LayoutStore, SavedDiagram, StoreError};
+    use crate::app::results::diagram::store::{DiagramKey, LayoutStore, SavedDiagram, SavedEntity, StoreError};
     use crate::sql_table::SqlDialect;
     use crate::catalog::CatalogIndex;
     use std::sync::Arc;
@@ -2249,10 +2249,10 @@ Ref: public.orders.customer_id > public.customers.id
         let graph = fixture();
         let layout = DiagramLayout::auto(&graph, AttributeMode::All, &metrics());
         let (table_key, schema_key) = (key(Some("orders")), key(None));
-        assert_ne!(store.path(&table_key), store.path(&schema_key));
+        assert_ne!(store.name(&table_key), store.name(&schema_key));
         let mut other_connection = table_key.clone();
         other_connection.connection = "c2".into();
-        assert_ne!(store.path(&table_key), store.path(&other_connection));
+        assert_ne!(store.name(&table_key), store.name(&other_connection));
 
         // A later build wrote extra fields (top level and per entity).
         std::fs::create_dir_all(&dir).unwrap();
@@ -2262,17 +2262,17 @@ Ref: public.orders.customer_id > public.customers.id
             "entities": [{"schema": "public", "table": "orders", "x": 5.0, "y": 6.0, "shape": "round"}],
             "tags": [{"text": "hello"}],
         });
-        std::fs::write(store.path(&table_key), future.to_string()).unwrap();
+        store.put_raw(&table_key, &future.to_string());
         let loaded = store.load(&table_key).unwrap().unwrap();
         assert_eq!(loaded.entities[0].extra["shape"], "round");
         let rewritten = loaded.clone().with_positions(&graph, &layout);
         store.save(&table_key, &rewritten).unwrap();
-        let text: serde_json::Value = serde_json::from_slice(&std::fs::read(store.path(&table_key)).unwrap()).unwrap();
+        let text: serde_json::Value = serde_json::from_str(&store.raw(&table_key).unwrap()).unwrap();
         assert_eq!(text["tags"][0]["text"], "hello", "top-level extras are kept");
         assert_eq!(text["entities"][0]["shape"], "round", "per-entity extras are kept");
         assert_eq!(text["entities"].as_array().unwrap().len(), 3);
         // Fields missing from an old file default.
-        std::fs::write(store.path(&schema_key), r#"{"key": {"connection":"c1","database":"db","schema":"public"}}"#).unwrap();
+        store.put_raw(&schema_key, r#"{"key": {"connection":"c1","database":"db","schema":"public"}}"#);
         assert_eq!(store.load(&schema_key).unwrap().unwrap().entities, vec![]);
         std::fs::remove_dir_all(dir).ok();
     }
@@ -2282,7 +2282,7 @@ Ref: public.orders.customer_id > public.customers.id
         let (store, dir) = temp_store();
         let key = key(Some("orders"));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(store.path(&key), r#"{"version": 99, "key": {}, "entities": []}"#).unwrap();
+        store.put_raw(&key, r#"{"version": 99, "key": {}, "entities": []}"#);
         assert!(matches!(store.load(&key), Err(StoreError::Newer(99))));
         let graph = fixture();
         let layout = DiagramLayout::auto(&graph, AttributeMode::All, &metrics());
@@ -2290,9 +2290,9 @@ Ref: public.orders.customer_id > public.customers.id
             store.save(&key, &SavedDiagram::capture(&key, &graph, &layout)),
             Err(StoreError::Newer(99))
         ));
-        assert!(std::fs::read_to_string(store.path(&key)).unwrap().contains("99"), "left untouched");
+        assert!(store.raw(&key).unwrap().contains("99"), "left untouched");
 
-        std::fs::write(store.path(&key), "{not json").unwrap();
+        store.put_raw(&key, "{not json");
         assert!(matches!(store.load(&key), Err(StoreError::Corrupt(_))));
         // A corrupt file is replaced by the next save.
         store.save(&key, &SavedDiagram::capture(&key, &graph, &layout)).unwrap();
@@ -2301,8 +2301,34 @@ Ref: public.orders.customer_id > public.customers.id
         // A file whose stored key differs (hash collision, copied file).
         let mut foreign = SavedDiagram::capture(&key, &graph, &layout);
         foreign.key.connection = "someone-else".into();
-        std::fs::write(store.path(&key), serde_json::to_vec(&foreign).unwrap()).unwrap();
+        store.put_raw(&key, &serde_json::to_string(&foreign).unwrap());
         assert_eq!(store.load(&key).unwrap(), None);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn diagrams_saved_as_files_before_are_moved_in_once_and_the_files_stay_as_they_were() {
+        let (store, dir) = temp_store();
+        let key = key(Some("orders"));
+        let saved = SavedDiagram {
+            key: key.clone(),
+            entities: vec![SavedEntity { schema: Some("public".into()), table: "orders".into(), x: 5.0, y: 6.0, ..Default::default() }],
+            ..Default::default()
+        };
+        std::fs::create_dir_all(dir.join("diagrams")).unwrap();
+        let file = dir.join("diagrams").join(format!("{}.json", store.name(&key)));
+        std::fs::write(&file, serde_json::to_vec_pretty(&saved).unwrap()).unwrap();
+        let before = std::fs::read(&file).unwrap();
+        assert_eq!(store.load(&key).unwrap(), Some(saved.clone()));
+        assert_eq!(std::fs::read(&file).unwrap(), before, "the old file is not touched");
+        // Changed and deleted in the database: the old file does not come back over it.
+        let mut moved = saved;
+        moved.entities[0].x = 99.0;
+        store.save(&key, &moved).unwrap();
+        assert_eq!(store.load(&key).unwrap(), Some(moved));
+        store.forget(&key).unwrap();
+        assert_eq!(store.load(&key).unwrap(), None);
+        assert_eq!(std::fs::read(&file).unwrap(), before);
         std::fs::remove_dir_all(dir).ok();
     }
 }
