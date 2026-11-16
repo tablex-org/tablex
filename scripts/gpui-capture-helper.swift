@@ -40,6 +40,8 @@ let allowedScenarioTitles: Set<String> = [
     "TableX UI Scenario: assistant-history",
     "TableX UI Scenario: assistant-readonly",
     "TableX UI Scenario: assistant-editor-action",
+    "TableX UI Scenario: updates",
+    "TableX UI Scenario: updates-changelog",
 ]
 
 struct HelperError: Error {

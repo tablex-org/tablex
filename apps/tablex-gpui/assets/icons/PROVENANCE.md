@@ -110,3 +110,9 @@ them the panel's case, replace-mode and previous-match buttons are empty squares
 `sun.svg`, `moon.svg` and `monitor.svg` (the Light / Dark / System entries and the
 button of the title bar's theme picker) are copied verbatim from the pinned
 `gpui-kit-assets 0.8.0` Lucide set, ISC licensed like the glyphs above.
+
+## Title bar update glyph
+
+`cloud-download.svg` (the title bar's "Updates" button, left of the theme picker) is
+copied verbatim from the pinned `gpui-kit-assets 0.8.0` Lucide set, ISC licensed like
+the glyphs above.

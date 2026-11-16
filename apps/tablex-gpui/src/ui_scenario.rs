@@ -224,6 +224,10 @@ pub enum ScenarioKind {
     SettingsAi,
     /// Settings on the AI Assistant page with Ollama selected, a model chosen and an optional key.
     SettingsAiOllama,
+    /// The Update Center on its TableX tab: a newer release with its notes.
+    Updates,
+    /// The Update Center on its Changelog tab.
+    UpdatesChangelog,
 }
 
 impl ScenarioKind {
@@ -264,6 +268,8 @@ impl ScenarioKind {
             Self::AssistantEditorAction => "assistant-editor-action",
             Self::SettingsAi => "settings-ai",
             Self::SettingsAiOllama => "settings-ai-ollama",
+            Self::Updates => "updates",
+            Self::UpdatesChangelog => "updates-changelog",
         }
     }
 
@@ -309,6 +315,8 @@ impl ScenarioKind {
             "assistant-editor-action" => Self::AssistantEditorAction,
             "settings-ai" => Self::SettingsAi,
             "settings-ai-ollama" => Self::SettingsAiOllama,
+            "updates" => Self::Updates,
+            "updates-changelog" => Self::UpdatesChangelog,
             _ => return None,
         })
     }
@@ -397,7 +405,7 @@ impl UiScenario {
                     }
                     let Some(kind) = ScenarioKind::parse(value) else {
                         return Err(format!(
-                            "unsupported UI scenario '{value}'; expected new-connection, connection-tree, connection-overview, result-grid, result-footer, mongo-grid, table-diagram, database-diagram, table-properties-edit, driver-manager, driver-manager-tools, missing-driver, split-panes, split-panes-drop, grouped-tabs, grouped-tabs-lone, settings, settings-shortcuts, connection-overrides, import-selection, redis, assistant, assistant-streaming, assistant-no-key, assistant-access-off, assistant-error, assistant-approval, assistant-approval-dangerous, assistant-approval-long, assistant-access-write, assistant-history, assistant-readonly, assistant-editor-action, settings-ai, or settings-ai-ollama"
+                            "unsupported UI scenario '{value}'; expected new-connection, connection-tree, connection-overview, result-grid, result-footer, mongo-grid, table-diagram, database-diagram, table-properties-edit, driver-manager, driver-manager-tools, missing-driver, split-panes, split-panes-drop, grouped-tabs, grouped-tabs-lone, settings, settings-shortcuts, connection-overrides, import-selection, redis, assistant, assistant-streaming, assistant-no-key, assistant-access-off, assistant-error, assistant-approval, assistant-approval-dangerous, assistant-approval-long, assistant-access-write, assistant-history, assistant-readonly, assistant-editor-action, settings-ai, settings-ai-ollama, updates, or updates-changelog"
                         ));
                     };
                     scenario = Some(kind);
@@ -779,6 +787,8 @@ mod tests {
             ),
             ("settings-ai", ScenarioKind::SettingsAi),
             ("settings-ai-ollama", ScenarioKind::SettingsAiOllama),
+            ("updates", ScenarioKind::Updates),
+            ("updates-changelog", ScenarioKind::UpdatesChangelog),
         ] {
             let scenario = UiScenario::from_args([
                 "tablex-gpui",

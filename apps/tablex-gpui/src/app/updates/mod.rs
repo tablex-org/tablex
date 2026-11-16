@@ -4,6 +4,7 @@
 //! besides the launch check and the command; nothing is sent but the requests for the latest release
 //! and, when one is newer, its update manifest. Nothing is installed without a click.
 
+pub(super) mod center;
 pub(super) mod check;
 pub(super) mod install;
 
@@ -29,7 +30,7 @@ pub(in crate::app) type Quitter = Box<dyn Fn(&mut gpui::App)>;
 
 /// What the notice for a newer release offers.
 #[derive(Clone)]
-struct Offer {
+pub(in crate::app) struct Offer {
     release: Release,
     /// A verified artifact and the bundle to replace: Install & Restart. Without: Download.
     install: Option<(Artifact, Bundle)>,
@@ -49,7 +50,8 @@ pub(super) struct UpdateUi {
     pub(in crate::app) current: String,
     /// Debug builds never check on their own.
     pub(in crate::app) debug_build: bool,
-    /// `<app data dir>/update-check.json`; none in a scenario (nothing is written there).
+    /// The app database (`<app data dir>/tablex.db`, which keeps the update-check state); none in a
+    /// scenario (nothing is written there).
     pub(in crate::app) state_path: Option<std::path::PathBuf>,
     /// The check in flight; a newer request replaces it.
     pub(in crate::app) task: Option<gpui::Task<()>>,
@@ -69,6 +71,8 @@ pub(super) struct UpdateUi {
     /// bundle, which is moved aside: no further check or install until it has been restarted.
     pending_restart: Option<check::Version>,
     install: Option<InstallRun>,
+    /// The Update Center: what the dialog shows, besides the above.
+    pub(in crate::app) center: center::UpdateCenter,
     pub(in crate::app) install_task: Option<gpui::Task<()>>,
     /// Repaints the progress of the install.
     ticker: Option<gpui::Task<()>>,
@@ -93,10 +97,7 @@ impl UpdateUi {
             },
             current: env!("CARGO_PKG_VERSION").to_owned(),
             debug_build: cfg!(debug_assertions),
-            state_path: (!isolated)
-                .then(crate::platform::app_data_dir)
-                .flatten()
-                .map(|dir| dir.join("update-check.json")),
+            state_path: (!isolated).then(engine_storage::app_db::default_path),
             task: None,
             opener: Box::new(|url, cx| cx.open_url(url)),
             source: if isolated { Arc::new(install::OfflineSource) } else { Arc::new(install::HttpSource) },
@@ -116,6 +117,7 @@ impl UpdateUi {
             quit: Box::new(|cx| cx.dispatch_action(&super::menus::Quit)),
             pending_restart: None,
             install: None,
+            center: center::UpdateCenter::new(),
             install_task: None,
             ticker: None,
             #[cfg(test)]
@@ -138,9 +140,16 @@ impl AppRoot {
         }
     }
 
-    /// "Check for Updates": always asks, and always says what it found.
+    /// "Check for Updates": opens the Update Center, which asks and says what it found (a notice
+    /// when there is no window to open it in).
     pub(super) fn check_for_updates(&mut self, cx: &mut Context<Self>) {
-        self.start_update_check(Mode::Manual, cx);
+        let root = cx.entity().downgrade();
+        let opened = self.with_ui_window(cx, move |window, cx| {
+            let _ = root.update(cx, |this, cx| this.open_update_center(window, true, cx));
+        });
+        if !opened {
+            self.start_update_check(Mode::Manual, cx);
+        }
     }
 
     /// On a launch: what an earlier update left beside the app (the previous bundle, unpacked or
@@ -171,6 +180,7 @@ impl AppRoot {
             }
             return;
         }
+        self.update_ui.center.checking_started();
         let fetcher = Arc::clone(&self.update_ui.fetcher);
         let source = Arc::clone(&self.update_ui.source);
         let trust = self.update_ui.trust.clone();
@@ -229,6 +239,7 @@ impl AppRoot {
                 self.show_update_notice(offer, cx)
             }
             (Outcome::Failed(error), Mode::Auto) => {
+                self.update_ui.center.status = center::Status::Failed(error.clone());
                 // Silent for the user; the Error Log keeps an Info entry.
                 let report = crate::error_log::Report::new(
                     crate::error_log::Severity::Info,
@@ -237,20 +248,28 @@ impl AppRoot {
                 );
                 self.report_event(None, report);
             }
-            (Outcome::Failed(error), Mode::Manual) => self.show_update_message(
-                NotificationType::Error,
-                format!("Couldn't check for updates: {error}"),
-                cx,
-            ),
-            (Outcome::UpToDate, Mode::Manual) => {
-                let message = format!("You're up to date ({})", self.update_ui.current);
-                self.show_update_message(NotificationType::Success, message, cx);
+            (Outcome::Failed(error), Mode::Manual) => {
+                let message = format!("Couldn't check for updates: {error}");
+                self.update_ui.center.status = center::Status::Failed(error);
+                self.show_update_message(NotificationType::Error, message, cx)
             }
-            (Outcome::UpToDate | Outcome::NotDue, Mode::Auto) | (Outcome::NotDue, Mode::Manual) => {}
+            (Outcome::UpToDate, mode) => {
+                self.update_ui.center.status = center::Status::UpToDate;
+                if mode == Mode::Manual {
+                    let message = format!("You're up to date ({})", self.update_ui.current);
+                    self.show_update_message(NotificationType::Success, message, cx);
+                }
+            }
+            (Outcome::NotDue, _) => {}
         }
+        cx.notify();
     }
 
+    /// A notice, unless the Update Center is open: it shows the same itself.
     fn show_update_message(&mut self, kind: NotificationType, message: String, cx: &mut Context<Self>) {
+        if self.update_ui.center.open {
+            return;
+        }
         #[cfg(test)]
         self.update_ui.shown.push(message.clone());
         self.with_ui_window(cx, move |window, cx| {
@@ -262,6 +281,10 @@ impl AppRoot {
     /// install) or Download, then Later and Skip This Version. It stays until one of them (or its
     /// close button) is used.
     fn show_update_notice(&mut self, offer: Offer, cx: &mut Context<Self>) {
+        self.update_ui.center.status = center::Status::Available(offer.clone());
+        if self.update_ui.center.open {
+            return;
+        }
         let title = format!("TableX {} is available", offer.release.version);
         #[cfg(test)]
         self.update_ui.shown.push(title.clone());
@@ -321,7 +344,10 @@ impl AppRoot {
         let run = InstallRun { progress: Arc::default(), cancel: Arc::default() };
         let (progress, cancel) = (Arc::clone(&run.progress), Arc::clone(&run.cancel));
         self.update_ui.install = Some(run);
-        self.show_install_progress(&offer.release.version, Arc::clone(&progress), Arc::clone(&cancel), cx);
+        // The Update Center shows the progress itself.
+        if !self.update_ui.center.open {
+            self.show_install_progress(&offer.release.version, Arc::clone(&progress), Arc::clone(&cancel), cx);
+        }
 
         let source = Arc::clone(&self.update_ui.source);
         let (version, target, current) = (offer.release.version.clone(), self.update_ui.target, self.update_ui.current.clone());
@@ -434,6 +460,9 @@ impl AppRoot {
     /// "Restart to finish updating": the new version is in place. Restart quits (asking first about
     /// open work, as Quit does) and the new version starts.
     fn show_restart_notice(&mut self, version: &check::Version, cx: &mut Context<Self>) {
+        if self.update_ui.center.open {
+            return;
+        }
         let title = format!("TableX {version} is installed");
         #[cfg(test)]
         self.update_ui.shown.push(title.clone());
