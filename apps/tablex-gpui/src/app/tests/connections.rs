@@ -40,8 +40,54 @@ fn runtime_uri_for_form_prefers_a_password_embedded_in_the_uri() {
     };
 
     assert_eq!(
-        runtime_uri_for_form(&form, Some(&original)).unwrap().expose_for_test(),
+        runtime_uri_for_form(&form, Some(&original), &Default::default()).unwrap().expose_for_test(),
         "postgresql://alice:new%40password@localhost/app"
+    );
+}
+
+#[test]
+fn runtime_uri_for_form_uses_the_password_typed_earlier_in_this_run_for_an_unchanged_connection() {
+    let id = "22222222-2222-4222-8222-222222222222";
+    let original = engine_storage::connection::SavedConnectionRecord {
+        id: id.to_uppercase(),
+        name: "Typed earlier".to_string(),
+        uri: "postgresql://alice@localhost/app".to_string(),
+        db_type: crate::connections::DB_TYPE_POSTGRESQL.to_string(),
+        color_hex: "#34C759".to_string(),
+        save_password: false,
+        save_proxy_password: false,
+        network_settings_json: "{}".to_string(),
+        is_pinned: false,
+        last_connected: None,
+        created_at: 1.0,
+        updated_at: 1.0,
+        connection_type: String::new(),
+        overrides_json: String::new(),
+    };
+    let form = ConnectionFormState {
+        name: "Typed earlier".to_string(),
+        kind: ConnectionKind::Postgres,
+        uri: "postgresql://alice@localhost/app".to_string(),
+        save_password: false,
+        use_uri: true,
+        ..Default::default()
+    };
+    let session = engine_connect::session_passwords::SessionPasswords::default();
+    // Nothing typed yet: the form's own address, no password.
+    assert_eq!(
+        runtime_uri_for_form(&form, Some(&original), &session).unwrap().expose_for_test(),
+        "postgresql://alice@localhost/app"
+    );
+    session.set(id, "s3 cret");
+    assert_eq!(
+        runtime_uri_for_form(&form, Some(&original), &session).unwrap().expose_for_test(),
+        "postgresql://alice:s3%20cret@localhost/app"
+    );
+    // Another host is another connection: the password does not follow.
+    let moved = ConnectionFormState { uri: "postgresql://alice@elsewhere.example.com/app".to_string(), ..form };
+    assert_eq!(
+        runtime_uri_for_form(&moved, Some(&original), &session).unwrap().expose_for_test(),
+        "postgresql://alice@elsewhere.example.com/app"
     );
 }
 

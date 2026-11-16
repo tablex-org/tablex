@@ -193,6 +193,14 @@ impl AppRoot {
 
     // ---- read, reconnect, retry once ------------------------------------------------------------
 
+    /// Runs a reconnect nobody asked for: a connection whose password was never typed in this run ends
+    /// in "Password required" instead of opening the password prompt.
+    pub(super) fn without_prompts(&mut self, reconnect: impl FnOnce(&mut Self)) {
+        let before = std::mem::replace(&mut self.connection_ui.background_connect, true);
+        reconnect(self);
+        self.connection_ui.background_connect = before;
+    }
+
     /// `connection` lost its session under a request that may be sent again: it reconnects. `false`
     /// when nobody should (the user disconnected it, or there is no such connection).
     fn reconnect_for_retry(&mut self, connection: &str) -> bool {
@@ -236,7 +244,7 @@ impl AppRoot {
         self.recovery.retried_runs.insert(tab_id, run);
         // The failed attempt's task and operation go; the run itself stays the tab's live run.
         self.finish_query_task(tab_id, run);
-        self.connect_then_run_sql(run, request.clone(), cx);
+        self.without_prompts(|this| this.connect_then_run_sql(run, request.clone(), cx));
         true
     }
 
@@ -274,7 +282,7 @@ impl AppRoot {
         }
         // Reopening the session resets the connection's tree (so the node has no load to register
         // for); the node is expanded again, and loaded, once the new session is up.
-        self.ensure_connected(connection.clone(), None, cx);
+        self.without_prompts(|this| this.ensure_connected(connection.clone(), None, cx));
         self.navigator_ui.pending_loads.entry(connection).or_default().push((request.clone(), 0));
         true
     }
@@ -306,7 +314,7 @@ impl AppRoot {
             self.recovery.retried_tabs.remove(&tab_id);
             return false;
         }
-        self.ensure_connected(connection, None, cx);
+        self.without_prompts(|this| this.ensure_connected(connection, None, cx));
         true
     }
 

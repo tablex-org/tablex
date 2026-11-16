@@ -57,6 +57,7 @@ mod completion;
 mod connection_menu;
 mod connection_menu_view;
 mod connection_overview;
+mod another_user;
 mod connection_policy;
 mod connection_ui;
 mod data_import;
@@ -82,6 +83,7 @@ mod process_list;
 mod recovery;
 mod redis;
 mod remote_search;
+mod reset_passwords;
 mod results;
 mod scenario;
 mod script_run;
@@ -369,20 +371,29 @@ impl AppRoot {
                 })
         });
         let ui_scenario = scenario.clone().map(FixtureService::new);
+        let mut connection_load_error: Option<String> = None;
         let (saved_connections, connection_policy) = if let Some(service) = ui_scenario.as_ref() {
             (
                 service.saved_connections().to_vec(),
                 connection_policy::ConnectionPolicy::default(),
             )
         } else {
-            let records = crate::connections::load_saved_records();
+            let records = crate::connections::try_load_saved_records().unwrap_or_else(|error| {
+                connection_load_error = Some(format!("Could not read the saved connections: {error}"));
+                Vec::new()
+            });
             (
                 records.iter().map(SavedConnection::from_record).collect(),
                 connection_policy::ConnectionPolicy::from_records(&records),
             )
         };
         let mut navigator = NavigatorState::new(saved_connections.clone());
-        let sidebar = sidebar::SidebarState::new(scenario_enabled, &mut navigator, cx);
+        navigator.set_database_scopes(connection_policy.database_scopes(&saved_connections));
+        let mut sidebar = sidebar::SidebarState::new(scenario_enabled, &mut navigator, cx);
+        // An empty list that is an error says so (it is reported at start, with the other problems).
+        if let Some(error) = connection_load_error {
+            sidebar.error.get_or_insert(error);
+        }
         let settings_path =
             settings_state::resolve_settings_path(scenario_enabled, sidebar.path.as_deref());
         let workspace = WorkspaceState::default();
@@ -411,7 +422,12 @@ impl AppRoot {
             driver_data_dir.path,
         ));
         let (mut tunnel_ui, tunnel_prompts) = tunnel_ui::TunnelUi::new(scenario_enabled);
-        tunnel_ui.attach_agent(Arc::clone(&driver_store));
+        let connection_ui = connection_ui::ConnectionUiState::default();
+        tunnel_ui.attach_agent(
+            Arc::clone(&driver_store),
+            Arc::clone(&connection_ui.credentials),
+            connection_ui.session_passwords.clone(),
+        );
         let assistant = assistant::AssistantUi::production(
             tunnel_ui.agent.clone(),
             scenario_enabled || cfg!(test),
@@ -453,7 +469,7 @@ impl AppRoot {
             transfer_create: Default::default(),
             navigator,
             sessions: ConnectionSessions::default(),
-            connection_ui: connection_ui::ConnectionUiState::default(),
+            connection_ui,
             filter_enumeration: connection_menu::FilterEnumerationState::default(),
             saved_sql_ui: {
                 let mut state = connection_menu::SavedSqlUiState::default();
@@ -465,7 +481,7 @@ impl AppRoot {
                 state
             },
             history_popup: None,
-            import_store: if scenario_enabled {
+            import_store: if scenario_enabled || cfg!(test) {
                 Arc::new(crate::connection_import::store::MemoryImportStore::default())
             } else {
                 Arc::new(crate::connection_import::store::SystemImportStore)
@@ -632,6 +648,10 @@ impl AppRoot {
             Some(crate::ui_scenario::ScenarioKind::SettingsShortcuts) => {
                 app.seed_settings_shortcuts_scenario();
             }
+            #[cfg(any(test, feature = "ui-scenarios"))]
+            Some(kind @ (crate::ui_scenario::ScenarioKind::Updates | crate::ui_scenario::ScenarioKind::UpdatesChangelog)) => {
+                app.seed_updates_scenario(kind == crate::ui_scenario::ScenarioKind::UpdatesChangelog, cx)
+            }
             _ => {}
         }
         if matches!(
@@ -771,6 +791,9 @@ mod tests {
     include!("tests/connection_types.rs");
     include!("tests/connection_tls.rs");
     include!("tests/ssh_tunnel.rs");
+    include!("tests/session_password.rs");
+    include!("tests/database_scope.rs");
+    include!("tests/reset_passwords.rs");
     include!("tests/ssh_tunnel_live.rs");
     include!("tests/transactions.rs");
     include!("tests/transactions_smart.rs");

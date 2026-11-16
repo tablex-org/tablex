@@ -326,7 +326,15 @@ impl AppRoot {
     /// saved is only there) and the tunnel's settings. The credential store is read later, on the worker.
     fn tool_connection(&self, connection: &str) -> Result<ToolConnection, GateError> {
         let saved = self.saved_connections.iter().find(|saved| saved.matches_id(connection)).cloned().ok_or(GateError::Gone)?;
-        Ok(ToolConnection { live_uri: self.driver_runtime.session_uris.get(connection).cloned(), tunnel: self.secondary_tunnel_access(connection), saved })
+        // The open session's own address, else the one the typed-for-this-run password makes; a saved
+        // password is read from the credential store on the worker.
+        let live_uri = self
+            .driver_runtime
+            .session_uris
+            .get(connection)
+            .cloned()
+            .or_else(|| self.connection_ui.session_passwords.runtime_uri(&saved)?.ok());
+        Ok(ToolConnection { live_uri, tunnel: self.secondary_tunnel_access(connection), saved })
     }
 
     /// Run: refuses a restore on a connection that went read-only, asks a Production one, then runs.

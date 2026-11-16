@@ -1,6 +1,6 @@
 use super::Area;
 use crate::connections::{self, ConnectionKind, SavedConnection};
-use crate::credentials::{CredentialStore, SecretKind, SystemStore};
+use crate::credentials::{CredentialStore, SecretKind};
 use crate::query_mode::{QueryMode, QueryModeExt};
 use engine_driver_api::Capability;
 use std::collections::HashMap;
@@ -380,7 +380,7 @@ pub fn copy_saved_connection_info(
     item: CopyInfo,
 ) -> Result<String, String> {
     copy_info(conn, item, |account| {
-        let store = SystemStore::new();
+        let store = crate::credentials::default_store();
         let load = |account: &str| store.load(SecretKind::Database, account).ok().flatten();
         load(account).or_else(|| load(&account.to_lowercase()))
     })

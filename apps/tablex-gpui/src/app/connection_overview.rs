@@ -622,21 +622,45 @@ impl AppRoot {
                 }))
                 .into_any_element()
         };
+        let connection = saved.id.to_string();
+        let enter_password_button = || {
+            let connection = connection.clone();
+            Button::new(("connection-enter-password", tab_id))
+                .debug_selector(|| "connection-enter-password".into())
+                .label("Enter Password")
+                .small()
+                .primary()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.enter_password(&connection, cx);
+                }))
+                .into_any_element()
+        };
         match state {
             ConnectionTabState::Connecting => message_panel("Connecting\u{2026}"),
-            ConnectionTabState::PasswordRequired => state_panel(
-                Icon::new(IconName::TriangleAlert).text_color(theme::warning()),
-                "Password required",
-                Some(text_line("Re-enter the password and save the connection.")),
-                vec![edit("connection-edit-password", "Edit Connection", true, true)],
-            ),
+            ConnectionTabState::PasswordRequired => {
+                let mut actions = Vec::new();
+                if !saved.save_password {
+                    actions.push(enter_password_button());
+                }
+                let primary = actions.is_empty();
+                actions.push(edit("connection-edit-password", "Edit Connection", primary, true));
+                state_panel(
+                    Icon::new(IconName::TriangleAlert).text_color(theme::warning()),
+                    "Password required",
+                    Some(text_line("Re-enter the password and save the connection.")),
+                    actions,
+                )
+            }
             ConnectionTabState::Failed(error) => {
                 let message = error.clone();
+                let message_for_reset = error.clone();
                 state_panel(
                     Icon::new(IconName::TriangleAlert).text_color(theme::danger()),
                     "Connection failed",
                     Some(selectable_error(error, tab_id, error_scroll)),
-                    vec![
+                    std::iter::empty()
+                        .chain((!saved.save_password).then(enter_password_button))
+                        .chain([
                         Button::new(("connection-failed-retry", tab_id))
                             .debug_selector(|| "connection-failed-retry".into())
                             .label("Retry")
@@ -655,7 +679,20 @@ impl AppRoot {
                             })
                             .into_any_element(),
                         edit("connection-failed-edit", "Edit", false, false),
-                    ],
+                    ])
+                        // The saved passwords cannot be read at all (their master key is gone):
+                        // the way out is the same action as in the command palette.
+                        .chain(crate::credentials::suggests_reset(&message_for_reset).then(|| {
+                            Button::new(("connection-failed-reset-passwords", tab_id))
+                                .debug_selector(|| "connection-failed-reset-passwords".into())
+                                .label("Reset Saved Passwords\u{2026}")
+                                .small()
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.confirm_reset_saved_passwords(window, cx);
+                                }))
+                                .into_any_element()
+                        }))
+                        .collect(),
                 )
             }
             _ => state_panel(

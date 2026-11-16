@@ -1,11 +1,11 @@
 use super::navigator_ui::SidebarGlyph;
 use super::tunnel_ui;
 use super::*;
-use crate::credentials::{CredentialStore, SecretKind, SystemStore};
+use crate::credentials::{CredentialStore, SecretKind};
 use engine_connect::connect::Connection;
 use engine_connect::records::RuntimeUri;
+use engine_connect::session_passwords::SessionPasswords;
 
-#[derive(Default)]
 pub(super) struct ConnectionUiState {
     pub(super) test_generation: u64,
     pub(super) test_in_flight: std::rc::Rc<std::cell::Cell<bool>>,
@@ -15,6 +15,59 @@ pub(super) struct ConnectionUiState {
     /// Inputs of the most recently opened dialog (tests inspect field state).
     #[cfg(test)]
     pub(super) last_inputs: Option<ConnectionDialogInputs>,
+    /// Where saved passwords live: the OS store (tests hand the app a store of their own).
+    pub(super) credentials: Arc<dyn CredentialStore + Send + Sync>,
+    /// The passwords typed for connections that do not save theirs: in memory for this run only.
+    /// Every [`Connector`](engine_connect::connect::Connector) of the app reads them (see
+    /// [`AppRoot::connector`]).
+    pub(super) session_passwords: SessionPasswords,
+    /// A connect nobody asked for (a recovery) is running: it never opens a password prompt.
+    pub(super) background_connect: bool,
+}
+
+impl Default for ConnectionUiState {
+    fn default() -> Self {
+        Self {
+            test_generation: 0,
+            test_in_flight: Default::default(),
+            rerun_on_activate: HashSet::new(),
+            #[cfg(test)]
+            last_inputs: None,
+            // Tests never reach the OS credential store: an in-memory one stands in.
+            #[cfg(not(test))]
+            credentials: crate::credentials::default_store(),
+            #[cfg(test)]
+            credentials: Arc::new(MemoryCredentials::default()),
+            session_passwords: SessionPasswords::default(),
+            background_connect: false,
+        }
+    }
+}
+
+/// The credential store of a test build: kept in memory, so no test reads or writes the Keychain.
+#[cfg(test)]
+#[derive(Default)]
+pub(super) struct MemoryCredentials(
+    std::sync::Mutex<std::collections::HashMap<(SecretKind, String), String>>,
+);
+
+#[cfg(test)]
+impl CredentialStore for MemoryCredentials {
+    fn load(&self, kind: SecretKind, account: &str) -> Result<Option<String>, crate::credentials::CredentialError> {
+        Ok(self.0.lock().unwrap().get(&(kind, account.to_owned())).cloned())
+    }
+    fn write(&self, kind: SecretKind, account: &str, password: &str) -> Result<(), crate::credentials::CredentialError> {
+        self.0.lock().unwrap().insert((kind, account.to_owned()), password.to_owned());
+        Ok(())
+    }
+    fn delete(&self, kind: SecretKind, account: &str) -> Result<(), crate::credentials::CredentialError> {
+        self.0.lock().unwrap().remove(&(kind, account.to_owned()));
+        Ok(())
+    }
+    fn reset(&self) -> Result<Vec<String>, crate::credentials::CredentialError> {
+        self.0.lock().unwrap().clear();
+        Ok(Vec::new())
+    }
 }
 
 /// A driver session that is open, with the SSH tunnel it connected through: what the
@@ -115,7 +168,24 @@ pub(super) fn connection_dialog_height(viewport_height: gpui::Pixels) -> gpui::P
 pub(super) fn runtime_uri_for_form(
     form: &ConnectionFormState,
     original_record: Option<&engine_storage::connection::SavedConnectionRecord>,
+    session: &SessionPasswords,
 ) -> Result<RuntimeUri, String> {
+    // Nothing typed, nothing saved, but typed earlier in this run for the same connection.
+    if form.kind != ConnectionKind::Sqlite
+        && form.password.is_empty()
+        && form.password_from_uri().is_none_or(|password| password.is_empty())
+        && !form.save_password
+    {
+        if let Some(record) = original_record {
+            if !record.save_password
+                && crate::connections::persisted_uris_match(form.kind, &record.uri, &form.persisted_uri()?)
+            {
+                if let Some(uri) = session.runtime_uri(&SavedConnection::from_record(record)) {
+                    return uri;
+                }
+            }
+        }
+    }
     if form.kind != ConnectionKind::Sqlite
         && form.password.is_empty()
         && form
@@ -217,19 +287,20 @@ fn save_connection_record(
     form: &ConnectionFormState,
     record: engine_storage::connection::SavedConnectionRecord,
     original_record: Option<&engine_storage::connection::SavedConnectionRecord>,
+    store: &Arc<dyn CredentialStore + Send + Sync>,
 ) -> Result<(), String> {
     engine_storage::connection::upsert_connection(&record)
         .map_err(|error| format!("Could not save connection: {error}"))?;
     {
         if form.save_password && !form.password.is_empty() {
-            SystemStore::new()
+            store
                 .save(SecretKind::Database, &record.id, &form.password)
                 .map_err(|error| format!("Could not save connection password: {error}"))?;
         } else if !form.save_password
             || original_record
                 .is_some_and(|original| original.save_password && !record.save_password)
         {
-            SystemStore::new()
+            store
                 .delete(SecretKind::Database, &record.id)
                 .map_err(|error| format!("Could not clear connection password: {error}"))?;
         }
@@ -242,11 +313,11 @@ fn save_connection_record(
         if original_record.is_some_and(|original| {
             crate::ssh_tunnel::SshSettings::parse(&original.network_settings_json).is_err()
         }) {
-            crate::ssh_tunnel::clear_route_secrets(&SystemStore::new(), &record.id)
+            crate::ssh_tunnel::clear_route_secrets(store, &record.id)
                 .map_err(|error| format!("Could not clear SSH secrets: {error}"))?;
         }
         crate::ssh_tunnel::persist_secrets(
-            &SystemStore::new(),
+            store,
             &record.id,
             old.as_ref(),
             ssh,
@@ -262,6 +333,7 @@ fn read_and_save_dialog_form(
     initial_form: ConnectionFormState,
     original_record: Option<&engine_storage::connection::SavedConnectionRecord>,
     require_password: bool,
+    store: &Arc<dyn CredentialStore + Send + Sync>,
     cx: &gpui::App,
 ) -> Result<ConnectionFormState, String> {
     let mut form = inputs.read_form(cx, initial_form);
@@ -269,7 +341,7 @@ fn read_and_save_dialog_form(
         form.validate_recovery()?;
     }
     let record = form.to_record(current_time(), original_record)?;
-    save_connection_record(&form, record, original_record)?;
+    save_connection_record(&form, record, original_record, store)?;
     Ok(form)
 }
 
@@ -313,7 +385,21 @@ impl AppRoot {
             }
         }
 
-        if self.prompt_missing_driver(&saved, &uri_override, attempt, cx) {
+        self.continue_connect(saved, uri_override, attempt, cx);
+    }
+
+    /// The connect attempt `attempt` of `saved`, past the status bookkeeping: a password nobody typed
+    /// yet is asked for first, then a missing driver, then the connect itself.
+    pub(super) fn continue_connect(
+        &mut self,
+        saved: SavedConnection,
+        uri_override: Option<RuntimeUri>,
+        attempt: u64,
+        cx: &mut Context<Self>,
+    ) {
+        if self.ask_password_for_attempt(&saved, &uri_override, attempt, cx)
+            || self.prompt_missing_driver(&saved, &uri_override, attempt, cx)
+        {
             return;
         }
         self.run_driver_connect(saved, uri_override, attempt, cx);
@@ -587,7 +673,23 @@ impl AppRoot {
         let refresh = move |cx: &mut gpui::App| {
             let _ = window.update(cx, |_, window, _| window.refresh());
         };
-        let runtime_uri = match runtime_uri_for_form(&form, original_record.as_ref()) {
+        // A password typed for an existing connection that does not save it is kept for this run.
+        if let Some(record) = original_record.as_ref().filter(|record| {
+            !form.save_password
+                && !form.password.is_empty()
+                && form.persisted_uri().is_ok_and(|uri| {
+                    crate::connections::persisted_uris_match(form.kind, &record.uri, &uri)
+                })
+        }) {
+            self.connection_ui
+                .session_passwords
+                .set(&record.id, &form.password);
+        }
+        let runtime_uri = match runtime_uri_for_form(
+            &form,
+            original_record.as_ref(),
+            &self.connection_ui.session_passwords,
+        ) {
             Ok(uri) => uri,
             Err(error) => {
                 *status.borrow_mut() = TestStatus::Failure(error);
@@ -940,13 +1042,35 @@ impl AppRoot {
             .border_color(theme::border())
             .text_size(px(12.0))
             .text_color(theme::text_muted())
-            .child(Icon::new(SidebarGlyph::Connected).size(px(14.0)))
+            .child(
+                Icon::new(SidebarGlyph::Connected)
+                    .size(px(14.0))
+                    .text_color(if connecting { theme::text_muted() } else { theme::warning() }),
+            )
             .child(div().flex_1().min_w_0().truncate().child(label))
+            // Small buttons sized to the 32 px strip; the full-size ones belong to the centered card.
             .when(!connecting, |this| {
-                this.child(self.reconnect_button(tab_id, cx))
+                this.child(
+                    Button::new(("connection-lost-reconnect", tab_id))
+                        .debug_selector(|| "connection-lost-reconnect".into())
+                        .icon(Icon::new(SidebarGlyph::Connected).size(px(12.0)))
+                        .label("Reconnect")
+                        .with_size(gpui_component::Size::XSmall)
+                        .outline()
+                        .compact()
+                        .h(px(24.0))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.retry_connection(tab_id, cx);
+                        })),
+                )
             })
             .when(failed, |this| {
-                this.child(self.edit_connection_button(tab_id, saved, require_password, cx))
+                this.child(
+                    self.edit_connection_button(tab_id, saved, require_password, cx)
+                        .with_size(gpui_component::Size::XSmall)
+                        .ghost()
+                        .h(px(24.0)),
+                )
             })
             .into_any_element()
     }
@@ -1252,6 +1376,17 @@ impl AppRoot {
         saved: Vec<SavedConnection>,
         cx: &mut Context<Self>,
     ) {
+        // A password typed for this run belongs to the connection as it was: another address or
+        // user, or no connection at all, and it is gone.
+        for old in &self.saved_connections {
+            let changed = saved
+                .iter()
+                .find(|new| new.id == old.id)
+                .is_none_or(|new| new.uri != old.uri || new.kind != old.kind);
+            if changed {
+                self.connection_ui.session_passwords.clear(&old.id.to_string());
+            }
+        }
         self.saved_connections = saved;
         let live: HashSet<_> = self
             .saved_connections
@@ -1272,6 +1407,9 @@ impl AppRoot {
         self.release_idle_own_sessions(cx);
         self.navigator
             .set_connections(self.saved_connections.clone());
+        self.navigator.set_database_scopes(
+            self.connection_policy.database_scopes(&self.saved_connections),
+        );
         self.reconcile_sidebar_placements(cx);
         cx.notify();
     }
@@ -1398,7 +1536,8 @@ impl AppRoot {
         // the connection and of each jump host): never on the UI thread.
         let cleanup = cx.background_executor().spawn({
             let storage_id = storage_id.clone();
-            async move { smol::unblock(move || SystemStore::new().delete_all(&storage_id)).await }
+            let store = Arc::clone(&self.connection_ui.credentials);
+            async move { smol::unblock(move || store.delete_all(&storage_id)).await }
         });
         cx.spawn(async move |this, cx| {
             let Err(error) = cleanup.await else { return };
@@ -1471,12 +1610,26 @@ impl AppRoot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_connection_dialog_for(existing, None, require_password, window, cx);
+    }
+
+    /// The connection dialog: of `existing` (an edit), a new connection (`None`), or - with
+    /// `another_user` - a new connection to the same server as `existing`, see
+    /// [`super::another_user`].
+    pub(super) fn open_connection_dialog_for(
+        &mut self,
+        existing: Option<SavedConnection>,
+        another_user: Option<super::another_user::AnotherUser>,
+        require_password: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.invalidate_connection_test();
         let mut form = existing
             .as_ref()
             .map(ConnectionFormState::from_saved)
             .unwrap_or_else(|| ConnectionFormState::new(ConnectionKind::Postgres));
-        let original_record = if self.scenario_ui.service.is_some() {
+        let mut original_record = if self.scenario_ui.service.is_some() {
             None
         } else {
             existing.as_ref().and_then(|saved| {
@@ -1524,7 +1677,25 @@ impl AppRoot {
                 })
                 .unwrap_or_default(),
         });
+        // A new connection to the same server: nothing of the source's own record, credentials or
+        // agent access comes along.
+        if let (Some(source), Some(another)) = (existing.as_ref(), another_user.as_ref()) {
+            // The tunnel's settings and the type and overrides are the source's (secrets are not
+            // in them); the form is a fresh one.
+            let (ssh, profile) = (form.ssh.take(), form.profile.take());
+            form = ConnectionFormState::another_user_of(source, &another.database);
+            form.ssh = ssh;
+            let mut profile = profile.unwrap_or_default();
+            profile.overrides.clear(crate::settings::connection::AGENT_ACCESS);
+            form.profile = Some(profile);
+            original_record = None;
+        }
+        let editing = existing.is_some() && another_user.is_none();
         let inputs = ConnectionDialogInputs::new(window, cx, &form, &self.settings);
+        if another_user.is_some() {
+            // The server is already chosen: straight to the fields.
+            inputs.step.set(crate::connection_dialog::ConnectionDialogStep::Config);
+        }
         if original_record.as_ref().is_some_and(|record| {
             crate::ssh_tunnel::SshSettings::parse(&record.network_settings_json).is_err()
         }) {
@@ -1542,7 +1713,7 @@ impl AppRoot {
         {
             self.connection_ui.last_inputs = Some(inputs.clone());
         }
-        let title = if existing.is_some() {
+        let title = if editing {
             "Edit Connection"
         } else {
             "New Connection"
@@ -1559,6 +1730,8 @@ impl AppRoot {
             inputs.set_scenario_enabled(scenario_enabled);
             inputs
         };
+        let inputs_for_focus = inputs.clone();
+        let another_user_asked = another_user.is_some();
         let root = cx.entity().downgrade();
         {
             // The tab's "Test tunnel" button.
@@ -1819,6 +1992,8 @@ impl AppRoot {
                     let original_record = original_record.clone();
                     let root_for_ok = root.clone();
                     let scenario_enabled = scenario_enabled;
+                    // The group the source connection of "Connect as Another User" is in.
+                    let place_in_group = another_user.as_ref().and_then(|another| another.group.clone());
                     move |_, window, cx| {
                         if input_state.is_picker() {
                             if !input_state.picker_selection_is_visible() {
@@ -1847,8 +2022,11 @@ impl AppRoot {
                         if scenario_enabled {
                             match scenario_result {
                                 Ok(Some(Ok(form))) => {
-                                    let _ = root_for_ok.update(cx, |this, _| {
+                                    let _ = root_for_ok.update(cx, |this, cx| {
                                         this.invalidate_connection_test();
+                                        if let (Some(group), Some(id)) = (&place_in_group, form.id) {
+                                            this.place_connection_in_group(&id.to_string(), group, cx);
+                                        }
                                     });
                                     if require_password {
                                         if let Some(connection) = form.id {
@@ -1875,17 +2053,26 @@ impl AppRoot {
                             }
                             return false;
                         }
+                        let Ok((store, session)) = root_for_ok.update(cx, |this, _| {
+                            (
+                                Arc::clone(&this.connection_ui.credentials),
+                                this.connection_ui.session_passwords.clone(),
+                            )
+                        }) else {
+                            return false;
+                        };
                         let result = read_and_save_dialog_form(
                             &input_state,
                             initial_form.clone(),
                             original_record.as_ref(),
                             require_password,
+                            &store,
                             cx,
                         );
                         match result {
                             Ok(form) => {
                                 let runtime_uri = if require_password {
-                                    match runtime_uri_for_form(&form, original_record.as_ref()) {
+                                    match runtime_uri_for_form(&form, original_record.as_ref(), &session) {
                                         Ok(uri) => Some(uri),
                                         Err(error) => {
                                             let _ = root_for_ok.update(cx, |this, _| {
@@ -1914,6 +2101,20 @@ impl AppRoot {
                                 });
                                 let _ = root_for_ok.update(cx, |this, cx| {
                                     this.refresh_saved_connections(cx);
+                                    if let (Some(group), Some(id)) = (&place_in_group, form.id) {
+                                        this.place_connection_in_group(&id.to_string(), group, cx);
+                                    }
+                                    if let (Some(id), false) = (form.id, form.password.is_empty()) {
+                                        // A password that is not saved is kept for this run (what is saved
+                                        // is read from the credential store), after the refresh: an edit of
+                                        // the address forgot the old one.
+                                        let key = id.to_string();
+                                        if form.save_password {
+                                            this.connection_ui.session_passwords.clear(&key);
+                                        } else {
+                                            this.connection_ui.session_passwords.set(&key, &form.password);
+                                        }
+                                    }
                                     if let (Some(id), Some(())) = (form.id, reconnect) {
                                         this.connection_edited(&id.to_string(), cx);
                                     }
@@ -1959,6 +2160,11 @@ impl AppRoot {
                     }
                 })
         });
+        if another_user_asked {
+            // Opening a dialog moves focus to the dialog itself; the User field takes it back (the
+            // credentials are what this dialog is for).
+            inputs_for_focus.username.update(cx, |state, cx| state.focus(window, cx));
+        }
         cx.notify();
     }
 

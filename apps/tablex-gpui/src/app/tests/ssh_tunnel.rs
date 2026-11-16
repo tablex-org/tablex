@@ -15,29 +15,43 @@ const BASTION: &str = "bastion.example.com";
 struct MiniRedis {
     addr: std::net::SocketAddr,
     accepted: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// The arguments of every `AUTH` a client sent.
+    auths: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
 }
 
 impl MiniRedis {
     fn start() -> Self {
+        Self::start_requiring(None)
+    }
+
+    /// A server that refuses every client that did not `AUTH` with `password` (when given).
+    fn start_requiring(password: Option<&str>) -> Self {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let counter = accepted.clone();
+        let auths = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (counter, seen, required) = (accepted.clone(), auths.clone(), password.map(str::to_owned));
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                std::thread::spawn(move || MiniRedis::serve(stream));
+                let (seen, required) = (seen.clone(), required.clone());
+                std::thread::spawn(move || MiniRedis::serve(stream, required, seen));
             }
         });
-        Self { addr, accepted }
+        Self { addr, accepted, auths }
+    }
+
+    fn auths(&self) -> Vec<Vec<String>> {
+        self.auths.lock().unwrap().clone()
     }
 
     fn connections(&self) -> usize {
         self.accepted.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// One RESP command (`*N` of bulk strings) from `buf`, with the bytes it took.
-    fn command(buf: &[u8]) -> Option<(String, usize)> {
+    /// One RESP command (`*N` of bulk strings) from `buf`: its name (upper case) and arguments, with
+    /// the bytes it took.
+    fn command(buf: &[u8]) -> Option<(String, Vec<String>, usize)> {
         fn line(buf: &[u8], at: &mut usize) -> Option<usize> {
             let end = buf[*at..].windows(2).position(|pair| pair == b"\r\n")?;
             let number = std::str::from_utf8(&buf[*at + 1..*at + end]).ok()?.parse().ok()?;
@@ -47,6 +61,7 @@ impl MiniRedis {
         let mut at = 0;
         let count = line(buf, &mut at)?;
         let mut name = String::new();
+        let mut args = Vec::new();
         for index in 0..count {
             let length = line(buf, &mut at)?;
             if buf.len() < at + length + 2 {
@@ -54,22 +69,39 @@ impl MiniRedis {
             }
             if index == 0 {
                 name = String::from_utf8_lossy(&buf[at..at + length]).to_ascii_uppercase();
+            } else {
+                args.push(String::from_utf8_lossy(&buf[at..at + length]).into_owned());
             }
             at += length + 2;
         }
-        Some((name, at))
+        Some((name, args, at))
     }
 
-    fn serve(mut stream: std::net::TcpStream) {
+    fn serve(
+        mut stream: std::net::TcpStream,
+        required: Option<String>,
+        auths: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+    ) {
+        let mut authed = required.is_none();
         let (mut buf, mut chunk) = (Vec::new(), [0u8; 4096]);
         loop {
             match stream.read(&mut chunk) {
                 Ok(0) | Err(_) => return,
                 Ok(read) => buf.extend_from_slice(&chunk[..read]),
             }
-            while let Some((name, used)) = Self::command(&buf) {
+            while let Some((name, args, used)) = Self::command(&buf) {
                 buf.drain(..used);
                 let reply = match name.as_str() {
+                    "AUTH" => {
+                        auths.lock().unwrap().push(args.clone());
+                        if required.is_none() || args.last() == required.as_ref() {
+                            authed = true;
+                            "+OK\r\n".to_owned()
+                        } else {
+                            "-WRONGPASS invalid username-password pair or user is disabled.\r\n".to_owned()
+                        }
+                    }
+                    _ if !authed => "-NOAUTH Authentication required.\r\n".to_owned(),
                     "PING" => "+PONG\r\n".to_owned(),
                     "INFO" => {
                         let body = "# Server\r\nredis_version:7.2.0\r\n";

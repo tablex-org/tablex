@@ -17,7 +17,9 @@ use crate::ssh_tunnel::{
     SecretNeed, SecretRequest, SshSecrets, SshSettings, TunnelAccess, TunnelOpener,
 };
 use engine_connect::connect::{accounts_of, Connector, HostKeyAnswer, OpenRequest, TunnelPrompts};
+use engine_connect::credentials::CredentialStore;
 use engine_connect::records::RuntimeUri;
+use engine_connect::session_passwords::SessionPasswords;
 use engine_net::{KeyboardInteractiveRequest, Secret};
 use gpui::{Entity, SharedString};
 use gpui_component::dialog::DialogFooter;
@@ -124,9 +126,16 @@ impl TunnelUi {
     }
 
     /// Builds the agent's connections over the app's driver store, tunnel opener and prompts.
-    pub(super) fn attach_agent(&mut self, store: Arc<engine_driver_host::InstalledDriverStore>) {
-        let connector =
-            Connector::new(store).with_tunnels(Arc::clone(&self.opener), self.known_hosts.clone());
+    pub(super) fn attach_agent(
+        &mut self,
+        store: Arc<engine_driver_host::InstalledDriverStore>,
+        credentials: Arc<dyn CredentialStore + Send + Sync>,
+        passwords: SessionPasswords,
+    ) {
+        let connector = Connector::new(store)
+            .with_credentials(credentials)
+            .with_session_passwords(passwords)
+            .with_tunnels(Arc::clone(&self.opener), self.known_hosts.clone());
         let prompts = Arc::new(AppPrompts {
             sender: self.prompts.clone(),
         });
@@ -274,12 +283,19 @@ struct Decision {
     enter_accepts: bool,
     /// Runs once the decision is made, whichever it was (empties the dialog's inputs).
     on_done: WindowCallback,
+    /// The input that has the focus when the dialog opens (the dialog shell, when `None`).
+    focus: Option<Entity<InputState>>,
 }
 
 fn open_decision(window: &mut Window, cx: &mut gpui::App, decision: Decision) {
     let decided = Rc::new(Cell::new(false));
     let decision = Rc::new(decision);
-    window.open_dialog(cx, move |dialog, _, _| {
+    // `open_dialog` focuses the dialog shell: the input takes the focus on the first build only.
+    let focus_pending = Cell::new(decision.focus.is_some());
+    window.open_dialog(cx, move |dialog, window, cx| {
+        if let Some(input) = decision.focus.as_ref().filter(|_| focus_pending.replace(false)) {
+            input.focus_handle(cx).focus(window, cx);
+        }
         let finish = {
             let (decided, decision) = (decided.clone(), decision.clone());
             Rc::new(
@@ -550,10 +566,13 @@ impl AppRoot {
 
     /// The connector of this app: the driver store, tunnel opener and `known_hosts` it started with.
     pub(super) fn connector(&self) -> Connector {
-        Connector::new(Arc::clone(&self.driver_ui.store)).with_tunnels(
-            Arc::clone(&self.tunnel_ui.opener),
-            self.tunnel_ui.known_hosts.clone(),
-        )
+        Connector::new(Arc::clone(&self.driver_ui.store))
+            .with_credentials(Arc::clone(&self.connection_ui.credentials))
+            .with_session_passwords(self.connection_ui.session_passwords.clone())
+            .with_tunnels(
+                Arc::clone(&self.tunnel_ui.opener),
+                self.tunnel_ui.known_hosts.clone(),
+            )
     }
 
     /// A connection was edited or deleted (or its agent access may have changed): whatever an agent
@@ -869,6 +888,7 @@ impl AppRoot {
                     // Trusting a key takes a deliberate click: Enter declines, like Escape.
                     enter_accepts: false,
                     on_done: Rc::new(|_, _| {}),
+                    focus: None,
                 },
             );
         })
@@ -944,6 +964,7 @@ impl AppRoot {
                     on_cancel: Rc::new(|_, _| {}),
                     enter_accepts: false,
                     on_done: Rc::new(|_, _| {}),
+                    focus: None,
                 },
             );
         });
@@ -1026,6 +1047,7 @@ impl AppRoot {
                         let input = input.clone();
                         Rc::new(move |window, cx| clear_input(&input, window, cx))
                     },
+                    focus: None,
                     on_ok: Rc::new(submit),
                     on_cancel: Rc::new(move |_, cx| {
                         let key = key.clone();
@@ -1043,6 +1065,209 @@ impl AppRoot {
                 },
             );
         })
+    }
+
+    /// The password prompt of a connection that does not save its password: its name, the masked
+    /// input with the focus, "Save password", Connect (Enter) and Cancel (Escape). `on_connect` runs
+    /// once the password is kept for this run (and saved, when asked); `on_cancel` when the user
+    /// backs out. `false` when there is no window to ask in.
+    pub(super) fn ask_for_password(
+        &mut self,
+        saved: &SavedConnection,
+        on_connect: RootCallback,
+        on_cancel: RootCallback,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        #[cfg(test)]
+        self.tunnel_ui.opened_dialogs.push("db-password");
+        let root = cx.entity().downgrade();
+        let saved = saved.clone();
+        self.with_ui_window(cx, move |window, cx| {
+            let input = cx.new(|cx| InputState::new(window, cx).masked(true));
+            let keep = Rc::new(Cell::new(false));
+            let label = format!("Password for {}", saved.name);
+            let (body_input, body_keep) = (input.clone(), keep.clone());
+            let (ok_root, cancel_root) = (root.clone(), root);
+            let (ok_input, ok_keep) = (input.clone(), keep.clone());
+            open_decision(
+                window,
+                cx,
+                Decision {
+                    title: "Password required".into(),
+                    width: 460.0,
+                    body: Rc::new(move || {
+                        let keep = body_keep.clone();
+                        column(vec![
+                            paragraph(label.clone()),
+                            div()
+                                .debug_selector(|| "password-prompt-input".into())
+                                .child(Input::new(&body_input).mask_toggle())
+                                .into_any_element(),
+                            div()
+                                .debug_selector(|| "password-prompt-save".into())
+                                .child(
+                                    Checkbox::new("password-prompt-save-box")
+                                        .label("Save password")
+                                        .checked(keep.get())
+                                        .on_click(move |checked, _, cx| {
+                                            keep.set(*checked);
+                                            cx.refresh_windows();
+                                        }),
+                                )
+                                .into_any_element(),
+                        ])
+                    }),
+                    ok: Some(("Connect", "password-prompt-ok")),
+                    cancel: ("Cancel", "password-prompt-cancel"),
+                    enter_accepts: true,
+                    on_done: {
+                        let input = input.clone();
+                        Rc::new(move |window, cx| clear_input(&input, window, cx))
+                    },
+                    focus: Some(input),
+                    on_ok: Rc::new(move |_, cx| {
+                        let password = Secret::new(ok_input.read(cx).value().to_string());
+                        let (saved, keep, on_connect) =
+                            (saved.clone(), ok_keep.get(), on_connect.clone());
+                        let _ = ok_root.update(cx, |this, cx| {
+                            this.keep_typed_password(&saved, password.expose(), keep, cx);
+                            on_connect(this, cx);
+                        });
+                    }),
+                    on_cancel: Rc::new(move |_, cx| {
+                        let on_cancel = on_cancel.clone();
+                        let _ = cancel_root.update(cx, |this, cx| on_cancel(this, cx));
+                    }),
+                },
+            );
+        })
+    }
+
+    /// The password typed in the prompt: kept in memory for this run; with "Save password" also in
+    /// the credential store, and the record says it is saved (as the connection dialog does).
+    fn keep_typed_password(
+        &mut self,
+        saved: &SavedConnection,
+        password: &str,
+        save: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let key = saved.id.to_string();
+        self.connection_ui.session_passwords.set(&key, password);
+        if !save || password.is_empty() {
+            return;
+        }
+        let storage_id = crate::connections::storage_connection_id(&key);
+        let record = match engine_storage::connection::get_connection(&storage_id) {
+            Ok(Some(mut record)) => {
+                record.save_password = true;
+                record.updated_at = super::connection_ui::current_time();
+                record
+            }
+            // A connection without a record (a fixture) has nothing to save to.
+            Ok(None) => return,
+            Err(error) => {
+                self.report_warning(Area::Connect, Some(&key), format!("Could not save connection: {error}"));
+                return;
+            }
+        };
+        let saved_password = engine_storage::connection::upsert_connection(&record)
+            .map_err(|error| format!("Could not save connection: {error}"))
+            .and_then(|()| {
+                self.connection_ui
+                    .credentials
+                    .save(crate::credentials::SecretKind::Database, &record.id, password)
+                    .map_err(|error| format!("Could not save connection password: {error}"))
+            });
+        if let Err(message) = saved_password {
+            self.report_warning(Area::Connect, Some(&key), message);
+        }
+        self.refresh_saved_connections(cx);
+    }
+
+    /// The user declined the password prompt of the parked connect `attempt`: the connection stays
+    /// disconnected, what waited for it (queued runs, tree loads) is dropped, and nothing is reported
+    /// as an error.
+    fn cancel_password_attempt(&mut self, key: &str, attempt: u64, cx: &mut Context<Self>) {
+        if !self.attempt_is_current(key, attempt) {
+            return;
+        }
+        self.sessions.disconnect(key);
+        self.discard_pending_runs(key, attempt, "Connection cancelled: no password entered", cx);
+        self.navigator_ui.pending_loads.remove(key);
+        self.navigator.reset_node(&NavigatorNodeId::Connection { connection: key.to_owned() });
+        self.navigator_ui.generation = self.navigator.generation();
+        self.sync_sidebar_connections(cx);
+        cx.notify();
+    }
+
+    /// A connect attempt that needs a password nobody typed yet: asks (the attempt stays
+    /// `Connecting` until the answer), or, for a connect nobody asked for (a recovery), fails it with
+    /// the "Password required" state. Returns `false` when the attempt needs no password.
+    pub(super) fn ask_password_for_attempt(
+        &mut self,
+        saved: &SavedConnection,
+        uri_override: &Option<RuntimeUri>,
+        attempt: u64,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let key = saved.id.to_string();
+        if uri_override.is_some()
+            || !saved.expects_password()
+            || self.connection_ui.session_passwords.contains(&key)
+        {
+            return false;
+        }
+        let asked = !self.connection_ui.background_connect && {
+            let (connect_key, cancel_key) = (key.clone(), key.clone());
+            let (retry_saved, retry_uri) = (saved.clone(), uri_override.clone());
+            self.ask_for_password(
+                saved,
+                Rc::new(move |this, cx| {
+                    if !this.attempt_is_current(&connect_key, attempt) {
+                        return;
+                    }
+                    // The record may say "saved" now: connect with the app's latest.
+                    let latest = this
+                        .saved_connections
+                        .iter()
+                        .find(|candidate| candidate.matches_id(&connect_key))
+                        .cloned()
+                        .unwrap_or_else(|| retry_saved.clone());
+                    this.continue_connect(latest, retry_uri.clone(), attempt, cx);
+                }),
+                Rc::new(move |this, cx| this.cancel_password_attempt(&cancel_key, attempt, cx)),
+                cx,
+            )
+        };
+        if !asked {
+            self.fail_driver_connect(
+                &key,
+                attempt,
+                ConnectFailure::Message(crate::connections::missing_password_error()),
+                cx,
+            );
+        }
+        true
+    }
+
+    /// "Enter Password" on a connection that does not save one: the prompt, then a connect.
+    pub(super) fn enter_password(&mut self, connection: &str, cx: &mut Context<Self>) {
+        let Some(saved) = self
+            .saved_connections
+            .iter()
+            .find(|saved| saved.matches_id(connection))
+            .cloned()
+        else {
+            return;
+        };
+        let key = saved.id.to_string();
+        self.ask_for_password(
+            &saved,
+            Rc::new(move |this, cx| this.ensure_connected(key.clone(), None, cx)),
+            Rc::new(|_, _| {}),
+            cx,
+        );
     }
 
     #[allow(clippy::too_many_arguments)] // each parameter is one input of the operation; a parameter struct would only rename the list
@@ -1142,6 +1367,7 @@ impl AppRoot {
                             clear_input(input, window, cx);
                         }
                     }),
+                    focus: None,
                     on_ok: Rc::new(move |_, cx| {
                         let answers = answer_inputs
                             .iter()
@@ -1172,6 +1398,10 @@ impl AppRoot {
         cx: &mut Context<Self>,
     ) {
         let message = failure.message();
+        // The server refused the password typed for this run: it is asked for again next time.
+        if matches!(&failure, ConnectFailure::Message(text) if crate::connections::is_auth_failure(text)) {
+            self.connection_ui.session_passwords.clear(connection_key);
+        }
         if !self
             .sessions
             .finish_connect(connection_key, attempt, Err(message.clone()))
@@ -1237,7 +1467,7 @@ impl AppRoot {
             refresh(cx);
             return;
         };
-        let uri = match runtime_uri_for_form(&form, original.as_ref()) {
+        let uri = match runtime_uri_for_form(&form, original.as_ref(), &self.connection_ui.session_passwords) {
             Ok(uri) => uri,
             Err(error) => {
                 *status.borrow_mut() = TestStatus::Failure(error);

@@ -613,7 +613,7 @@ impl SessionSpec {
     pub(in crate::app) fn resolve_uri(&self) -> Result<RuntimeUri, String> {
         match &self.uri {
             Some(uri) => Ok(uri.clone()),
-            None => crate::sessions::engine_uri(&self.saved).map_err(|error| crate::sessions::redact_secrets(&error)),
+            None => self.connector.saved_uri(&self.saved).map_err(|error| crate::sessions::redact_secrets(&error)),
         }
     }
 
@@ -937,7 +937,7 @@ impl AppRoot {
     pub(in crate::app) fn apply_session_uri(&self, saved: &crate::connections::SavedConnection, connection: &str) -> Result<RuntimeUri, String> {
         match self.driver_runtime.session_uris.get(connection) {
             Some(uri) => Ok(uri.clone()),
-            None => crate::sessions::engine_uri(saved).map_err(|error| crate::sessions::redact_secrets(&error)),
+            None => self.connector().saved_uri(saved).map_err(|error| crate::sessions::redact_secrets(&error)),
         }
     }
 }

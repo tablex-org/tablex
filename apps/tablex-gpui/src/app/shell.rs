@@ -123,6 +123,10 @@ impl Render for AppRoot {
         }
         self.guard_window_close(window, cx);
         self.schedule_session_save(cx);
+        // Tests share one process, and with it the storage layer's warnings: they ask for them.
+        if !cfg!(test) {
+            self.report_storage_warnings(cx);
+        }
         self.flush_error_log(cx);
         let active_tab_id = self.workspace.active_tab().map(|tab| tab.id);
         #[cfg(feature = "ui-scenarios")]
@@ -173,6 +177,7 @@ impl Render for AppRoot {
                     .flex_shrink_0()
                     .items_center()
                     .pr(px(8.0))
+                    .child(self.render_updates_button(cx))
                     .child(self.render_theme_button(cx))
                     .child(
                         Button::new("open-settings")
@@ -517,6 +522,17 @@ impl Render for AppRoot {
             }))
             .on_action(cx.listener(|this, _: &FormatSql, window, cx| {
                 this.format_sql(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &RunActiveQuery, _, cx| {
+                if let Some(tab_id) = this.workspace.active_tab().map(|tab| tab.id) {
+                    this.run_tab_query_explicit(tab_id, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &RunScript, _, cx| {
+                this.run_active_tab_span(super::workspace::RunSpan::Script, cx);
+            }))
+            .on_action(cx.listener(|this, _: &RunFromCursor, _, cx| {
+                this.run_active_tab_span(super::workspace::RunSpan::FromCursor, cx);
             }))
             .on_action(cx.listener(|this, _: &ExplainPlan, _, cx| {
                 this.explain_active_tab(engine_plan::ExplainMode::Estimate, cx);
