@@ -235,9 +235,61 @@ struct PendingLocate {
     pages: u8,
     /// Expand the target itself once it is selected (palette reveal).
     expand_target: bool,
+    /// Open the target as Enter does once it is selected (the app channel's `open_object`).
+    open_target: bool,
 }
 
 impl AppRoot {
+    /// What Enter does on a row: an object opens as a double click does, anything else as a click.
+    fn activate_navigator_row(&mut self, row: &NavigatorRow, cx: &mut Context<Self>) {
+        match &row.id {
+            NavigatorNodeId::Object { .. } => self.handle_navigator_open(row, cx),
+            _ => self.handle_navigator_click(row, cx),
+        }
+    }
+
+    fn activate_navigator_node(&mut self, id: &NavigatorNodeId, cx: &mut Context<Self>) {
+        let row = self
+            .navigator
+            .visible_index(id)
+            .and_then(|index| self.navigator.visible_row_at(index));
+        if let Some(row) = row {
+            self.activate_navigator_row(&row, cx);
+        }
+    }
+
+    /// Reveals the node at the end of `path` (connecting and loading as it goes, as "Reveal Active
+    /// Tab" does) and opens it as Enter does: a table's data tab, a MongoDB collection's tab. With
+    /// `mongo` (database, collection) the path is the connection alone and the collection is found
+    /// among its provider nodes. `Err` is what stopped it at once (a hidden connection, a target
+    /// that is not in the catalog); loads that are still going finish on their own.
+    pub(super) fn locate_and_open_in_sidebar(
+        &mut self,
+        path: Vec<NavigatorNodeId>,
+        mongo: Option<(String, String)>,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        self.sidebar.pending_locate = None;
+        self.sidebar.locate_error = None;
+        self.shell.sidebar_collapsed = false;
+        self.sidebar.pending_locate = Some(PendingLocate {
+            tab_id: None,
+            path,
+            mongo,
+            pages: 0,
+            expand_target: false,
+            open_target: true,
+        });
+        self.continue_sidebar_locate(cx);
+        match self.sidebar.locate_error.clone() {
+            Some(error) => {
+                self.sidebar.pending_locate = None;
+                Err(error)
+            }
+            None => Ok(()),
+        }
+    }
+
     pub(super) fn locate_active_sidebar_tab(&mut self, cx: &mut Context<Self>) {
         self.sidebar.pending_locate = None;
         self.sidebar.locate_error = None;
@@ -309,6 +361,7 @@ impl AppRoot {
             mongo,
             pages: 0,
             expand_target: false,
+            open_target: false,
         });
         self.continue_sidebar_locate(cx);
     }
@@ -372,6 +425,7 @@ impl AppRoot {
             mongo,
             pages: 0,
             expand_target: true,
+            open_target: false,
         });
         self.continue_sidebar_locate(cx);
     }
@@ -392,6 +446,7 @@ impl AppRoot {
             mongo: None,
             pages: 0,
             expand_target: false,
+            open_target: false,
         });
         self.continue_sidebar_locate(cx);
     }
@@ -488,7 +543,7 @@ impl AppRoot {
             return;
         }
         if let Some(target) = pending.path.last() {
-            self.select_sidebar_locate_target(target, pending.expand_target, cx);
+            self.select_sidebar_locate_target(target, pending.expand_target, pending.open_target, cx);
         }
     }
 
@@ -496,6 +551,7 @@ impl AppRoot {
         &mut self,
         id: &NavigatorNodeId,
         expand: bool,
+        open: bool,
         cx: &mut Context<Self>,
     ) {
         if self.navigator.select_visible(id, false, false) {
@@ -514,6 +570,9 @@ impl AppRoot {
                 if let Some(request) = self.navigator.toggle_expansion(id).request {
                     self.ensure_connected_then_load(request, cx);
                 }
+            }
+            if open {
+                self.activate_navigator_node(id, cx);
             }
             self.notify_chrome(cx);
         } else {
@@ -601,7 +660,7 @@ impl AppRoot {
             self.notify_chrome(cx);
             return;
         }
-        self.select_sidebar_locate_target(&parent, pending.expand_target, cx);
+        self.select_sidebar_locate_target(&parent, pending.expand_target, pending.open_target, cx);
     }
 
     /// The record a duplicate is stored as, with its new id: a copy of the connection that starts
@@ -1000,9 +1059,8 @@ impl AppRoot {
                     return false;
                 };
                 match &id {
-                    NavigatorNodeId::Object { .. } => self.handle_navigator_open(&row, cx),
                     NavigatorNodeId::Group { .. } => self.handle_navigator_disclosure(&row, cx),
-                    _ => self.handle_navigator_click(&row, cx),
+                    _ => self.activate_navigator_row(&row, cx),
                 }
                 true
             }

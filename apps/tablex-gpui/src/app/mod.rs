@@ -51,6 +51,7 @@ use std::time::Instant;
 
 mod actions;
 mod aggregate;
+mod app_channel;
 mod assistant;
 mod command_palette;
 mod completion;
@@ -306,6 +307,8 @@ pub struct AppRoot {
     assistant: assistant::AssistantUi,
     /// The update check and its notice (see `updates`).
     update_ui: updates::UpdateUi,
+    /// The local socket `tablex-mcp` shows things through (see `app_channel`).
+    app_channel: app_channel::ChannelUi,
 }
 
 struct ColumnResizeGhost;
@@ -529,6 +532,7 @@ impl AppRoot {
             settings_ui: settings_state::SettingsUi::new(settings_path),
             assistant,
             update_ui: updates::UpdateUi::new(scenario_enabled || cfg!(test)),
+            app_channel: Default::default(),
         };
         // Every tab's cached results view is stale after a plain notification
         // of the root unless it was announced as chrome-only.
@@ -540,6 +544,7 @@ impl AppRoot {
         #[cfg(not(test))]
         if !scenario_enabled {
             app.start_recovery(cx);
+            app.start_app_channel(cx);
         }
         #[cfg(feature = "ui-scenarios")]
         if scenario_enabled {
@@ -794,6 +799,7 @@ mod tests {
     include!("tests/reopen_tab.rs");
     include!("tests/updates.rs");
     include!("tests/connection_types.rs");
+    include!("tests/app_channel.rs");
     include!("tests/connection_tls.rs");
     include!("tests/ssh_tunnel.rs");
     include!("tests/session_password.rs");

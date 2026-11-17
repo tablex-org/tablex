@@ -1345,9 +1345,10 @@ impl AppRoot {
         cx.notify();
     }
 
-    pub(super) fn refresh_saved_connections(&mut self, cx: &mut Context<Self>) {
+    /// `false` when the store could not be read (the list is left as it was).
+    pub(super) fn refresh_saved_connections(&mut self, cx: &mut Context<Self>) -> bool {
         if self.scenario_ui.service.is_some() {
-            return;
+            return true;
         }
         let records = match engine_storage::connection::list_connections() {
             Ok(records) => records,
@@ -1359,13 +1360,14 @@ impl AppRoot {
                     format!("Could not refresh connections: {error}"),
                 );
                 cx.notify();
-                return;
+                return false;
             }
         };
         let saved = records.iter().map(SavedConnection::from_record).collect();
         self.connection_policy = connection_policy::ConnectionPolicy::from_records(&records);
         self.apply_saved_connections(saved, cx);
         self.assistant_sync(cx);
+        true
     }
 
     /// Installs a new saved-connection list after add / edit / delete:
@@ -1451,7 +1453,9 @@ impl AppRoot {
         let next_pin = !connection.is_pinned;
         let storage_id = crate::connections::storage_connection_id(&connection.id.to_string());
         match engine_storage::connection::set_connection_pinned(&storage_id, next_pin) {
-            Ok(()) => self.refresh_saved_connections(cx),
+            Ok(()) => {
+                self.refresh_saved_connections(cx);
+            }
             Err(error) => {
                 self.sidebar.notice = Some(format!("Could not pin connection: {error}"));
                 self.report_error(

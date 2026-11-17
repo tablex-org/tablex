@@ -3,6 +3,7 @@
 //!
 //! | module | what |
 //! |---|---|
+//! | [`app_channel`] | the local socket from `tablex-mcp` to the running app: open a table, show a query, reload connections |
 //! | [`platform`] | where TableX keeps its files; the OS credential store's name |
 //! | [`records`] | the saved connection model, kinds, URI helpers, export / duplicate redaction |
 //! | [`credentials`] | the secret store trait, the OS store (legacy items) and [`credentials::default_store`] |
@@ -21,6 +22,7 @@
 // add noise to every `match`.
 #![allow(clippy::result_large_err)]
 
+pub mod app_channel;
 pub mod connect;
 pub mod credentials;
 pub mod drivers;
