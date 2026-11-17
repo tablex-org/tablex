@@ -782,6 +782,27 @@ mod assistant_panel_tests {
         );
     }
 
+    /// The access chooser in a short dock: the empty state is not drawn under it, nothing is drawn
+    /// over the status line, and the composer stays inside the dock (the chooser scrolls).
+    #[gpui::test]
+    fn the_access_chooser_in_a_short_dock_overlaps_nothing(cx: &mut TestAppContext) {
+        cx.dispatcher.allow_parking();
+        let (app, visual) = assistant_app(cx);
+        let _armed = arm(&app, visual, vec![say("ok")], None, true);
+        open_dock(&app, visual);
+        visual.simulate_resize(gpui::size(gpui::px(1100.0), gpui::px(460.0)));
+        settle(visual);
+        assert!(shown(visual, "assistant-disclosure"));
+        assert!(!shown(visual, "assistant-empty"), "the chooser says what the assistant is for");
+        let panel = visual.debug_bounds("assistant-panel").unwrap();
+        let status = visual.debug_bounds("assistant-status").unwrap();
+        let area = visual.debug_bounds("assistant-transcript-area").unwrap();
+        let composer = visual.debug_bounds("assistant-composer").unwrap();
+        assert!(area.top() >= status.bottom(), "the transcript starts below the status line");
+        assert!(composer.bottom() <= panel.bottom() + gpui::px(1.0), "the composer is in the dock: {composer:?} {panel:?}");
+        assert!(composer.top() >= status.bottom(), "nothing pushes the composer up over the header");
+    }
+
     fn disclosure_choice(cx: &mut TestAppContext, choice: &str) {
         cx.dispatcher.allow_parking();
         let (app, visual) = assistant_app(cx);

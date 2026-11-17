@@ -2364,8 +2364,12 @@ impl AssistantPanel {
         .size_full()
     }
 
-    fn transcript(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// `disclosure`: the access chooser is shown below, and says what the assistant is for.
+    fn transcript(&self, disclosure: bool, cx: &mut Context<Self>) -> AnyElement {
         if self.chat.read(cx).is_empty() {
+            if disclosure {
+                return div().into_any_element();
+            }
             return self.empty_state();
         }
         let panel = cx.entity();
@@ -2402,9 +2406,12 @@ impl AssistantPanel {
         let choices = context.offered.clone();
         let busy = context.access_busy || running;
         let writes = choices.contains(&AgentLevel::ReadWrite);
+        // In a short dock the text scrolls and the card shrinks; the choices stay in view below it
+        // and the composer is never pushed out of the dock.
         div()
             .debug_selector(|| "assistant-disclosure".into())
-            .flex_shrink_0()
+            .flex_shrink(1.0)
+            .min_h(px(0.0))
             .flex()
             .flex_col()
             .gap(px(6.0))
@@ -2414,6 +2421,15 @@ impl AssistantPanel {
             .border_1()
             .border_color(theme::border_strong())
             .bg(theme::surface())
+            .child(
+                div()
+                    .id("assistant-disclosure-text")
+                    .flex_shrink(1.0)
+                    .min_h(px(0.0))
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.0))
             .child(
                 div()
                     .text_size(px(13.0))
@@ -2501,9 +2517,11 @@ impl AssistantPanel {
                 this.child(line(
                     "This connection's type does not allow the assistant to use it.".to_owned(),
                 ))
-            })
+            }),
+            )
             .child(
                 div()
+                    .flex_shrink_0()
                     .flex()
                     .flex_wrap()
                     .gap(px(6.0))
@@ -2747,7 +2765,7 @@ impl Render for AssistantPanel {
         let header = self.header(cx);
         let status = self.status_line(cx);
         let bar = self.scope_bar(cx);
-        let transcript = self.transcript(cx);
+        let transcript = self.transcript(disclosure, cx);
         let composer = self.composer_area(cx);
         let footer = self.footer(cx);
         let disclosure = disclosure.then(|| self.disclosure(cx));
@@ -2786,6 +2804,8 @@ impl Render for AssistantPanel {
                     .min_h_0()
                     .debug_selector(|| "assistant-transcript-area".into())
                     .relative()
+                    // What does not fit is cut here, never drawn over the header or the chooser.
+                    .overflow_hidden()
                     .child(transcript)
                     .child(self.record_transcript_bounds(cx)),
             )
