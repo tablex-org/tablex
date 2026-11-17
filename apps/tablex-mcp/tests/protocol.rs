@@ -27,6 +27,8 @@ async fn tools_list_is_exactly_what_the_layer_says() {
         "begin_transaction",
         "commit_transaction",
         "rollback_transaction",
+        "open_table",
+        "execute_and_show",
     ] {
         assert!(listed.iter().any(|tool| tool.name == name), "{name} is listed");
     }

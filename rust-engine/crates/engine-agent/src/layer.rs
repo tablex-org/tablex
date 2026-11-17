@@ -12,7 +12,7 @@ use crate::limits::Limits;
 use crate::mongo;
 use crate::policy::{check_statement, Need};
 use crate::ports::{
-    ApprovalDecision, ConnectionCatalog, ConnectionInfo, ConnectionKind, Language, NodeLevel,
+    AppShow, ApprovalDecision, ConnectionCatalog, ConnectionInfo, ConnectionKind, Language, NodeLevel,
     NodeQuery, OpenGeneration, RefuseWrites, Revision, RoutineQuery, RunRequest, Session,
     SessionInfo, SessionProvider, TableRef, TransactionApproval, TxControl, WriteApproval,
     WriteApprover,
@@ -391,6 +391,9 @@ pub struct ToolLayer {
     /// `begin_transaction`, `commit_transaction`, `rollback_transaction` and `execute_query`'s
     /// `transaction_id` exist (see [`with_transactions`](Self::with_transactions)).
     transactions_enabled: bool,
+    /// The running TableX app, when this front end has a channel to it (see
+    /// [`with_app`](Self::with_app)).
+    app: Option<Arc<dyn AppShow>>,
     transaction_idle: Duration,
     txs: Mutex<TxTable>,
     /// `close_all` calls in progress: a transaction is not begun meanwhile (and one that got in
@@ -422,11 +425,12 @@ impl ToolLayer {
             audit: None,
             limits: Limits::default(),
             front_end: front_end.into(),
-            specs: schema::tool_specs_for(false),
+            specs: schema::tool_specs_for(false, false),
             sessions: Mutex::new(HashMap::new()),
             opening: Mutex::new(HashMap::new()),
             generations: AtomicU64::new(0),
             transactions_enabled: false,
+            app: None,
             transaction_idle: DEFAULT_TRANSACTION_IDLE,
             txs: Mutex::new(TxTable::default()),
             closing_all: AtomicUsize::new(0),
@@ -451,7 +455,23 @@ impl ToolLayer {
     #[must_use]
     pub fn with_transactions(mut self) -> Self {
         self.transactions_enabled = true;
-        self.specs = schema::tool_specs_for(true);
+        self.specs = schema::tool_specs_for(true, self.app.is_some());
+        self
+    }
+
+    /// Offers `open_table` and `execute_and_show`, which show things in the running TableX app
+    /// through `app`. Off by default: the in-app assistant is inside the app and has none.
+    ///
+    /// * `open_table` needs access `schema_only`; the app opens the table as a double click does.
+    /// * `execute_and_show` needs access `read`. The query goes into an editor tab of the app; with
+    ///   `run` the app runs it through its own Run path, so its confirmations and connection-type
+    ///   rules apply and the user answers in the app. A query that runs from here has to be a
+    ///   single read: anything that changes data would skip the approval a write gets through
+    ///   `execute_query`, so it is only shown (`run` false) for the user to run.
+    #[must_use]
+    pub fn with_app(mut self, app: Arc<dyn AppShow>) -> Self {
+        self.app = Some(app);
+        self.specs = schema::tool_specs_for(self.transactions_enabled, true);
         self
     }
 
@@ -732,6 +752,7 @@ impl ToolLayer {
     ) -> Result<Value, AgentError> {
         let tool = ToolName::parse(name)
             .filter(|tool| self.transactions_enabled || !tool.is_transaction_tool())
+            .filter(|tool| self.app.is_some() || !tool.is_app_tool())
             .ok_or_else(|| AgentError::UnknownTool(sanitize_tool_name(name)))?;
         // Before the call looks at any transaction: one that sat idle too long is gone already
         // (its session is closed without a ROLLBACK round trip: see `expire_idle_transactions`).
@@ -839,6 +860,14 @@ impl ToolLayer {
                 let request: TransactionRequest = self.parse(tool, arguments)?;
                 to_value(self.rollback_transaction(&request.transaction_id, trace)?)
             }
+            ToolName::OpenTable => {
+                let request: OpenTableRequest = self.parse(tool, arguments)?;
+                to_value(self.open_table(request)?)
+            }
+            ToolName::ExecuteAndShow => {
+                let request: ExecuteAndShowRequest = self.parse(tool, arguments)?;
+                to_value(self.execute_and_show(request, trace)?)
+            }
         }
     }
 
@@ -902,7 +931,8 @@ impl ToolLayer {
             .cloned();
         if let Some(slot) = stale {
             self.close_slot(connection_id, &slot);
-            if tool != ToolName::OpenSession {
+            // The app tools use no session: the old one is closed and that is all.
+            if tool != ToolName::OpenSession && !tool.is_app_tool() {
                 return Err(Self::edited(&info));
             }
         }
@@ -2967,6 +2997,93 @@ impl ToolLayer {
             );
         }
         None
+    }
+
+    /// `open_table`: asks the app to show the table.
+    fn open_table(&self, request: OpenTableRequest) -> Result<OpenTableResult, AgentError> {
+        let (info, _) = self.authorize(ToolName::OpenTable, &request.connection_id)?;
+        for name in [Some(&request.database), request.schema.as_ref(), Some(&request.object)]
+            .into_iter()
+            .flatten()
+        {
+            Self::check_database(Some(name))?;
+        }
+        let app = self.app.as_ref().ok_or_else(|| AgentError::UnknownTool("open_table".into()))?;
+        app.open_object(
+            &info.id,
+            &request.database,
+            request.schema.as_deref(),
+            &request.object,
+        )?;
+        Ok(OpenTableResult {
+            connection_id: info.id,
+            object: request.object,
+            requested: true,
+        })
+    }
+
+    /// `execute_and_show`: puts the query in an editor tab of the app and, with `run`, has the app
+    /// run it. A query that is run from here must be one read (see [`with_app`](Self::with_app)).
+    fn execute_and_show(
+        &self,
+        request: ExecuteAndShowRequest,
+        trace: &mut Trace,
+    ) -> Result<ExecuteAndShowResult, AgentError> {
+        let (info, access) = self.authorize(ToolName::ExecuteAndShow, &request.connection_id)?;
+        Self::check_database(request.database.as_deref())?;
+        self.check_length(&request.query)?;
+        if request.query.trim().is_empty() {
+            return Err(AgentError::invalid("the query is empty"));
+        }
+        let run = request.run.unwrap_or(true);
+        trace.statement = Some(request.query.clone());
+        if run {
+            Self::check_runs_as_read(&info, access, &request.query)?;
+        }
+        let app = self
+            .app
+            .as_ref()
+            .ok_or_else(|| AgentError::UnknownTool("execute_and_show".into()))?;
+        app.show_query(&info.id, request.database.as_deref(), &request.query, run)?;
+        trace.approval = Some(if run {
+            "shown and run in the app".into()
+        } else {
+            "shown in the app, not run".into()
+        });
+        Ok(ExecuteAndShowResult {
+            connection_id: info.id,
+            shown: true,
+            run,
+        })
+    }
+
+    /// The policy for a query the app is asked to run: one read, at the connection's access.
+    /// Anything else is not run from here.
+    fn check_runs_as_read(
+        info: &ConnectionInfo,
+        access: AgentAccess,
+        query: &str,
+    ) -> Result<(), AgentError> {
+        let classified = match info.kind.language() {
+            Language::Sql => info
+                .kind
+                .lex_options()
+                .map(|lex| classify_sql(query, info.kind, &lex)),
+            Language::Redis => Some(classify_redis(query)),
+            Language::Mongo | Language::Other => None,
+        };
+        let Some(classified) = classified else {
+            return Err(AgentError::WriteRefused(
+                "a MongoDB script cannot be judged to be a read, so it is not run from here; call with run false to put it in the editor and let the user run it".into(),
+            ));
+        };
+        match check_statement(access, &classified, false, "query")? {
+            Need::Nothing => Ok(()),
+            Need::Approval { .. } => Err(AgentError::WriteRefused(format!(
+                "this query changes data (`{}`); execute_and_show runs reads only. Call with run false to put it in the editor and let the user run it, or use execute_query, which asks the user to approve it",
+                classified.verb
+            ))),
+        }
     }
 
     fn begin_transaction(

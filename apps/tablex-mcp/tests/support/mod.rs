@@ -179,6 +179,13 @@ impl Fixture {
         Self::build(|connector, audit, _| tablex_mcp::setup::build_layer(connector, audit))
     }
 
+    /// [`new`](Self::new) with the channel to the app given (a socket of the test's own).
+    pub fn with_app(app: Arc<dyn engine_agent::AppShow>) -> Self {
+        Self::build(|connector, audit, _| {
+            tablex_mcp::setup::build_layer_with_app(connector, audit, app)
+        })
+    }
+
     /// A fixture whose layer is made by `make` (fakes instead of the connector) and audited into
     /// this fixture's audit log.
     pub fn with_layer(make: impl FnOnce(Arc<AuditLog>) -> ToolLayer) -> Self {

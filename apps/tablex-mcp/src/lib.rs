@@ -5,6 +5,7 @@
 //! over a byte pipe and tears the sessions down when the client goes away. **stdout is the
 //! protocol**: in serve mode nothing but the MCP transport writes to it.
 
+pub mod app_port;
 pub mod approver;
 pub mod cli;
 pub mod keychain;

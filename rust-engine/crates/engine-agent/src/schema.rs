@@ -221,18 +221,19 @@ fn mongo_write_output() -> Value {
 const MONGO_JSON: &str = "JSON as MongoDB takes it; typed values use Extended JSON, e.g. \
     {\"$oid\": \"...\"}, {\"$date\": \"2024-01-31T00:00:00Z\"}, {\"$numberLong\": \"123\"}.";
 
-/// Every tool, in a stable order, with the transaction tools and `execute_query`'s
-/// `transaction_id`.
+/// Every tool, in a stable order, with the transaction tools, `execute_query`'s `transaction_id`
+/// and the tools that show things in the app.
 pub fn tool_specs() -> Vec<ToolSpec> {
-    tool_specs_for(true)
+    tool_specs_for(true, true)
 }
 
 /// The tools a layer offers: the transaction tools (and `execute_query`'s `transaction_id`)
-/// only when `transactions` is true.
-pub fn tool_specs_for(transactions: bool) -> Vec<ToolSpec> {
+/// only when `transactions` is true, `open_table` and `execute_and_show` only when `app` is.
+pub fn tool_specs_for(transactions: bool, app: bool) -> Vec<ToolSpec> {
     ToolName::ALL
         .into_iter()
         .filter(|tool| transactions || !tool.is_transaction_tool())
+        .filter(|tool| app || !tool.is_app_tool())
         .map(|tool| spec_for(tool, transactions))
         .collect()
 }
@@ -798,6 +799,64 @@ fn spec_for(tool: ToolName, transactions: bool) -> ToolSpec {
             ),
             example: json!({"transaction_id": "tx-1"}),
         },
+        ToolName::OpenTable => ToolSpec {
+            name: tool.as_str(),
+            description: "Show a table, view or MongoDB collection to the user: TableX reveals it in its \
+                sidebar and opens it in a data tab, as a double click does. Nothing is read for you and \
+                no data is returned: use it when the user should look at the data. Needs access \
+                `schema_only` or more, and TableX has to be running; the connection is opened by TableX \
+                if needed. The answer means TableX took the request up, not that the table has \
+                loaded.",
+            input_schema: object(
+                vec![
+                    connection.clone(),
+                    database("Database name (for MongoDB, the database of the collection)."),
+                    ("schema", string("Schema name; leave out for a database without schemas (MySQL, MariaDB, SQLite, MongoDB).")),
+                    ("object", string("Table, view or collection name.")),
+                ],
+                &["connection_id", "database", "object"],
+            ),
+            output_schema: object(
+                vec![
+                    connection.clone(),
+                    ("object", string("The table, view or collection.")),
+                    ("requested", boolean("TableX took the request up; the table may still be loading.")),
+                ],
+                &["connection_id", "object", "requested"],
+            ),
+            example: json!({"connection_id": "c1", "database": "shop", "schema": "public", "object": "orders"}),
+        },
+        ToolName::ExecuteAndShow => ToolSpec {
+            name: tool.as_str(),
+            description: "Put a query in a new editor tab of TableX, where the user sees it, and run it \
+                there so the user sees the result. Needs access `read` or more, and TableX has to be \
+                running. A query that is run (`run` true, the default) must be a single read; it runs \
+                under TableX's own rules, which may ask the user to confirm first or refuse (production \
+                or read-only connections), and the user answers in TableX. A query that changes data, a \
+                script with several statements or a MongoDB script is not run from here: call with \
+                `run` false to only put it in the editor for the user to run, or use execute_query (a \
+                change is put to the user for approval). No rows are returned: use execute_query when \
+                you need the data yourself. The answer means TableX took the request up, not that the \
+                query has finished.",
+            input_schema: object(
+                vec![
+                    connection.clone(),
+                    ("query", string("The query text for the editor (SQL, a Redis command or a MongoDB script).")),
+                    database("Database to open the tab on; leave out for the connection's own database."),
+                    ("run", boolean("Run it now (default true); false only puts it in the editor.")),
+                ],
+                &["connection_id", "query"],
+            ),
+            output_schema: object(
+                vec![
+                    connection.clone(),
+                    ("shown", boolean("TableX opened the tab with the query in it.")),
+                    ("run", boolean("TableX was asked to run it (it may ask the user first).")),
+                ],
+                &["connection_id", "shown", "run"],
+            ),
+            example: json!({"connection_id": "c1", "query": "SELECT * FROM orders ORDER BY id DESC LIMIT 20", "database": "shop", "run": true}),
+        },
         ToolName::ExecuteRedisCommand => ToolSpec {
             name: tool.as_str(),
             description: "Run one Redis command line on a Redis connection. Reads need access `read`; a command \
@@ -1123,11 +1182,17 @@ mod tests {
                 "begin_transaction",
                 "commit_transaction",
                 "rollback_transaction",
+                "open_table",
+                "execute_and_show",
             ]
         );
         // Off by default: neither the tools nor `transaction_id` exist for the model.
-        let plain = tool_specs_for(false);
+        let plain = tool_specs_for(false, false);
         assert_eq!(plain.len(), 19);
+        assert_eq!(tool_specs_for(true, false).len(), 22);
+        let with_app: Vec<_> = tool_specs_for(false, true).iter().map(|spec| spec.name).collect();
+        assert_eq!(with_app.len(), 21);
+        assert_eq!(&with_app[19..], ["open_table", "execute_and_show"]);
         let execute = plain.iter().find(|spec| spec.name == "execute_query").unwrap();
         assert!(execute.input_schema["properties"].get("transaction_id").is_none());
         assert!(!execute.description.contains("transaction"));
@@ -1184,6 +1249,8 @@ mod tests {
                 ToolName::CommitTransaction | ToolName::RollbackTransaction => {
                     parses::<TransactionRequest>(example)
                 }
+                ToolName::OpenTable => parses::<OpenTableRequest>(example),
+                ToolName::ExecuteAndShow => parses::<ExecuteAndShowRequest>(example),
             }
         }
     }

@@ -2,7 +2,8 @@
 //! behind one policy, shared by the MCP server and the in-app assistant.
 //!
 //! * **Tools** (nineteen, names stable; three more with [`ToolLayer::with_transactions`]: `begin_transaction`,
-//!   `commit_transaction`, `rollback_transaction`): `list_connections`, `open_session`,
+//!   `commit_transaction`, `rollback_transaction`; two with [`ToolLayer::with_app`], the MCP server's
+//!   channel to the running app: `open_table`, `execute_and_show`): `list_connections`, `open_session`,
 //!   `close_session`, `list_namespaces`, `list_tables`, `describe_table`,
 //!   `get_schema_context`, `execute_query`, `execute_batch` (a script of SQL statements, approved
 //!   once), `explain_query`, `execute_redis_command`, `mongo_find`, `mongo_aggregate`,
@@ -58,7 +59,7 @@ pub use error::{AgentError, ToolError};
 pub use layer::{ToolLayer, ToolOutcome};
 pub use limits::Limits;
 pub use ports::{
-    ApprovalDecision, ConnectionCatalog, ConnectionInfo, ConnectionKind, Language, OpenGeneration,
+    AppShow, ApprovalDecision, ConnectionCatalog, ConnectionInfo, ConnectionKind, Language, OpenGeneration,
     RefuseWrites, Revision, Session, SessionProvider, TransactionApproval, TxControl, WriteApproval,
     WriteApprover,
 };

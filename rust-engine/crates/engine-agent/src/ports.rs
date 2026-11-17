@@ -442,6 +442,32 @@ pub trait Session: Send + Sync {
     }
 }
 
+/// The running TableX app, which an agent may ask to show something to the user. Only the MCP
+/// server has one (the in-app assistant is inside the app already), so only a layer built with
+/// [`ToolLayer::with_app`](crate::ToolLayer::with_app) has `open_table` and `execute_and_show`.
+/// Both calls block on the channel to the app, on the caller's worker thread; an error is
+/// [`AgentError::AppUnavailable`] (the app is not there) or [`AgentError::AppRefused`] (it said no).
+pub trait AppShow: Send + Sync {
+    /// Reveal a table, view or collection in the app and open it as a double click does.
+    fn open_object(
+        &self,
+        connection_id: &str,
+        database: &str,
+        schema: Option<&str>,
+        object: &str,
+    ) -> Result<(), AgentError>;
+
+    /// Open a query tab with `text` in its editor. With `run` the app runs it through its own Run
+    /// path, so its confirmations, connection types and read-only rules apply.
+    fn show_query(
+        &self,
+        connection_id: &str,
+        database: Option<&str>,
+        text: &str,
+        run: bool,
+    ) -> Result<(), AgentError>;
+}
+
 /// A write the front end is asked to approve.
 #[derive(Debug, Clone)]
 pub struct WriteApproval<'a> {

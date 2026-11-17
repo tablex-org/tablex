@@ -1,5 +1,5 @@
-//! Typed requests and results of the tools (nineteen, and three transaction tools a front end may
-//! switch on).
+//! Typed requests and results of the tools (nineteen, three transaction tools and two tools that
+//! show things in the app, which a front end may switch on).
 //!
 //! Requests reject unknown fields. Their JSON Schemas (see [`crate::schema`])
 //! are the hand-written twins of these structs; a test keeps them in step.
@@ -38,10 +38,12 @@ pub enum ToolName {
     BeginTransaction,
     CommitTransaction,
     RollbackTransaction,
+    OpenTable,
+    ExecuteAndShow,
 }
 
 impl ToolName {
-    pub const ALL: [Self; 22] = [
+    pub const ALL: [Self; 24] = [
         Self::ListConnections,
         Self::OpenSession,
         Self::CloseSession,
@@ -64,6 +66,8 @@ impl ToolName {
         Self::BeginTransaction,
         Self::CommitTransaction,
         Self::RollbackTransaction,
+        Self::OpenTable,
+        Self::ExecuteAndShow,
     ];
 
     /// The tools only a layer built with `with_transactions` offers.
@@ -72,6 +76,11 @@ impl ToolName {
             self,
             Self::BeginTransaction | Self::CommitTransaction | Self::RollbackTransaction
         )
+    }
+
+    /// The tools only a layer built with `with_app` offers (they act on the running TableX app).
+    pub const fn is_app_tool(self) -> bool {
+        matches!(self, Self::OpenTable | Self::ExecuteAndShow)
     }
 
     pub const fn as_str(self) -> &'static str {
@@ -98,6 +107,8 @@ impl ToolName {
             Self::BeginTransaction => "begin_transaction",
             Self::CommitTransaction => "commit_transaction",
             Self::RollbackTransaction => "rollback_transaction",
+            Self::OpenTable => "open_table",
+            Self::ExecuteAndShow => "execute_and_show",
         }
     }
 
@@ -123,7 +134,8 @@ impl ToolName {
             | Self::DescribeTable
             | Self::GetSchemaContext
             | Self::ListRoutines
-            | Self::GetRoutineSource => AgentAccess::SchemaOnly,
+            | Self::GetRoutineSource
+            | Self::OpenTable => AgentAccess::SchemaOnly,
             // A script is judged statement by statement: a write in it needs `read_write`.
             Self::ExecuteQuery
             | Self::ExecuteBatch
@@ -131,7 +143,8 @@ impl ToolName {
             | Self::ExecuteRedisCommand
             | Self::MongoFind
             | Self::MongoAggregate
-            | Self::MongoCount => AgentAccess::Read,
+            | Self::MongoCount
+            | Self::ExecuteAndShow => AgentAccess::Read,
             Self::MongoInsert | Self::MongoUpdate | Self::MongoDelete | Self::BeginTransaction => {
                 AgentAccess::ReadWrite
             }
@@ -669,3 +682,44 @@ pub struct ExecuteBatchResult {
 pub type DescribeTableResult = TableDescription;
 pub type GetSchemaContextResult = SchemaContext;
 pub type StatementResult = QueryResult;
+
+/// `open_table`: show a table, view or collection in the app.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpenTableRequest {
+    pub connection_id: String,
+    pub database: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    pub object: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenTableResult {
+    pub connection_id: String,
+    pub object: String,
+    /// TableX took the request up; the table itself may still be loading.
+    pub requested: bool,
+}
+
+/// `execute_and_show`: a query in an editor tab of the app, run there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecuteAndShowRequest {
+    pub connection_id: String,
+    pub query: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
+    /// Run it (default true); false only puts it in the editor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecuteAndShowResult {
+    pub connection_id: String,
+    /// TableX took the request up and opened the tab.
+    pub shown: bool,
+    /// TableX was asked to run it (it may ask the user first, or refuse by its own rules).
+    pub run: bool,
+}

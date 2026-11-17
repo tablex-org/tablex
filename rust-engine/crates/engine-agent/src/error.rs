@@ -17,6 +17,8 @@ pub const AUDIT_UNAVAILABLE: &str = "agent.audit_unavailable";
 pub const UNSUPPORTED: &str = "agent.unsupported";
 pub const TRANSACTION_GONE: &str = "agent.transaction_gone";
 pub const TRANSACTION_ABORTED: &str = "agent.transaction_aborted";
+pub const APP_UNAVAILABLE: &str = "agent.app_unavailable";
+pub const APP_REFUSED: &str = "agent.app_refused";
 pub const INTERNAL: &str = "agent.internal";
 
 /// Why a tool call did not produce a result. Every variant has a stable
@@ -72,6 +74,12 @@ pub enum AgentError {
         message: String,
         retryable: bool,
     },
+    /// The TableX app cannot be reached (not running, no channel on this platform, a broken one).
+    #[error("{0}")]
+    AppUnavailable(String),
+    /// The TableX app was reached and said no.
+    #[error("{0}")]
+    AppRefused(String),
     #[error("{0}")]
     Internal(String),
 }
@@ -94,6 +102,8 @@ impl AgentError {
             Self::TransactionGone(_) => TRANSACTION_GONE,
             Self::TransactionAborted(_) => TRANSACTION_ABORTED,
             Self::Driver { code, .. } => code,
+            Self::AppUnavailable(_) => APP_UNAVAILABLE,
+            Self::AppRefused(_) => APP_REFUSED,
             Self::Internal(_) => INTERNAL,
         }
     }

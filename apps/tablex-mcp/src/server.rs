@@ -37,7 +37,12 @@ begin_transaction opens a transaction: each change in it is approved one by one 
 commit_transaction, which the user approves with the list of changes; roll back (rollback_transaction) \
 what you do not need. execute_batch with use_transaction runs a whole script as one transaction that \
 is committed, or rolled back when a statement fails, after a single approval. An unused transaction is \
-rolled back after 5 minutes. MongoDB writes are not part of transactions.";
+rolled back after 5 minutes. MongoDB writes are not part of transactions. To show something to the \
+user in the TableX app (which has to be running), open_table opens a table, view or collection in its \
+sidebar and a data tab, and execute_and_show puts a query in an editor tab and runs it there, under \
+the app's own rules: it runs a single read only; for a query that changes data, or one the user \
+should review first, pass run false and tell the user to run it. Neither returns data: use \
+execute_query when you need the rows yourself.";
 
 /// The layer's code for a tool name it does not have; a protocol error here, not a tool result.
 const UNKNOWN_TOOL: &str = "agent.unknown_tool";
