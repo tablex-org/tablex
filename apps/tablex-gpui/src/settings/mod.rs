@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 
 /// Schema version written by this build. Bump it together with a new
 /// migration in [`store`].
-pub const SCHEMA_VERSION: u32 = 5;
+pub const SCHEMA_VERSION: u32 = 6;
 
 /// A closed set of named values a setting can take (`Select` options).
 pub trait Choice: Copy + PartialEq + 'static {
@@ -398,7 +398,9 @@ impl Default for EditorSettings {
             autocomplete_insert_space: false,
             autocomplete_max_items: 50,
             highlight_current_statement: false,
-            run_scope: RunScope::All,
+            // Run / Ctrl+Enter runs the statement at the cursor (or the selection); Run Script
+            // (Option+X) runs everything.
+            run_scope: RunScope::Current,
             on_script_error: OnScriptError::Stop,
             parameters: true,
             max_result_tabs: 20,

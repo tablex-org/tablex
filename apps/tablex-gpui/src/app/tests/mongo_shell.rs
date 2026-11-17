@@ -156,6 +156,10 @@ impl<'a> ShellRig<'a> {
         let shared = engine.clone();
         let (tab_id, connection) = app.update(visual, |this, cx| {
             this.scenario_ui.service = None;
+            // These tests run whole scripts with Run (the default runs the statement at the cursor).
+            let mut settings = (*this.settings).clone();
+            settings.editor.run_scope = crate::settings::RunScope::All;
+            this.settings = std::sync::Arc::new(settings);
             this.driver_ui.tools.store = Some(std::sync::Arc::new(engine_driver_host::ToolStore::new(&tools_dir)));
             this.driver_ui.store = std::sync::Arc::new(engine_driver_host::InstalledDriverStore::new(&store_dir));
             this.driver_ui.policy = TrustPolicy::Developer;

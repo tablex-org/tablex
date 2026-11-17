@@ -401,16 +401,16 @@ fn a_dropdown_opens_selects_updates_the_draft_and_reopens_on_the_new_value(
     let (app, visual) = settings_app(cx);
     open_settings_page(&app, visual);
     settings_nav(visual, "editor");
-    assert_eq!(draft_of(&app, visual).editor.run_scope, RunScope::All);
-
-    // Open, move to the first option ("Current statement"), confirm.
-    click(visual, "setting-control-editor.run_scope".into());
-    visual.simulate_keystrokes("up up enter");
-    settle(visual);
     assert_eq!(draft_of(&app, visual).editor.run_scope, RunScope::Current);
+
+    // Open, move to the last option ("Whole script"), confirm.
+    click(visual, "setting-control-editor.run_scope".into());
+    visual.simulate_keystrokes("down down enter");
+    settle(visual);
+    assert_eq!(draft_of(&app, visual).editor.run_scope, RunScope::All);
     assert_eq!(
         applied(&app, visual).editor.run_scope,
-        RunScope::All,
+        RunScope::Current,
         "still a draft"
     );
     assert!(rendered(visual, "setting-reset-editor.run_scope".into()));
@@ -428,7 +428,7 @@ fn a_dropdown_opens_selects_updates_the_draft_and_reopens_on_the_new_value(
                 .read(cx)
                 .selected_value()
                 .map(|label| label.to_string()),
-            Some("Current statement".to_string())
+            Some("Whole script".to_string())
         );
     });
     click(visual, "setting-control-editor.run_scope".into());
@@ -436,7 +436,7 @@ fn a_dropdown_opens_selects_updates_the_draft_and_reopens_on_the_new_value(
     settle(visual);
     assert_eq!(
         draft_of(&app, visual).editor.run_scope,
-        RunScope::Current,
+        RunScope::All,
         "dismissal changes nothing"
     );
 
@@ -454,7 +454,7 @@ fn a_dropdown_opens_selects_updates_the_draft_and_reopens_on_the_new_value(
                 .read(cx)
                 .selected_value()
                 .map(|label| label.to_string()),
-            Some("Whole script".to_string())
+            Some("Current statement".to_string())
         );
     });
 }
@@ -591,8 +591,8 @@ fn run_executes_the_setting_scope(cx: &mut TestAppContext) {
             this.sql_in_run_scope(tab, script.to_string(), None, cx)
         })
     };
-    // The default runs the whole script.
-    assert_eq!(run(&app, visual), script);
+    // The default runs the statement at the cursor (Run Script runs the whole script).
+    assert_eq!(run(&app, visual), "select 2");
 
     let scope =
         |value: RunScope, app: &gpui::Entity<AppRoot>, visual: &mut gpui::VisualTestContext| {

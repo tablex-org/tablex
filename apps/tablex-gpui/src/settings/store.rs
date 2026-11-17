@@ -56,7 +56,20 @@ const MIGRATIONS: &[Migration] = &[
         to: 5,
         apply: move_model_and_address_under_anthropic,
     },
+    Migration {
+        to: 6,
+        apply: run_the_current_statement,
+    },
 ];
+
+/// 6: Run / Ctrl+Enter runs the statement at the cursor, as in other database tools, and Run Script
+/// (Option+X) the whole script. Earlier versions wrote "Whole script" into every file as the
+/// default, so a file that has it gets the new default once.
+fn run_the_current_statement(settings: &mut Settings, _: &Legacy) {
+    if settings.editor.run_scope == super::RunScope::All {
+        settings.editor.run_scope = super::RunScope::Current;
+    }
+}
 
 /// 5: the model and the address are kept per provider (`ai.providers.<id>`). A version-4 file has
 /// them at the top of `ai`, and Anthropic was its only provider. `ai.mcp_writes` does not move.
@@ -268,6 +281,24 @@ mod tests {
     }
 
     #[test]
+    fn a_version_five_file_runs_the_current_statement_once_and_keeps_a_later_choice() {
+        let dir = temp_dir();
+        let path = dir.join(FILE_NAME);
+        std::fs::write(&path, r#"{"schema_version": 5, "editor": {"run_scope": "all", "soft_wrap": true}}"#).unwrap();
+        let loaded = load(&path, &Legacy::default());
+        assert!(loaded.needs_save);
+        assert_eq!(loaded.settings.editor.run_scope, super::super::RunScope::Current);
+        assert!(loaded.settings.editor.soft_wrap);
+        // "Selection" was a choice: it stays.
+        std::fs::write(&path, r#"{"schema_version": 5, "editor": {"run_scope": "selection"}}"#).unwrap();
+        assert_eq!(load(&path, &Legacy::default()).settings.editor.run_scope, super::super::RunScope::Selection);
+        // Whole script chosen again after the upgrade is kept.
+        std::fs::write(&path, format!(r#"{{"schema_version": {SCHEMA_VERSION}, "editor": {{"run_scope": "all"}}}}"#)).unwrap();
+        assert_eq!(load(&path, &Legacy::default()).settings.editor.run_scope, super::super::RunScope::All);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn a_version_two_file_gains_the_ai_defaults_and_keeps_its_choices() {
         let dir = temp_dir();
         let path = dir.join(FILE_NAME);
@@ -301,7 +332,7 @@ mod tests {
         assert!(loaded.needs_save, "rewritten at the current version");
         let settings = loaded.settings;
         assert_eq!(settings.schema_version, SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 5);
+        assert_eq!(SCHEMA_VERSION, 6);
         assert!(!settings.ai.mcp_writes, "off after the upgrade");
         assert!(settings.editor.soft_wrap && settings.results.page_size == 321);
         // Version 3 -> 5: the model of the file ends up under Anthropic.
@@ -345,7 +376,7 @@ mod tests {
         let loaded = load(&path, &Legacy::default());
         assert!(loaded.needs_save, "rewritten at version 5");
         let ai = loaded.settings.ai.clone();
-        assert_eq!(loaded.settings.schema_version, 5);
+        assert_eq!(loaded.settings.schema_version, SCHEMA_VERSION);
         assert_eq!(ai.providers.anthropic.model, "claude-haiku-5-5");
         assert_eq!(ai.providers.anthropic.base_url, "http://localhost:4000");
         // The other providers start from their defaults, with no model.
@@ -367,7 +398,7 @@ mod tests {
         save(&path, &loaded.settings).unwrap();
         let written: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(written["schema_version"], 5);
+        assert_eq!(written["schema_version"], SCHEMA_VERSION);
         assert!(written["ai"].get("model").is_none() && written["ai"].get("base_url").is_none());
         assert_eq!(written["ai"]["mcp_writes"], true);
         assert_eq!(

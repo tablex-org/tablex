@@ -110,9 +110,14 @@ fn run_runs_the_whole_script_and_run_selected_runs_the_statement_or_selection(cx
     click_debug_button(visual, "script-run-selected");
     settle(visual);
     assert_eq!(script_rows(&app, visual), 120, "the selected statement ran");
-    // Run (all) on a two-statement script is no single find: it is a MongoDB shell script, which
-    // needs the plugin (this catalog has none), so the dialog says so and nothing runs. That
-    // proves Run Selected was what made the difference.
+    // Run with "Run executes" on the whole script: a two-statement script is no single find but
+    // a MongoDB shell script, which needs the plugin (this catalog has none), so the dialog says
+    // so and nothing runs. That proves Run Selected was what made the difference.
+    app.update(visual, |this, _| {
+        let mut settings = (*this.settings).clone();
+        settings.editor.run_scope = crate::settings::RunScope::All;
+        this.settings = std::sync::Arc::new(settings);
+    });
     click_debug_button(visual, "run-query");
     settle(visual);
     assert!(

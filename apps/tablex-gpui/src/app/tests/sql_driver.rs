@@ -183,6 +183,10 @@ impl<'a> SqlRig<'a> {
         settle(visual);
         let (tab, key, session, handle) = app.update(visual, |this, cx| {
             this.scenario_ui.service = None;
+            // These tests run whole scripts with Run (the default runs the statement at the cursor).
+            let mut settings = (*this.settings).clone();
+            settings.editor.run_scope = crate::settings::RunScope::All;
+            this.settings = std::sync::Arc::new(settings);
             let id = uuid::Uuid::new_v4();
             this.saved_connections.push(SavedConnection {
                 id,
