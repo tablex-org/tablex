@@ -194,6 +194,16 @@ class CaptureRunnerTests(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             runner.parser().parse_args(["launch", "--binary", "/x", "--output", "/y", "--theme", "sepia"])
 
+    def test_launch_language_flag_forces_the_scenario_language_through_the_environment(self):
+        args = runner.parser().parse_args(["launch", "--binary", "/x", "--output", "/y", "--language", "vi"])
+        self.assertEqual(args.language, "vi")
+        self.assertEqual(runner.launch_env(None, args.language)["TABLEX_LANGUAGE"], "vi")
+        with patch.dict(runner.os.environ, {}, clear=False):
+            runner.os.environ.pop("TABLEX_LANGUAGE", None)
+            self.assertNotIn("TABLEX_LANGUAGE", runner.launch_env(None))
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            runner.parser().parse_args(["launch", "--binary", "/x", "--output", "/y", "--language", "fr"])
+
     def test_launch_refuses_symlink_output(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

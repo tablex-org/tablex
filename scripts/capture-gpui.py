@@ -23,6 +23,7 @@ HELPER_PREFIX = "tablex-gpui-capture-helper-"
 SCENARIOS = ("new-connection", "connection-tree", "connection-overview", "result-grid", "result-footer", "mongo-grid", "table-diagram", "database-diagram", "table-properties-edit", "driver-manager", "driver-manager-tools", "missing-driver", "split-panes", "split-panes-drop", "grouped-tabs", "grouped-tabs-lone", "settings", "settings-shortcuts", "connection-overrides", "import-selection", "redis", "assistant", "assistant-streaming", "assistant-no-key", "assistant-access-off", "assistant-error", "assistant-approval", "assistant-approval-dangerous", "assistant-approval-long", "assistant-access-write", "assistant-history", "assistant-readonly", "assistant-editor-action", "settings-ai", "settings-ai-ollama", "updates", "updates-changelog")
 FIXTURES = ("sample", "populated", "pending-edits", "empty", "loading", "error", "narrow", "disconnected", "states")
 THEMES = ("dark", "light", "system")
+LANGUAGES = ("system", "en", "vi")
 DEFAULT_SCENARIO = "new-connection"
 DEFAULT_FIXTURE = "sample"
 EVENTS = {"ready", "ui-state", "ui-bounds", "test-start", "test-success", "test-error", "save"}
@@ -301,11 +302,14 @@ def update_window(output: Path, run: dict[str, Any], *, persist: bool = True) ->
     return window
 
 
-def launch_env(theme: str | None) -> dict[str, str]:
-    """Scenario runs force the theme with TABLEX_THEME (dark|light|system)."""
+def launch_env(theme: str | None, language: str | None = None) -> dict[str, str]:
+    """Scenario runs force the theme with TABLEX_THEME (dark|light|system) and the interface language
+    with TABLEX_LANGUAGE (system|en|vi)."""
     env = os.environ.copy()
     if theme:
         env["TABLEX_THEME"] = theme
+    if language:
+        env["TABLEX_LANGUAGE"] = language
     return env
 
 
@@ -357,7 +361,7 @@ def launch(args: argparse.Namespace) -> None:
                 ],
                 stdout=log,
                 stderr=subprocess.STDOUT,
-                env=launch_env(getattr(args, "theme", None)),
+                env=launch_env(getattr(args, "theme", None), getattr(args, "language", None)),
                 start_new_session=True,
             )
         except OSError as error:
@@ -1184,6 +1188,7 @@ def parser() -> argparse.ArgumentParser:
     launch_parser.add_argument("--scenario", choices=SCENARIOS, default=DEFAULT_SCENARIO)
     launch_parser.add_argument("--fixture", choices=FIXTURES, default=DEFAULT_FIXTURE)
     launch_parser.add_argument("--theme", choices=THEMES, help="force the theme for this run (sets TABLEX_THEME); default: the scenario's saved/default theme")
+    launch_parser.add_argument("--language", choices=LANGUAGES, help="force the interface language for this run (sets TABLEX_LANGUAGE); default: the scenario's saved/default language")
     launch_parser.add_argument("--timeout", type=float, default=20.0)
     launch_parser.add_argument("--window-timeout", type=float, default=5.0)
     launch_parser.set_defaults(handler=launch)
