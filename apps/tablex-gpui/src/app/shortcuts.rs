@@ -647,7 +647,10 @@ static DEFS: &[ShortcutDef] = &[
         &["enter", "secondary-enter"],
         bind!(MongoFindEnter),
     )
-    .fixed(),
+    .fixed()
+    // Enter in the filter field runs the filter; elsewhere a global action may have the chord
+    // (Run Query on ⌘Enter): the field's own binding is deeper and wins inside it.
+    .scoped_override(),
     ShortcutDef::new(
         "mongo.run_sort",
         "Mongo Query Bar",
@@ -656,7 +659,8 @@ static DEFS: &[ShortcutDef] = &[
         &["enter", "secondary-enter"],
         bind!(MongoSortEnter),
     )
-    .fixed(),
+    .fixed()
+    .scoped_override(),
     // Ending a transaction cannot be undone and every plain chord is taken (Ctrl+Alt is AltGr on
     // Windows layouts): these three are bound by the user, and shown in the tooltips and palette.
     ShortcutDef::new(
@@ -1236,6 +1240,20 @@ mod tests {
             conflict(&none, redo, "secondary-z").map(|d| d.id),
             Some("diagram.undo")
         );
+    }
+
+    /// Enter and ⌘Enter in the Mongo query bar's fields are fixed and act only inside the field:
+    /// a global action (Run Query, Run Script) may still take ⌘Enter, and wins outside the field.
+    #[test]
+    fn a_global_action_may_take_the_chords_of_the_mongo_query_bar_fields() {
+        let none = Overrides::new();
+        for id in ["editor.run", "editor.run_script", "editor.run_from_cursor"] {
+            let def = find(id).unwrap();
+            assert_eq!(conflict(&none, def, "secondary-enter").map(|d| d.id), None, "{id}");
+        }
+        // Other context-scoped chords still block a global action (grid copy, Enter edits a cell).
+        assert!(conflict(&none, find("editor.save_script").unwrap(), "secondary-c").is_some());
+        assert_eq!(conflict(&none, find("editor.run").unwrap(), "enter").map(|d| d.id), Some("results.edit_cell"));
     }
 
     #[test]

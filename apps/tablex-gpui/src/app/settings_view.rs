@@ -2370,10 +2370,24 @@ impl AppRoot {
             .as_ref()
             .filter(|recording| recording.id == id);
         let controls = if !def.editable {
+            // The keys it answers to, then why they cannot be changed.
             div()
+                .debug_selector(move || format!("shortcut-fixed-{id}"))
+                .flex()
+                .items_center()
+                .gap(px(6.0))
                 .text_size(px(12.0))
-                .text_color(theme::text_faint())
-                .child("Fixed")
+                .children(chords.iter().map(|chord| {
+                    div()
+                        .px(px(6.0))
+                        .py(px(2.0))
+                        .rounded(px(4.0))
+                        .border_1()
+                        .border_color(theme::border())
+                        .text_color(theme::text_muted())
+                        .child(shortcuts::display(chord, macos))
+                }))
+                .child(div().text_color(theme::text_faint()).child("Fixed"))
                 .into_any_element()
         } else {
             div()
