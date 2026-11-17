@@ -95,6 +95,7 @@ impl Live {
             page_size: 50,
             timeout_ms: Some(60_000),
             cursor: None,
+            continue_on_error: false,
         }
     }
 

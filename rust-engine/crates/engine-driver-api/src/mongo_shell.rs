@@ -154,6 +154,108 @@ pub fn read_frame<T: for<'de> Deserialize<'de>>(
         .map_err(|error| FrameError::Malformed(error.to_string()))
 }
 
+/// Byte ranges of the statements of a shell script (the app's Run Selected, and the plugin's
+/// statement-by-statement run). A statement ends at a
+/// top-level `;` or at a blank line, never inside strings, regex-free
+/// brackets or comments, so `db.a.find({\n  x: 1\n})` stays one statement.
+/// Ranges are trimmed and non-empty.
+pub fn statement_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
+    let bytes = text.as_bytes();
+    let mut ranges = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0i32;
+    let mut index = 0usize;
+    let push = |from: usize, to: usize, ranges: &mut Vec<std::ops::Range<usize>>| {
+        let slice = &text[from..to];
+        let trimmed = slice.trim();
+        if !trimmed.is_empty() {
+            let lead = slice.len() - slice.trim_start().len();
+            ranges.push(from + lead..from + lead + trimmed.len());
+        }
+    };
+    while index < bytes.len() {
+        match bytes[index] {
+            quote @ (b'"' | b'\'' | b'`') => {
+                index += 1;
+                while index < bytes.len() && bytes[index] != quote {
+                    if bytes[index] == b'\\' {
+                        index += 1;
+                    }
+                    index += 1;
+                }
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+                continue;
+            }
+            // An SQL comment (`-- note`, a rule `-----`), not a decrement (`i--`).
+            b'-' if bytes.get(index + 1) == Some(&b'-')
+                && bytes.get(index + 2).is_none_or(|next| matches!(next, b' ' | b'\t' | b'-' | b'\n' | b'\r'))
+                && !index
+                    .checked_sub(1)
+                    .is_some_and(|before| bytes[before].is_ascii_alphanumeric() || matches!(bytes[before], b'_' | b'$' | b')' | b']')) =>
+            {
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+                continue;
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index += 2;
+                while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/') {
+                    index += 1;
+                }
+                index += 1;
+            }
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b';' if depth <= 0 => {
+                push(start, index, &mut ranges);
+                start = index + 1;
+                depth = 0;
+            }
+            b'\n' => {
+                // A blank line (only whitespace until the next newline) ends a statement.
+                let rest = &text[index + 1..];
+                let blank = rest
+                    .split('\n')
+                    .next()
+                    .is_some_and(|line| line.trim().is_empty() && index + 1 + line.len() < text.len());
+                // Inside an open bracket it does too when the next line starts a new statement at
+                // the margin (`db.…`, a name): an unfinished statement above must not swallow the
+                // ones below it, so the statement at the cursor is still the one the user sees.
+                // A line that starts with SELECT starts an SQL statement (`mongo_sql`): a shell
+                // statement never begins with that word.
+                let sql_follows = depth <= 0
+                    && rest.split('\n').next().is_some_and(|line| {
+                        let line = line.trim_start();
+                        line.get(..6).is_some_and(|word| word.eq_ignore_ascii_case("select"))
+                            && line[6..].starts_with(|c: char| c.is_whitespace() || c == '*')
+                    });
+                let ends = sql_follows
+                    || blank
+                    && (depth <= 0
+                        || rest
+                            .split('\n')
+                            .find(|line| !line.trim().is_empty())
+                            .and_then(|line| line.chars().next())
+                            .is_some_and(|first| first.is_ascii_alphabetic() || first == '_' || first == '$'));
+                if ends {
+                    push(start, index, &mut ranges);
+                    start = index + 1;
+                    depth = 0;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    push(start, text.len(), &mut ranges);
+    ranges
+}
+
 /// One script run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ShellRequest {
@@ -172,6 +274,10 @@ pub struct ShellRequest {
     /// The cursor the previous reply left open (mongosh `it` continues it).
     #[serde(default)]
     pub cursor: Option<CursorRef>,
+    /// The statements run one after the other, as a shell does; `true` runs the ones after a
+    /// failed statement too (its error goes to the output), `false` stops there.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub continue_on_error: bool,
 }
 
 fn default_page_size() -> u32 {
@@ -320,6 +426,7 @@ mod tests {
             page_size: 50,
             timeout_ms: None,
             cursor: None,
+            continue_on_error: false,
         });
         let text = String::from_utf8(encoded(&run)[4..].to_vec()).unwrap();
         assert!(text.starts_with(r#"{"run":{"script":"1","database":"d","allow_writes":false,"page_size":50"#), "{text}");

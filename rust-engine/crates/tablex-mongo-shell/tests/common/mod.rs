@@ -62,6 +62,7 @@ pub fn request(script: &str) -> ShellRequest {
         page_size: 50,
         timeout_ms: None,
         cursor: None,
+        continue_on_error: false,
     }
 }
 

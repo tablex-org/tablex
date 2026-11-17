@@ -952,6 +952,7 @@ mod tests {
             page_size: 50,
             timeout_ms: None,
             cursor: None,
+            continue_on_error: false,
         };
         let run = MongoShell::new(&exe).run_with(commands.clone(), request).expect("starts");
         let handle = run.cancel_handle();

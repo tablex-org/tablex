@@ -219,7 +219,7 @@ fn run_in_context<'js>(
                 error: Some(describe_abort(state, request)),
             });
         }
-        None => evaluate_script(ctx, &script, request, state),
+        None => evaluate_statements(ctx, &script, request, state),
     };
     let outcome = match evaluated {
         Ok(value) => finish_value(ctx, &api, value, request, state),
@@ -253,6 +253,88 @@ fn eval_named<'js, V: rquickjs::FromJs<'js>>(
     options.promise = promise;
     options.filename = Some(name.to_owned());
     ctx.eval_with_options(source, options)
+}
+
+/// Runs the script's statements one after the other in one context, as a shell does: what one
+/// declares the next sees, and a statement that does not parse fails alone (its line and column are
+/// the script's: each statement is evaluated where it stands). With `continue_on_error` a failed
+/// statement's error goes to the output and the run goes on; the value is the last statement's
+/// that ran. A stop, a timeout or the memory limit ends the run either way.
+fn evaluate_statements<'js>(
+    ctx: &Ctx<'js>,
+    script: &str,
+    request: &ShellRequest,
+    state: &Rc<RunState>,
+) -> Result<Value<'js>, Box<Outcome>> {
+    let ranges = engine_driver_api::mongo_shell::statement_ranges(script);
+    if ranges.len() <= 1 {
+        return evaluate_script(ctx, script, request, state);
+    }
+    let mut last: Option<Value<'js>> = None;
+    let mut first_failure: Option<Box<Outcome>> = None;
+    for range in ranges {
+        // The statement where it stands: the lines and columns before it are blank.
+        let before = &script[..range.start];
+        let line_start = before.rfind('\n').map_or(0, |at| at + 1);
+        let mut source = "\n".repeat(before.matches('\n').count());
+        source.extend(script[line_start..range.start].chars().map(|c| if c == '\t' { '\t' } else { ' ' }));
+        // With its own `;`, so an error at that `;` is reported there.
+        let rest = &script[range.end..];
+        let gap = rest.len() - rest.trim_start_matches([' ', '\t']).len();
+        let end = if rest[gap..].starts_with(';') { range.end + gap + 1 } else { range.end };
+        source.push_str(&script[range.start..end]);
+        match evaluate_script(ctx, &source, request, state) {
+            // A declaration has no value: the script's value stays the last expression's.
+            Ok(value) if !is_declaration(&script[range.clone()]) || last.is_none() => last = Some(value),
+            Ok(_) => {}
+            Err(failed) => {
+                let stops = !request.continue_on_error
+                    || state.abort.get().is_some()
+                    || failed.error.as_ref().is_some_and(|error| {
+                        matches!(error.kind, FailureKind::Cancelled | FailureKind::Timeout | FailureKind::Memory | FailureKind::Internal)
+                    });
+                if stops {
+                    return Err(failed);
+                }
+                if let Some(error) = &failed.error {
+                    state.output.borrow_mut().push(&statement_failure_line(error));
+                }
+                first_failure.get_or_insert(failed);
+            }
+        }
+    }
+    match (last, first_failure) {
+        (Some(value), _) => Ok(value),
+        (None, Some(failed)) => Err(failed),
+        (None, None) => Ok(Value::new_undefined(ctx.clone())),
+    }
+}
+
+/// `var`, `let`, `const`, `function`, `class` (after leading comments): a statement with no value.
+fn is_declaration(statement: &str) -> bool {
+    let mut rest = statement.trim_start();
+    loop {
+        if let Some(after) = rest.strip_prefix("//") {
+            rest = after.split_once('\n').map_or("", |(_, next)| next).trim_start();
+        } else if let Some(after) = rest.strip_prefix("/*") {
+            rest = after.split_once("*/").map_or("", |(_, next)| next).trim_start();
+        } else {
+            break;
+        }
+    }
+    let word: String = rest.chars().take_while(|c| c.is_ascii_alphabetic()).collect();
+    matches!(word.as_str(), "var" | "let" | "const" | "function" | "class")
+        || (word == "async" && rest["async".len()..].trim_start().starts_with("function"))
+}
+
+/// The output line of a statement that failed in a run that goes on.
+fn statement_failure_line(error: &ShellFailure) -> String {
+    let place = match (error.line, error.column) {
+        (Some(line), Some(column)) => format!(" (line {line}, column {column})"),
+        (Some(line), None) => format!(" (line {line})"),
+        _ => String::new(),
+    };
+    format!("{:?} error{place}: {}", error.kind, error.message)
 }
 
 /// Evaluates the user's script; a script failure comes back as an

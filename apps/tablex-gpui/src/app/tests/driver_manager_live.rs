@@ -422,6 +422,7 @@ fn live_every_catalog_driver_installs_connects_uninstalls_and_reinstalls(cx: &mu
             page_size: 50,
             timeout_ms: Some(60_000),
             cursor: None,
+            continue_on_error: false,
         };
         let reply = shell.run(&session, request("print(1 + 1)")).expect("start").wait().expect("run");
         eprintln!("LIVE tablex-mongo-shell print(1 + 1) -> output {:?} error {:?}", reply.output, reply.error);
