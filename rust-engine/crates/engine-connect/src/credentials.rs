@@ -132,6 +132,12 @@ pub trait CredentialStore {
     /// Succeeds when there is nothing to delete.
     fn delete(&self, kind: SecretKind, account: &str) -> Result<(), CredentialError>;
 
+    /// Whether a secret is stored, without reading it where the store can tell: the macOS Keychain
+    /// asks the user before it hands out an item's data, never for its attributes.
+    fn contains(&self, kind: SecretKind, account: &str) -> Result<bool, CredentialError> {
+        Ok(self.load(kind, account)?.is_some())
+    }
+
     /// Removes every saved secret of the store so that new ones can be saved ([`RESET_ACTION`]),
     /// the secrets that earlier versions kept as items of the OS store of their own included. The
     /// answer is what could not be removed from the OS store (best effort: empty when all went),
@@ -195,6 +201,9 @@ impl<T: CredentialStore + ?Sized> CredentialStore for std::sync::Arc<T> {
     fn delete(&self, kind: SecretKind, account: &str) -> Result<(), CredentialError> {
         (**self).delete(kind, account)
     }
+    fn contains(&self, kind: SecretKind, account: &str) -> Result<bool, CredentialError> {
+        (**self).contains(kind, account)
+    }
     fn unlock(&self) -> Result<(), CredentialError> {
         (**self).unlock()
     }
@@ -254,6 +263,28 @@ impl CredentialStore for SystemStore {
         password: &str,
     ) -> Result<(), CredentialError> {
         Ok(self.entry(kind, account)?.set_password(password)?)
+    }
+
+    /// The item's attributes only: reading its data would make macOS ask the user (again) when this
+    /// build is not on the item's access list, as with an item an earlier version saved.
+    #[cfg(target_os = "macos")]
+    fn contains(&self, kind: SecretKind, account: &str) -> Result<bool, CredentialError> {
+        use security_framework::item::{ItemClass, ItemSearchOptions, Limit};
+        /// `errSecItemNotFound`.
+        const NOT_FOUND: i32 = -25300;
+        let service = self.service_override.as_deref().unwrap_or(kind.service());
+        let found = ItemSearchOptions::new()
+            .class(ItemClass::generic_password())
+            .service(service)
+            .account(account)
+            .load_attributes(true)
+            .limit(Limit::Max(1))
+            .search();
+        match found {
+            Ok(items) => Ok(!items.is_empty()),
+            Err(error) if error.code() == NOT_FOUND => Ok(false),
+            Err(error) => Err(CredentialError::Platform(error.to_string())),
+        }
     }
 
     fn delete(&self, kind: SecretKind, account: &str) -> Result<(), CredentialError> {

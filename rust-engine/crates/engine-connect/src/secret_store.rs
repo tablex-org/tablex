@@ -365,7 +365,9 @@ impl EncryptedStore {
         let known = self.key()?;
         // A copy of a legacy item is made only while the item is there: asked before the lock (the
         // OS may be slow and no transaction waits for it), the row is what the lock decides on.
-        if migrate && self.os.load(kind, account)?.is_none() {
+        // Asked without reading it: a second read of an item of an earlier version is a second
+        // Keychain prompt for every saved password.
+        if migrate && !self.os.contains(kind, account)? {
             return Ok(false);
         }
         let mut conn = app_db::open(path).map_err(open_error)?;
@@ -598,6 +600,9 @@ mod tests {
     struct Os {
         items: Mutex<HashMap<(SecretKind, String), String>>,
         loads: AtomicUsize,
+        /// Reads of the data of items other than the master key: each one is a Keychain prompt for
+        /// an item an earlier version saved.
+        legacy_reads: AtomicUsize,
         key_writes: AtomicUsize,
         deny_key_read: AtomicBool,
         fail_delete: AtomicBool,
@@ -635,6 +640,7 @@ mod tests {
                 .get(&(kind, account.to_owned()))
                 .cloned();
             if kind != SecretKind::MasterKey && found.is_some() {
+                self.legacy_reads.fetch_add(1, Ordering::SeqCst);
                 let hook = self.after_legacy_read.lock().unwrap().take();
                 if let Some(hook) = hook {
                     hook();
@@ -651,6 +657,10 @@ mod tests {
             }
             self.put(kind, account, password);
             Ok(())
+        }
+        /// The attributes only, as the Keychain answers without asking: not a read.
+        fn contains(&self, kind: SecretKind, account: &str) -> Result<bool, CredentialError> {
+            Ok(self.has(kind, account))
         }
         fn delete(&self, kind: SecretKind, account: &str) -> Result<(), CredentialError> {
             if self.fail_delete.load(Ordering::SeqCst) {
@@ -870,6 +880,27 @@ mod tests {
         assert_eq!(store.load(DB, "a").unwrap().as_deref(), Some("legacy-pw"));
         assert_eq!(fx.os.loads.load(Ordering::SeqCst), loads, "the second load stays in the file");
         assert_eq!(fx.store().load(DB, "a").unwrap().as_deref(), Some("legacy-pw"));
+    }
+
+    /// Each read of an item an earlier version saved is a Keychain prompt (the item's access list
+    /// names the earlier build): moving it in reads it once, and every later load is the file's.
+    #[test]
+    fn moving_a_legacy_item_in_reads_it_once() {
+        let fx = Fixture::new();
+        fx.app_moved_in();
+        for account in ["a", "b", "c"] {
+            fx.os.put(DB, account, "legacy-pw");
+        }
+        let store = fx.store();
+        for account in ["a", "b", "c"] {
+            assert_eq!(store.load(DB, account).unwrap().as_deref(), Some("legacy-pw"));
+        }
+        assert_eq!(fx.os.legacy_reads.load(Ordering::SeqCst), 3, "one read per item");
+        for account in ["a", "b", "c"] {
+            assert_eq!(store.load(DB, account).unwrap().as_deref(), Some("legacy-pw"));
+            assert_eq!(fx.store().load(DB, account).unwrap().as_deref(), Some("legacy-pw"));
+        }
+        assert_eq!(fx.os.legacy_reads.load(Ordering::SeqCst), 3, "no read after the move");
     }
 
     #[test]

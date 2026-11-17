@@ -39,7 +39,8 @@ uuid = { version = "0.8", features = ["v4"] }
 engine-connect = { path = ".", features = ["testing"] }
 tempfile = "3.14"
 
-# Opt-in Keychain test: proves items written through Security.framework (the old
+# Whether a Keychain item is there, from its attributes alone (reading its data may prompt).
+# The opt-in Keychain test also uses it: items written through Security.framework (the old
 # backend, the Swift app) stay readable through `keyring`.
-[target.'cfg(target_os = "macos")'.dev-dependencies]
+[target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3.7"
