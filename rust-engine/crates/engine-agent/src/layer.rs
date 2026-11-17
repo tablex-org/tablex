@@ -12,7 +12,8 @@ use crate::limits::Limits;
 use crate::mongo;
 use crate::policy::{check_statement, Need};
 use crate::ports::{
-    AppShow, ApprovalDecision, ConnectionCatalog, ConnectionInfo, ConnectionKind, Language, NodeLevel,
+    AppShow, ApprovalDecision, ConnectionAdmin, ConnectionCatalog, ConnectionChange,
+    ConnectionChanged, ConnectionInfo, ConnectionKind, Language, NodeLevel,
     NodeQuery, OpenGeneration, RefuseWrites, Revision, RoutineQuery, RunRequest, Session,
     SessionInfo, SessionProvider, TableRef, TransactionApproval, TxControl, WriteApproval,
     WriteApprover,
@@ -394,6 +395,9 @@ pub struct ToolLayer {
     /// The running TableX app, when this front end has a channel to it (see
     /// [`with_app`](Self::with_app)).
     app: Option<Arc<dyn AppShow>>,
+    /// The saved connections, when this front end lets an agent ask to change them (see
+    /// [`with_connection_admin`](Self::with_connection_admin)).
+    admin: Option<Arc<dyn ConnectionAdmin>>,
     transaction_idle: Duration,
     txs: Mutex<TxTable>,
     /// `close_all` calls in progress: a transaction is not begun meanwhile (and one that got in
@@ -425,12 +429,13 @@ impl ToolLayer {
             audit: None,
             limits: Limits::default(),
             front_end: front_end.into(),
-            specs: schema::tool_specs_for(false, false),
+            specs: schema::tool_specs_for(false, false, false),
             sessions: Mutex::new(HashMap::new()),
             opening: Mutex::new(HashMap::new()),
             generations: AtomicU64::new(0),
             transactions_enabled: false,
             app: None,
+            admin: None,
             transaction_idle: DEFAULT_TRANSACTION_IDLE,
             txs: Mutex::new(TxTable::default()),
             closing_all: AtomicUsize::new(0),
@@ -455,7 +460,7 @@ impl ToolLayer {
     #[must_use]
     pub fn with_transactions(mut self) -> Self {
         self.transactions_enabled = true;
-        self.specs = schema::tool_specs_for(true, self.app.is_some());
+        self.specs = schema::tool_specs_for(true, self.app.is_some(), self.admin.is_some());
         self
     }
 
@@ -471,11 +476,27 @@ impl ToolLayer {
     #[must_use]
     pub fn with_app(mut self, app: Arc<dyn AppShow>) -> Self {
         self.app = Some(app);
-        self.specs = schema::tool_specs_for(self.transactions_enabled, true);
+        self.specs = schema::tool_specs_for(self.transactions_enabled, true, self.admin.is_some());
         self
     }
 
     /// Replaces [`DEFAULT_TRANSACTION_IDLE`].
+    /// Offers `add_connection`, `duplicate_connection` and `remove_connection`, which change the
+    /// user's saved connections through `admin`. Off by default: the in-app assistant leaves that to
+    /// the user's own dialogs. `admin` puts every call to the user before anything changes (see
+    /// [`ConnectionAdmin`]); a declined or unanswered question changes nothing.
+    ///
+    /// None of them needs access on the connection it names (a removal or a copy is the user's
+    /// decision, asked every time), but `duplicate_connection` is refused when the copy, which has
+    /// no access setting of its own, would get more access than the original has now. After a
+    /// removal the agent's session on the connection and its transactions are closed.
+    #[must_use]
+    pub fn with_connection_admin(mut self, admin: Arc<dyn ConnectionAdmin>) -> Self {
+        self.admin = Some(admin);
+        self.specs = schema::tool_specs_for(self.transactions_enabled, self.app.is_some(), true);
+        self
+    }
+
     #[must_use]
     pub fn with_transaction_idle_timeout(mut self, idle: Duration) -> Self {
         self.transaction_idle = idle;
@@ -753,6 +774,7 @@ impl ToolLayer {
         let tool = ToolName::parse(name)
             .filter(|tool| self.transactions_enabled || !tool.is_transaction_tool())
             .filter(|tool| self.app.is_some() || !tool.is_app_tool())
+            .filter(|tool| self.admin.is_some() || !tool.is_admin_tool())
             .ok_or_else(|| AgentError::UnknownTool(sanitize_tool_name(name)))?;
         // Before the call looks at any transaction: one that sat idle too long is gone already
         // (its session is closed without a ROLLBACK round trip: see `expire_idle_transactions`).
@@ -867,6 +889,20 @@ impl ToolLayer {
             ToolName::ExecuteAndShow => {
                 let request: ExecuteAndShowRequest = self.parse(tool, arguments)?;
                 to_value(self.execute_and_show(request, trace)?)
+            }
+            ToolName::AddConnection => {
+                let request: AddConnectionRequest = self.parse(tool, arguments)?;
+                // Whatever the call does with it, the password never reaches an error or the audit.
+                trace.secrets.extend(request.password.iter().map(|text| SecretText::new(text.as_str())));
+                to_value(self.add_connection(&request, cancel, trace)?)
+            }
+            ToolName::DuplicateConnection => {
+                let request: DuplicateConnectionRequest = self.parse(tool, arguments)?;
+                to_value(self.duplicate_connection(&request, cancel, trace)?)
+            }
+            ToolName::RemoveConnection => {
+                let request: ConnectionRequest = self.parse(tool, arguments)?;
+                to_value(self.remove_connection(&request.connection_id, cancel, trace)?)
             }
         }
     }
@@ -3084,6 +3120,146 @@ impl ToolLayer {
                 classified.verb
             ))),
         }
+    }
+
+    fn add_connection(
+        &self,
+        request: &AddConnectionRequest,
+        cancel: &CancelToken,
+        trace: &mut Trace,
+    ) -> Result<ConnectionChangeResult, AgentError> {
+        let changed = self.change_connections(&ConnectionChange::Add(request), cancel, trace)?;
+        trace.connection_id = Some(changed.connection_id.clone());
+        Ok(self.change_result(changed, true))
+    }
+
+    fn duplicate_connection(
+        &self,
+        request: &DuplicateConnectionRequest,
+        cancel: &CancelToken,
+        trace: &mut Trace,
+    ) -> Result<ConnectionChangeResult, AgentError> {
+        let source = self.known_connection(&request.connection_id)?;
+        // The copy has no access setting of its own, so it gets what its type gives: never more
+        // than the original has now (the user may have lowered or switched off the original).
+        let copy_access = AgentAccess::effective(None, &source.connection_type);
+        if copy_access > source.effective_access() {
+            return Err(AgentError::AccessDenied(format!(
+                "connection `{}` was not copied: the copy would get agent access `{copy_access}`, more than the `{}` the original has. The user can copy it in the TableX app",
+                source.name,
+                source.effective_access()
+            )));
+        }
+        let change = ConnectionChange::Duplicate {
+            source: &source,
+            name: &request.name,
+        };
+        let changed = self.change_connections(&change, cancel, trace)?;
+        Ok(self.change_result(changed, true))
+    }
+
+    fn remove_connection(
+        &self,
+        connection_id: &str,
+        cancel: &CancelToken,
+        trace: &mut Trace,
+    ) -> Result<ConnectionChangeResult, AgentError> {
+        let connection = self.known_connection(connection_id)?;
+        let change = ConnectionChange::Remove { connection: &connection };
+        let changed = self.change_connections(&change, cancel, trace)?;
+        // The agent's session on it, its tunnel and its transactions go with it.
+        self.revoke(&connection.id);
+        Ok(self.change_result(changed, false))
+    }
+
+    /// A saved connection by id, whatever its access.
+    fn known_connection(&self, connection_id: &str) -> Result<ConnectionInfo, AgentError> {
+        self.catalog.get(connection_id).ok_or_else(|| {
+            AgentError::invalid(format!(
+                "unknown connection_id `{}`; call list_connections for the ids",
+                connection_id.chars().take(64).collect::<String>()
+            ))
+        })
+    }
+
+    /// The change in the front end's words for the model, with the access the new connection got.
+    fn change_result(&self, changed: ConnectionChanged, created: bool) -> ConnectionChangeResult {
+        let agent_access = created
+            .then(|| self.catalog.get(&changed.connection_id))
+            .flatten()
+            .map(|info| info.effective_access());
+        ConnectionChangeResult {
+            connection_id: changed.connection_id,
+            agent_access,
+            password_saved: created.then_some(changed.password_saved),
+            app_notified: changed.app_notified,
+            warning: changed.warning.map(|warning| clean(&warning, 400)),
+        }
+    }
+
+    /// Validates, asks the user and only then changes: `admin.check`, then `admin.approve`, then
+    /// (once the connection asked about is still as it was) `admin.apply`.
+    fn change_connections(
+        &self,
+        change: &ConnectionChange<'_>,
+        cancel: &CancelToken,
+        trace: &mut Trace,
+    ) -> Result<ConnectionChanged, AgentError> {
+        const WHAT: &str = "change to the saved connections";
+        let admin = self
+            .admin
+            .as_ref()
+            .ok_or_else(|| AgentError::UnknownTool("add_connection".into()))?;
+        trace.statement = Some(admin.check(change)?);
+        // No point asking the user for a change that could not be audited.
+        if self.audit.as_ref().is_some_and(|audit| !audit.is_healthy()) {
+            return Err(AgentError::AuditUnavailable);
+        }
+        Self::check_not_cancelled(cancel)?;
+        match admin.approve(change, cancel) {
+            ApprovalDecision::Approve => trace.approval = Some("approved".into()),
+            declined => return Err(Self::declined(declined, WHAT, cancel, trace)),
+        }
+        // A question can wait a long time: the connection it was about may be gone or edited.
+        let refuse = |trace: &mut Trace, why: &str, error: AgentError| {
+            trace.approval = Some(format!("approved, then refused: {why}"));
+            Err(error)
+        };
+        let asked = match change {
+            ConnectionChange::Duplicate { source, .. } => Some(*source),
+            ConnectionChange::Remove { connection } => Some(*connection),
+            ConnectionChange::Add(_) => None,
+        };
+        if let Some(asked) = asked {
+            match self.catalog.get(&asked.id) {
+                None => {
+                    return refuse(
+                        trace,
+                        "the connection was removed",
+                        AgentError::NotConnected(
+                            "the connection was removed while the question was open, so nothing was changed".into(),
+                        ),
+                    )
+                }
+                Some(now) if now.revision.differs_from(asked.revision) => {
+                    return refuse(
+                        trace,
+                        "the connection was edited",
+                        AgentError::NotConnected(
+                            "the connection was edited while the question was open, so nothing was changed; ask again".into(),
+                        ),
+                    )
+                }
+                Some(_) => {}
+            }
+        }
+        if cancel.is_cancelled() {
+            trace.approval = Some("approved, then cancelled".into());
+            return Err(AgentError::Cancelled);
+        }
+        admin.apply(change).inspect_err(|error| {
+            trace.approval = Some(format!("approved, then failed: {}", clean(&error.to_string(), 200)));
+        })
     }
 
     fn begin_transaction(

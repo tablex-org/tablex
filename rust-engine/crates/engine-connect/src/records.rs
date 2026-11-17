@@ -246,6 +246,28 @@ pub fn sanitized_uri(uri: &str) -> Result<String, String> {
     Ok(url.to_string())
 }
 
+/// The URI options (lowercase) that [`public_connection_uri`] keeps: routing and TLS choices, never
+/// a secret.
+pub const SHAREABLE_OPTIONS: [&str; 17] = [
+    "authsource",
+    "authmechanism",
+    "replicaset",
+    "tls",
+    "ssl",
+    "sslmode",
+    "ssl-mode",
+    "retrywrites",
+    "readpreference",
+    "connecttimeoutms",
+    "serverselectiontimeoutms",
+    "directconnection",
+    "appname",
+    "w",
+    "wtimeoutms",
+    "secure",
+    "ca_cert",
+];
+
 /// A shareable URI: no userinfo password, secret-valued query option, or fragment.
 pub fn public_connection_uri(uri: &str) -> Result<String, String> {
     let sanitized = sanitized_uri(uri)?;
@@ -264,26 +286,7 @@ pub fn public_connection_uri(uri: &str) -> Result<String, String> {
     for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
         let key_lower = key.to_ascii_lowercase();
         // Unknown driver options may carry credentials; only known routing options are shareable.
-        if !matches!(
-            key_lower.as_str(),
-            "authsource"
-                | "authmechanism"
-                | "replicaset"
-                | "tls"
-                | "ssl"
-                | "sslmode"
-                | "ssl-mode"
-                | "retrywrites"
-                | "readpreference"
-                | "connecttimeoutms"
-                | "serverselectiontimeoutms"
-                | "directconnection"
-                | "appname"
-                | "w"
-                | "wtimeoutms"
-                | "secure"
-                | "ca_cert"
-        ) {
+        if !SHAREABLE_OPTIONS.contains(&key_lower.as_str()) {
             continue;
         }
         safe.append_pair(&key, &value);

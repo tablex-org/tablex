@@ -6,6 +6,7 @@
 //! | [`app_channel`] | the local socket from `tablex-mcp` to the running app: open a table, show a query, reload connections |
 //! | [`platform`] | where TableX keeps its files; the OS credential store's name |
 //! | [`records`] | the saved connection model, kinds, URI helpers, export / duplicate redaction |
+//! | [`new_connection`] | the record of a connection made from plain values (`tablex-mcp`'s `add_connection`) |
 //! | [`credentials`] | the secret store trait, the OS store (legacy items) and [`credentials::default_store`] |
 //! | [`secret_store`] | the encrypted secrets table of the app database and its one master key in the OS store |
 //! | [`session_passwords`] | the passwords typed for connections that save none, in memory for this run |
@@ -26,6 +27,7 @@ pub mod app_channel;
 pub mod connect;
 pub mod credentials;
 pub mod drivers;
+pub mod new_connection;
 pub mod platform;
 pub mod profile;
 pub mod records;

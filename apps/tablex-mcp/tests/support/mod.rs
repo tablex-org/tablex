@@ -186,6 +186,19 @@ impl Fixture {
         })
     }
 
+    /// [`new`](Self::new) with the client that tells the app its connections changed given
+    /// (`None`: nobody to tell).
+    pub fn with_notify(notify: Option<engine_connect::app_channel::AppClient>) -> Self {
+        Self::build(|connector, audit, _| {
+            tablex_mcp::setup::build_layer_with_channel(
+                connector,
+                audit,
+                Arc::new(tablex_mcp::app_port::AppChannel::at_default_location()),
+                notify,
+            )
+        })
+    }
+
     /// A fixture whose layer is made by `make` (fakes instead of the connector) and audited into
     /// this fixture's audit log.
     pub fn with_layer(make: impl FnOnce(Arc<AuditLog>) -> ToolLayer) -> Self {

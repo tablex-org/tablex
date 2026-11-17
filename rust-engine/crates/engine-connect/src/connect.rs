@@ -524,6 +524,12 @@ impl Connector {
         self
     }
 
+    /// The credential store this connector reads secrets from, for a front end that saves or
+    /// deletes them (`tablex-mcp`'s connection tools).
+    pub fn credentials(&self) -> &Arc<dyn CredentialStore + Send + Sync> {
+        &self.credentials
+    }
+
     /// Gets the credential store ready for reads (the encrypted store reads its master key, the one
     /// item the OS asks about); see [`CredentialStore::unlock`].
     pub fn unlock_credentials(&self) -> Result<(), CredentialError> {

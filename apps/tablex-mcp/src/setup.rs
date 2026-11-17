@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use engine_agent::{AppShow, AuditConfig, AuditLog, ToolLayer};
+use engine_connect::app_channel::AppClient;
 use engine_connect::connect::{AgentConnections, Connector, RefusePrompts};
 use engine_connect::drivers::{
     driver_data_dir_override, resolve_driver_data_dir, DRIVER_DATA_DIR_ENV,
@@ -16,6 +17,7 @@ use engine_storage::paths::{data_dir_override, DATA_DIR_ENV};
 
 use crate::app_port::AppChannel;
 use crate::approver::ElicitingApprover;
+use crate::connection_admin::ConnectionStore;
 
 // A shipped build must never carry the test credential switch.
 #[cfg(all(feature = "test-credentials", not(debug_assertions)))]
@@ -38,9 +40,15 @@ pub enum SetupError {
 /// user to connect once from the app), a write is put to the user through MCP elicitation when the
 /// app's switch (`ai.mcp_writes` in the connector's own `settings.json`, read at the time of each
 /// write) allows it and refused otherwise ([`ElicitingApprover`]), things can be shown in the
-/// running app through its socket ([`AppChannel`]), and every call is audited.
+/// running app through its socket ([`AppChannel`]), the saved connections can be added, copied and
+/// removed with the user's approval each time ([`ConnectionStore`]), and every call is audited.
 pub fn build_layer(connector: Connector, audit: Arc<AuditLog>) -> ToolLayer {
-    build_layer_with_app(connector, audit, Arc::new(AppChannel::at_default_location()))
+    build_layer_with_channel(
+        connector,
+        audit,
+        Arc::new(AppChannel::at_default_location()),
+        AppClient::at_default_location(),
+    )
 }
 
 /// [`build_layer`] with the channel to the running app (`open_table`, `execute_and_show`) given.
@@ -49,7 +57,19 @@ pub fn build_layer_with_app(
     audit: Arc<AuditLog>,
     app: Arc<dyn AppShow>,
 ) -> ToolLayer {
+    build_layer_with_channel(connector, audit, app, AppClient::at_default_location())
+}
+
+/// [`build_layer_with_app`] with the client that tells the app its connections changed
+/// (`add_connection`, `duplicate_connection`, `remove_connection`) given too (`None`: nobody to tell).
+pub fn build_layer_with_channel(
+    connector: Connector,
+    audit: Arc<AuditLog>,
+    app: Arc<dyn AppShow>,
+    notify: Option<AppClient>,
+) -> ToolLayer {
     let settings_path = connector.settings_path().map(Path::to_path_buf);
+    let admin_connector = connector.clone();
     let connections = AgentConnections::new(connector, Arc::new(RefusePrompts));
     // On macOS a Keychain that will not hand a secret over is the user's one-time authorisation to
     // give: say which command does it.
@@ -59,6 +79,10 @@ pub fn build_layer_with_app(
         Err(_) => connections,
     };
     let connections = Arc::new(connections);
+    // One approver: the questions of writes and of connection changes share its budget of open
+    // questions.
+    let approver = Arc::new(ElicitingApprover::new(settings_path));
+    let admin = ConnectionStore::new(admin_connector, approver.clone(), notify);
     ToolLayer::new(connections.clone(), connections, FRONT_END)
         // Explicit transactions (PostgreSQL, SQLite): every write and the commit are put to the
         // user, and an abandoned transaction is always rolled back (see `McpServer::serve`).
@@ -66,7 +90,9 @@ pub fn build_layer_with_app(
         // `open_table` and `execute_and_show`: shown in the running app, which applies its own
         // rules to a query it is asked to run.
         .with_app(app)
-        .with_approver(Arc::new(ElicitingApprover::new(settings_path)))
+        // `add_connection`, `duplicate_connection`, `remove_connection`: each put to the user.
+        .with_connection_admin(Arc::new(admin))
+        .with_approver(approver)
         .with_audit(audit)
 }
 

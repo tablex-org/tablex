@@ -29,6 +29,9 @@ async fn tools_list_is_exactly_what_the_layer_says() {
         "rollback_transaction",
         "open_table",
         "execute_and_show",
+        "add_connection",
+        "duplicate_connection",
+        "remove_connection",
     ] {
         assert!(listed.iter().any(|tool| tool.name == name), "{name} is listed");
     }
@@ -64,7 +67,16 @@ async fn the_server_identifies_itself_and_says_where_access_is_set() {
     assert_eq!(info.server_info.version, env!("CARGO_PKG_VERSION"));
     let instructions = info.instructions.clone().expect("instructions");
     assert!(instructions.contains("Agent access"), "{instructions}");
-    for tool in ["mongo_find", "mongo_insert", "mongo_update", "mongo_delete", "execute_batch"] {
+    for tool in [
+        "mongo_find",
+        "mongo_insert",
+        "mongo_update",
+        "mongo_delete",
+        "execute_batch",
+        "add_connection",
+        "duplicate_connection",
+        "remove_connection",
+    ] {
         assert!(instructions.contains(tool), "{tool}: {instructions}");
     }
     assert!(info.capabilities.tools.is_some());

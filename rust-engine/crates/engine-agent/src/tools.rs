@@ -1,5 +1,6 @@
-//! Typed requests and results of the tools (nineteen, three transaction tools and two tools that
-//! show things in the app, which a front end may switch on).
+//! Typed requests and results of the tools (nineteen, three transaction tools, two tools that
+//! show things in the app and three that manage the saved connections, which a front end may
+//! switch on).
 //!
 //! Requests reject unknown fields. Their JSON Schemas (see [`crate::schema`])
 //! are the hand-written twins of these structs; a test keeps them in step.
@@ -40,10 +41,13 @@ pub enum ToolName {
     RollbackTransaction,
     OpenTable,
     ExecuteAndShow,
+    AddConnection,
+    DuplicateConnection,
+    RemoveConnection,
 }
 
 impl ToolName {
-    pub const ALL: [Self; 24] = [
+    pub const ALL: [Self; 27] = [
         Self::ListConnections,
         Self::OpenSession,
         Self::CloseSession,
@@ -68,6 +72,9 @@ impl ToolName {
         Self::RollbackTransaction,
         Self::OpenTable,
         Self::ExecuteAndShow,
+        Self::AddConnection,
+        Self::DuplicateConnection,
+        Self::RemoveConnection,
     ];
 
     /// The tools only a layer built with `with_transactions` offers.
@@ -81,6 +88,15 @@ impl ToolName {
     /// The tools only a layer built with `with_app` offers (they act on the running TableX app).
     pub const fn is_app_tool(self) -> bool {
         matches!(self, Self::OpenTable | Self::ExecuteAndShow)
+    }
+
+    /// The tools only a layer built with `with_connection_admin` offers (they change the user's
+    /// saved connections, each change put to the user).
+    pub const fn is_admin_tool(self) -> bool {
+        matches!(
+            self,
+            Self::AddConnection | Self::DuplicateConnection | Self::RemoveConnection
+        )
     }
 
     pub const fn as_str(self) -> &'static str {
@@ -109,6 +125,9 @@ impl ToolName {
             Self::RollbackTransaction => "rollback_transaction",
             Self::OpenTable => "open_table",
             Self::ExecuteAndShow => "execute_and_show",
+            Self::AddConnection => "add_connection",
+            Self::DuplicateConnection => "duplicate_connection",
+            Self::RemoveConnection => "remove_connection",
         }
     }
 
@@ -127,7 +146,13 @@ impl ToolName {
     /// The access a connection needs before this tool may touch it.
     pub const fn required_access(self) -> AgentAccess {
         match self {
-            Self::ListConnections | Self::CloseSession => AgentAccess::Off,
+            // The three connection tools name no session: they need no access to the connection
+            // (a removal or a copy is the user's decision, put to them each time).
+            Self::ListConnections
+            | Self::CloseSession
+            | Self::AddConnection
+            | Self::DuplicateConnection
+            | Self::RemoveConnection => AgentAccess::Off,
             Self::OpenSession
             | Self::ListNamespaces
             | Self::ListTables
@@ -195,7 +220,7 @@ pub struct ListConnectionsRequest {}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConnectionRequest {
-    /// For `open_session` and `close_session`.
+    /// For `open_session`, `close_session`, `begin_transaction` and `remove_connection`.
     pub connection_id: String,
 }
 
@@ -722,4 +747,84 @@ pub struct ExecuteAndShowResult {
     pub shown: bool,
     /// TableX was asked to run it (it may ask the user first, or refuse by its own rules).
     pub run: bool,
+}
+
+/// `add_connection`. The password is the one secret in any request: `Debug` leaves it out.
+#[derive(Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AddConnectionRequest {
+    pub name: String,
+    pub kind: ConnectionKind,
+    #[serde(default)]
+    pub uri: Option<String>,
+    #[serde(default)]
+    pub host: Option<String>,
+    #[serde(default)]
+    pub port: Option<i64>,
+    #[serde(default)]
+    pub database: Option<String>,
+    #[serde(default)]
+    pub user: Option<String>,
+    /// SQLite: the database file.
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub password: Option<String>,
+    /// The id or name of a connection type of the user's settings; default `development`.
+    #[serde(default)]
+    pub connection_type: Option<String>,
+    #[serde(default)]
+    pub options: Option<ConnectionOptions>,
+}
+
+impl std::fmt::Debug for AddConnectionRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AddConnectionRequest")
+            .field("name", &self.name)
+            .field("kind", &self.kind)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("database", &self.database)
+            .field("user", &self.user)
+            .field("path", &self.path)
+            .field("password", &self.password.as_ref().map(|_| "<hidden>"))
+            .finish_non_exhaustive()
+    }
+}
+
+/// The options of `add_connection`: what the New Connection dialog offers that needs no file.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectionOptions {
+    /// `disable`, `require` or `verify_full`.
+    #[serde(default)]
+    pub tls: Option<String>,
+}
+
+/// `duplicate_connection`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DuplicateConnectionRequest {
+    pub connection_id: String,
+    pub name: String,
+}
+
+/// What `add_connection`, `duplicate_connection` and `remove_connection` answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectionChangeResult {
+    /// The new connection's id (`add_connection`, `duplicate_connection`) or the removed one's.
+    pub connection_id: String,
+    /// What agents may do on the new connection (`add_connection`, `duplicate_connection`): the
+    /// default of its connection type and Settings -> AI, never more than the user chose there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_access: Option<AgentAccess>,
+    /// The password was saved in the credential store for the new connection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password_saved: Option<bool>,
+    /// The running TableX app was told to reload its connections. Not an error when it was not
+    /// running: it reads them when it starts.
+    pub app_notified: bool,
+    /// Something that went wrong after the change was made (a secret that could not be cleared).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }

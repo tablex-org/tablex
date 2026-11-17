@@ -218,22 +218,38 @@ fn mongo_write_output() -> Value {
     )
 }
 
+/// What the three connection tools answer.
+fn connection_change_output() -> Value {
+    object(
+        vec![
+            ("connection_id", string("The new connection's id, or the removed one's.")),
+            ("agent_access", string_enum(&ACCESS_LEVELS, "What you may do on the new connection.")),
+            ("password_saved", boolean("A password was saved for the new connection.")),
+            ("app_notified", boolean("The running TableX was told to reload its connections (false when it is not running).")),
+            ("warning", string("Something that went wrong after the change was made.")),
+        ],
+        &["connection_id", "app_notified"],
+    )
+}
+
 const MONGO_JSON: &str = "JSON as MongoDB takes it; typed values use Extended JSON, e.g. \
     {\"$oid\": \"...\"}, {\"$date\": \"2024-01-31T00:00:00Z\"}, {\"$numberLong\": \"123\"}.";
 
-/// Every tool, in a stable order, with the transaction tools, `execute_query`'s `transaction_id`
-/// and the tools that show things in the app.
+/// Every tool, in a stable order, with the transaction tools, `execute_query`'s `transaction_id`,
+/// the tools that show things in the app and the ones that manage the saved connections.
 pub fn tool_specs() -> Vec<ToolSpec> {
-    tool_specs_for(true, true)
+    tool_specs_for(true, true, true)
 }
 
 /// The tools a layer offers: the transaction tools (and `execute_query`'s `transaction_id`)
-/// only when `transactions` is true, `open_table` and `execute_and_show` only when `app` is.
-pub fn tool_specs_for(transactions: bool, app: bool) -> Vec<ToolSpec> {
+/// only when `transactions` is true, `open_table` and `execute_and_show` only when `app` is, and
+/// `add_connection`, `duplicate_connection` and `remove_connection` only when `admin` is.
+pub fn tool_specs_for(transactions: bool, app: bool, admin: bool) -> Vec<ToolSpec> {
     ToolName::ALL
         .into_iter()
         .filter(|tool| transactions || !tool.is_transaction_tool())
         .filter(|tool| app || !tool.is_app_tool())
+        .filter(|tool| admin || !tool.is_admin_tool())
         .map(|tool| spec_for(tool, transactions))
         .collect()
 }
@@ -857,6 +873,82 @@ fn spec_for(tool: ToolName, transactions: bool) -> ToolSpec {
             ),
             example: json!({"connection_id": "c1", "query": "SELECT * FROM orders ORDER BY id DESC LIMIT 20", "database": "shop", "run": true}),
         },
+        ToolName::AddConnection => ToolSpec {
+            name: tool.as_str(),
+            description: "Add a saved connection to TableX. The user is asked to approve every call \
+                and sees the name, kind, address and connection type (never the password); a refusal \
+                or a decline is final: do not retry it, tell the user. Give either `uri` or the \
+                fields (`host`, `port`, `database`, `user`; SQLite: `path`, an absolute file path). \
+                The `uri` must not hold a password and only takes routing and TLS options (e.g. \
+                sslmode, authSource); give the password as `password`, which is saved in the \
+                credential store (without it the connection has none saved and TableX asks for it \
+                when connecting). SSH tunnels, proxies and certificate files cannot be set up here. \
+                `connection_type` is the id or name of one of the user's connection types (default \
+                development). The new connection has no access setting of its own: what you may do on \
+                it is what the user's settings give its type (see `agent_access` in the answer, often \
+                `off`). The name must not be in use (case-insensitive). TableX does not need to be \
+                running; a running one reloads its connections. The driver for the kind need not be \
+                installed yet.",
+            input_schema: object(
+                vec![
+                    ("name", string("Display name, at most 128 characters, one line; not used by another connection.")),
+                    ("kind", string_enum(&KINDS, "Database engine.")),
+                    ("uri", string("Connection URI without a password, instead of the fields (e.g. postgresql://app@db.local:5432/shop).")),
+                    ("host", string("Host name or address (not SQLite).")),
+                    ("port", integer("Port, 1 to 65535; leave out for the engine's default.")),
+                    ("database", string("Database name (Redis: the database number).")),
+                    ("user", string("User name.")),
+                    ("path", string("SQLite: absolute path of the database file.")),
+                    ("password", string("Password to save in the credential store; never shown to the user or logged.")),
+                    ("connection_type", string("Id or name of a connection type; default development.")),
+                    (
+                        "options",
+                        object(
+                            vec![(
+                                "tls",
+                                string_enum(
+                                    &["disable", "require", "verify_full"],
+                                    "TLS mode (not SQLite). MongoDB takes only disable and verify_full.",
+                                ),
+                            )],
+                            &[],
+                        ),
+                    ),
+                ],
+                &["name", "kind"],
+            ),
+            output_schema: connection_change_output(),
+            example: json!({"name": "local-pg", "kind": "postgresql", "host": "localhost", "port": 5432, "database": "shop", "user": "app", "password": "s3cret", "connection_type": "development", "options": {"tls": "require"}}),
+        },
+        ToolName::DuplicateConnection => ToolSpec {
+            name: tool.as_str(),
+            description: "Copy a saved connection under a new name. The user is asked to approve every \
+                call; a refusal or a decline is final. The copy has the same address, options and \
+                type and its saved password (when the original has one); it does not get the \
+                original's own access setting, so what you may do on it follows its connection type, \
+                and the call is refused when that would be more than you may do on the original. The \
+                copy's SSH tunnel secrets are not copied. The name must not be in use \
+                (case-insensitive).",
+            input_schema: object(
+                vec![
+                    connection.clone(),
+                    ("name", string("Display name of the copy, at most 128 characters, one line.")),
+                ],
+                &["connection_id", "name"],
+            ),
+            output_schema: connection_change_output(),
+            example: json!({"connection_id": "c1", "name": "local-pg copy"}),
+        },
+        ToolName::RemoveConnection => ToolSpec {
+            name: tool.as_str(),
+            description: "Remove a saved connection from TableX, with its saved passwords and pinned \
+                objects, and close your session on it. The user is asked to approve every call, and \
+                the question says when the connection is a production one; a refusal or a decline is \
+                final. It cannot be undone.",
+            input_schema: object(vec![connection.clone()], &["connection_id"]),
+            output_schema: connection_change_output(),
+            example: json!({"connection_id": "c1"}),
+        },
         ToolName::ExecuteRedisCommand => ToolSpec {
             name: tool.as_str(),
             description: "Run one Redis command line on a Redis connection. Reads need access `read`; a command \
@@ -1184,15 +1276,22 @@ mod tests {
                 "rollback_transaction",
                 "open_table",
                 "execute_and_show",
+                "add_connection",
+                "duplicate_connection",
+                "remove_connection",
             ]
         );
         // Off by default: neither the tools nor `transaction_id` exist for the model.
-        let plain = tool_specs_for(false, false);
+        let plain = tool_specs_for(false, false, false);
         assert_eq!(plain.len(), 19);
-        assert_eq!(tool_specs_for(true, false).len(), 22);
-        let with_app: Vec<_> = tool_specs_for(false, true).iter().map(|spec| spec.name).collect();
+        assert_eq!(tool_specs_for(true, false, false).len(), 22);
+        let with_app: Vec<_> = tool_specs_for(false, true, false).iter().map(|spec| spec.name).collect();
         assert_eq!(with_app.len(), 21);
         assert_eq!(&with_app[19..], ["open_table", "execute_and_show"]);
+        let with_admin: Vec<_> = tool_specs_for(false, false, true).iter().map(|spec| spec.name).collect();
+        assert_eq!(with_admin.len(), 22);
+        assert_eq!(&with_admin[19..], ["add_connection", "duplicate_connection", "remove_connection"]);
+        assert_eq!(tool_specs_for(true, true, true).len(), 27);
         let execute = plain.iter().find(|spec| spec.name == "execute_query").unwrap();
         assert!(execute.input_schema["properties"].get("transaction_id").is_none());
         assert!(!execute.description.contains("transaction"));
@@ -1251,6 +1350,9 @@ mod tests {
                 }
                 ToolName::OpenTable => parses::<OpenTableRequest>(example),
                 ToolName::ExecuteAndShow => parses::<ExecuteAndShowRequest>(example),
+                ToolName::AddConnection => parses::<AddConnectionRequest>(example),
+                ToolName::DuplicateConnection => parses::<DuplicateConnectionRequest>(example),
+                ToolName::RemoveConnection => parses::<ConnectionRequest>(example),
             }
         }
     }

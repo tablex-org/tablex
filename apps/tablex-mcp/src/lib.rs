@@ -8,6 +8,7 @@
 pub mod app_port;
 pub mod approver;
 pub mod cli;
+pub mod connection_admin;
 pub mod keychain;
 pub mod server;
 pub mod setup;

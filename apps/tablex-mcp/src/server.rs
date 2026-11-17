@@ -42,7 +42,14 @@ user in the TableX app (which has to be running), open_table opens a table, view
 sidebar and a data tab, and execute_and_show puts a query in an editor tab and runs it there, under \
 the app's own rules: it runs a single read only; for a query that changes data, or one the user \
 should review first, pass run false and tell the user to run it. Neither returns data: use \
-execute_query when you need the rows yourself.";
+execute_query when you need the rows yourself. To change the user's saved connections, add_connection \
+adds one (a uri or host, port, database and user; SQLite a path; the password as its own argument, \
+never inside the uri), duplicate_connection copies one under a new name and remove_connection removes \
+one with its saved passwords. The user is asked to approve every call, once per call, in your client \
+(and only when they allowed changes through MCP in TableX: Settings \u{2192} AI; an \
+unanswered or declined question changes nothing and is final: do not retry it). A new or copied \
+connection has no access setting of its own and follows the user's settings for its type, so you may \
+not be able to use it until the user enables agent access for it.";
 
 /// The layer's code for a tool name it does not have; a protocol error here, not a tool result.
 const UNKNOWN_TOOL: &str = "agent.unknown_tool";

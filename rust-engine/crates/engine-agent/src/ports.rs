@@ -8,6 +8,7 @@ use crate::limits::Limits;
 use crate::result::QueryResult;
 use crate::secret::SecretText;
 use crate::table::TableDescription;
+use crate::tools::AddConnectionRequest;
 use engine_driver_api::sql::{SchemaObjectKind, SchemaObjectRef};
 use engine_driver_kit::sql::SqlLexOptions;
 use serde::{Deserialize, Serialize};
@@ -466,6 +467,58 @@ pub trait AppShow: Send + Sync {
         text: &str,
         run: bool,
     ) -> Result<(), AgentError>;
+}
+
+/// A change to the user's saved connections that an agent asks for.
+#[derive(Debug, Clone)]
+pub enum ConnectionChange<'a> {
+    /// A new connection (the request carries the password: `Debug` leaves it out).
+    Add(&'a AddConnectionRequest),
+    /// A copy of `source` named `name`.
+    Duplicate {
+        source: &'a ConnectionInfo,
+        name: &'a str,
+    },
+    Remove {
+        connection: &'a ConnectionInfo,
+    },
+}
+
+/// What a [`ConnectionAdmin`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionChanged {
+    /// The new connection's id (`Add`, `Duplicate`) or the removed one's.
+    pub connection_id: String,
+    /// A password was saved for the new connection.
+    pub password_saved: bool,
+    /// The running app was told. `false` is not an error: the app reads the connections when it
+    /// starts.
+    pub app_notified: bool,
+    /// Something that went wrong after the change was made.
+    pub warning: Option<String>,
+}
+
+/// The saved connections, which an agent may ask to change (`add_connection`,
+/// `duplicate_connection`, `remove_connection`). Only the MCP server has one, so only a layer built
+/// with [`ToolLayer::with_connection_admin`](crate::ToolLayer::with_connection_admin) has the three
+/// tools: the in-app assistant offers the user their own dialogs instead.
+///
+/// **Every change is put to the user.** The layer calls [`check`](Self::check), then
+/// [`approve`](Self::approve), and [`apply`](Self::apply) only after a yes; an implementation must
+/// make `apply` impossible without one (it may refuse when the conditions of the question no
+/// longer hold). All three block, on the caller's worker thread.
+pub trait ConnectionAdmin: Send + Sync {
+    /// Validates the change without making it, and describes it for the audit log in one line: no
+    /// password, no URI with credentials. The error is what the model is told (an
+    /// `agent.invalid_arguments`, usually).
+    fn check(&self, change: &ConnectionChange<'_>) -> Result<String, AgentError>;
+
+    /// Asks the user. The question says what will be added, copied or removed (never a password).
+    fn approve(&self, change: &ConnectionChange<'_>, cancel: &CancelToken) -> ApprovalDecision;
+
+    /// Makes the change, and tells the running app. Called only after [`approve`](Self::approve)
+    /// said yes.
+    fn apply(&self, change: &ConnectionChange<'_>) -> Result<ConnectionChanged, AgentError>;
 }
 
 /// A write the front end is asked to approve.

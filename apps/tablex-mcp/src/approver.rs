@@ -111,6 +111,12 @@ pub const ANSWER_PROPERTY: &str = "run";
 pub const ANSWER_TITLE: &str = "Run this statement";
 /// The title when the question is the COMMIT of a transaction.
 pub const COMMIT_TITLE: &str = "Commit this transaction";
+/// The title when the question is a change to the saved connections (`add_connection`,
+/// `duplicate_connection`, `remove_connection`).
+pub const CONNECTION_TITLE: &str = "Make this change to your connections";
+/// The question budget (declines, open questions) the connection tools share, in place of a
+/// connection: three declines end them for the server session, like a connection's writes.
+const CONNECTIONS_BUDGET: &str = "(saved connections)";
 
 /// Declines of one connection after which it is closed to MCP writes for the rest of the session.
 pub const MAX_DECLINES: u32 = 3;
@@ -423,7 +429,10 @@ impl ElicitingApprover {
     /// The requested schema: one required boolean, [`ANSWER_PROPERTY`], whose default is `false`
     /// (a client that fills in defaults declines).
     fn schema(commit: bool) -> Option<ElicitationSchema> {
-        let title = if commit { COMMIT_TITLE } else { ANSWER_TITLE };
+        Self::schema_titled(if commit { COMMIT_TITLE } else { ANSWER_TITLE })
+    }
+
+    fn schema_titled(title: &'static str) -> Option<ElicitationSchema> {
         ElicitationSchema::builder()
             .required_bool_with(ANSWER_PROPERTY, |boolean| {
                 boolean.title(title).with_default(false)
@@ -516,6 +525,52 @@ pub fn code_span(text: &str) -> String {
 }
 
 impl ElicitingApprover {
+    /// Puts a change to the user's saved connections to them: `message` says what will be added,
+    /// copied or removed. The same conditions as for a write apply that make sense for it, in this
+    /// order: the app's switch is on, the client can ask (elicitation, form mode), and the
+    /// connection tools have not been declined [`MAX_DECLINES`] times in this server session or
+    /// are not [`MAX_OPEN_QUESTIONS`] open. A production connection is not a reason to refuse here:
+    /// the message says it is one. Only a yes with `run` set to `true` approves.
+    pub fn ask_connection_change(&self, message: String, cancel: &CancelToken) -> ApprovalDecision {
+        let refuse = |reason: &str| ApprovalDecision::Refuse {
+            reason: reason.to_owned(),
+        };
+        if !self.switch_on() {
+            return refuse(REASON_SWITCH_OFF);
+        }
+        let Some(caller) = Caller::current().filter(Caller::can_ask) else {
+            return refuse(REASON_NO_ELICITATION);
+        };
+        let open = match self.open_question(CONNECTIONS_BUDGET) {
+            Ok(open) => open,
+            Err(reason) => return refuse(reason),
+        };
+        let Some(schema) = Self::schema_titled(CONNECTION_TITLE) else {
+            return refuse(REASON_NOT_DELIVERED);
+        };
+        let params = ElicitRequestParams::FormElicitationParams {
+            meta: None,
+            message,
+            requested_schema: schema,
+        };
+        let answer = caller.ask(params, cancel);
+        if Self::counts_against_the_connection(&answer) {
+            self.record_decline(CONNECTIONS_BUDGET);
+        }
+        drop(open);
+        Self::decide(answer)
+    }
+
+    /// After a yes to [`ask_connection_change`](Self::ask_connection_change): the app's switch may
+    /// have been turned off while the question waited.
+    pub fn connection_change_still_allowed(&self) -> Result<(), &'static str> {
+        if self.switch_on() {
+            Ok(())
+        } else {
+            Err(REASON_SWITCH_OFF)
+        }
+    }
+
     /// Conditions 1-3 of the module docs (and: no dangerous statement), in that order. The caller
     /// that can be asked, or the fixed reason a write is refused without asking.
     fn preflight(&self, request: &WriteApproval<'_>) -> Result<Caller, &'static str> {

@@ -1008,8 +1008,9 @@ use crate::anthropic::request::{
 fn the_tool_schemas_stay_inside_the_strict_tool_limits() {
     let harness = Harness::new(vec![]);
     let tools = harness.layer.tools();
-    // The assistant is inside the app: the tools that show things in the app are the MCP server's.
-    for name in ["open_table", "execute_and_show"] {
+    // The assistant is inside the app: the tools that show things in the app and the ones that
+    // change the saved connections (each put to the user by the MCP server) are the MCP server's.
+    for name in ["open_table", "execute_and_show", "add_connection", "duplicate_connection", "remove_connection"] {
         assert!(tools.iter().all(|tool| tool.name != name), "{name} is not offered to the assistant");
     }
     let strict = strict_tools(tools);
