@@ -334,6 +334,12 @@ impl DriverManagerUi {
     }
 
     /// Whether the lists an install would start from were read under the policy in force now.
+    /// Updates waiting in Driver Manager: drivers and tools (the title bar's dot, the tab's dot,
+    /// the one-per-run notification).
+    pub(in crate::app) fn pending_updates(&self) -> usize {
+        self.updates_available + self.tools.updates_available()
+    }
+
     pub(super) fn catalog_is_current(&self) -> bool {
         self.catalog_policy == Some(self.policy)
     }
@@ -839,17 +845,17 @@ impl AppRoot {
         }));
     }
 
-    /// One info toast per run when the catalog has updates.
+    /// One info toast per run when the catalog has updates (drivers or tools).
     fn announce_driver_updates(&mut self, cx: &mut Context<Self>) {
-        let count = self.driver_ui.updates_available;
+        let count = self.driver_ui.pending_updates();
         if count == 0 || self.driver_ui.updates_announced {
             return;
         }
         self.driver_ui.updates_announced = true;
         let message = if count == 1 {
-            "1 driver update is available (Driver Manager)".to_string()
+            "1 update is available in Driver Manager".to_string()
         } else {
-            format!("{count} driver updates are available (Driver Manager)")
+            format!("{count} updates are available in Driver Manager")
         };
         self.with_driver_window(cx, move |window, cx| window.push_notification(message, cx));
     }

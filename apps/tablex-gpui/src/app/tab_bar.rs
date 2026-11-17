@@ -1750,9 +1750,9 @@ impl AppRoot {
         let (name, suffix) = tab_label_parts(tab, compact);
         let label = tab_label(tab, compact);
         let icon = self.tab_icon(tab);
-        // A dot on the Driver Manager tab while driver updates are waiting.
+        // A dot on the Driver Manager tab while driver or tool updates are waiting.
         let driver_updates =
-            tab.kind == TabKind::DriverManager && self.driver_ui.updates_available > 0;
+            tab.kind == TabKind::DriverManager && self.driver_ui.pending_updates() > 0;
         let renaming = self
             .shell
             .tab_bar

@@ -1136,6 +1136,10 @@ fn an_update_keeps_the_stable_path_and_uninstall_removes_exactly_the_installed_f
     assert_eq!((installed.as_str(), available.as_deref()), ("Installed 0.1.0", Some("Available 0.2.0")));
     assert!(rig.rendered("tool-action-update:tablex-mcp") && rig.rendered("tool-action-uninstall:tablex-mcp") && rig.rendered("tool-path:tablex-mcp"));
     assert!(!rig.rendered("tool-action-install:tablex-mcp"));
+    // A tool update alone counts: the title bar's Driver Manager button and its tab get the dot.
+    let drivers = rig.read(|this| this.driver_ui.updates_available);
+    assert_eq!(rig.read(|this| this.driver_ui.pending_updates()), drivers + 1);
+    assert!(rig.rendered("global-driver-manager-dot"));
     // The user's own file in the folder is not ours to delete.
     std::fs::write(rig.tools_dir.join("tablex-mcp").join("notes.txt"), "mine").unwrap();
 
@@ -1148,6 +1152,8 @@ fn an_update_keeps_the_stable_path_and_uninstall_removes_exactly_the_installed_f
     assert_eq!(std::fs::read(rig.tool_file()).unwrap(), v2);
     assert_eq!(rig.tool_item(|item| item.installed.clone().unwrap().version), "0.2.0");
     assert!(!rig.rendered("tool-action-update:tablex-mcp"));
+    assert_eq!(rig.read(|this| this.driver_ui.pending_updates()), drivers, "the tool's update is done");
+    assert_eq!(rig.rendered("global-driver-manager-dot"), drivers > 0);
 
     rig.click("tool-action-uninstall:tablex-mcp");
     rig.wait("the uninstall", |this| {
@@ -1157,6 +1163,29 @@ fn an_update_keeps_the_stable_path_and_uninstall_removes_exactly_the_installed_f
     assert!(!rig.rendered("tool-path:tablex-mcp") && !rig.rendered("tool-copy-config:tablex-mcp") && !rig.rendered("tool-action-uninstall:tablex-mcp"));
     assert!(rig.rendered("tool-action-install:tablex-mcp"), "available again");
     assert_eq!(rig.tool_state(), ToolCatalogState::Available);
+}
+
+#[gpui::test]
+fn the_startup_check_announces_a_tool_update_when_no_driver_has_one(cx: &mut TestAppContext) {
+    let mut rig = DmRig::new(cx, TrustPolicy::Developer);
+    rig.publish("1.0.0");
+    rig.publish_tool("0.1.0", &tool_bytes(5));
+    rig.open_manager_with_tool();
+    rig.install_tool();
+    rig.publish_tool("0.2.0", &tool_bytes(6));
+    let _ = std::fs::remove_file(rig.store_dir.join("Drivers/v2/last-update-check"));
+
+    rig.update(|this, cx| {
+        this.driver_ui.updates_announced = false;
+        this.start_driver_startup(cx);
+    });
+    rig.wait("the startup check", |this| {
+        this.driver_ui.catalog_task.is_none() && this.driver_ui.tools.updates_available() == 1
+    });
+    assert_eq!(rig.read(|this| this.driver_ui.updates_available), 0, "no driver has an update");
+    assert_eq!(rig.read(|this| this.driver_ui.pending_updates()), 1);
+    assert!(rig.read(|this| this.driver_ui.updates_announced), "the tool update is announced");
+    assert!(rig.rendered("global-driver-manager-dot"));
 }
 
 impl DmRig<'_> {
@@ -1615,6 +1644,7 @@ fn the_tools_tab_hides_the_driver_update_banner_and_the_drivers_tabs_keep_it(cx:
     });
     settle(rig.visual);
     assert!(rig.rendered("driver-banner"));
+    assert!(rig.rendered("global-driver-manager-dot"), "the title bar button shows the driver update");
     rig.click(DriverFilter::Tools.selector());
     assert!(!rig.rendered("driver-banner"), "Update all is about drivers");
     rig.click(DriverFilter::Installed.selector());

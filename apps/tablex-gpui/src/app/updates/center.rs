@@ -126,18 +126,7 @@ impl AppRoot {
                     .tooltip("Updates")
                     .on_click(cx.listener(|this, _, window, cx| this.open_update_center(window, false, cx))),
             )
-            .when(self.update_known(), |this| {
-                this.child(
-                    div()
-                        .debug_selector(|| "title-updates-dot".into())
-                        .absolute()
-                        .top(px(3.0))
-                        .right(px(3.0))
-                        .size(px(7.0))
-                        .rounded_full()
-                        .bg(theme::accent()),
-                )
-            })
+            .when(self.update_known(), |this| this.child(title_bar_dot("title-updates-dot")))
     }
 
     /// Opens the Update Center on the TableX tab, and checks when no check ran lately (`force`: always).
@@ -620,4 +609,17 @@ mod scenario {
             .detach();
         }
     }
+}
+
+/// The dot on a title bar button whose window has something new (Updates, Driver Manager): placed in
+/// the button's top right corner, so the button's parent is `relative`.
+pub(in crate::app) fn title_bar_dot(selector: &'static str) -> gpui::Div {
+    div()
+        .debug_selector(move || selector.into())
+        .absolute()
+        .top(px(3.0))
+        .right(px(3.0))
+        .size(px(7.0))
+        .rounded_full()
+        .bg(theme::accent())
 }

@@ -100,6 +100,14 @@ impl ToolsUi {
         self.keychain_task.is_some()
     }
 
+    /// Installed tools (add-ons included) the catalog has a newer version of.
+    pub(in crate::app) fn updates_available(&self) -> usize {
+        self.items
+            .iter()
+            .filter(|item| matches!(item.state, engine_driver_host::ToolCatalogState::UpdateAvailable { .. }))
+            .count()
+    }
+
     /// The MCP server's row.
     pub(in crate::app) fn item(&self) -> Option<&ToolCatalogItem> {
         self.item_of(MCP_TOOL_ID)

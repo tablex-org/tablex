@@ -251,19 +251,27 @@ impl Render for AppRoot {
                     .on_click(cx.listener(|this, _, window, cx| this.open_transfer_from_toolbar(window, cx))),
             )
             .child(
-                Button::new("global-driver-manager")
-                    .debug_selector(|| "global-driver-manager".into())
-                    .icon(Icon::default().path("icons/settings-2.svg").size(px(14.0)))
-                    .label("Driver Manager")
-                    .small()
-                    .compact()
-                    .ghost()
-                    .tooltip(if self.driver_ui.updates_available > 0 {
-                        "Install, update and remove database drivers (updates available)"
-                    } else {
-                        "Install, update and remove database drivers"
-                    })
-                    .on_click(cx.listener(|this, _, _, cx| this.open_driver_manager(cx))),
+                // A dot while drivers or tools have updates, as on the Updates button.
+                div()
+                    .relative()
+                    .child(
+                        Button::new("global-driver-manager")
+                            .debug_selector(|| "global-driver-manager".into())
+                            .icon(Icon::default().path("icons/settings-2.svg").size(px(14.0)))
+                            .label("Driver Manager")
+                            .small()
+                            .compact()
+                            .ghost()
+                            .tooltip(if self.driver_ui.pending_updates() > 0 {
+                                "Install, update and remove database drivers (updates available)"
+                            } else {
+                                "Install, update and remove database drivers"
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| this.open_driver_manager(cx))),
+                    )
+                    .when(self.driver_ui.pending_updates() > 0, |this| {
+                        this.child(super::updates::center::title_bar_dot("global-driver-manager-dot"))
+                    }),
             )
             .child(
                 // A mark on the button while a statement waits for the user, dock open or not.
