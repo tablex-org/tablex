@@ -681,7 +681,7 @@ fn dragging_tabs_back_after_regrouping_keeps_keys_unique_adjacent_and_readable(
     let (mongo, pg) = (crate::ui_fixture::MONGO_ID, crate::ui_fixture::POSTGRES_ID);
     tb_open(&app, visual, "orders", mongo, "shop");
     tb_open(&app, visual, "invoices", mongo, "shop");
-    let script = tb_open(&app, visual, "Mongo Script", mongo, "banvietbank");
+    let script = tb_open(&app, visual, "Mongo Script", mongo, "ledger");
     let trans = tb_open(&app, visual, "ledger", pg, "ledger_v3");
     tb_set_group_by(&app, visual, TabGroupBy::Database);
     app.update(visual, |this, cx| this.set_tab_rows(true, cx));
@@ -725,7 +725,7 @@ fn dragging_tabs_back_after_regrouping_keeps_keys_unique_adjacent_and_readable(
     for (index, key) in keys.iter().enumerate() {
         assert!(!keys[..index].contains(key), "duplicate chip key {key:?}");
     }
-    assert_eq!(keys.len(), 3, "mongo/shop, mongo/banvietbank, pg: {keys:?}");
+    assert_eq!(keys.len(), 3, "mongo/shop, mongo/ledger, pg: {keys:?}");
     // Chips of one connection are adjacent: the mongo chips come first.
     let connections: Vec<_> = keys
         .iter()
@@ -769,7 +769,7 @@ fn dragging_tabs_back_in_connection_mode_merges_them_into_the_existing_group(
     let (app, visual) = pn_app(cx);
     let (mongo, pg) = (crate::ui_fixture::MONGO_ID, crate::ui_fixture::POSTGRES_ID);
     let first = tb_open(&app, visual, "orders", mongo, "shop");
-    let script = tb_open(&app, visual, "Mongo Script", mongo, "banvietbank");
+    let script = tb_open(&app, visual, "Mongo Script", mongo, "ledger");
     let trans = tb_open(&app, visual, "ledger", pg, "ledger_v3");
     tb_set_group_by(&app, visual, TabGroupBy::Connection);
     app.update(visual, |this, cx| this.set_tab_rows(true, cx));
@@ -813,7 +813,7 @@ fn tr_two_panes(
     let l1 = tb_open(app, visual, "l1", mongo, "shop");
     let l2 = tb_open(app, visual, "l2", sqlite, "main");
     app.update(visual, |this, cx| {
-        this.open_mongo_script_tab(mongo, "banvietbank", "txn");
+        this.open_mongo_script_tab(mongo, "ledger", "txn");
         cx.notify();
     });
     tb_settle(visual);
@@ -866,7 +866,7 @@ fn two_tabs_of_one_connection_share_one_chip_until_the_pane_groups_by_database(
     let (app, visual) = pn_app(cx);
     let mongo = crate::ui_fixture::MONGO_ID;
     tb_open(&app, visual, "a", mongo, "shop");
-    tb_open(&app, visual, "b", mongo, "banvietbank");
+    tb_open(&app, visual, "b", mongo, "ledger");
     tb_set_group_by(&app, visual, TabGroupBy::Connection);
     app.update(visual, |this, cx| this.set_tab_rows(true, cx));
     tb_settle(visual);
@@ -941,7 +941,7 @@ fn dragging_between_panes_with_different_modes_judges_the_tab_by_the_destination
     app.update(visual, |this, cx| this.set_pane_group_by(right, TabGroupBy::Database, cx));
     tb_settle(visual);
     // l1 (mongo/shop) joins the right pane next to the mongo script tab
-    // (mongo/banvietbank): another database group there, not refused.
+    // (mongo/ledger): another database group there, not refused.
     app.update(visual, |this, cx| this.activate_tab_ui(l1, cx));
     tb_settle(visual);
     let tail = visual.debug_bounds("workspace-tab-tail-p1").unwrap().center();
@@ -955,7 +955,7 @@ fn dragging_between_panes_with_different_modes_judges_the_tab_by_the_destination
             .iter()
             .filter_map(|chip| chip.group.map(|key| key.database.clone()))
             .collect();
-        assert!(dbs.contains(&"shop".to_string()) && dbs.contains(&"banvietbank".to_string()), "{dbs:?}");
+        assert!(dbs.contains(&"shop".to_string()) && dbs.contains(&"ledger".to_string()), "{dbs:?}");
         let _ = script;
     });
 }

@@ -249,7 +249,7 @@ impl AppRoot {
         let mongo = crate::ui_fixture::MONGO_ID;
         let (invoices, _) = self.workspace.open_or_activate_collection_tab(mongo, "shop", "invoices");
         let (customers, _) = self.workspace.open_or_activate_collection_tab(mongo, "shop", "customers");
-        self.open_mongo_script_tab(mongo, "banvietbank", "txn");
+        self.open_mongo_script_tab(mongo, "ledger", "txn");
         let script = self.workspace.active_tab().map(|tab| tab.id);
         if self.workspace.split_tab(invoices, crate::panes::Edge::Right) {
             if let Some(right) = self.workspace.pane_of(invoices) {
