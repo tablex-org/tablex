@@ -570,6 +570,11 @@ impl AppRoot {
             documents: _,
         } = checked;
         let database = database_after.unwrap_or_else(|| context.database.clone());
+        // A selection or the statement at the cursor ran: its place is said in the editor's lines.
+        let mut error = error;
+        if let (Some(failure), Some(tab)) = (error.as_mut(), self.workspace.tab(tab_id)) {
+            crate::mongo_shell::place_in_editor(failure, &context.script, &tab.sql);
+        }
         let failed_message = error.as_ref().map(|failure| {
             format!("{}: {}", failure_label(failure.kind), failure_text(failure))
         });

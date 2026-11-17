@@ -647,6 +647,31 @@ fn a_scalar_or_write_result_is_shell_text_and_errors_show_line_and_column(cx: &m
 }
 
 #[gpui::test]
+fn run_follows_run_executes_and_an_error_names_the_editor_line(cx: &mut TestAppContext) {
+    let mut rig = ShellRig::new(cx, Some("0.3.0"));
+    rig.install_plugin();
+    rig.update(|this, _| {
+        let mut next = (*this.settings).clone();
+        next.editor.run_scope = crate::settings::RunScope::Current;
+        this.settings = std::sync::Arc::new(next);
+    });
+    let mut broken = reply(&[], ShellResult::None, "app");
+    broken.error = Some(failure(FailureKind::Syntax, "expecting ';'", Some((2, 8))));
+    rig.engine.push(Scripted::Reply(Box::new(broken)));
+    // An unfinished line above does not reach the server: the statement at the cursor runs alone.
+    rig.run_script("var unfinished = 1 2;\n\ndb.c.insertOne({\n  a: 1 b\n});");
+    rig.wait_ready();
+    let sent = rig.engine.requests().last().unwrap().script.clone();
+    assert!(sent.starts_with("db.c.insertOne({") && !sent.contains("unfinished"), "{sent:?}");
+    // Its line 2 is the editor's line 4.
+    let status = rig.status();
+    assert!(
+        matches!(&status, crate::query::QueryStatus::Failed(message) if message.contains("line 4, column 8")),
+        "{status:?}"
+    );
+}
+
+#[gpui::test]
 fn more_continues_the_cursor_through_the_plugin(cx: &mut TestAppContext) {
     let mut rig = ShellRig::new(cx, Some("0.3.0"));
     rig.install_plugin();

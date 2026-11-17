@@ -1181,7 +1181,11 @@ impl AppRoot {
             if explicit {
                 match span {
                     Some(RunSpan::FromCursor) => self.run_mongo_script_from_cursor(tab_id, cx),
-                    _ => self.run_mongo_script_tab(tab_id, cx),
+                    Some(RunSpan::Script) => self.run_mongo_script_tab(tab_id, cx),
+                    None => match self.mongo_in_run_scope(tab_id, cx) {
+                        Some(part) => self.run_mongo_script_text(tab_id, part, cx),
+                        None => self.run_mongo_script_tab(tab_id, cx),
+                    },
                 }
             } else {
                 self.rerun_mongo_script_tab(tab_id, cx);
@@ -1347,6 +1351,29 @@ impl AppRoot {
             RunScope::Current => crate::sql_script::statement_at(&script, cursor, &self.sql_lex(tab_id))
                 .map_or(script.clone(), |range| script[range].to_string()),
             RunScope::Selection | RunScope::All => script,
+        }
+    }
+
+    /// The part of a MongoDB script tab's editor that Run executes, by the same "Run executes"
+    /// setting as SQL: a selection wins unless the setting says the whole script, and without one
+    /// the statement at the cursor or the whole script. `None`: the whole script.
+    fn mongo_in_run_scope(&self, tab_id: u64, cx: &gpui::App) -> Option<String> {
+        use crate::settings::RunScope;
+        let scope = self.settings.editor.run_scope;
+        if scope == RunScope::All {
+            return None;
+        }
+        let state = self.query_editors.by_tab.get(&tab_id)?.read(cx);
+        let selection = state.selected_value().to_string();
+        if !selection.trim().is_empty() {
+            return Some(selection);
+        }
+        match scope {
+            RunScope::Current => {
+                let text = state.value().to_string();
+                crate::mongo_script::statement_at(&text, state.cursor()).map(|range| text[range].to_string())
+            }
+            RunScope::Selection | RunScope::All => None,
         }
     }
 

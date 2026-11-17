@@ -321,6 +321,27 @@ fn legal_cursor(cursor: CursorRef, started_in: &str, ended_in: &str) -> Option<C
     })
 }
 
+/// Moves a failure's place from the script that ran to the editor it came from: `script` is the
+/// selection, the statement at the cursor or the rest of the script from it, a part of `editor`.
+/// Left alone when the script starts the editor or is no longer in it (edited since).
+pub fn place_in_editor(failure: &mut ShellFailure, script: &str, editor: &str) {
+    let Some(line) = failure.line else {
+        return;
+    };
+    let Some(start) = editor.find(script).filter(|start| *start > 0) else {
+        return;
+    };
+    let before = &editor[..start];
+    let lines_before = u32::try_from(before.matches('\n').count()).unwrap_or(u32::MAX);
+    failure.line = Some(line.saturating_add(lines_before));
+    if line == 1 {
+        // The script's first line starts where the selection does, maybe mid-line.
+        let column_before = before.rsplit('\n').next().map_or(0, |text| text.chars().count());
+        let column_before = u32::try_from(column_before).unwrap_or(u32::MAX);
+        failure.column = failure.column.map(|column| column.saturating_add(column_before));
+    }
+}
+
 /// `message`, with where in the script it happened and the server's code: the line the tab shows
 /// inline and the Error Log keeps.
 pub fn failure_text(failure: &ShellFailure) -> String {
@@ -502,6 +523,33 @@ mod tests {
         assert_eq!(failure_text(&failure), "duplicate key (line 3, column 9) [DuplicateKey 11000]");
         let plain = ShellFailure { kind: FailureKind::Script, message: "x".into(), line: None, column: None, code: None, code_name: None };
         assert_eq!(failure_text(&plain), "x");
+    }
+
+    #[test]
+    fn a_failure_in_a_part_of_the_editor_is_placed_in_the_editor() {
+        let editor = "var a = 1;\nvar b = 2;\n\ndb.items.find({\n  x: 1\n});\n";
+        let failure = |line, column| ShellFailure {
+            kind: FailureKind::Syntax,
+            message: "expecting ';'".into(),
+            line: Some(line),
+            column: Some(column),
+            code: None,
+            code_name: None,
+        };
+        // The statement at the cursor (lines 4 to 6 of the editor) failed on its line 3.
+        let mut moved = failure(3, 2);
+        place_in_editor(&mut moved, "db.items.find({\n  x: 1\n});", editor);
+        assert_eq!((moved.line, moved.column), (Some(6), Some(2)));
+        // A selection starting mid-line: its first line's columns move too.
+        let mut first = failure(1, 3);
+        place_in_editor(&mut first, "b = 2;", editor);
+        assert_eq!((first.line, first.column), (Some(2), Some(7)));
+        // The whole editor, or a script no longer in it: as reported.
+        for script in [editor, "db.other.find()"] {
+            let mut same = failure(3, 2);
+            place_in_editor(&mut same, script, editor);
+            assert_eq!((same.line, same.column), (Some(3), Some(2)));
+        }
     }
 
     #[test]

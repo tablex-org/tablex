@@ -151,16 +151,27 @@ pub fn statement_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
                 start = index + 1;
                 depth = 0;
             }
-            b'\n' if depth <= 0 => {
+            b'\n' => {
                 // A blank line (only whitespace until the next newline) ends a statement.
                 let rest = &text[index + 1..];
                 let blank = rest
                     .split('\n')
                     .next()
                     .is_some_and(|line| line.trim().is_empty() && index + 1 + line.len() < text.len());
-                if blank {
+                // Inside an open bracket it does too when the next line starts a new statement at
+                // the margin (`db.…`, a name): an unfinished statement above must not swallow the
+                // ones below it, so the statement at the cursor is still the one the user sees.
+                let ends = blank
+                    && (depth <= 0
+                        || rest
+                            .split('\n')
+                            .find(|line| !line.trim().is_empty())
+                            .and_then(|line| line.chars().next())
+                            .is_some_and(|first| first.is_ascii_alphabetic() || first == '_' || first == '$'));
+                if ends {
                     push(start, index, &mut ranges);
                     start = index + 1;
+                    depth = 0;
                 }
             }
             _ => {}
@@ -328,6 +339,21 @@ mod tests {
             ["db.a.find({ x: \"a;b\" })", "db.b.find({\n  y: 1\n})", "// note;\ndb.c.find({})"]
         );
         assert!(statement_ranges("  \n ; ;").is_empty());
+    }
+
+    /// A statement left unfinished above (an open bracket) ends at a blank line before a statement
+    /// at the margin, so the one under the cursor still runs alone; a blank line inside a finished
+    /// statement's indented body does not split it.
+    #[test]
+    fn an_unfinished_statement_does_not_swallow_the_next_one() {
+        let text = "db.a.find({\n  x: 1\n\ndb.b.find({\n  \"k\": \"v\"\n});\n";
+        let found: Vec<&str> = statement_ranges(text).into_iter().map(|range| &text[range]).collect();
+        assert_eq!(found, ["db.a.find({\n  x: 1", "db.b.find({\n  \"k\": \"v\"\n})"]);
+        let cursor = text.len();
+        assert_eq!(statement_at(text, cursor).map(|range| &text[range]), Some("db.b.find({\n  \"k\": \"v\"\n})"));
+
+        let indented = "db.a.aggregate([\n  { $match: {} },\n\n  { $limit: 1 }\n])";
+        assert_eq!(statement_ranges(indented).len(), 1, "a blank line inside an indented body");
     }
 
     #[test]
