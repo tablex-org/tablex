@@ -598,12 +598,16 @@ impl AppRoot {
                 columns,
             ),
         };
+        let (output_widest, value_widest) =
+            (crate::mongo_shell::widest_line(&output), crate::mongo_shell::widest_line(&value_lines));
         let view = ShellView {
             script: context.script.clone(),
             output,
             output_truncated,
             value_text,
             value_lines,
+            output_widest,
+            value_widest,
             documents: rows,
             more: more.map(|cursor| MoreCursor {
                 cursor,

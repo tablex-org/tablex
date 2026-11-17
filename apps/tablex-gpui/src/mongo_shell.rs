@@ -65,6 +65,10 @@ pub struct ShellView {
     pub notes: Vec<String>,
     /// The Output pane is open.
     pub output_open: bool,
+    /// The longest line of `output` and of `value_lines`, as drawn: the lists are as wide as it
+    /// and scroll sideways (found once here, not on every frame).
+    pub output_widest: Option<usize>,
+    pub value_widest: Option<usize>,
 }
 
 impl ShellView {
@@ -244,6 +248,16 @@ fn char_boundary(text: &str, at: usize) -> usize {
         end -= 1;
     }
     end
+}
+
+/// The index of the line that is drawn widest (the panes use a monospace font; a cut line is
+/// drawn [`MAX_DISPLAY_LINE_BYTES`] long).
+pub fn widest_line(lines: &[SharedString]) -> Option<usize> {
+    lines
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, line)| clip_line(line).chars().count())
+        .map(|(index, _)| index)
 }
 
 /// `line` as a pane draws it: cut at [`MAX_DISPLAY_LINE_BYTES`] with a marker.

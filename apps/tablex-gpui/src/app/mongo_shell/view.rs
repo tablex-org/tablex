@@ -193,9 +193,9 @@ impl AppRoot {
 
     /// The shell text of a scalar or write result, one line per row of a virtualized list.
     pub(in crate::app) fn render_shell_text(&mut self, tab_id: u64, cx: &mut Context<Self>) -> AnyElement {
-        let lines = self
+        let (lines, widest) = self
             .shell_view(tab_id)
-            .map_or(0, |view| view.value_lines.len());
+            .map_or((0, None), |view| (view.value_lines.len(), view.value_widest));
         let scroll = self.view(tab_id).shell_text_scroll.clone();
         let rows = uniform_list(
             ("shell-text-rows", tab_id),
@@ -209,6 +209,9 @@ impl AppRoot {
                     .collect()
             }),
         )
+        // As wide as the longest line, so a long one scrolls sideways instead of being cut.
+        .with_horizontal_sizing_behavior(gpui::ListHorizontalSizingBehavior::Unconstrained)
+        .with_width_from_item(widest)
         .flex_1()
         .min_h_0()
         .track_scroll(&scroll);
@@ -222,7 +225,7 @@ impl AppRoot {
             .px(px(12.0))
             .py(px(6.0))
             .child(rows)
-            .child(Scrollbar::vertical(&scroll))
+            .child(Scrollbar::new(&scroll))
             .into_any_element()
     }
 
@@ -236,7 +239,7 @@ impl AppRoot {
         if !view.output_open || view.output.is_empty() {
             return None;
         }
-        let (count, truncated) = (view.output.len(), view.output_truncated);
+        let (count, truncated, widest) = (view.output.len(), view.output_truncated, view.output_widest);
         let scroll = self.view(tab_id).shell_output_scroll.clone();
         let rows = uniform_list(
             ("shell-output-rows", tab_id),
@@ -250,6 +253,8 @@ impl AppRoot {
                     .collect()
             }),
         )
+        .with_horizontal_sizing_behavior(gpui::ListHorizontalSizingBehavior::Unconstrained)
+        .with_width_from_item(widest)
         .flex_1()
         .min_h_0()
         .track_scroll(&scroll);
@@ -307,7 +312,7 @@ impl AppRoot {
                         .relative()
                         .px(px(12.0))
                         .child(rows)
-                        .child(Scrollbar::vertical(&scroll)),
+                        .child(Scrollbar::new(&scroll)),
                 )
                 .into_any_element(),
         )

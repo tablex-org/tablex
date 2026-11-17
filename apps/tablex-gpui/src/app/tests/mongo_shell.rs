@@ -675,6 +675,38 @@ fn run_follows_run_executes_and_an_error_names_the_editor_line(cx: &mut TestAppC
     );
 }
 
+/// A text result or an Output line wider than the pane scrolls sideways (it used to be cut at the
+/// pane's edge, with no way to see the rest but Copy).
+#[gpui::test]
+fn long_text_and_output_lines_scroll_sideways(cx: &mut TestAppContext) {
+    let mut rig = ShellRig::new(cx, Some("0.3.0"));
+    rig.install_plugin();
+    let long = format!("start {} end", "x".repeat(600));
+    rig.engine.push(Scripted::Reply(Box::new(reply(
+        &[&long],
+        ShellResult::Value { text: format!("\"{long}\"\nshort") },
+        "app",
+    ))));
+    rig.run_script("print(1); 'x'");
+    rig.wait_ready();
+    let tab = rig.tab_id;
+    for (selector, scroll) in [("shell-text", false), ("shell-output", true)] {
+        let bounds = rig.visual.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is shown"));
+        rig.visual.simulate_event(gpui::ScrollWheelEvent {
+            position: bounds.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(-300.0), gpui::px(0.0))),
+            ..Default::default()
+        });
+        rig.visual.run_until_parked();
+        let offset = rig.read(|this| {
+            let view = this.view(tab);
+            let handle = if scroll { &view.shell_output_scroll } else { &view.shell_text_scroll };
+            handle.0.borrow().base_handle.offset()
+        });
+        assert!(offset.x < gpui::px(-100.0), "{selector} scrolled sideways: {offset:?}");
+    }
+}
+
 #[gpui::test]
 fn more_continues_the_cursor_through_the_plugin(cx: &mut TestAppContext) {
     let mut rig = ShellRig::new(cx, Some("0.3.0"));
