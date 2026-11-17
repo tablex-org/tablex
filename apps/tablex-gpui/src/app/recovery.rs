@@ -119,7 +119,9 @@ fn ping_session(
     match result {
         Ok(()) => PingOutcome::Alive,
         // The server answered with a refusal: the connection is up.
-        Err(engine_driver_host::LoaderError::DriverRejected { code, .. }) if !crate::sessions::is_connection_lost_code(&code) => {
+        Err(engine_driver_host::LoaderError::DriverRejected { code, message, .. })
+            if !crate::sessions::is_connection_lost_rejection(&code, &message) =>
+        {
             PingOutcome::Alive
         }
         Err(error) => PingOutcome::Dead(error.to_string()),

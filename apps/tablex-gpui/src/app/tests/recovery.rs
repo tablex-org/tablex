@@ -233,6 +233,45 @@ fn a_second_loss_of_the_same_run_is_shown_not_retried(cx: &mut TestAppContext) {
     assert!(other_run, "another run starts over");
 }
 
+/// A driver that reports a dropped socket as a plain `query.failed: connection closed` (what an
+/// older PostgreSQL driver says after the computer slept) still gets the reconnect and retry, and
+/// the result area says the connection was lost.
+#[gpui::test]
+fn a_plain_connection_closed_failure_is_retried_as_a_lost_connection(cx: &mut TestAppContext) {
+    let db = SqliteDb::new(ITEMS_SEED);
+    let rig = recovery_rig(cx, &db);
+    let closed = DriverQueryError::Driver(engine_driver_host::LoaderError::DriverRejected {
+        code: "query.failed".into(),
+        message: "connection closed".into(),
+        retryable: false,
+    });
+    assert!(closed.is_connection_lost());
+    let (tab, key) = (rig.tab, rig.key.clone());
+    let retried = rig.app.update(rig.visual, |this, cx| {
+        let run = this.workspace.runtime_mut(tab).unwrap().query.begin().unwrap();
+        let request = SqlRun {
+            tab_id: tab,
+            kind: RunKind::Sql,
+            connection: key.clone(),
+            sql: "SELECT 1".into(),
+            database: String::new(),
+            collection: String::new(),
+            limit: 200,
+            offset: 0,
+            confirmed: false,
+            read_only: false,
+        };
+        this.retry_run_after_loss(run, &request, &closed, super::transaction::TabRoute::Shared, cx)
+    });
+    assert!(retried, "the read reconnects and runs again");
+    let text = super::results::grid::failed_query_text("driver rejected the request: query.failed: connection closed");
+    assert!(text.starts_with("The connection to the database was lost (connection closed)"), "{text}");
+    assert_eq!(
+        super::results::grid::failed_query_text("driver rejected the request: query.failed: syntax error"),
+        "Query failed: driver rejected the request: query.failed: syntax error"
+    );
+}
+
 #[gpui::test]
 fn a_write_on_a_dead_session_is_not_retried(cx: &mut TestAppContext) {
     let db = SqliteDb::new(ITEMS_SEED);

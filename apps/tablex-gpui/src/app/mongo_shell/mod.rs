@@ -540,8 +540,8 @@ impl AppRoot {
                 // plugin (its stderr, protocol errors) never does.
                 let lost = matches!(
                     &error,
-                    ShellRunError::Host(ShellHostError::Driver(LoaderError::DriverRejected { code, .. }))
-                        if crate::sessions::is_connection_lost_code(code)
+                    ShellRunError::Host(ShellHostError::Driver(LoaderError::DriverRejected { code, message, .. }))
+                        if crate::sessions::is_connection_lost_rejection(code, message)
                 );
                 if lost || self.tab_tunnel_is_down(tab_id) {
                     self.mark_tab_connection_lost(tab_id);

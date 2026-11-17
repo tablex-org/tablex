@@ -18,15 +18,68 @@ pub enum ConnectionStatus {
 pub const CONNECTION_LOST_REASON: &str = "Connection to the database was lost";
 
 /// Whether a stringified driver failure says the session is gone
-/// (`driver rejected the request: <area>.not_connected: ...`).
+/// (`driver rejected the request: <area>.not_connected: ...`, or a plain failure whose message
+/// says the connection dropped, see [`is_connection_lost_rejection`]).
 pub fn is_connection_lost_error(error: &str) -> bool {
     crate::error_log::DriverRejection::parse(error)
-        .is_some_and(|rejection| is_connection_lost_code(rejection.code))
+        .is_some_and(|rejection| is_connection_lost_rejection(rejection.code, error))
 }
 
 /// Whether a driver error code says the session is gone.
 pub fn is_connection_lost_code(code: &str) -> bool {
     code.ends_with(".not_connected")
+}
+
+/// Whether a driver's refusal says the session is gone: its code (`<area>.not_connected`), or a
+/// plain failure (`query.failed`) whose message is the network's or the client library's word for
+/// a dropped connection. An older driver, or a path of a driver that does not tell the two apart,
+/// reports a socket the server or the network closed while the app was idle that way; without
+/// this the session would stay "connected" and every run and refresh would fail on it until the
+/// app restarts. A cancel is never a lost connection.
+pub fn is_connection_lost_rejection(code: &str, message: &str) -> bool {
+    if is_connection_lost_code(code) {
+        return true;
+    }
+    if code.ends_with(".cancelled") || code.ends_with(".interrupted") {
+        return false;
+    }
+    message_says_connection_lost(message)
+}
+
+/// Words of drivers and operating systems for a connection that dropped (not one that was never
+/// made: "connection refused" belongs to connecting).
+const LOST_CONNECTION_WORDS: &[&str] = &[
+    "connection closed",
+    "connection is closed",
+    "connection was closed",
+    "connection reset",
+    "connection lost",
+    "connection aborted",
+    "connection was lost",
+    "closed the connection",
+    "server closed the connection",
+    "broken pipe",
+    "reset by peer",
+    "socket closed",
+    "socket is not connected",
+    "unexpected eof",
+    "unexpected end of file",
+    "communications link failure",
+    "not connected",
+];
+
+/// [`is_connection_lost_rejection`]'s message test (case-insensitive); also `os error 32`
+/// (EPIPE), `54` / `104` (ECONNRESET on macOS / Linux), `57` / `107` (ENOTCONN), `10053` /
+/// `10054` (Windows aborted / reset).
+pub fn message_says_connection_lost(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    if LOST_CONNECTION_WORDS.iter().any(|words| lower.contains(words)) {
+        return true;
+    }
+    lower.match_indices("os error ").any(|(at, prefix)| {
+        let digits: String = lower[at + prefix.len()..].chars().take_while(char::is_ascii_digit).collect();
+        matches!(digits.as_str(), "32" | "54" | "104" | "57" | "107" | "10053" | "10054")
+    })
 }
 
 /// Pure session map: saved-connection UUID -> runtime status.
@@ -255,6 +308,32 @@ mod tests {
         assert!(!sessions.mark_lost(CONN), "already lost");
         assert!(sessions.begin_connect(CONN).is_some(), "lost allows reconnect");
         assert!(!sessions.was_dropped(CONN));
+    }
+
+    /// Some drivers (and older builds) report a dropped socket as a plain `query.failed`: its
+    /// words count, a server's refusal or a cancel does not.
+    #[test]
+    fn a_plain_failure_that_says_the_connection_dropped_is_a_lost_connection() {
+        for lost in [
+            "driver rejected the request: query.failed: connection closed",
+            "Could not list: driver rejected the request: metadata.failed: Connection reset by peer (os error 54)",
+            "driver rejected the request: query.failed: error communicating with database: Broken pipe (os error 32)",
+            "driver rejected the request: query.failed: unexpected EOF",
+            "driver rejected the request: query.failed: io error: os error 104",
+        ] {
+            assert!(is_connection_lost_error(lost), "{lost}");
+        }
+        for kept in [
+            "driver rejected the request: query.failed: syntax error at or near \"selec\"",
+            "driver rejected the request: query.failed: relation \"orders\" does not exist",
+            "driver rejected the request: query.cancelled: connection closed by the user",
+            "driver rejected the request: connect.failed: Connection refused (os error 61)",
+            "plain text that mentions a connection closed but is not a driver rejection",
+        ] {
+            assert!(!is_connection_lost_error(kept), "{kept}");
+        }
+        assert!(is_connection_lost_rejection("query.failed", "Connection is closed"));
+        assert!(!is_connection_lost_rejection("query.interrupted", "connection closed"));
     }
 
     #[test]

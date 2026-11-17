@@ -131,7 +131,7 @@ impl DriverExecutor {
         match error {
             LoaderError::DriverRejected { code, .. } if code.ends_with(".cancelled") => Failure::Cancelled,
             _ if self.control.is_cancelled() => Failure::Cancelled,
-            LoaderError::DriverRejected { code, .. } if crate::sessions::is_connection_lost_code(code) || code == codes::MUTATION_COMMIT_UNKNOWN => Failure::Lost(text),
+            LoaderError::DriverRejected { code, message, .. } if crate::sessions::is_connection_lost_rejection(code, message) || code == codes::MUTATION_COMMIT_UNKNOWN => Failure::Lost(text),
             // The server (or the driver, for text it cannot take) refused this statement; the session is fine.
             LoaderError::DriverRejected { .. } => Failure::Rejected(message_of(&text)),
             _ => Failure::Lost(text),

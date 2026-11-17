@@ -344,7 +344,7 @@ impl DriverQueryError {
     /// `sessions::is_connection_lost_error`.
     pub(super) fn is_connection_lost(&self) -> bool {
         self.rejection()
-            .is_some_and(|(code, ..)| crate::sessions::is_connection_lost_code(code))
+            .is_some_and(|(code, message, _)| crate::sessions::is_connection_lost_rejection(code, message))
     }
 
     /// Text for the tab's status line: an interrupt nobody asked for

@@ -584,7 +584,7 @@ impl PageReader {
         let text = crate::sessions::redact_secrets(&error.to_string());
         match error {
             LoaderError::DriverRejected { code, .. } if code.ends_with(".cancelled") => ReadError::Cancelled,
-            LoaderError::DriverRejected { code, .. } if crate::sessions::is_connection_lost_code(code) => ReadError::Lost(text),
+            LoaderError::DriverRejected { code, message, .. } if crate::sessions::is_connection_lost_rejection(code, message) => ReadError::Lost(text),
             LoaderError::DriverRejected { code, message, .. } if code.starts_with("query.") => {
                 if code == codes::QUERY_NOT_PAGEABLE {
                     ReadError::Refused(format!("Only a single SELECT can be transferred ({})", crate::sessions::redact_secrets(message)))

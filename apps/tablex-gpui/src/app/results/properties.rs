@@ -821,8 +821,8 @@ impl DescribeError {
     fn is_connection_lost(&self) -> bool {
         matches!(
             self,
-            Self::Driver(engine_driver_host::LoaderError::DriverRejected { code, .. })
-                if crate::sessions::is_connection_lost_code(code)
+            Self::Driver(engine_driver_host::LoaderError::DriverRejected { code, message, .. })
+                if crate::sessions::is_connection_lost_rejection(code, message)
         )
     }
 }

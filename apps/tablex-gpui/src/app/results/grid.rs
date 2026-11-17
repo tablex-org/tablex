@@ -1185,6 +1185,7 @@ impl AppRoot {
     }
 
     fn render_result_empty_state(&self, tab_id: u64) -> AnyElement {
+        // (see `failed_query_text` for a failure that lost the connection)
         use crate::query::QueryStatus;
         let status = self
             .workspace
@@ -1198,9 +1199,7 @@ impl AppRoot {
             _ if shell_failed => "No result: the script failed".to_string(),
             Some(QueryStatus::Ready { .. }) => "No rows returned".to_string(),
             Some(QueryStatus::Running { .. }) => "Running query…".to_string(),
-            Some(QueryStatus::Failed(error)) => {
-                format!("Query failed: {}", crate::sessions::redact_secrets(error))
-            }
+            Some(QueryStatus::Failed(error)) => failed_query_text(error),
             Some(QueryStatus::Cancelled) => "Query cancelled".to_string(),
             _ => "Run a query to see results".to_string(),
         };
@@ -1963,4 +1962,17 @@ mod null_color_tests {
             super::grid_cell_text_color(false)
         );
     }
+}
+
+/// What the result area says about a failed run: a lost connection in plain words with what to
+/// do (the banner above has Reconnect), anything else as the driver said it.
+pub(in crate::app) fn failed_query_text(error: &str) -> String {
+    let error = crate::sessions::redact_secrets(error);
+    if crate::sessions::is_connection_lost_error(&error) {
+        let detail = crate::error_log::DriverRejection::parse(&error)
+            .and_then(|rejection| rejection.message_if_leading)
+            .unwrap_or(&error);
+        return format!("The connection to the database was lost ({detail}). Reconnect, then run the query again.");
+    }
+    format!("Query failed: {error}")
 }

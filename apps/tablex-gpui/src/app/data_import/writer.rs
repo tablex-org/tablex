@@ -102,7 +102,7 @@ impl DriverWriter {
         }
         match error {
             LoaderError::DriverRejected { code, .. } if code.ends_with(".cancelled") => WriteFailure::Cancelled,
-            LoaderError::DriverRejected { code, .. } if crate::sessions::is_connection_lost_code(code) => WriteFailure::Lost(text),
+            LoaderError::DriverRejected { code, message, .. } if crate::sessions::is_connection_lost_rejection(code, message) => WriteFailure::Lost(text),
             // The server (or the driver, for a value it cannot bind) refused this data.
             // Nobody knows whether a COMMIT that was cut off was applied: that is not a refusal.
             LoaderError::DriverRejected { code, .. } if code == codes::MUTATION_COMMIT_UNKNOWN => WriteFailure::Lost(text),
