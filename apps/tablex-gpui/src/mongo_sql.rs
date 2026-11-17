@@ -6,10 +6,11 @@
 //!
 //! ```sql
 //! SELECT [DISTINCT] * | field [AS alias], COUNT(*), SUM(field), AVG(..), MIN(..), MAX(..)
-//! FROM "database"."collection" | collection
+//! FROM "database"."collection" | collection [alias]
+//! [[INNER | LEFT [OUTER]] JOIN collection [alias] ON a.field = b.field] ...
 //! [WHERE condition]   -- = != <> < <= > >=, [NOT] IN (..), [NOT] LIKE / ILIKE, IS [NOT] NULL,
 //!                     -- [NOT] BETWEEN .. AND .., AND, OR, NOT, parentheses
-//! [GROUP BY field, ..] [ORDER BY field [ASC|DESC], ..] [LIMIT n [OFFSET m]]
+//! [GROUP BY field, ..] [HAVING condition] [ORDER BY field [ASC|DESC], ..] [LIMIT n [OFFSET m]]
 //! ```
 //!
 //! A field is a name (`status`), a path (`info.ref`) or a quoted name (`"info.ref"`); a value is a
@@ -61,7 +62,8 @@ pub fn rewrite_script(script: &str) -> Result<Rewritten, String> {
             select.to_shell(false)
         } else {
             select.to_shell(true)
-        };
+        }
+        .map_err(|message| place(script, start, &message))?;
         out.push_str(&shell);
         copied = range.end;
         // Its `;` (a single statement needs none), then the lines the statement took, so what
@@ -278,14 +280,29 @@ enum Item {
 struct Select {
     database: Option<String>,
     collection: String,
+    joins: Vec<Join>,
     distinct: bool,
     /// Empty: `*`.
     items: Vec<Item>,
     filter: Option<J>,
     group: Vec<String>,
+    /// Field names are output names, group keys, or `@agg:<function>:<field or *>`.
+    having: Option<J>,
     order: Vec<(String, bool)>,
     limit: Option<u64>,
     offset: Option<u64>,
+}
+
+/// `[INNER | LEFT [OUTER]] JOIN collection [alias] ON a = b`: a `$lookup` of the documents whose
+/// `foreign` equals the joined-so-far document's `local`, put under `alias` (one per output
+/// document; LEFT keeps a document that has none).
+#[derive(Debug)]
+struct Join {
+    left: bool,
+    collection: String,
+    alias: String,
+    local: String,
+    foreign: String,
 }
 
 /// A value of the shell statement.
@@ -362,6 +379,8 @@ struct Parser<'a> {
     index: usize,
     end: usize,
     text: &'a str,
+    /// In HAVING: a condition may compare an aggregate (`COUNT(*) > 1`).
+    having: bool,
 }
 
 fn parse(statement: &str) -> Result<Select, SqlError> {
@@ -374,7 +393,7 @@ fn parse(statement: &str) -> Result<Select, SqlError> {
     while tokens.last().is_some_and(|token| token.kind == Tok::Sym(";")) {
         tokens.pop();
     }
-    let mut parser = Parser { tokens, index: 0, end: statement.trim_end().len(), text: statement };
+    let mut parser = Parser { tokens, index: 0, end: statement.trim_end().len(), text: statement, having: false };
     let select = parser.select()?;
     if let Some(token) = parser.peek() {
         return Err(parser.unexpected(token));
@@ -462,6 +481,44 @@ impl Parser<'_> {
         };
         self.expect_word("from")?;
         let (database, collection) = self.source()?;
+        let alias = self.alias()?.unwrap_or_else(|| collection.clone());
+        let mut joins = Vec::new();
+        let mut raw_joins = Vec::new();
+        loop {
+            let at = self.at();
+            let left = self.eat_word("left");
+            if left {
+                self.eat_word("outer");
+            }
+            let inner = !left && self.eat_word("inner");
+            if !self.eat_word("join") {
+                if left || inner {
+                    return Err(self.error("expected JOIN"));
+                }
+                for word in ["right", "full", "cross"] {
+                    if self.is_word(word) {
+                        return Err(self.error(format!("{} JOIN is not supported: use INNER or LEFT JOIN", word.to_uppercase())));
+                    }
+                }
+                break;
+            }
+            let (join_database, join_collection) = self.source()?;
+            if join_database.as_ref().is_some_and(|name| Some(name) != database.as_ref()) {
+                return Err(SqlError { at, message: "a JOIN reads a collection of the same database".into() });
+            }
+            let join_alias = self.alias()?.unwrap_or_else(|| join_collection.clone());
+            self.expect_word("on")?;
+            let on_at = self.at();
+            let first = self.field()?;
+            if !(self.eat_sym("=") || self.eat_sym("==")) {
+                return Err(self.error("a JOIN's ON compares two fields with ="));
+            }
+            let second = self.field()?;
+            if self.is_word("and") || self.is_word("or") {
+                return Err(self.error("a JOIN's ON takes one condition"));
+            }
+            raw_joins.push((left, join_collection, join_alias, first, second, on_at));
+        }
         let filter = if self.eat_word("where") { Some(self.or()?) } else { None };
         let mut group = Vec::new();
         if self.eat_word("group") {
@@ -471,6 +528,14 @@ impl Parser<'_> {
                 group.push(self.field()?);
             }
         }
+        let having = if self.eat_word("having") {
+            self.having = true;
+            let condition = self.or();
+            self.having = false;
+            Some(condition?)
+        } else {
+            None
+        };
         let mut order = Vec::new();
         if self.eat_word("order") {
             self.expect_word("by")?;
@@ -498,7 +563,56 @@ impl Parser<'_> {
         if offset.is_none() && self.eat_word("offset") {
             offset = Some(self.count()?);
         }
-        Ok(Select { database, collection, distinct, items, filter, group, order, limit, offset })
+        // Field references are resolved now that every name the statement uses is known.
+        let names = std::iter::once(alias.clone()).chain(raw_joins.iter().map(|join| join.2.clone())).collect::<Vec<_>>();
+        if let Some(duplicate) = names.iter().enumerate().find(|(index, name)| names[..*index].contains(name)) {
+            return Err(SqlError { at: 0, message: format!("{} names two collections: give one an alias", duplicate.1) });
+        }
+        let resolver = Resolver { base: alias.clone(), joined: names[1..].to_vec() };
+        for (left, join_collection, join_alias, first, second, on_at) in raw_joins {
+            let of_join = |path: &str| path.split_once('.').is_some_and(|(head, _)| head == join_alias);
+            let (local, foreign) = match (of_join(&first), of_join(&second)) {
+                (false, true) => (first, second),
+                (true, false) => (second, first),
+                _ => {
+                    return Err(SqlError {
+                        at: on_at,
+                        message: format!("ON must compare a field of {join_alias} with a field joined before it"),
+                    })
+                }
+            };
+            let foreign = foreign.split_once('.').map(|(_, rest)| rest.to_owned()).unwrap_or(foreign);
+            // Earlier joins only: a later alias is not there yet.
+            let local = resolver.resolve(&local);
+            if resolver.joined.iter().skip_while(|name| **name != join_alias).any(|name| local.starts_with(&format!("{name}."))) {
+                return Err(SqlError { at: on_at, message: format!("ON must compare a field of {join_alias} with a field joined before it") });
+            }
+            joins.push(Join { left, collection: join_collection, alias: join_alias, local, foreign });
+        }
+        let items = items
+            .into_iter()
+            .map(|item| match item {
+                Item::Field { path, alias } => Item::Field { path: resolver.resolve(&path), alias },
+                Item::Aggregate { function, field, alias } => {
+                    Item::Aggregate { function, field: field.map(|path| resolver.resolve(&path)), alias }
+                }
+            })
+            .collect::<Vec<_>>();
+        let filter = filter.map(|filter| rename_fields(&filter, &mut |path| Ok(resolver.resolve(path)))).transpose().map_err(|message| SqlError { at: 0, message })?;
+        let group: Vec<String> = group.iter().map(|path| resolver.resolve(path)).collect();
+        let output_names: Vec<String> = items.iter().filter_map(|item| match item {
+            Item::Field { alias: Some(alias), .. } | Item::Aggregate { alias: Some(alias), .. } => Some(alias.clone()),
+            _ => None,
+        }).collect();
+        let order = order
+            .into_iter()
+            .map(|(path, descending)| (if output_names.contains(&path) { path } else { resolver.resolve(&path) }, descending))
+            .collect();
+        let grouping = distinct || !group.is_empty() || items.iter().any(|item| matches!(item, Item::Aggregate { .. }));
+        if having.is_some() && !grouping {
+            return Err(SqlError { at: 0, message: "HAVING needs GROUP BY or an aggregate".into() });
+        }
+        Ok(Select { database, collection, joins, distinct, items, filter, group, having, order, limit, offset })
     }
 
     fn count(&mut self) -> Result<u64, SqlError> {
@@ -620,7 +734,10 @@ impl Parser<'_> {
     }
 
     fn predicate(&mut self) -> Result<J, SqlError> {
-        let field = self.field()?;
+        let field = match self.having_aggregate()? {
+            Some(reference) => reference,
+            None => self.field()?,
+        };
         let id = field == "_id";
         if self.eat_word("is") {
             let negated = self.eat_word("not");
@@ -761,10 +878,71 @@ impl Parser<'_> {
     }
 }
 
+impl Parser<'_> {
+    /// In HAVING, `COUNT(*)` / `SUM(field)` …: the reference `@agg:<function>:<field or *>`.
+    fn having_aggregate(&mut self) -> Result<Option<String>, SqlError> {
+        if !self.having {
+            return Ok(None);
+        }
+        let Some(Token { kind: Tok::Word(word), .. }) = self.peek().cloned() else {
+            return Ok(None);
+        };
+        if !self.tokens.get(self.index + 1).is_some_and(|next| next.kind == Tok::Sym("(")) {
+            return Ok(None);
+        }
+        let Item::Aggregate { function, field, .. } = self.item()? else {
+            return Err(self.error(format!("expected an aggregate, found {word}")));
+        };
+        Ok(Some(aggregate_reference(function, field.as_deref())))
+    }
+}
+
+fn aggregate_reference(function: Aggregate, field: Option<&str>) -> String {
+    format!("@agg:{function:?}:{}", field.unwrap_or("*"))
+}
+
+/// What the names of a statement with aliases or joins point at: `o.ref` (the FROM alias) is
+/// the document's `ref`; `c.name` (a joined alias) stays `c.name`, the field of the document the
+/// join put under `c`; anything else is a path of the document.
+struct Resolver {
+    base: String,
+    joined: Vec<String>,
+}
+
+impl Resolver {
+    fn resolve(&self, path: &str) -> String {
+        match path.split_once('.') {
+            Some((head, rest)) if head == self.base && !self.joined.iter().any(|name| name == head) => rest.to_owned(),
+            _ => path.to_owned(),
+        }
+    }
+}
+
+/// `filter` with each field name replaced by `rename` (operators and values are left alone).
+fn rename_fields(filter: &J, rename: &mut dyn FnMut(&str) -> Result<String, String>) -> Result<J, String> {
+    let J::Obj(pairs) = filter else {
+        return Ok(filter.clone());
+    };
+    let mut out = Vec::with_capacity(pairs.len());
+    for (key, value) in pairs {
+        if key.starts_with('$') {
+            let value = match value {
+                J::Arr(items) => J::Arr(items.iter().map(|item| rename_fields(item, rename)).collect::<Result<_, _>>()?),
+                other => other.clone(),
+            };
+            out.push((key.clone(), value));
+        } else {
+            out.push((rename(key)?, value.clone()));
+        }
+    }
+    Ok(J::Obj(out))
+}
+
 fn is_keyword(word: &str) -> bool {
     matches!(
         word.to_ascii_lowercase().as_str(),
-        "from" | "where" | "group" | "order" | "limit" | "offset" | "and" | "or" | "not" | "as"
+        "from" | "where" | "group" | "order" | "limit" | "offset" | "and" | "or" | "not" | "as" | "join" | "inner"
+            | "left" | "right" | "full" | "cross" | "outer" | "on" | "having"
     )
 }
 
@@ -814,19 +992,20 @@ fn like_to_regex(pattern: &str) -> String {
 impl Select {
     /// The shell statement: `db["c"].find(…)` (the fast path reads it), or with `sibling` the
     /// collection of the named database, for a statement among others.
-    fn to_shell(&self, sibling: bool) -> String {
+    fn to_shell(&self, sibling: bool) -> Result<String, String> {
         let collection = match (&self.database, sibling) {
             (Some(database), true) => format!("db.getSiblingDB({}).getCollection({})", json(database), json(&self.collection)),
             _ => format!("db[{}]", json(&self.collection)),
         };
         let aggregated = self.distinct
+            || !self.joins.is_empty()
             || !self.group.is_empty()
             || self.items.iter().any(|item| match item {
                 Item::Aggregate { .. } => true,
                 Item::Field { alias, .. } => alias.is_some(),
             });
         if aggregated {
-            return format!("{collection}.aggregate({})", J::Arr(self.pipeline()).text());
+            return Ok(format!("{collection}.aggregate({})", J::Arr(self.pipeline()?).text()));
         }
         let filter = self.filter.clone().unwrap_or(J::Obj(Vec::new()));
         let mut out = format!("{collection}.find({}", filter.text());
@@ -855,7 +1034,7 @@ impl Select {
         if let Some(limit) = self.limit {
             let _ = write!(out, ".limit({limit})");
         }
-        out
+        Ok(out)
     }
 
     fn sort(&self, name: impl Fn(&str) -> String) -> J {
@@ -867,8 +1046,26 @@ impl Select {
         )
     }
 
-    fn pipeline(&self) -> Vec<J> {
+    fn pipeline(&self) -> Result<Vec<J>, String> {
         let mut stages = Vec::new();
+        for join in &self.joins {
+            stages.push(J::one(
+                "$lookup",
+                J::obj([
+                    ("from".to_owned(), J::Str(join.collection.clone())),
+                    ("localField".to_owned(), J::Str(join.local.clone())),
+                    ("foreignField".to_owned(), J::Str(join.foreign.clone())),
+                    ("as".to_owned(), J::Str(join.alias.clone())),
+                ]),
+            ));
+            stages.push(J::one(
+                "$unwind",
+                J::obj([
+                    ("path".to_owned(), J::Str(format!("${}", join.alias))),
+                    ("preserveNullAndEmptyArrays".to_owned(), J::Bool(join.left)),
+                ]),
+            ));
+        }
         if let Some(filter) = &self.filter {
             stages.push(J::one("$match", filter.clone()));
         }
@@ -888,10 +1085,14 @@ impl Select {
                 stages.push(J::one("$sort", self.sort(source)));
             }
             self.page(&mut stages);
+            if self.items.is_empty() {
+                // SELECT * over joins: each document with the joined ones under their aliases.
+                return Ok(stages);
+            }
             let mut project = vec![("_id".to_owned(), J::Num("0".into()))];
-            for item in &self.items {
+            for (index, item) in self.items.iter().enumerate() {
                 if let Item::Field { path, alias } = item {
-                    let name = alias.clone().unwrap_or_else(|| path.clone());
+                    let name = alias.clone().unwrap_or_else(|| self.output_name(index, path));
                     if name == "_id" {
                         project.retain(|(key, _)| key != "_id");
                     }
@@ -899,7 +1100,7 @@ impl Select {
                 }
             }
             stages.push(J::one("$project", J::Obj(project)));
-            return stages;
+            return Ok(stages);
         }
         // DISTINCT a, b is GROUP BY a, b.
         let keys: Vec<String> = if self.group.is_empty() && self.distinct {
@@ -932,7 +1133,7 @@ impl Select {
         for (index, item) in items.iter().enumerate() {
             match item {
                 Item::Field { path, alias } => {
-                    let name = alias.clone().unwrap_or_else(|| path.clone());
+                    let name = alias.clone().unwrap_or_else(|| self.output_name(index, path));
                     // A field that is not a key: its first value in the group.
                     let value = key_ref(path).unwrap_or_else(|| {
                         let slot = format!("f{index}");
@@ -969,13 +1170,73 @@ impl Select {
                 }
             }
         }
+        // HAVING reads the groups: an output name, a group key or an aggregate (one not selected
+        // is computed in the group too, and not shown).
+        let having = self.having.as_ref().map(|having| {
+            rename_fields(having, &mut |name| {
+                if let Some(rest) = name.strip_prefix("@agg:") {
+                    let found = items.iter().enumerate().find_map(|(index, item)| match item {
+                        Item::Aggregate { function, field, .. } if aggregate_reference(*function, field.as_deref()) == name => Some(format!("a{index}")),
+                        _ => None,
+                    });
+                    return Ok(found.unwrap_or_else(|| {
+                        let slot = format!("h{}", group.len());
+                        let (function, field) = rest.split_once(':').unwrap_or((rest, "*"));
+                        let operand = J::Str(format!("${field}"));
+                        let accumulator = match function {
+                            "Sum" => J::one("$sum", operand),
+                            "Avg" => J::one("$avg", operand),
+                            "Min" => J::one("$min", operand),
+                            "Max" => J::one("$max", operand),
+                            _ if field == "*" => J::one("$sum", J::Num("1".into())),
+                            _ => J::one("$sum", J::one("$cond", J::Arr(vec![J::one("$eq", J::Arr(vec![J::one("$ifNull", J::Arr(vec![operand, J::Null])), J::Null])), J::Num("0".into()), J::Num("1".into())]))),
+                        };
+                        group.push((slot.clone(), accumulator));
+                        slot
+                    }));
+                }
+                // An output name (an alias, a selected field or aggregate) or a group key.
+                if let Some((_, J::Str(value))) = project.iter().find(|(output, _)| output == name) {
+                    return Ok(value.trim_start_matches('$').to_owned());
+                }
+                if let Some(key) = key_ref(name) {
+                    return Ok(key.trim_start_matches('$').to_owned());
+                }
+                Err(format!("HAVING names {name}, which is neither selected, grouped nor aggregated"))
+            })
+        });
+        let having = having.transpose()?;
         stages.push(J::one("$group", J::Obj(group)));
+        if let Some(having) = having {
+            stages.push(J::one("$match", having));
+        }
         stages.push(J::one("$project", J::Obj(project)));
         if !self.order.is_empty() {
             stages.push(J::one("$sort", self.sort(|name| name.to_owned())));
         }
         self.page(&mut stages);
-        stages
+        Ok(stages)
+    }
+
+    /// The column of a selected field: as written for the collection's own fields; a joined one
+    /// is its last name (`c.name`: `name`), or `c_name` when another column has that name.
+    fn output_name(&self, index: usize, path: &str) -> String {
+        let Some((alias, rest)) = path.split_once('.').filter(|(head, _)| self.joins.iter().any(|join| join.alias == *head)) else {
+            return path.to_owned();
+        };
+        let last = rest.rsplit('.').next().unwrap_or(rest);
+        let taken = self.items.iter().enumerate().any(|(other, item)| {
+            other != index
+                && match item {
+                    Item::Field { path, alias } => alias.as_deref().unwrap_or(path.rsplit('.').next().unwrap_or(path)) == last,
+                    Item::Aggregate { alias, .. } => alias.as_deref() == Some(last),
+                }
+        });
+        if taken {
+            format!("{alias}_{}", rest.replace('.', "_"))
+        } else {
+            last.to_owned()
+        }
     }
 
     fn page(&self, stages: &mut Vec<J>) {
@@ -1082,6 +1343,67 @@ mod tests {
     }
 
     #[test]
+    fn joins_are_lookups_under_their_aliases() {
+        assert_eq!(
+            one("select o.ref, c.name, o.total from orders o join customers c on o.customerId = c._id where c.country = 'VN' order by o.total desc limit 5"),
+            concat!(
+                r#"db["orders"].aggregate([{"$lookup": {"from": "customers", "localField": "customerId", "foreignField": "_id", "as": "c"}}, "#,
+                r#"{"$unwind": {"path": "$c", "preserveNullAndEmptyArrays": false}}, {"$match": {"c.country": "VN"}}, "#,
+                r#"{"$sort": {"total": -1}}, {"$limit": 5}, {"$project": {"_id": 0, "ref": "$ref", "name": "$c.name", "total": "$total"}}])"#
+            )
+        );
+        // LEFT keeps the documents without a match; two joins, the second on the first; SELECT *.
+        assert_eq!(
+            one("SELECT * FROM \"shop\".\"orders\" LEFT OUTER JOIN customers AS c ON c._id = orders.customerId INNER JOIN regions r ON r.code = c.region"),
+            concat!(
+                r#"db["orders"].aggregate([{"$lookup": {"from": "customers", "localField": "customerId", "foreignField": "_id", "as": "c"}}, "#,
+                r#"{"$unwind": {"path": "$c", "preserveNullAndEmptyArrays": true}}, "#,
+                r#"{"$lookup": {"from": "regions", "localField": "c.region", "foreignField": "code", "as": "r"}}, "#,
+                r#"{"$unwind": {"path": "$r", "preserveNullAndEmptyArrays": false}}])"#
+            )
+        );
+        // The same last name twice: the joined one is prefixed with its alias.
+        assert_eq!(
+            one("select o.name, c.name from orders o join customers c on o.cid = c.id"),
+            concat!(
+                r#"db["orders"].aggregate([{"$lookup": {"from": "customers", "localField": "cid", "foreignField": "id", "as": "c"}}, "#,
+                r#"{"$unwind": {"path": "$c", "preserveNullAndEmptyArrays": false}}, {"$project": {"_id": 0, "name": "$name", "c_name": "$c.name"}}])"#
+            )
+        );
+    }
+
+    #[test]
+    fn having_filters_the_groups() {
+        assert_eq!(
+            one("select status, count(*) as n from orders group by status having n > 1 and status <> 'done'"),
+            concat!(
+                r#"db["orders"].aggregate([{"$group": {"_id": "$status", "a1": {"$sum": 1}}}, {"$match": {"a1": {"$gt": 1}, "_id": {"$ne": "done"}}}, "#,
+                r#"{"$project": {"_id": 0, "status": "$_id", "n": "$a1"}}])"#
+            )
+        );
+        // An aggregate written in HAVING: the selected one, or one computed for it alone.
+        assert_eq!(
+            one("select status, count(*) from orders group by status having count(*) >= 2 and sum(total) > 100"),
+            concat!(
+                r#"db["orders"].aggregate([{"$group": {"_id": "$status", "a1": {"$sum": 1}, "h2": {"$sum": "$total"}}}, "#,
+                r#"{"$match": {"a1": {"$gte": 2}, "h2": {"$gt": 100}}}, {"$project": {"_id": 0, "status": "$_id", "count": "$a1"}}])"#
+            )
+        );
+    }
+
+    #[test]
+    fn what_joins_and_having_cannot_do_is_said() {
+        let error = |sql: &str| rewrite_script(sql).unwrap_err();
+        assert!(error("select * from a right join b on a.x = b.y").contains("RIGHT JOIN is not supported"));
+        assert!(error("select * from a join b on a.x = b.y and a.z = b.w").contains("one condition"));
+        assert!(error("select * from a join b on a.x > b.y").contains("compares two fields with ="));
+        assert!(error("select * from a join b on a.x = a.y").contains("ON must compare a field of b"));
+        assert!(error("select * from \"d1\".\"a\" join \"d2\".\"b\" on a.x = b.y").contains("same database"));
+        assert!(error("select * from a having x > 1").contains("HAVING needs GROUP BY"));
+        assert!(error("select s, count(*) from a group by s having other > 1").contains("HAVING names other"));
+    }
+
+    #[test]
     fn a_mixed_script_keeps_its_line_numbers_and_shell_statements() {
         let script = "//note\n--where a = 'x'\nselect * from \"d\".\"c\"\n   where a = 'x';\n\n----------\ndb.c.find({\n  b: 1\n});\n";
         let rewritten = rewrite_script(script).unwrap();
@@ -1107,7 +1429,7 @@ mod tests {
             rewrite_script(script).unwrap_err(),
             "SQL: expected a value, found b (quote strings: 'b') (line 4, column 13)"
         );
-        assert!(rewrite_script("select a from c join d").unwrap_err().contains("unexpected join"));
+        assert!(rewrite_script("select a from c join d").unwrap_err().contains("expected ON"));
         assert!(rewrite_script("select upper(a) from c").unwrap_err().contains("upper is not supported"));
         assert!(rewrite_script("select * from c where a = 'x").unwrap_err().contains("unterminated quote"));
     }
