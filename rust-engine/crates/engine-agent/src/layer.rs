@@ -49,6 +49,8 @@ const ROLLBACK_TIMEOUT: Duration = Duration::from_secs(10);
 /// read them all, so a transaction that would hold more takes no further change.
 const MAX_TRANSACTION_WRITES: usize = 50;
 const MAX_TRANSACTION_WRITE_BYTES: usize = 8000;
+/// Statements one `execute_batch` takes.
+const MAX_BATCH_STATEMENTS: usize = 50;
 /// Ended transactions whose ids are remembered, to say why one is gone.
 const REMEMBERED_ENDED: usize = 32;
 
@@ -354,6 +356,8 @@ struct MongoCall<'a> {
     collection: &'a str,
     /// The command the call sends first (for the audit line and the size check).
     command: &'a Value,
+    /// A write that is dangerous (an empty filter it was allowed): why.
+    dangerous: Option<&'a str>,
 }
 
 /// What a call learned that the audit line and the redaction need.
@@ -776,6 +780,10 @@ impl ToolLayer {
                 let request: ExecuteQueryRequest = self.parse(tool, arguments)?;
                 to_value(self.execute_query(request, cancel, trace)?)
             }
+            ToolName::ExecuteBatch => {
+                let request: ExecuteBatchRequest = self.parse(tool, arguments)?;
+                to_value(self.execute_batch(request, cancel, trace)?)
+            }
             ToolName::ExplainQuery => {
                 let request: ExplainQueryRequest = self.parse(tool, arguments)?;
                 to_value(self.explain_query(request, cancel, trace)?)
@@ -795,6 +803,21 @@ impl ToolLayer {
             ToolName::MongoCount => {
                 let request: MongoCountRequest = self.parse(tool, arguments)?;
                 to_value(self.mongo_count(request, cancel, trace)?)
+            }
+            ToolName::MongoInsert => {
+                Self::refuse_mongo_transaction(&arguments)?;
+                let request: MongoInsertRequest = self.parse(tool, arguments)?;
+                to_value(self.mongo_insert(request, cancel, trace)?)
+            }
+            ToolName::MongoUpdate => {
+                Self::refuse_mongo_transaction(&arguments)?;
+                let request: MongoUpdateRequest = self.parse(tool, arguments)?;
+                to_value(self.mongo_update(request, cancel, trace)?)
+            }
+            ToolName::MongoDelete => {
+                Self::refuse_mongo_transaction(&arguments)?;
+                let request: MongoDeleteRequest = self.parse(tool, arguments)?;
+                to_value(self.mongo_delete(request, cancel, trace)?)
             }
             ToolName::ListRoutines => {
                 let request: ListRoutinesRequest = self.parse(tool, arguments)?;
@@ -1226,7 +1249,7 @@ impl ToolLayer {
                 tool.as_str()
             ))),
             Language::Mongo => Err(AgentError::Unsupported(format!(
-                "`{}` is for SQL databases; this is MongoDB, use mongo_find, mongo_aggregate or mongo_count to read documents (list_tables lists the collections)",
+                "`{}` is for SQL databases; this is MongoDB, use mongo_find, mongo_aggregate or mongo_count to read documents and mongo_insert, mongo_update or mongo_delete to change them (list_tables lists the collections)",
                 tool.as_str()
             ))),
             Language::Other => Err(AgentError::Unsupported(format!(
@@ -1569,6 +1592,406 @@ impl ToolLayer {
         )
     }
 
+    /// `execute_batch`: the statements of a script, in order, on one session. Everything that can
+    /// refuse the script as a whole (a statement that is not allowed, one that cannot be reviewed,
+    /// a transaction that cannot be had) does so before anything runs; the changes in it are then
+    /// put to the user ONCE, as one list.
+    fn execute_batch(
+        &self,
+        request: ExecuteBatchRequest,
+        cancel: &CancelToken,
+        trace: &mut Trace,
+    ) -> Result<ExecuteBatchResult, AgentError> {
+        let started = Instant::now();
+        let (info, access) = self.authorize(ToolName::ExecuteBatch, &request.connection_id)?;
+        Self::check_database(request.database.as_deref())?;
+        let continue_on_error = request.continue_on_error.unwrap_or(false);
+        let own_transaction = request.use_transaction.unwrap_or(false);
+        let in_transaction = own_transaction || request.transaction_id.is_some();
+        if own_transaction && request.transaction_id.is_some() {
+            return Err(AgentError::invalid(
+                "`use_transaction` and `transaction_id` cannot be combined: the script either runs in a transaction of its own or in the open one",
+            ));
+        }
+        if continue_on_error && in_transaction {
+            return Err(AgentError::invalid(
+                "`continue_on_error` cannot be used in a transaction: after an error it only accepts a rollback",
+            ));
+        }
+        if in_transaction && !self.transactions_enabled {
+            return Err(AgentError::invalid(
+                "transactions are not available in this front end",
+            ));
+        }
+        // A script of an open transaction runs on the transaction's own session.
+        let existing = match &request.transaction_id {
+            Some(id) => Some(self.use_transaction(id, &info)?),
+            None => None,
+        };
+        let slot = match &existing {
+            Some(used) => Arc::clone(&used.tx.slot),
+            None => self.open_slot(&info, trace)?,
+        };
+        if existing.is_some() {
+            trace.secrets.clone_from(&slot.secrets);
+        }
+        Self::require_sql(&slot, ToolName::ExecuteBatch)?;
+        if in_transaction {
+            Self::check_transaction_database(&slot, request.database.as_deref())?;
+        }
+        self.check_length(&request.script)?;
+        trace.statement = Some(request.script.clone());
+        if let Some(used) = &existing {
+            let state = lock(&used.tx.state);
+            if state.aborted {
+                return Err(Self::aborted(&used.tx.id));
+            }
+            if state.committing {
+                return Err(Self::committing(&used.tx.id));
+            }
+        }
+        let lex = slot
+            .info
+            .lex
+            .ok_or_else(|| AgentError::Internal("a SQL session without lexer settings".into()))?;
+        // The statements, split the way the drivers split them; each is then classified on its own
+        // and must be exactly one statement.
+        let parts: Vec<&str> = engine_driver_kit::sql::classify(&request.script, &lex)
+            .statements
+            .iter()
+            .map(|statement| request.script[statement.range.clone()].trim())
+            .filter(|text| !text.is_empty())
+            .collect();
+        if parts.is_empty() {
+            return Err(AgentError::invalid("the script is empty"));
+        }
+        if parts.len() > MAX_BATCH_STATEMENTS {
+            return Err(AgentError::Limit(format!(
+                "the script has {} statements; the most one call takes is {MAX_BATCH_STATEMENTS}. Split it into several calls",
+                parts.len()
+            )));
+        }
+        let mut plan = Vec::with_capacity(parts.len());
+        for (at, text) in parts.iter().enumerate() {
+            let number = at + 1;
+            let classified = classify_sql(text, slot.info.kind, &lex);
+            // `COPY` reads or writes server files and programs, which a rollback does not undo.
+            if in_transaction && classified.verb == "COPY" {
+                return Err(Self::in_script(
+                    AgentError::Unsupported(
+                        "COPY is not available inside a transaction: what it does to files and programs on the server is not undone by a rollback"
+                            .into(),
+                    ),
+                    number,
+                ));
+            }
+            // Flagged as dangerous so that a dangerous statement comes back as `Approval` with its
+            // reason: a script never runs one, whatever the front end allows.
+            let need = check_statement(access, &classified, true, "SQL statement")
+                .map_err(|error| Self::in_script(error, number))?;
+            let is_write = match need {
+                Need::Nothing => false,
+                Need::Approval { dangerous: None } => true,
+                Need::Approval {
+                    dangerous: Some(reason),
+                } => {
+                    return Err(AgentError::DangerousRefused(format!(
+                        "statement {number} of the script is dangerous: {reason}. execute_batch never runs a dangerous statement, so nothing in the script was run. Do not retry the script or reword it; if the user asked for that statement, run it alone with execute_query and dangerous=true, otherwise tell the user"
+                    )))
+                }
+            };
+            plan.push((*text, classified, is_write));
+        }
+        let writes: Vec<&str> = plan
+            .iter()
+            .filter(|(_, _, is_write)| *is_write)
+            .map(|(text, _, _)| *text)
+            .collect();
+        if own_transaction {
+            if writes.is_empty() {
+                return Err(AgentError::invalid(
+                    "`use_transaction` is for scripts that change data; this one only reads, so run it without it",
+                ));
+            }
+            if matches!(info.kind, ConnectionKind::MySql | ConnectionKind::MariaDb) {
+                return Err(AgentError::Unsupported(
+                    "a script cannot be made one transaction on MySQL or MariaDB: DDL statements commit implicitly there. Run it without `use_transaction`, or split it"
+                        .into(),
+                ));
+            }
+            if let Some(reason) = Self::transactions_unsupported(&info) {
+                return Err(AgentError::Unsupported(reason.into()));
+            }
+            if let Some(reason) = self.provider.transactions_unavailable(&info) {
+                return Err(AgentError::Unsupported(reason));
+            }
+        }
+        // The text the user reads: every statement that changes data, in order.
+        let listing = writes
+            .iter()
+            .map(|text| {
+                if text.ends_with(';') {
+                    (*text).to_owned()
+                } else {
+                    format!("{text};")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let resolved_database = if in_transaction {
+            None
+        } else {
+            self.approval_database(&slot, request.database.as_deref())
+        };
+        let approval = (!writes.is_empty()).then(|| WriteApproval {
+            connection_id: &info.id,
+            connection_name: &info.name,
+            connection_type: &info.connection_type.name,
+            production: info.connection_type.production,
+            language: Language::Sql,
+            database: resolved_database.as_deref(),
+            collection: None,
+            statement: &listing,
+            script: Some(writes.len()),
+            dangerous: None,
+            transaction: existing.as_ref().map(|used| TransactionApproval {
+                id: &used.tx.id,
+                commit: None,
+            }),
+        });
+        if let Some(approval) = &approval {
+            // No point asking the user for a write that could not be audited.
+            if self.audit.as_ref().is_some_and(|audit| !audit.is_healthy()) {
+                return Err(AgentError::AuditUnavailable);
+            }
+            if let Some(used) = &existing {
+                // The commit question has to show every write: they must all fit, and the approver
+                // must still be able to put the whole list to the user.
+                let (held, held_bytes, mut all) = {
+                    let state = lock(&used.tx.state);
+                    (state.writes.len(), state.write_bytes, state.writes.clone())
+                };
+                let added: usize = writes.iter().map(|text| text.len()).sum();
+                let reviewable = if held + writes.len() > MAX_TRANSACTION_WRITES
+                    || held_bytes + added > MAX_TRANSACTION_WRITE_BYTES
+                {
+                    Err(String::new())
+                } else {
+                    all.extend(writes.iter().map(|text| (*text).to_owned()));
+                    self.approver.commit_reviewable(&all)
+                };
+                if let Err(reason) = reviewable {
+                    return Err(AgentError::Limit(format!(
+                        "transaction `{}` already holds {held} change(s) ({held_bytes} bytes); with this script the commit could not be shown to the user for approval{}. Commit it with commit_transaction or roll it back, then continue in a new transaction",
+                        used.tx.id,
+                        if reason.is_empty() { String::new() } else { format!(" ({reason})") },
+                    )));
+                }
+            }
+            let approved = match &existing {
+                Some(used) => format!("approved (in transaction {}, not committed)", used.tx.id),
+                None if own_transaction => "approved (one transaction, committed if all succeed)".into(),
+                None => "approved".into(),
+            };
+            self.ask_approval(
+                ToolName::ExecuteBatch,
+                &info,
+                approval,
+                "script",
+                &approved,
+                cancel,
+                trace,
+            )?;
+        }
+        // The transaction of the script itself: begun only now that the user said yes.
+        let own = if own_transaction {
+            let began = self.begin_transaction(&info.id, cancel, trace)?;
+            trace.statement = Some(request.script.clone());
+            let used = self.use_transaction_by_id(&began.transaction_id)?;
+            trace.secrets.clone_from(&used.tx.slot.secrets);
+            Some(used)
+        } else {
+            None
+        };
+        let transaction = existing.as_ref().or(own.as_ref());
+        let run_slot: &OpenSession = match transaction {
+            Some(used) => &used.tx.slot,
+            None => &slot,
+        };
+        let mut remaining_bytes = self.limits.max_result_bytes;
+        let mut statements: Vec<BatchStatement> = Vec::with_capacity(plan.len());
+        let mut failed = 0;
+        let mut changes = 0;
+        let mut affected = 0u64;
+        let mut stop: Option<AgentError> = None;
+        for (at, (text, classified, is_write)) in plan.iter().enumerate() {
+            let outcome = match &approval {
+                // The switch or the access may have changed since the answer, or while an earlier
+                // statement ran: the same check as right after the answer, before each change.
+                Some(approval) if *is_write => self
+                    .recheck_after_approval(ToolName::ExecuteBatch, &info, approval, cancel, trace)
+                    .inspect_err(|error| stop = Some(error.clone()))
+                    .and_then(|()| {
+                        self.run_in_script(
+                            &info, run_slot, text, classified, true, &request, remaining_bytes, transaction, cancel, trace,
+                        )
+                    }),
+                _ => self.run_in_script(
+                    &info, run_slot, text, classified, *is_write, &request, remaining_bytes, transaction, cancel, trace,
+                ),
+            };
+            let preview = clean(text, 200);
+            match outcome {
+                Ok(result) => {
+                    remaining_bytes = remaining_bytes.saturating_sub(
+                        result.rows.iter().flatten().map(String::len).sum::<usize>(),
+                    );
+                    if *is_write {
+                        changes += 1;
+                        affected += result.affected_rows.unwrap_or(0);
+                    }
+                    statements.push(BatchStatement {
+                        index: at + 1,
+                        statement: preview,
+                        ok: true,
+                        result: Some(result),
+                        error: None,
+                    });
+                }
+                Err(AgentError::Cancelled) => {
+                    self.end_script_transaction(own.as_ref(), trace);
+                    return Err(AgentError::Cancelled);
+                }
+                Err(error) => {
+                    failed += 1;
+                    statements.push(BatchStatement {
+                        index: at + 1,
+                        statement: preview,
+                        ok: false,
+                        result: None,
+                        error: Some(BatchError {
+                            code: error.code().to_owned(),
+                            message: clean(&redact(&error.to_string(), &trace.secrets), 2000),
+                        }),
+                    });
+                    // A write that is no longer allowed ends the script whatever `continue_on_error`
+                    // says: nothing after it may run.
+                    if !continue_on_error || stop.is_some() {
+                        break;
+                    }
+                }
+            }
+        }
+        let skipped = plan.len() - statements.len();
+        let mut outcome_transaction = None;
+        if let Some(used) = own {
+            let id = used.tx.id.clone();
+            if failed > 0 {
+                drop(used);
+                self.end_script_transaction_by_id(&id, trace);
+                outcome_transaction = Some(BatchTransaction::RolledBack);
+                changes = 0;
+            } else {
+                drop(used);
+                // Every change was approved with the script: there is no commit question.
+                self.commit_transaction_asking(&id, false, cancel, trace)?;
+                outcome_transaction = Some(BatchTransaction::Committed);
+            }
+        }
+        trace.statement = Some(request.script.clone());
+        let total_rows = if changes > 0 {
+            affected
+        } else {
+            statements
+                .iter()
+                .filter_map(|entry| entry.result.as_ref())
+                .map(|result| result.row_count as u64)
+                .sum()
+        };
+        trace.rows = Some(total_rows);
+        Ok(ExecuteBatchResult {
+            statement_count: plan.len(),
+            statements,
+            skipped,
+            ok: failed == 0 && skipped == 0,
+            transaction: outcome_transaction,
+            changes,
+            affected_rows: (changes > 0).then_some(affected),
+            elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        })
+    }
+
+    /// One statement of a script, with what is left of the script's result size.
+    #[allow(clippy::too_many_arguments)]
+    fn run_in_script(
+        &self,
+        info: &ConnectionInfo,
+        slot: &OpenSession,
+        text: &str,
+        classified: &Classified,
+        is_write: bool,
+        request: &ExecuteBatchRequest,
+        remaining_bytes: usize,
+        transaction: Option<&TxUse>,
+        cancel: &CancelToken,
+        trace: &mut Trace,
+    ) -> Result<QueryResult, AgentError> {
+        // The size limit of the whole script is shared by its statements; a statement always
+        // gets at least its first row.
+        let limits = Limits {
+            max_result_bytes: remaining_bytes,
+            ..self.limits.clone()
+        };
+        self.run_statement(
+            ToolName::ExecuteBatch,
+            info,
+            slot,
+            text,
+            classified,
+            Language::Sql,
+            request.database.as_deref(),
+            request.row_limit,
+            &limits,
+            is_write,
+            false,
+            transaction,
+            cancel,
+            trace,
+        )
+    }
+
+    /// Rolls back the transaction of a script that was cancelled.
+    fn end_script_transaction(&self, own: Option<&TxUse>, trace: &mut Trace) {
+        if let Some(used) = own {
+            let id = used.tx.id.clone();
+            self.end_script_transaction_by_id(&id, trace);
+        }
+    }
+
+    fn end_script_transaction_by_id(&self, id: &str, trace: &mut Trace) {
+        // `rollback_transaction` writes its own statement and row count into the trace.
+        let (statement, rows) = (trace.statement.take(), trace.rows.take());
+        let _ = self.rollback_transaction(id, trace);
+        trace.statement = statement;
+        trace.rows = rows;
+    }
+
+    /// `error` for the statement `number` (from 1) of a script: the message says which one.
+    fn in_script(error: AgentError, number: usize) -> AgentError {
+        let at = |message: String| format!("statement {number} of the script: {message}");
+        match error {
+            AgentError::AccessDenied(message) => AgentError::AccessDenied(at(message)),
+            AgentError::WriteRefused(message) => AgentError::WriteRefused(at(message)),
+            AgentError::DangerousRefused(message) => AgentError::DangerousRefused(at(message)),
+            AgentError::Unsupported(message) => AgentError::Unsupported(at(message)),
+            AgentError::InvalidArguments(message) => AgentError::InvalidArguments(at(message)),
+            AgentError::MultiStatement => {
+                AgentError::invalid(at("it is not exactly one statement".into()))
+            }
+            other => other,
+        }
+    }
+
     fn explain_query(
         &self,
         request: ExplainQueryRequest,
@@ -1688,6 +2111,7 @@ impl ToolLayer {
             database: &request.database,
             collection: &request.collection,
             command: &command,
+            dangerous: None,
         };
         let result = self.run_mongo(&call, cancel, trace, |target| {
             mongo::documents(target, &command, rows)
@@ -1711,6 +2135,7 @@ impl ToolLayer {
             database: &request.database,
             collection: &request.collection,
             command: &command,
+            dangerous: None,
         };
         let result = self.run_mongo(&call, cancel, trace, |target| {
             mongo::documents(target, &command, rows)
@@ -1732,15 +2157,110 @@ impl ToolLayer {
             database: &request.database,
             collection: &request.collection,
             command: &command,
+            dangerous: None,
         };
         let result = self.run_mongo(&call, cancel, trace, |target| mongo::count(target, &command))?;
         trace.rows = Some(result.count);
         Ok(result)
     }
 
+    fn mongo_insert(
+        &self,
+        request: MongoInsertRequest,
+        cancel: &CancelToken,
+        trace: &mut Trace,
+    ) -> Result<MongoWriteResult, AgentError> {
+        let built = mongo::insert_command(&request)?;
+        self.mongo_write(
+            ToolName::MongoInsert,
+            &request.connection_id,
+            &request.database,
+            &request.collection,
+            built,
+            cancel,
+            trace,
+        )
+    }
+
+    fn mongo_update(
+        &self,
+        request: MongoUpdateRequest,
+        cancel: &CancelToken,
+        trace: &mut Trace,
+    ) -> Result<MongoWriteResult, AgentError> {
+        let built = mongo::update_command(&request)?;
+        self.mongo_write(
+            ToolName::MongoUpdate,
+            &request.connection_id,
+            &request.database,
+            &request.collection,
+            built,
+            cancel,
+            trace,
+        )
+    }
+
+    fn mongo_delete(
+        &self,
+        request: MongoDeleteRequest,
+        cancel: &CancelToken,
+        trace: &mut Trace,
+    ) -> Result<MongoWriteResult, AgentError> {
+        let built = mongo::delete_command(&request)?;
+        self.mongo_write(
+            ToolName::MongoDelete,
+            &request.connection_id,
+            &request.database,
+            &request.collection,
+            built,
+            cancel,
+            trace,
+        )
+    }
+
+    /// A transaction lives on one PostgreSQL or SQLite session; a MongoDB write is applied at once.
+    fn refuse_mongo_transaction(arguments: &Value) -> Result<(), AgentError> {
+        if arguments.get("transaction_id").is_some_and(|id| !id.is_null()) {
+            return Err(AgentError::Unsupported(
+                "`transaction_id` is not available for MongoDB: transactions are for PostgreSQL and SQLite connections, and a MongoDB write is applied as soon as the user approves it"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn mongo_write(
+        &self,
+        tool: ToolName,
+        connection_id: &str,
+        database: &str,
+        collection: &str,
+        built: mongo::WriteCommand,
+        cancel: &CancelToken,
+        trace: &mut Trace,
+    ) -> Result<MongoWriteResult, AgentError> {
+        let call = MongoCall {
+            tool,
+            connection_id,
+            database,
+            collection,
+            command: &built.command,
+            dangerous: built.dangerous.as_deref(),
+        };
+        let result = self.run_mongo(&call, cancel, trace, |target| {
+            mongo::write(target, &built.command)
+        })?;
+        trace.rows = Some(result.n_modified.unwrap_or(result.n));
+        Ok(result)
+    }
+
     /// Access, session, busy flag, cancel and statement timeout around one MongoDB tool. A read
-    /// only, so there is no policy and no approval: the access the tool needs (`read`) is checked
-    /// by [`authorize`](Self::authorize), and the driver refuses every writing command.
+    /// has no policy and no approval: the access the tool needs (`read`) is checked by
+    /// [`authorize`](Self::authorize), and the driver refuses every writing command. A write
+    /// (`call.tool.is_mongo_write()`) needs `read_write`, is put to the user as the exact command
+    /// before anything is sent, is checked again after the answer, and leaves its audit line before
+    /// it runs.
     fn run_mongo<T>(
         &self,
         call: &MongoCall<'_>,
@@ -1756,11 +2276,18 @@ impl ToolLayer {
             ));
         }
         Self::check_database(Some(call.database))?;
+        let write = call.tool.is_mongo_write();
+        if write {
+            Self::check_collection(call.collection)?;
+        }
         let slot = self.open_slot(&info, trace)?;
         Self::require_mongo(&slot, call.tool)?;
         let text = call.command.to_string();
         self.check_length(&text)?;
         trace.statement = Some(format!("{} {text}", call.database));
+        if write {
+            self.approve_mongo_write(call, &info, cancel, trace)?;
+        }
         let Some(_busy) = BusyGuard::acquire(&slot.busy) else {
             return Err(AgentError::Limit(
                 "another statement is still running on this connection; wait for it or cancel it"
@@ -1768,6 +2295,19 @@ impl ToolLayer {
             ));
         };
         let _active = ActiveStatement::begin(&slot, cancel)?;
+        // A write is audited BEFORE it is sent: if the record cannot be written, it is not sent.
+        if write {
+            if let Some(audit) = &self.audit {
+                let mut entry = AuditEntry::now(&self.front_end, call.tool.as_str());
+                entry.connection_id = Some(info.id.chars().take(128).collect());
+                entry.statement = trace.statement.as_ref().map(|text| slot.masks.redact(text));
+                entry.outcome = "started".into();
+                entry.approval = trace.approval.clone();
+                if audit.record_blocking(entry).is_err() {
+                    return Err(AgentError::AuditUnavailable);
+                }
+            }
+        }
         let timeout = info.statement_timeout(&self.limits);
         let watchdog = Watchdog::arm(cancel, timeout);
         let outcome = run(&mongo::Target {
@@ -1777,6 +2317,7 @@ impl ToolLayer {
             limits: &self.limits,
             timeout,
             cancel,
+            write,
         });
         drop(watchdog);
         outcome.map_err(|error| match error {
@@ -1786,6 +2327,59 @@ impl ToolLayer {
             )),
             error => error,
         })
+    }
+
+    /// The question for a MongoDB write: the database, the collection and the exact command as
+    /// Extended JSON. A yes is checked again against the connection and the front end's own
+    /// conditions; anything else sends nothing.
+    fn approve_mongo_write(
+        &self,
+        call: &MongoCall<'_>,
+        info: &ConnectionInfo,
+        cancel: &CancelToken,
+        trace: &mut Trace,
+    ) -> Result<(), AgentError> {
+        const WHAT: &str = "MongoDB command";
+        if let (Some(reason), false) = (call.dangerous, self.approver.allows_dangerous()) {
+            return Err(AgentError::DangerousRefused(format!(
+                "this {WHAT} is dangerous ({reason}) and {} never runs dangerous statements; do not retry it or reword it, ask the user to run it themselves in the TableX app",
+                self.front_end
+            )));
+        }
+        // No point asking the user for a write that could not be audited.
+        if self.audit.as_ref().is_some_and(|audit| !audit.is_healthy()) {
+            return Err(AgentError::AuditUnavailable);
+        }
+        let shown = serde_json::to_string_pretty(call.command)
+            .map_err(|error| AgentError::Internal(format!("the command cannot be shown: {error}")))?;
+        let database = clean_name(call.database, MAX_NAME_CHARS);
+        let collection = clean_name(call.collection, MAX_NAME_CHARS);
+        let request = WriteApproval {
+            connection_id: &info.id,
+            connection_name: &info.name,
+            connection_type: &info.connection_type.name,
+            production: info.connection_type.production,
+            language: Language::Mongo,
+            database: Some(&database),
+            collection: Some(&collection),
+            statement: &shown,
+            script: None,
+            dangerous: call.dangerous,
+            transaction: None,
+        };
+        self.ask_approval(call.tool, info, &request, WHAT, "approved", cancel, trace)
+    }
+
+    /// A collection name is drawn on the approval card and sent as it is (see
+    /// [`check_database`](Self::check_database)).
+    fn check_collection(collection: &str) -> Result<(), AgentError> {
+        let length = collection.chars().count();
+        if collection.chars().any(is_shapeless) || length > MAX_NAME_CHARS {
+            return Err(AgentError::invalid(
+                "this collection cannot be used by the MongoDB tools: its name has a character with no shape of its own, or is longer than can be shown for approval; tell the user",
+            ));
+        }
+        Ok(())
     }
 
     /// The database a write will run in: the request's, else the connection's
@@ -1945,34 +2539,67 @@ impl ToolLayer {
                     production: info.connection_type.production,
                     language,
                     database: resolved_database.as_deref(),
+                    collection: None,
                     statement: text,
+                    script: None,
                     dangerous: dangerous.as_deref(),
                     transaction: transaction.map(|used| TransactionApproval {
                         id: &used.tx.id,
                         commit: None,
                     }),
                 };
-                let decision = self.approver.approve(&request, cancel);
-                match decision {
-                    // SQL: only a dangerous statement is sent as `confirmed`, so
-                    // the driver's own check still backs up the classifier for
-                    // every other write. Redis asks for it on every write.
-                    ApprovalDecision::Approve => {
-                        trace.approval = Some(match transaction {
-                            Some(used) => {
-                                format!("approved (in transaction {}, not committed)", used.tx.id)
-                            }
-                            None => "approved".into(),
-                        });
-                        // The question may have waited a long time: the connection may have been
-                        // edited, its type made read-only or its access lowered since.
-                        self.recheck_after_approval(tool, info, &request, cancel, trace)?;
-                        dangerous.is_some() || language == Language::Redis
+                // SQL: only a dangerous statement is sent as `confirmed`, so the driver's own check
+                // still backs up the classifier for every other write. Redis asks for it on every
+                // write.
+                let approved = match transaction {
+                    Some(used) => {
+                        format!("approved (in transaction {}, not committed)", used.tx.id)
                     }
-                    declined => return Err(Self::declined(declined, what, cancel, trace)),
-                }
+                    None => "approved".into(),
+                };
+                self.ask_approval(tool, info, &request, what, &approved, cancel, trace)?;
+                dangerous.is_some() || language == Language::Redis
             }
         };
+        self.run_statement(
+            tool,
+            info,
+            slot,
+            text,
+            classified,
+            language,
+            database,
+            row_limit,
+            &self.limits,
+            is_write,
+            confirmed,
+            transaction,
+            cancel,
+            trace,
+        )
+    }
+
+    /// Runs one statement the policy and the approval have already let through: the checks of its
+    /// transaction, the audit line of a write, then the session. `limits` are the result limits
+    /// of this statement.
+    #[allow(clippy::too_many_arguments)]
+    fn run_statement(
+        &self,
+        tool: ToolName,
+        info: &ConnectionInfo,
+        slot: &OpenSession,
+        text: &str,
+        classified: &Classified,
+        language: Language,
+        database: Option<&str>,
+        row_limit: Option<usize>,
+        limits: &Limits,
+        is_write: bool,
+        confirmed: bool,
+        transaction: Option<&TxUse>,
+        cancel: &CancelToken,
+        trace: &mut Trace,
+    ) -> Result<QueryResult, AgentError> {
         if let Some(used) = transaction {
             // Rolled back (its connection closed, an explicit rollback) while the question was open.
             if slot.closing.load(Ordering::SeqCst) {
@@ -2031,7 +2658,7 @@ impl ToolLayer {
             state.writes.push(text.to_owned());
         }
         let read_only = classified.class == StatementClass::Read && !is_write;
-        let timeout = info.statement_timeout(&self.limits);
+        let timeout = info.statement_timeout(limits);
         let watchdog = Watchdog::arm(cancel, timeout);
         let started = Instant::now();
         // A driver that panics inside `run` leaves a statement of unknown fate: the transaction is
@@ -2042,8 +2669,8 @@ impl ToolLayer {
                 language,
                 text,
                 database,
-                limits: &self.limits,
-                row_limit: self.limits.rows_for(row_limit),
+                limits,
+                row_limit: limits.rows_for(row_limit),
                 confirmed,
                 read_only,
             },
@@ -2093,6 +2720,29 @@ impl ToolLayer {
                     None => Err(error),
                 }
             }
+        }
+    }
+
+    /// Puts `request` to the approver. On a yes the audit note is `approved` and the connection
+    /// is checked again (it may have changed while the question was open); anything else is the
+    /// error to give the model.
+    #[allow(clippy::too_many_arguments)]
+    fn ask_approval(
+        &self,
+        tool: ToolName,
+        info: &ConnectionInfo,
+        request: &WriteApproval<'_>,
+        what: &str,
+        approved: &str,
+        cancel: &CancelToken,
+        trace: &mut Trace,
+    ) -> Result<(), AgentError> {
+        match self.approver.approve(request, cancel) {
+            ApprovalDecision::Approve => {
+                trace.approval = Some(approved.to_owned());
+                self.recheck_after_approval(tool, info, request, cancel, trace)
+            }
+            declined => Err(Self::declined(declined, what, cancel, trace)),
         }
     }
 
@@ -2352,7 +3002,9 @@ impl ToolLayer {
             production: info.connection_type.production,
             language: Language::Sql,
             database: None,
+            collection: None,
             statement: TxControl::Begin.sql(),
+            script: None,
             dangerous: None,
             transaction: None,
         };
@@ -2475,6 +3127,18 @@ impl ToolLayer {
         cancel: &CancelToken,
         trace: &mut Trace,
     ) -> Result<CommitTransactionResult, AgentError> {
+        self.commit_transaction_asking(id, true, cancel, trace)
+    }
+
+    /// `ask` false: the user already approved every change of the transaction together with the
+    /// commit (`execute_batch` with `use_transaction`), so there is no commit question.
+    fn commit_transaction_asking(
+        &self,
+        id: &str,
+        ask: bool,
+        cancel: &CancelToken,
+        trace: &mut Trace,
+    ) -> Result<CommitTransactionResult, AgentError> {
         Self::check_not_cancelled(cancel)?;
         let used = self.use_transaction_by_id(id)?;
         let tx = Arc::clone(&used.tx);
@@ -2535,7 +3199,7 @@ impl ToolLayer {
         };
         let changes = writes.len();
         let still_open = "The transaction is still open and nothing is committed: roll it back with rollback_transaction.";
-        if changes > 0 {
+        if changes > 0 && ask {
             // The user approves the COMMIT with the list of what it makes final.
             if self.audit.as_ref().is_some_and(|audit| !audit.is_healthy()) {
                 return Err(AgentError::AuditUnavailable);
@@ -2547,7 +3211,9 @@ impl ToolLayer {
                 production: info.connection_type.production,
                 language: Language::Sql,
                 database: None,
+                collection: None,
                 statement: TxControl::Commit.sql(),
+                script: None,
                 dangerous: None,
                 transaction: Some(TransactionApproval {
                     id: &tx.id,

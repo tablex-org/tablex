@@ -877,14 +877,14 @@ fn result_line(name: &str, content: &str, is_error: bool) -> String {
     }
 }
 
-/// The main arguments of a tool call on one line: the statement or command if it has one, else
+/// The main arguments of a tool call on one line: the statement, command or script if it has one, else
 /// `name: value` pairs of the simple arguments (the connection id is the chat's, not worth a word).
 pub(super) fn summarize_args(input: &Value) -> String {
     let Some(map) = input.as_object() else {
         return String::new();
     };
     let one_line = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let text = ["statement", "command"]
+    let text = ["statement", "command", "script"]
         .iter()
         .find_map(|key| map.get(*key).and_then(Value::as_str))
         .map(one_line)
@@ -1231,6 +1231,15 @@ mod tests {
                 &json!({"connection_id": "c1", "table": "orders", "limit": 5, "x": [1]})
             ),
             "table: orders, limit: 5"
+        );
+        // A script is shown as the text it is; a MongoDB write by its simple arguments.
+        assert_eq!(
+            summarize_args(&json!({"connection_id": "c1", "script": "INSERT INTO a VALUES (1);\nSELECT 1"})),
+            "INSERT INTO a VALUES (1); SELECT 1"
+        );
+        assert_eq!(
+            summarize_args(&json!({"connection_id": "c1", "database": "shop", "collection": "orders", "filter": {"a": 1}, "many": true})),
+            "database: shop, collection: orders, many: true"
         );
         assert_eq!(summarize_args(&json!({"connection_id": "c1"})), "");
         assert_eq!(summarize_args(&json!("nope")), "");

@@ -1074,3 +1074,129 @@ fn a_long_write_interrupted_inside_a_transaction_aborts_it_and_commits_nothing()
     rig.ok("rollback_transaction", json!({"transaction_id": tx}));
     assert_eq!(rig.count("users"), "3");
 }
+
+// ------------------------------------------------------------------ execute_batch
+
+fn batch(rig: &Rig, script: &str, extra: Value) -> ToolOutcome {
+    let mut request = json!({"connection_id": ID, "script": script});
+    request.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+    rig.call("execute_batch", request)
+}
+
+#[test]
+fn a_batch_runs_its_statements_in_order_on_the_real_driver_with_one_approval() {
+    let approver = ScriptedApprover::new(ApprovalDecision::Approve, false);
+    let rig = rig_with(
+        Some(AgentAccess::ReadWrite),
+        Some(approver.clone()),
+        Limits::default(),
+        Vec::new(),
+    );
+    rig.ok("open_session", json!({"connection_id": ID}));
+    let ToolOutcome::Success(result) = batch(
+        &rig,
+        "CREATE TABLE items(id INTEGER PRIMARY KEY, name TEXT);\n\
+         INSERT INTO items(name) VALUES ('a;b'), ('c');\n\
+         UPDATE items SET name = upper(name) WHERE id = 2;\n\
+         SELECT id, name FROM items ORDER BY id;",
+        json!({}),
+    ) else {
+        panic!("the batch failed")
+    };
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["statement_count"], 4);
+    assert_eq!(result["changes"], 3);
+    let statements = result["statements"].as_array().unwrap();
+    assert_eq!(statements[1]["result"]["affected_rows"], 2);
+    assert_eq!(statements[2]["result"]["affected_rows"], 1);
+    assert_eq!(statements[3]["result"]["rows"], json!([["1", "a;b"], ["2", "C"]]));
+    // One question, with the three changes and not the read.
+    let asked = approver.asked.lock().unwrap().clone();
+    assert_eq!(asked.len(), 1);
+    assert!(asked[0].0.contains("CREATE TABLE items") && asked[0].0.contains("UPDATE items"));
+    assert!(!asked[0].0.contains("SELECT id"));
+    assert_eq!(rig.count("items"), "2");
+    // The audit log has the script's end and a line for each change.
+    rig.layer.close_all();
+    rig.audit.flush();
+    let entries = read_entries(&rig.audit_path, 100).unwrap().entries;
+    assert_eq!(
+        entries.iter().filter(|e| e.tool == "execute_batch" && e.outcome == "started").count(),
+        3
+    );
+}
+
+#[test]
+fn a_batch_stops_at_a_failure_and_keeps_what_ran_before_it_unless_it_is_a_transaction() {
+    let rig = writer();
+    rig.ok("open_session", json!({"connection_id": ID}));
+    // 'a@x.io' exists: the second insert breaks the UNIQUE constraint.
+    let ToolOutcome::Success(result) = batch(
+        &rig,
+        "INSERT INTO users(email) VALUES ('new1@x.io'); INSERT INTO users(email) VALUES ('a@x.io'); \
+         INSERT INTO users(email) VALUES ('new3@x.io')",
+        json!({}),
+    ) else {
+        panic!()
+    };
+    assert_eq!(result["ok"], false);
+    assert_eq!(result["skipped"], 1);
+    assert_eq!(result["statements"][1]["ok"], false);
+    assert_eq!(result["changes"], 1);
+    assert_eq!(rig.count("users"), "4", "the first insert stays");
+
+    // continue_on_error: the third goes in.
+    let ToolOutcome::Success(result) = batch(
+        &rig,
+        "INSERT INTO users(email) VALUES ('a@x.io'); INSERT INTO users(email) VALUES ('new4@x.io')",
+        json!({"continue_on_error": true}),
+    ) else {
+        panic!()
+    };
+    assert_eq!(result["skipped"], 0);
+    assert_eq!(result["changes"], 1);
+    assert_eq!(rig.count("users"), "5");
+}
+
+#[test]
+fn a_batch_in_a_transaction_commits_all_or_leaves_nothing() {
+    let rig = writer();
+    rig.ok("open_session", json!({"connection_id": ID}));
+    let ToolOutcome::Success(committed) = batch(
+        &rig,
+        "INSERT INTO users(email) VALUES ('t1@x.io'); INSERT INTO users(email) VALUES ('t2@x.io')",
+        json!({"use_transaction": true}),
+    ) else {
+        panic!()
+    };
+    assert_eq!(committed["transaction"], "committed");
+    assert_eq!(committed["changes"], 2);
+    assert_eq!(rig.count("users"), "5", "visible to the shared session once committed");
+
+    let ToolOutcome::Success(rolled) = batch(
+        &rig,
+        "INSERT INTO users(email) VALUES ('t3@x.io'); INSERT INTO users(email) VALUES ('a@x.io'); \
+         INSERT INTO users(email) VALUES ('t4@x.io')",
+        json!({"use_transaction": true}),
+    ) else {
+        panic!()
+    };
+    assert_eq!(rolled["transaction"], "rolled_back");
+    assert_eq!(rolled["changes"], 0);
+    assert_eq!(rolled["statements"][1]["index"], 2);
+    assert_eq!(rolled["statements"][1]["ok"], false);
+    assert_eq!(rolled["skipped"], 1);
+    assert_eq!(rig.count("users"), "5", "the first insert of the failed script was undone");
+    // The transaction's session is closed: nothing holds the file, a write goes through.
+    let write = rig.query("INSERT INTO users(email) VALUES ('after@x.io')");
+    assert_eq!(write["affected_rows"], 1);
+
+    // Dangerous statements and `COMMIT` in a script are refused before anything runs.
+    for script in [
+        "INSERT INTO users(email) VALUES ('x1@x.io'); DELETE FROM users",
+        "INSERT INTO users(email) VALUES ('x2@x.io'); COMMIT",
+    ] {
+        assert!(batch(&rig, script, json!({"use_transaction": true})).is_error(), "{script}");
+    }
+    assert_eq!(rig.count("users"), "6");
+}

@@ -165,7 +165,7 @@ fn the_tools_do_not_exist_unless_the_front_end_turns_them_on() {
         ..Options::default()
     });
     let names: Vec<&str> = off.layer.tools().iter().map(|tool| tool.name).collect();
-    assert_eq!(names.len(), 15);
+    assert_eq!(names.len(), 19);
     for tool in ["begin_transaction", "commit_transaction", "rollback_transaction"] {
         assert!(!names.contains(&tool), "{tool}");
         assert_eq!(
@@ -180,6 +180,23 @@ fn the_tools_do_not_exist_unless_the_front_end_turns_them_on() {
         .find(|tool| tool.name == "execute_query")
         .unwrap();
     assert!(execute.input_schema["properties"].get("transaction_id").is_none());
+    // `execute_batch` is there, without its transaction parameters.
+    let batch = off
+        .layer
+        .tools()
+        .iter()
+        .find(|tool| tool.name == "execute_batch")
+        .unwrap();
+    for name in ["use_transaction", "transaction_id"] {
+        assert!(batch.input_schema["properties"].get(name).is_none(), "{name}");
+    }
+    off.ok("open_session", json!({"connection_id": PG}));
+    for args in [
+        json!({"connection_id": PG, "script": "SELECT 1", "use_transaction": true}),
+        json!({"connection_id": PG, "script": "SELECT 1", "transaction_id": "tx-1"}),
+    ] {
+        assert_eq!(code(&off.call("execute_batch", args)), "agent.invalid_arguments");
+    }
     // The argument is refused by the schema, never reaches a transaction lookup.
     off.ok("open_session", json!({"connection_id": PG}));
     assert_eq!(
@@ -189,7 +206,7 @@ fn the_tools_do_not_exist_unless_the_front_end_turns_them_on() {
 
     let on = fixture(Options::default());
     let names: Vec<&str> = on.layer.tools().iter().map(|tool| tool.name).collect();
-    assert_eq!(names.len(), 18);
+    assert_eq!(names.len(), 22);
     for tool in ["begin_transaction", "commit_transaction", "rollback_transaction"] {
         assert!(names.contains(&tool), "{tool}");
     }

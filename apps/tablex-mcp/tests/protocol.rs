@@ -15,9 +15,13 @@ async fn tools_list_is_exactly_what_the_layer_says() {
     let specs = harness.fixture.layer.tools();
     assert_eq!(listed.len(), specs.len());
     for name in [
+        "execute_batch",
         "mongo_find",
         "mongo_aggregate",
         "mongo_count",
+        "mongo_insert",
+        "mongo_update",
+        "mongo_delete",
         "list_routines",
         "get_routine_source",
         "begin_transaction",
@@ -31,6 +35,10 @@ async fn tools_list_is_exactly_what_the_layer_says() {
         execute.input_schema["properties"].get("transaction_id").is_some(),
         "execute_query takes a transaction_id"
     );
+    let batch = listed.iter().find(|tool| tool.name == "execute_batch").unwrap();
+    for name in ["use_transaction", "transaction_id", "continue_on_error"] {
+        assert!(batch.input_schema["properties"].get(name).is_some(), "execute_batch takes {name}");
+    }
     for (tool, spec) in listed.iter().zip(specs) {
         assert_eq!(tool.name, spec.name);
         assert_eq!(tool.description.as_deref(), Some(spec.description));
@@ -54,7 +62,9 @@ async fn the_server_identifies_itself_and_says_where_access_is_set() {
     assert_eq!(info.server_info.version, env!("CARGO_PKG_VERSION"));
     let instructions = info.instructions.clone().expect("instructions");
     assert!(instructions.contains("Agent access"), "{instructions}");
-    assert!(instructions.contains("mongo_find"), "{instructions}");
+    for tool in ["mongo_find", "mongo_insert", "mongo_update", "mongo_delete", "execute_batch"] {
+        assert!(instructions.contains(tool), "{tool}: {instructions}");
+    }
     assert!(info.capabilities.tools.is_some());
 }
 

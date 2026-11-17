@@ -19,6 +19,11 @@
 //! Dangerous statements never get here (`allows_dangerous` is false: the layer refuses them); the
 //! approver refuses one itself as well.
 //!
+//! The same question serves every write: an SQL statement or a Redis command, a MongoDB command
+//! (database, collection and the command as indented Extended JSON in the code block) and a script
+//! of SQL statements (`execute_batch`: every statement that changes data, listed in order, accepted
+//! or declined together).
+//!
 //! **Threads.** [`WriteApprover::approve`] blocks the call's own blocking thread. The question is
 //! sent by a task spawned on the server's runtime (so the protocol thread is never blocked and a
 //! current-thread runtime cannot deadlock); the blocking thread waits for that task's answer on a
@@ -258,9 +263,10 @@ impl ElicitingApprover {
         {
             return Self::commit_message(request, id, statements);
         }
-        let noun = match request.language {
-            Language::Redis => "command",
-            Language::Sql | Language::Mongo | Language::Other => "statement",
+        let noun = match (request.language, request.script) {
+            (Language::Redis | Language::Mongo, _) => "command",
+            (_, Some(_)) => "script",
+            (Language::Sql | Language::Other, None) => "statement",
         };
         let label = |text: &str| code_span(&spell_out(text, false).0);
         let connection_type = if request.connection_type.trim().is_empty() {
@@ -280,6 +286,18 @@ impl ElicitingApprover {
         );
         if let Some(database) = request.database {
             message.push_str(&format!("Database: {}\n\n", label(database)));
+        }
+        if let Some(collection) = request.collection {
+            message.push_str(&format!("Collection: {}\n\n", label(collection)));
+        }
+        if let Some(changes) = request.script {
+            message.push_str(&format!(
+                "The script is one question: the {changes} statement{} below that change{} data are \
+                 listed in order, and the statements that only read are not shown. Accepting runs \
+                 the whole script.\n\n",
+                plural(changes),
+                if changes == 1 { "s" } else { "" },
+            ));
         }
         if let Some(transaction) = request.transaction {
             message.push_str(&format!(
@@ -305,6 +323,7 @@ impl ElicitingApprover {
             Some(request.connection_name),
             Some(request.connection_type),
             request.database,
+            request.collection,
         ];
         if names
             .into_iter()
@@ -719,7 +738,9 @@ mod tests {
             production: false,
             language: Language::Sql,
             database,
+            collection: None,
             statement,
+            script: None,
             dangerous: None,
             transaction: None,
         }
@@ -792,6 +813,7 @@ mod tests {
             spelled(request.connection_type)
         });
         names.extend(request.database.map(spelled));
+        names.extend(request.collection.map(spelled));
         // A name with nothing to show reads `(blank)`; "No type" is plain text, not a span.
         let names: Vec<String> = names
             .into_iter()
@@ -1344,5 +1366,89 @@ mod tests {
             }
         );
         assert!(!approver.allows_dangerous());
+    }
+
+    fn mongo_request(statement: &str) -> WriteApproval<'_> {
+        WriteApproval {
+            language: Language::Mongo,
+            database: Some("shop"),
+            collection: Some("orders"),
+            ..request(statement, None)
+        }
+    }
+
+    #[test]
+    fn a_mongodb_write_names_the_database_and_the_collection_and_shows_the_command() {
+        let statement = "{\n  \"delete\": \"orders\",\n  \"deletes\": [\n    {\n      \"q\": {\n        \"note\": \"``` [x](y)\"\n      },\n      \"limit\": 1\n    }\n  ]\n}";
+        let message = ElicitingApprover::message(&mongo_request(statement));
+        assert!(message.starts_with(
+            "An MCP client asks to run a command that changes data. Nothing runs unless you accept.\n\n\
+             Connection: `Warehouse` (`Development`)\n\n\
+             Database: `shop`\n\n\
+             Collection: `orders`\n\n"
+        ), "{message}");
+        assert!(message.contains("The command has 11 lines"), "{message}");
+        assert!(message.contains("between the two lines of 4 backticks"), "{message}");
+        assert_literal(&mongo_request(statement));
+    }
+
+    #[test]
+    fn a_script_is_one_question_that_says_how_many_changes_it_holds() {
+        let listing = "INSERT INTO items (name) VALUES ('a');\n\nUPDATE orders SET status = 'paid' WHERE id = 1;";
+        let mut script = request(listing, Some("main"));
+        script.script = Some(2);
+        let message = ElicitingApprover::message(&script);
+        assert!(message.contains("asks to run a script that changes data"), "{message}");
+        assert!(message.contains("the 2 statements below that change data"), "{message}");
+        assert!(message.contains("```\nINSERT INTO items"), "{message}");
+        assert_literal(&script);
+        script.script = Some(1);
+        assert!(ElicitingApprover::message(&script).contains("the 1 statement below that changes data"));
+    }
+
+    #[test]
+    fn a_mongodb_write_gets_the_same_refusals_as_any_other() {
+        let command = "{\n  \"insert\": \"orders\"\n}";
+        // Switch off (or no settings): refused without asking.
+        let off = ElicitingApprover::new(None);
+        assert_eq!(
+            off.approve(&mongo_request(command), &CancelToken::new()),
+            ApprovalDecision::Refuse {
+                reason: REASON_SWITCH_OFF.to_owned()
+            }
+        );
+        assert!(off.check_writable(&mongo_request(command)).is_err());
+        let (_dir, path) = switch_on_file();
+        let on = ElicitingApprover::new(Some(path));
+        // Production: never from MCP.
+        let mut production = mongo_request(command);
+        production.production = true;
+        assert_eq!(
+            on.approve(&production, &CancelToken::new()),
+            ApprovalDecision::Refuse {
+                reason: REASON_PRODUCTION.to_owned()
+            }
+        );
+        // An empty filter that was allowed is a dangerous change: not through MCP.
+        let mut every_document = mongo_request(command);
+        every_document.dangerous = Some("the filter is empty");
+        assert_eq!(
+            on.approve(&every_document, &CancelToken::new()),
+            ApprovalDecision::Refuse {
+                reason: REASON_DANGEROUS.to_owned()
+            }
+        );
+        // A command too long to be reviewed is refused once there is a client to ask.
+        let long = format!("{{\n{}}}", "  \"a\": 1,\n".repeat(MAX_LINES));
+        assert_eq!(ElicitingApprover::review_problem(&long), Some(REASON_TOO_LONG));
+        // With everything in order the only thing missing is a client to ask.
+        assert_eq!(
+            on.approve(&mongo_request(command), &CancelToken::new()),
+            ApprovalDecision::Refuse {
+                reason: REASON_NO_ELICITATION.to_owned()
+            }
+        );
+        // The switch is read again once the client says yes.
+        assert_eq!(on.still_allowed(&mongo_request(command)), Ok(()));
     }
 }

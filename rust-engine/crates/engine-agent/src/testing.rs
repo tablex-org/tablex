@@ -210,6 +210,9 @@ pub struct FakeSession {
     pub mongo_commands: Mutex<Vec<(String, Value)>>,
     /// The time limit each of `mongo_commands` came with.
     pub mongo_max_times: Mutex<Vec<Duration>>,
+    /// For each of `mongo_commands`: it came through `mongo_write` (not the read-only
+    /// `mongo_command`).
+    pub mongo_writes: Mutex<Vec<bool>>,
 }
 
 impl FakeSession {
@@ -239,6 +242,7 @@ impl FakeSession {
             mongo_script: Mutex::new(None),
             mongo_commands: Mutex::new(Vec::new()),
             mongo_max_times: Mutex::new(Vec::new()),
+            mongo_writes: Mutex::new(Vec::new()),
         }
     }
 
@@ -269,6 +273,28 @@ impl FakeSession {
 
     pub fn run_count(&self) -> usize {
         lock(&self.runs).len()
+    }
+
+    fn mongo_run(
+        &self,
+        database: &str,
+        command: &Value,
+        max_time: Duration,
+        cancel: &CancelToken,
+        write: bool,
+    ) -> Result<Value, AgentError> {
+        lock(&self.mongo_commands).push((database.to_owned(), command.clone()));
+        lock(&self.mongo_max_times).push(max_time);
+        lock(&self.mongo_writes).push(write);
+        // Called without the lock: a script may wait for a cancel while another command (closing
+        // a cursor) comes in.
+        let script = lock(&self.mongo_script).clone();
+        match script {
+            Some(script) => script(database, command, cancel),
+            None => Err(AgentError::Unsupported(
+                "this session cannot run MongoDB commands".into(),
+            )),
+        }
     }
 
     fn page_of<T>(
@@ -435,17 +461,17 @@ impl Session for FakeSession {
         max_time: Duration,
         cancel: &CancelToken,
     ) -> Result<Value, AgentError> {
-        lock(&self.mongo_commands).push((database.to_owned(), command.clone()));
-        lock(&self.mongo_max_times).push(max_time);
-        // Called without the lock: a script may wait for a cancel while another command (closing
-        // a cursor) comes in.
-        let script = lock(&self.mongo_script).clone();
-        match script {
-            Some(script) => script(database, command, cancel),
-            None => Err(AgentError::Unsupported(
-                "this session cannot run MongoDB commands".into(),
-            )),
-        }
+        self.mongo_run(database, command, max_time, cancel, false)
+    }
+
+    fn mongo_write(
+        &self,
+        database: &str,
+        command: &Value,
+        max_time: Duration,
+        cancel: &CancelToken,
+    ) -> Result<Value, AgentError> {
+        self.mongo_run(database, command, max_time, cancel, true)
     }
 
     fn control(&self, action: TxControl, cancel: &CancelToken) -> Result<(), AgentError> {

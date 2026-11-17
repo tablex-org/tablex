@@ -1029,10 +1029,20 @@ fn the_tool_schemas_stay_inside_the_strict_tool_limits() {
     }
     // The MongoDB tools take free-form documents, which a strict schema cannot describe: they
     // are never strict, and they use none of the strict budget.
-    for name in ["mongo_find", "mongo_aggregate", "mongo_count"] {
+    for name in [
+        "mongo_find",
+        "mongo_aggregate",
+        "mongo_count",
+        "mongo_insert",
+        "mongo_update",
+        "mongo_delete",
+    ] {
         let index = tools.iter().position(|tool| tool.name == name).unwrap();
         assert!(!strict[index], "{name} is not strict");
     }
+    // `execute_batch` takes only fixed objects, so it is strict while the budget lasts.
+    let batch = tools.iter().position(|tool| tool.name == "execute_batch").unwrap();
+    assert!(strict[batch], "execute_batch is strict");
 }
 
 #[test]

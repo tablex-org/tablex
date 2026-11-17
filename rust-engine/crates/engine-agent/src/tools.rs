@@ -1,4 +1,4 @@
-//! Typed requests and results of the tools (fifteen, and three transaction tools a front end may
+//! Typed requests and results of the tools (nineteen, and three transaction tools a front end may
 //! switch on).
 //!
 //! Requests reject unknown fields. Their JSON Schemas (see [`crate::schema`])
@@ -24,11 +24,15 @@ pub enum ToolName {
     DescribeTable,
     GetSchemaContext,
     ExecuteQuery,
+    ExecuteBatch,
     ExplainQuery,
     ExecuteRedisCommand,
     MongoFind,
     MongoAggregate,
     MongoCount,
+    MongoInsert,
+    MongoUpdate,
+    MongoDelete,
     ListRoutines,
     GetRoutineSource,
     BeginTransaction,
@@ -37,7 +41,7 @@ pub enum ToolName {
 }
 
 impl ToolName {
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 22] = [
         Self::ListConnections,
         Self::OpenSession,
         Self::CloseSession,
@@ -46,11 +50,15 @@ impl ToolName {
         Self::DescribeTable,
         Self::GetSchemaContext,
         Self::ExecuteQuery,
+        Self::ExecuteBatch,
         Self::ExplainQuery,
         Self::ExecuteRedisCommand,
         Self::MongoFind,
         Self::MongoAggregate,
         Self::MongoCount,
+        Self::MongoInsert,
+        Self::MongoUpdate,
+        Self::MongoDelete,
         Self::ListRoutines,
         Self::GetRoutineSource,
         Self::BeginTransaction,
@@ -76,17 +84,29 @@ impl ToolName {
             Self::DescribeTable => "describe_table",
             Self::GetSchemaContext => "get_schema_context",
             Self::ExecuteQuery => "execute_query",
+            Self::ExecuteBatch => "execute_batch",
             Self::ExplainQuery => "explain_query",
             Self::ExecuteRedisCommand => "execute_redis_command",
             Self::MongoFind => "mongo_find",
             Self::MongoAggregate => "mongo_aggregate",
             Self::MongoCount => "mongo_count",
+            Self::MongoInsert => "mongo_insert",
+            Self::MongoUpdate => "mongo_update",
+            Self::MongoDelete => "mongo_delete",
             Self::ListRoutines => "list_routines",
             Self::GetRoutineSource => "get_routine_source",
             Self::BeginTransaction => "begin_transaction",
             Self::CommitTransaction => "commit_transaction",
             Self::RollbackTransaction => "rollback_transaction",
         }
+    }
+
+    /// The MongoDB tools that change data (always put to the user).
+    pub const fn is_mongo_write(self) -> bool {
+        matches!(
+            self,
+            Self::MongoInsert | Self::MongoUpdate | Self::MongoDelete
+        )
     }
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -104,13 +124,17 @@ impl ToolName {
             | Self::GetSchemaContext
             | Self::ListRoutines
             | Self::GetRoutineSource => AgentAccess::SchemaOnly,
+            // A script is judged statement by statement: a write in it needs `read_write`.
             Self::ExecuteQuery
+            | Self::ExecuteBatch
             | Self::ExplainQuery
             | Self::ExecuteRedisCommand
             | Self::MongoFind
             | Self::MongoAggregate
             | Self::MongoCount => AgentAccess::Read,
-            Self::BeginTransaction => AgentAccess::ReadWrite,
+            Self::MongoInsert | Self::MongoUpdate | Self::MongoDelete | Self::BeginTransaction => {
+                AgentAccess::ReadWrite
+            }
             // They name a transaction, not a connection: the layer checks the transaction's
             // connection itself (commit needs `read_write` again; rollback is always allowed).
             Self::CommitTransaction | Self::RollbackTransaction => AgentAccess::Off,
@@ -236,6 +260,30 @@ pub struct ExecuteQueryRequest {
     pub transaction_id: Option<String>,
 }
 
+/// `execute_batch`: several SQL statements in one call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecuteBatchRequest {
+    pub connection_id: String,
+    /// The statements, separated by `;`.
+    pub script: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
+    /// Rows to return per statement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_limit: Option<usize>,
+    /// Go on after a statement that fails (default: stop there).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continue_on_error: Option<bool>,
+    /// Run the whole script in a transaction of its own: committed if every statement succeeds,
+    /// rolled back if one fails.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub use_transaction: Option<bool>,
+    /// Run the script inside this open transaction (see `begin_transaction`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transaction_id: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExplainQueryRequest {
@@ -301,6 +349,56 @@ pub struct MongoCountRequest {
     pub collection: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filter: Option<Map<String, Value>>,
+}
+
+/// `mongo_insert`: `documents` are inserted in order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MongoInsertRequest {
+    pub connection_id: String,
+    pub database: String,
+    pub collection: String,
+    pub documents: Vec<Map<String, Value>>,
+}
+
+/// `mongo_update`: the first of `update` and `pipeline` that is given, and only one of them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MongoUpdateRequest {
+    pub connection_id: String,
+    pub database: String,
+    pub collection: String,
+    pub filter: Map<String, Value>,
+    /// Update operators, e.g. `{"$set": {"status": "paid"}}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update: Option<Map<String, Value>>,
+    /// An update pipeline (stages such as `$set`), instead of `update`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline: Option<Vec<Map<String, Value>>>,
+    /// Update every match, not only the first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub many: Option<bool>,
+    /// Insert a document when nothing matches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upsert: Option<bool>,
+    /// Allow an empty `filter` (every document); the user is asked about it as a dangerous change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_all: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MongoDeleteRequest {
+    pub connection_id: String,
+    pub database: String,
+    pub collection: String,
+    pub filter: Map<String, Value>,
+    /// Delete every match, not only the first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub many: Option<bool>,
+    /// Allow an empty `filter` (every document); the user is asked about it as a dangerous change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_all: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -495,6 +593,76 @@ pub struct MongoDocumentsResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MongoCountResult {
     pub count: u64,
+    pub elapsed_ms: u64,
+}
+
+/// Result of `mongo_insert`, `mongo_update` and `mongo_delete`, from the server's reply.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MongoWriteResult {
+    /// Documents inserted, matched (update) or deleted.
+    pub n: u64,
+    /// Documents an update changed; absent for insert and delete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub n_modified: Option<u64>,
+    /// Documents an update inserted (`upsert`): `{index, _id}` each.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub upserted: Vec<Value>,
+    /// Writes the server refused (`index`, `code`, `errmsg`); the rest of the command may have
+    /// been applied.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub write_errors: Vec<Value>,
+    pub elapsed_ms: u64,
+}
+
+/// Why one statement of a batch did not run to the end.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchError {
+    pub code: String,
+    pub message: String,
+}
+
+/// One statement of an `execute_batch`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchStatement {
+    /// Position in the script, from 1.
+    pub index: usize,
+    /// The start of the statement.
+    pub statement: String,
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<QueryResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<BatchError>,
+}
+
+/// How the transaction of an `execute_batch` ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BatchTransaction {
+    Committed,
+    RolledBack,
+}
+
+/// Result of `execute_batch`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecuteBatchResult {
+    /// Statements in the script.
+    pub statement_count: usize,
+    /// One entry for each statement that ran, in order (the last one is the one that failed, when
+    /// one did).
+    pub statements: Vec<BatchStatement>,
+    /// Statements that were not run because an earlier one failed.
+    pub skipped: usize,
+    /// Every statement ran and none failed.
+    pub ok: bool,
+    /// Present when the script ran in a transaction of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transaction: Option<BatchTransaction>,
+    /// Write statements that took effect (none when the transaction was rolled back).
+    pub changes: usize,
+    /// Rows changed by those statements; present when `changes` is above zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub affected_rows: Option<u64>,
     pub elapsed_ms: u64,
 }
 

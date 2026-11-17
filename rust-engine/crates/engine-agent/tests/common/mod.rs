@@ -107,3 +107,91 @@ impl SessionProvider for DriverProvider {
         ))
     }
 }
+
+/// A [`WriteApprover`] that remembers what it was asked, and answers as it is told.
+pub mod recorder {
+    use engine_agent::{
+        ApprovalDecision, CancelToken, Language, WriteApproval, WriteApprover,
+    };
+    use std::sync::{Arc, Mutex};
+
+    /// One question, as the front end saw it.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Asked {
+        pub connection_type: String,
+        pub production: bool,
+        pub language: Language,
+        pub database: Option<String>,
+        pub collection: Option<String>,
+        pub statement: String,
+        pub script: Option<usize>,
+        pub dangerous: Option<String>,
+        pub transaction: Option<String>,
+    }
+
+    pub struct Recorder {
+        pub decision: Mutex<ApprovalDecision>,
+        pub allow_dangerous: bool,
+        /// Refuses a production connection without asking, as the MCP server does.
+        pub refuse_production: bool,
+        /// What `still_allowed` answers (the MCP server's switch).
+        pub still_allowed: Mutex<Result<(), String>>,
+        pub asked: Mutex<Vec<Asked>>,
+        /// Runs while a question is open (the user changes something meanwhile).
+        pub meanwhile: Mutex<Option<Box<dyn Fn() + Send>>>,
+    }
+
+    impl Recorder {
+        pub fn new(decision: ApprovalDecision) -> Self {
+            Self {
+                decision: Mutex::new(decision),
+                allow_dangerous: false,
+                refuse_production: false,
+                still_allowed: Mutex::new(Ok(())),
+                asked: Mutex::new(Vec::new()),
+                meanwhile: Mutex::new(None),
+            }
+        }
+
+        pub fn arc(self) -> Arc<Self> {
+            Arc::new(self)
+        }
+
+        pub fn asked(&self) -> Vec<Asked> {
+            self.asked.lock().unwrap().clone()
+        }
+    }
+
+    impl WriteApprover for Recorder {
+        fn approve(&self, request: &WriteApproval<'_>, _cancel: &CancelToken) -> ApprovalDecision {
+            self.asked.lock().unwrap().push(Asked {
+                connection_type: request.connection_type.to_owned(),
+                production: request.production,
+                language: request.language,
+                database: request.database.map(str::to_owned),
+                collection: request.collection.map(str::to_owned),
+                statement: request.statement.to_owned(),
+                script: request.script,
+                dangerous: request.dangerous.map(str::to_owned),
+                transaction: request.transaction.map(|t| t.id.to_owned()),
+            });
+            if self.refuse_production && request.production {
+                return ApprovalDecision::Refuse {
+                    reason: "a production connection can only be changed from the app".into(),
+                };
+            }
+            if let Some(meanwhile) = &*self.meanwhile.lock().unwrap() {
+                meanwhile();
+            }
+            self.decision.lock().unwrap().clone()
+        }
+
+        fn still_allowed(&self, _request: &WriteApproval<'_>) -> Result<(), String> {
+            self.still_allowed.lock().unwrap().clone()
+        }
+
+        fn allows_dangerous(&self) -> bool {
+            self.allow_dangerous
+        }
+    }
+}

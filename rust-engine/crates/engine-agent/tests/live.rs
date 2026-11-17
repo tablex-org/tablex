@@ -10,8 +10,9 @@
 //! ```
 //!
 //! Only uniquely named scratch tables / prefixed keys are created, and they
-//! are dropped / deleted even when a test fails. The MongoDB test only reads
-//! (`admin.system.version` and documents the server generates itself).
+//! are dropped / deleted even when a test fails. One MongoDB test only reads
+//! (`admin.system.version` and documents the server generates itself); the other writes, in a
+//! uniquely named database that is dropped when it ends, even when it fails.
 
 mod common;
 
@@ -1062,6 +1063,140 @@ fn mongodb_read_only_tools() {
     live.catalog
         .update(ID, |info| info.agent_access = Some(AgentAccess::SchemaOnly));
     assert_eq!(code(&live.call("mongo_count", target(json!({})))), "agent.access_denied");
+}
+
+/// Drops a scratch MongoDB database outside the tool layer when it goes out of scope.
+struct DropMongoDatabase {
+    uri: String,
+    database: String,
+}
+
+impl Drop for DropMongoDatabase {
+    fn drop(&mut self) {
+        let handle = load_driver("dbengine-mongo", "abi-v2");
+        let Ok(mut session) = handle.connect(&json!({"uri": self.uri}).to_string()) else {
+            return;
+        };
+        let _ = session.mutate(&engine_driver_api::MutationRequest {
+            operation_id: engine_driver_api::OperationId(1),
+            kind: "drop_database".into(),
+            database: Some(self.database.clone()),
+            object: None,
+            identity: Value::Null,
+            payload: json!({}),
+        });
+    }
+}
+
+#[test]
+#[ignore = "needs TABLEX_TEST_MONGO_URI"]
+fn mongodb_writes_in_a_throwaway_database() {
+    let Ok(uri) = std::env::var("TABLEX_TEST_MONGO_URI") else {
+        return;
+    };
+    let database = unique("tablex_agent_writes");
+    let _drop = DropMongoDatabase {
+        uri: uri.clone(),
+        database: database.clone(),
+    };
+    let live = Live::new(ConnectionKind::MongoDb, "dbengine-mongo", &uri, AgentAccess::ReadWrite);
+    let target = |extra: Value| {
+        let mut args = json!({"connection_id": ID, "database": database, "collection": "orders"});
+        for (key, value) in extra.as_object().into_iter().flatten() {
+            args[key] = value.clone();
+        }
+        args
+    };
+    live.ok("open_session", json!({"connection_id": ID}));
+    let count = |filter: Value| live.ok("mongo_count", target(json!({"filter": filter})))["count"].as_u64().unwrap();
+
+    // Insert, with typed values.
+    let inserted = live.ok(
+        "mongo_insert",
+        target(json!({"documents": [
+            {"_id": 1, "status": "open", "total": 10, "placed": {"$date": "2024-01-31T00:00:00Z"}},
+            {"_id": 2, "status": "open", "total": 20},
+            {"_id": 3, "status": "paid", "total": 30},
+        ]})),
+    );
+    assert_eq!(inserted["n"], 3, "{inserted}");
+    assert!(inserted.get("write_errors").is_none());
+    assert_eq!(count(json!({})), 3);
+    let placed = live.ok("mongo_find", target(json!({"filter": {"_id": 1}})));
+    assert_eq!(placed["documents"][0]["placed"], json!({"$date": "2024-01-31T00:00:00Z"}));
+    // The question showed the exact command, the database and the collection.
+    let asked = live.approver.asked.lock().unwrap().clone();
+    assert!(asked[0].0.contains("\"insert\": \"orders\""), "{}", asked[0].0);
+    assert_eq!(live.approver.databases.lock().unwrap()[0].as_deref(), Some(database.as_str()));
+
+    // A duplicate key is a write error in the reply, not a failed call.
+    let duplicate = live.ok("mongo_insert", target(json!({"documents": [{"_id": 1}]})));
+    assert_eq!(duplicate["n"], 0);
+    assert_eq!(duplicate["write_errors"][0]["code"], 11000, "{duplicate}");
+
+    // Update: one match by default, every match with `many`, a pipeline, an upsert.
+    let one = live.ok(
+        "mongo_update",
+        target(json!({"filter": {"status": "open"}, "update": {"$set": {"status": "paid"}}})),
+    );
+    assert_eq!((one["n"].as_u64(), one["n_modified"].as_u64()), (Some(1), Some(1)), "{one}");
+    assert_eq!(count(json!({"status": "paid"})), 2);
+    let many = live.ok(
+        "mongo_update",
+        target(json!({
+            "filter": {"status": "paid"},
+            "pipeline": [{"$set": {"total": {"$add": ["$total", 1]}}}],
+            "many": true,
+        })),
+    );
+    assert_eq!((many["n"].as_u64(), many["n_modified"].as_u64()), (Some(2), Some(2)), "{many}");
+    let totals = live.ok("mongo_find", target(json!({"filter": {"status": "paid"}, "sort": {"_id": 1}, "projection": {"total": 1}})));
+    let totals: Vec<i64> = totals["documents"].as_array().unwrap().iter().map(|d| d["total"].as_i64().unwrap()).collect();
+    assert_eq!(totals.len(), 2);
+    assert!(totals.iter().all(|total| [11, 21, 31].contains(total)), "{totals:?}");
+    let upserted = live.ok(
+        "mongo_update",
+        target(json!({"filter": {"_id": 99}, "update": {"$set": {"status": "new"}}, "upsert": true})),
+    );
+    assert_eq!(upserted["n"], 1);
+    assert_eq!(upserted["n_modified"], 0);
+    assert_eq!(upserted["upserted"][0]["_id"], 99, "{upserted}");
+    assert_eq!(count(json!({})), 4);
+    // Nothing matches and nothing is upserted.
+    let none = live.ok("mongo_update", target(json!({"filter": {"_id": 1000}, "update": {"$set": {"a": 1}}})));
+    assert_eq!((none["n"].as_u64(), none["n_modified"].as_u64()), (Some(0), Some(0)));
+    // The server rejects a malformed update as a write error of the reply; nothing changed.
+    let bad = live.ok("mongo_update", target(json!({"filter": {"_id": 1}, "update": {"$bogus": {"a": 1}}})));
+    assert_eq!(bad["n"], 0);
+    assert_eq!(bad["write_errors"][0]["code"], 9, "{bad}");
+    assert_eq!(count(json!({})), 4);
+
+    // An empty filter is refused unless `allow_all`; then the user is asked as for a dangerous change.
+    let refused = live.call("mongo_delete", target(json!({"filter": {}, "many": true})));
+    assert_eq!(code(&refused), "agent.invalid_arguments");
+    assert_eq!(count(json!({})), 4);
+    let deleted = live.ok("mongo_delete", target(json!({"filter": {"status": "new"}})));
+    assert_eq!(deleted["n"], 1);
+    let first = live.ok("mongo_delete", target(json!({"filter": {"status": "paid"}})));
+    assert_eq!(first["n"], 1, "only the first match without `many`");
+    assert_eq!(count(json!({})), 2);
+    let all = live.ok("mongo_delete", target(json!({"filter": {}, "many": true, "allow_all": true})));
+    assert_eq!(all["n"], 2);
+    assert_eq!(count(json!({})), 0);
+    let dangerous = live.approver.asked.lock().unwrap().iter().filter(|(_, danger)| danger.is_some()).count();
+    assert_eq!(dangerous, 1);
+
+    // Below `read_write` the tools are refused and nothing is sent.
+    live.catalog
+        .update(ID, |info| info.agent_access = Some(AgentAccess::Read));
+    for (tool, args) in [
+        ("mongo_insert", target(json!({"documents": [{"_id": 7}]}))),
+        ("mongo_update", target(json!({"filter": {"_id": 7}, "update": {"$set": {"a": 1}}}))),
+        ("mongo_delete", target(json!({"filter": {"_id": 7}}))),
+    ] {
+        assert_eq!(code(&live.call(tool, args)), "agent.access_denied", "{tool}");
+    }
+    assert_eq!(count(json!({})), 0);
 }
 
 fn tx_sql(live: &Live, tx: &str, statement: &str) -> ToolOutcome {

@@ -16,8 +16,10 @@ write a query: when a schema summary is given below it lists the tables and colu
 working with, and list_tables and describe_table show the rest. Do not invent tables, columns or \
 functions; if something you need is not there, say so or look it up. Use the connection's own \
 query language: SQL in its dialect, with its quoting and its functions, the commands of a store \
-such as Redis, or on MongoDB the mongo_find, mongo_aggregate and mongo_count tools (filters and \
-pipelines in Extended JSON). When the answer depends on the data, read it with the tools instead of \
+such as Redis, or on MongoDB the mongo_find, mongo_aggregate and mongo_count tools to read and \
+mongo_insert, mongo_update and mongo_delete to change documents (filters and pipelines in Extended \
+JSON). Several SQL statements that belong together go in one execute_batch call, which the user \
+approves once. When the answer depends on the data, read it with the tools instead of \
 guessing, and keep the queries small: a LIMIT, and only the columns you need. Put SQL the user \
 may want to run in fenced code blocks tagged sql, one statement per block.
 

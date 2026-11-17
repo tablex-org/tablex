@@ -1782,6 +1782,20 @@ impl AssistantPanel {
         } else {
             format!("{} lines", question.lines)
         };
+        let lines = match question.script {
+            Some(1) => format!("1 change in the script, {lines}"),
+            Some(changes) => format!("{changes} changes in the script, {lines}"),
+            None => lines,
+        };
+        let title = if dangerous {
+            "Run this dangerous statement?"
+        } else if question.script.is_some() {
+            "Run this script?"
+        } else if question.collection.is_some() {
+            "Run this command?"
+        } else {
+            "Run this statement?"
+        };
         let below = (!view.end_seen).then(|| match view.below {
             0 => "The end of the last line is below. Scroll to read it before you run this."
                 .to_owned(),
@@ -1830,11 +1844,7 @@ impl AssistantPanel {
                             .text_size(px(13.0))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(theme::text())
-                            .child(if dangerous {
-                                "Run this dangerous statement?"
-                            } else {
-                                "Run this statement?"
-                            }),
+                            .child(title),
                     ),
             )
             .child(
@@ -1880,6 +1890,15 @@ impl AssistantPanel {
                             div()
                                 .debug_selector(|| "assistant-approval-database".into())
                                 .child(line(SharedString::from(format!("database {database}")))),
+                        )
+                    })
+                    .when_some(question.collection.clone(), |this, collection| {
+                        this.child(
+                            div()
+                                .debug_selector(|| "assistant-approval-collection".into())
+                                .child(line(SharedString::from(format!(
+                                    "collection {collection}"
+                                )))),
                         )
                     }),
             )

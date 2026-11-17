@@ -25,15 +25,19 @@ use crate::approver::Caller;
 const INSTRUCTIONS: &str = "TableX database access for AI agents. Tools list the user's saved \
 connections and open sessions on them; access is off by default; the user sets a default for all connections in TableX (Settings \u{2192} AI \u{2192} \
 Default agent access) and can set it per connection (connection > Overrides > Agent access). Start with \
-list_connections. Query with execute_query on a SQL connection, execute_redis_command on Redis, and \
-mongo_find, mongo_aggregate or mongo_count (read-only) on MongoDB. A statement that changes data may be put to the user for approval, through \
+list_connections. Query with execute_query on a SQL connection (execute_batch runs several statements in \
+one call, with the changes in it approved once), execute_redis_command on Redis, and mongo_find, \
+mongo_aggregate or mongo_count on MongoDB (mongo_insert, mongo_update and mongo_delete change its \
+documents). A statement or command that changes data may be put to the user for approval, through \
 your client, when the connection's access is read_write and the user has allowed changes through \
 MCP in TableX (Settings → AI); it is never allowed on a connection of a production type. A refusal or a \
 decline is final for that request: do not retry the statement or reword it to get around it, \
 tell the user instead. On a PostgreSQL or SQLite connection with read_write access, \
 begin_transaction opens a transaction: each change in it is approved one by one and is not final until \
 commit_transaction, which the user approves with the list of changes; roll back (rollback_transaction) \
-what you do not need. An unused transaction is rolled back after 5 minutes.";
+what you do not need. execute_batch with use_transaction runs a whole script as one transaction that \
+is committed, or rolled back when a statement fails, after a single approval. An unused transaction is \
+rolled back after 5 minutes. MongoDB writes are not part of transactions.";
 
 /// The layer's code for a tool name it does not have; a protocol error here, not a tool result.
 const UNKNOWN_TOOL: &str = "agent.unknown_tool";

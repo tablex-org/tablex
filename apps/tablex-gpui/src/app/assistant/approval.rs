@@ -145,6 +145,10 @@ pub struct Question {
     pub production: bool,
     /// The database the statement runs in, when the layer names one, as drawn.
     pub database: Option<SharedString>,
+    /// The MongoDB collection the command writes to, as drawn.
+    pub collection: Option<SharedString>,
+    /// `Some(n)`: the statement is a script of `n` changes, approved together.
+    pub script: Option<usize>,
     /// The statement exactly as the layer will run it.
     pub statement: SharedString,
     /// The statement as the card draws it: the same text, but a character that has no shape of its
@@ -177,6 +181,8 @@ impl Question {
             connection_type,
             production: request.production,
             database: request.database.map(label),
+            collection: request.collection.map(label),
+            script: request.script,
             statement: request.statement.to_owned().into(),
             shown: shown.into(),
             spelled,
@@ -367,7 +373,9 @@ pub(super) mod tests {
             production: false,
             language: Language::Sql,
             database: Some("main"),
+            collection: None,
             statement,
+            script: None,
             dangerous: None,
             transaction: None,
         }
@@ -585,6 +593,30 @@ pub(super) mod tests {
         question.arm();
         assert!(question.approve());
         assert_eq!(joined(handle), ApprovalDecision::Approve);
+    }
+
+    #[test]
+    fn a_mongodb_write_and_a_script_show_the_collection_and_the_count_and_the_command_as_it_is() {
+        let command = "{\n  \"delete\": \"orders\",\n  \"deletes\": [\n    {\n      \"q\": {},\n      \"limit\": 0\n    }\n  ]\n}";
+        let mut ask = request(command);
+        ask.language = Language::Mongo;
+        ask.database = Some("sh\u{200B}op");
+        ask.collection = Some("orders");
+        ask.dangerous = Some("the filter is empty, so it applies to every document of the collection");
+        let question = Question::new(&ask, Arc::new(Reply(Pending::new())));
+        assert_eq!(question.database.as_deref(), Some("sh<U+200B>op"));
+        assert_eq!(question.collection.as_deref(), Some("orders"));
+        assert_eq!(question.script, None);
+        assert_eq!(question.statement.as_ref(), command);
+        assert_eq!(question.shown.as_ref(), command, "readable as it is");
+        assert_eq!(question.lines, 9);
+        assert!(question.dangerous.is_some());
+
+        let mut script = request("INSERT INTO a VALUES (1);\n\nUPDATE a SET b = 2 WHERE id = 1;");
+        script.script = Some(2);
+        let question = Question::new(&script, Arc::new(Reply(Pending::new())));
+        assert_eq!((question.script, question.collection.as_deref()), (Some(2), None));
+        assert_eq!(question.lines, 3);
     }
 
     #[test]

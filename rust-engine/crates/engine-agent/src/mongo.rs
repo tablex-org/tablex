@@ -1,11 +1,13 @@
 //! `mongo_find`, `mongo_aggregate` and `mongo_count`: the commands they send, the reading of the
-//! cursor they get back, and the limits on what is returned.
+//! cursor they get back, and the limits on what is returned. `mongo_insert`, `mongo_update` and
+//! `mongo_delete`: the `insert`, `update` and `delete` commands, and the reading of their reply.
 //!
-//! Everything goes through [`Session::mongo_command`], one command at a time, and only the read
-//! commands `find`, `aggregate`, `count`, `getMore` and `killCursors` are ever built here (the
+//! The reads go through [`Session::mongo_command`], one command at a time, and only the read
+//! commands `find`, `aggregate`, `count`, `getMore` and `killCursors` are ever built for it (the
 //! driver refuses a writing command or pipeline again before it sends it). At most one more
 //! document than the limit is fetched, to know whether the result was cut; a cursor that is still
-//! open afterwards is closed.
+//! open afterwards is closed. The writes go through [`Session::mongo_write`], and only the layer
+//! calls it, after the user approved the exact command.
 
 use crate::cancel::CancelToken;
 use crate::error::AgentError;
@@ -13,8 +15,9 @@ use crate::limits::{truncate_text, Limits};
 use crate::ports::Session;
 use crate::result::Truncation;
 use crate::tools::{
-    MongoAggregateRequest, MongoCountRequest, MongoCountResult, MongoDocumentsResult,
-    MongoFindRequest,
+    MongoAggregateRequest, MongoCountRequest, MongoCountResult, MongoDeleteRequest,
+    MongoDocumentsResult, MongoFindRequest, MongoInsertRequest, MongoUpdateRequest,
+    MongoWriteResult,
 };
 use bson::{Bson, Document};
 use serde_json::{json, Map, Value};
@@ -25,6 +28,8 @@ use std::time::{Duration, Instant};
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 /// Empty batches from a cursor that is still open, in a row, before the read stops.
 const MAX_EMPTY_BATCHES: usize = 3;
+/// Most documents one `mongo_insert` takes.
+pub(crate) const MAX_INSERT_DOCUMENTS: usize = 1000;
 
 /// Where a call runs.
 pub(crate) struct Target<'a> {
@@ -35,6 +40,8 @@ pub(crate) struct Target<'a> {
     /// The statement timeout: the server's `maxTimeMS` and the wait for its answer.
     pub timeout: Duration,
     pub cancel: &'a CancelToken,
+    /// The command writes: it goes through [`Session::mongo_write`].
+    pub write: bool,
 }
 
 /// `limit` is at least 1 when given (the rest is capped by the layer's row limit).
@@ -105,9 +112,15 @@ fn run(target: &Target<'_>, command: &Value) -> Result<Document, AgentError> {
     if target.cancel.is_cancelled() {
         return Err(AgentError::Cancelled);
     }
-    let reply = target
-        .session
-        .mongo_command(target.database, command, target.timeout, target.cancel)?;
+    let reply = if target.write {
+        target
+            .session
+            .mongo_write(target.database, command, target.timeout, target.cancel)?
+    } else {
+        target
+            .session
+            .mongo_command(target.database, command, target.timeout, target.cancel)?
+    };
     let Ok(Bson::Document(reply)) = Bson::try_from(reply) else {
         return Err(malformed());
     };
@@ -322,6 +335,151 @@ pub(crate) fn count(target: &Target<'_>, command: &Value) -> Result<MongoCountRe
     .ok_or_else(malformed)?;
     Ok(MongoCountResult {
         count,
+        elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+    })
+}
+
+/// A write command and, when the call is dangerous (an empty filter it was told to allow), why.
+pub(crate) struct WriteCommand {
+    pub command: Value,
+    pub dangerous: Option<String>,
+}
+
+const EMPTY_FILTER: &str = "the filter is empty, so it applies to every document of the collection";
+
+/// `allow_all` is how the model says the user asked for every document: an empty filter without
+/// it is a mistake to refuse, with it a dangerous change to put to the user.
+fn check_filter(
+    filter: &Map<String, Value>,
+    allow_all: Option<bool>,
+) -> Result<Option<String>, AgentError> {
+    if !filter.is_empty() {
+        return Ok(None);
+    }
+    if allow_all == Some(true) {
+        return Ok(Some(EMPTY_FILTER.into()));
+    }
+    Err(AgentError::invalid(
+        "`filter` is empty, which would apply to every document of the collection; give a filter, \
+         or pass `allow_all` true only when the user asked for every document",
+    ))
+}
+
+pub(crate) fn insert_command(request: &MongoInsertRequest) -> Result<WriteCommand, AgentError> {
+    let count = request.documents.len();
+    if count == 0 || count > MAX_INSERT_DOCUMENTS {
+        return Err(AgentError::invalid(format!(
+            "`documents` must hold between 1 and {MAX_INSERT_DOCUMENTS} documents, not {count}"
+        )));
+    }
+    let documents: Vec<Value> = request
+        .documents
+        .iter()
+        .map(|document| Value::Object(document.clone()))
+        .collect();
+    Ok(WriteCommand {
+        command: json!({
+            "insert": request.collection,
+            "documents": documents,
+            "ordered": true,
+        }),
+        dangerous: None,
+    })
+}
+
+pub(crate) fn update_command(request: &MongoUpdateRequest) -> Result<WriteCommand, AgentError> {
+    let dangerous = check_filter(&request.filter, request.allow_all)?;
+    let update = match (&request.update, &request.pipeline) {
+        (Some(_), Some(_)) => {
+            return Err(AgentError::invalid(
+                "give `update` or `pipeline`, not both",
+            ))
+        }
+        (None, None) => {
+            return Err(AgentError::invalid(
+                "`update` (update operators) or `pipeline` (an update pipeline) is required",
+            ))
+        }
+        (Some(operators), None) => {
+            if operators.is_empty() || operators.keys().any(|key| !key.starts_with('$')) {
+                return Err(AgentError::invalid(
+                    "`update` must be update operators such as {\"$set\": {...}}; to replace a whole document, use `$set` for its fields",
+                ));
+            }
+            Value::Object(operators.clone())
+        }
+        (None, Some(stages)) => {
+            if stages.is_empty() {
+                return Err(AgentError::invalid("`pipeline` must have at least one stage"));
+            }
+            Value::Array(stages.iter().map(|stage| Value::Object(stage.clone())).collect())
+        }
+    };
+    Ok(WriteCommand {
+        command: json!({
+            "update": request.collection,
+            "updates": [{
+                "q": request.filter,
+                "u": update,
+                "multi": request.many.unwrap_or(false),
+                "upsert": request.upsert.unwrap_or(false),
+            }],
+            "ordered": true,
+        }),
+        dangerous,
+    })
+}
+
+pub(crate) fn delete_command(request: &MongoDeleteRequest) -> Result<WriteCommand, AgentError> {
+    let dangerous = check_filter(&request.filter, request.allow_all)?;
+    Ok(WriteCommand {
+        command: json!({
+            "delete": request.collection,
+            "deletes": [{
+                "q": request.filter,
+                "limit": i32::from(!request.many.unwrap_or(false)),
+            }],
+            "ordered": true,
+        }),
+        dangerous,
+    })
+}
+
+/// A count in a reply (the server answers `n` as an int, a long or a double).
+fn counted(value: Option<&Bson>) -> Option<u64> {
+    match value? {
+        Bson::Int32(n) => u64::try_from(*n).ok(),
+        Bson::Int64(n) => u64::try_from(*n).ok(),
+        Bson::Double(n) if *n >= 0.0 && n.fract() == 0.0 => Some(*n as u64),
+        _ => None,
+    }
+}
+
+/// The documents of an array field of the reply as relaxed Extended JSON.
+fn listed(reply: &Document, key: &str) -> Vec<Value> {
+    match reply.get(key) {
+        Some(Bson::Array(items)) => items
+            .iter()
+            .cloned()
+            .map(Bson::into_relaxed_extjson)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Sends a write command and reads the reply: `n`, `nModified`, `upserted` and `writeErrors`.
+pub(crate) fn write(
+    target: &Target<'_>,
+    command: &Value,
+) -> Result<MongoWriteResult, AgentError> {
+    let started = Instant::now();
+    let reply = run(target, command)?;
+    let n = counted(reply.get("n")).ok_or_else(malformed)?;
+    Ok(MongoWriteResult {
+        n,
+        n_modified: counted(reply.get("nModified")),
+        upserted: listed(&reply, "upserted"),
+        write_errors: listed(&reply, "writeErrors"),
         elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
     })
 }

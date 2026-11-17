@@ -1,12 +1,13 @@
 //! The agent tool layer: what an AI agent may do with a TableX connection,
 //! behind one policy, shared by the MCP server and the in-app assistant.
 //!
-//! * **Tools** (fifteen, names stable; three more with [`ToolLayer::with_transactions`]: `begin_transaction`,
+//! * **Tools** (nineteen, names stable; three more with [`ToolLayer::with_transactions`]: `begin_transaction`,
 //!   `commit_transaction`, `rollback_transaction`): `list_connections`, `open_session`,
 //!   `close_session`, `list_namespaces`, `list_tables`, `describe_table`,
-//!   `get_schema_context`, `execute_query`, `explain_query`,
-//!   `execute_redis_command`, `mongo_find`, `mongo_aggregate`, `mongo_count` (read-only MongoDB),
-//!   `list_routines`, `get_routine_source`. Typed requests and results live in [`tools`],
+//!   `get_schema_context`, `execute_query`, `execute_batch` (a script of SQL statements, approved
+//!   once), `explain_query`, `execute_redis_command`, `mongo_find`, `mongo_aggregate`,
+//!   `mongo_count` (MongoDB reads), `mongo_insert`, `mongo_update`, `mongo_delete` (MongoDB
+//!   writes, each put to the user), `list_routines`, `get_routine_source`. Typed requests and results live in [`tools`],
 //!   their JSON Schemas in [`schema`].
 //! * **One entry**: [`ToolLayer::call`] takes a tool name and JSON arguments
 //!   and returns a [`ToolOutcome`] (a result, or a typed error whose

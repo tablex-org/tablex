@@ -83,7 +83,8 @@ impl ConnectionKind {
 pub enum Language {
     Sql,
     Redis,
-    /// MongoDB: read-only `mongo_find`, `mongo_aggregate` and `mongo_count`.
+    /// MongoDB: `mongo_find`, `mongo_aggregate` and `mongo_count` read; `mongo_insert`,
+    /// `mongo_update` and `mongo_delete` write.
     Mongo,
     /// Browse only (no execute tool). No engine has it today.
     Other,
@@ -406,6 +407,21 @@ pub trait Session: Send + Sync {
         ))
     }
 
+    /// [`mongo_command`](Self::mongo_command) without the read-only guard, for the `insert`,
+    /// `update` and `delete` commands of `mongo_insert`, `mongo_update` and `mongo_delete`
+    /// (`agent.unsupported` by default). The tool layer calls it only after the write was approved.
+    fn mongo_write(
+        &self,
+        _database: &str,
+        _command: &serde_json::Value,
+        _max_time: Duration,
+        _cancel: &CancelToken,
+    ) -> Result<serde_json::Value, AgentError> {
+        Err(AgentError::Unsupported(
+            "this session cannot write to MongoDB".into(),
+        ))
+    }
+
     /// Begins, commits or rolls back a transaction on this session (`agent.unsupported` by
     /// default). Internal to the tool layer: the text goes to the driver as it is, NOT through
     /// the agent policy, which refuses statements that change transaction state. Stops promptly
@@ -439,8 +455,14 @@ pub struct WriteApproval<'a> {
     /// The database the statement runs in (the request's, else the connection's
     /// only database when that is known); `None` when it is the connection's default.
     pub database: Option<&'a str>,
-    /// The exact statement (SQL text or Redis command).
+    /// MongoDB: the collection the command writes to.
+    pub collection: Option<&'a str>,
+    /// The exact statement (SQL text, Redis command, or the MongoDB command as Extended JSON). For
+    /// a script (see `script`), every statement of it that changes data, each ended by `;`.
     pub statement: &'a str,
+    /// `Some(n)`: `statement` is a script (`execute_batch`) of `n` statements that change data,
+    /// approved as a whole.
+    pub script: Option<usize>,
     /// Why the statement is dangerous, if it is.
     pub dangerous: Option<&'a str>,
     /// Set when the question is about a transaction (`execute_query` with a `transaction_id`, or

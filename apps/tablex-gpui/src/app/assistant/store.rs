@@ -329,14 +329,44 @@ pub fn ran(name: &str, content: &str) -> Option<Ran> {
     if !matches!(
         tool,
         ToolName::ExecuteQuery
+            | ToolName::ExecuteBatch
             | ToolName::ExecuteRedisCommand
             | ToolName::MongoFind
             | ToolName::MongoAggregate
             | ToolName::MongoCount
+            | ToolName::MongoInsert
+            | ToolName::MongoUpdate
+            | ToolName::MongoDelete
     ) {
         return None;
     }
     let json: serde_json::Value = serde_json::from_str(content).ok()?;
+    // A MongoDB write always changed (or tried to change) data: `n` documents inserted, matched or
+    // deleted, `n_modified` of them changed by an update.
+    if tool.is_mongo_write() {
+        let rows = json
+            .get("n_modified")
+            .or_else(|| json.get("n"))
+            .and_then(serde_json::Value::as_u64);
+        return Some(Ran::Wrote { rows });
+    }
+    // A script reports the write statements that took effect (`changes`) and the rows they changed
+    // (`affected_rows`, present only then): one that changed nothing read.
+    if tool == ToolName::ExecuteBatch {
+        let wrote = json
+            .get("changes")
+            .and_then(serde_json::Value::as_u64)
+            .is_some_and(|changes| changes > 0);
+        return Some(if wrote {
+            Ran::Wrote {
+                rows: json
+                    .get("affected_rows")
+                    .and_then(serde_json::Value::as_u64),
+            }
+        } else {
+            Ran::Read
+        });
+    }
     if let Some(rows) = json
         .get("affected_rows")
         .and_then(serde_json::Value::as_u64)
@@ -356,7 +386,8 @@ pub fn ran(name: &str, content: &str) -> Option<Ran> {
 }
 
 /// The least level a conversation can have run at, from what it holds: a successful statement
-/// is `Read`, one that changed something `ReadWrite`. A header that says less is wrong (or
+/// is `Read`, one that changed something `ReadWrite` (so is any MongoDB write, and a script that
+/// changed something). A header that says less is wrong (or
 /// edited), and the conversation holds data of that level either way. The tools are the
 /// engine's own ([`engine_agent::ToolName`]), not names written out here.
 ///
@@ -1147,7 +1178,7 @@ mod tests {
             access_floor(&redis("{\"affected_rows\":1}")),
             AgentAccess::ReadWrite
         );
-        // The MongoDB tools only read: a result of one is a read.
+        // The MongoDB read tools: a result of one is a read.
         for tool in ["mongo_find", "mongo_aggregate", "mongo_count"] {
             let mongo = serde_json::from_value::<Conversation>(json!({
                 "scope": {"connection_id": CONNECTION}, "context": null,
@@ -1163,6 +1194,55 @@ mod tests {
             .unwrap();
             assert_eq!(access_floor(&mongo), AgentAccess::Read, "{tool}");
         }
+        // A MongoDB write is a write whatever its result says, and a script is one when it changed
+        // something.
+        let result_of = |tool: &str, result: &str| {
+            serde_json::from_value::<Conversation>(json!({
+                "scope": {"connection_id": CONNECTION}, "context": null,
+                "messages": [
+                    {"role": "user", "content": [{"type": "text", "text": "q"}]},
+                    {"role": "assistant", "content": [{"type": "tool_use", "id": "t",
+                        "name": tool, "input": {}}]},
+                    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t",
+                        "content": result}]},
+                    {"role": "assistant", "content": [{"type": "text", "text": "Done."}]}
+                ]
+            }))
+            .unwrap()
+        };
+        for tool in ["mongo_insert", "mongo_update", "mongo_delete"] {
+            for result in ["{\"n\":2,\"elapsed_ms\":1}", "{\"n\":0,\"n_modified\":0,\"elapsed_ms\":1}"] {
+                assert_eq!(
+                    access_floor(&result_of(tool, result)),
+                    AgentAccess::ReadWrite,
+                    "{tool} {result}"
+                );
+            }
+        }
+        assert_eq!(
+            ran("mongo_update", "{\"n\":3,\"n_modified\":2}"),
+            Some(Ran::Wrote { rows: Some(2) })
+        );
+        assert_eq!(ran("mongo_insert", "{\"n\":3}"), Some(Ran::Wrote { rows: Some(3) }));
+        let batch = |result: &str| access_floor(&result_of("execute_batch", result));
+        assert_eq!(
+            batch("{\"statement_count\":2,\"statements\":[],\"skipped\":0,\"ok\":true,\"changes\":1,\"affected_rows\":4,\"elapsed_ms\":1}"),
+            AgentAccess::ReadWrite
+        );
+        // A DDL statement has no row count, and still changed something.
+        assert_eq!(
+            batch("{\"statement_count\":1,\"statements\":[],\"skipped\":0,\"ok\":true,\"changes\":1,\"affected_rows\":0,\"elapsed_ms\":1}"),
+            AgentAccess::ReadWrite
+        );
+        assert_eq!(
+            batch("{\"statement_count\":2,\"statements\":[],\"skipped\":0,\"ok\":true,\"changes\":0,\"elapsed_ms\":1}"),
+            AgentAccess::Read
+        );
+        // A script rolled back changed nothing.
+        assert_eq!(
+            batch("{\"statement_count\":2,\"statements\":[],\"skipped\":1,\"ok\":false,\"transaction\":\"rolled_back\",\"changes\":0,\"elapsed_ms\":1}"),
+            AgentAccess::Read
+        );
     }
 
     #[test]

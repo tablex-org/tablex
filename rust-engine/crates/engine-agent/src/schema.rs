@@ -193,6 +193,31 @@ fn documents_output() -> Value {
     )
 }
 
+fn mongo_write_output() -> Value {
+    object(
+        vec![
+            ("n", integer("Documents inserted, matched (update) or deleted.")),
+            ("n_modified", integer("Documents an update changed.")),
+            (
+                "upserted",
+                array(
+                    document("One inserted document: {\"index\": 0, \"_id\": ...}."),
+                    "Documents an update inserted (upsert).",
+                ),
+            ),
+            (
+                "write_errors",
+                array(
+                    document("One refused write: {\"index\": 0, \"code\": 11000, \"errmsg\": \"...\"}."),
+                    "Writes the server refused; the rest of the command may have been applied.",
+                ),
+            ),
+            ("elapsed_ms", integer("Time the command took.")),
+        ],
+        &["n", "elapsed_ms"],
+    )
+}
+
 const MONGO_JSON: &str = "JSON as MongoDB takes it; typed values use Extended JSON, e.g. \
     {\"$oid\": \"...\"}, {\"$date\": \"2024-01-31T00:00:00Z\"}, {\"$numberLong\": \"123\"}.";
 
@@ -227,6 +252,23 @@ macro_rules! execute_query_text {
         DELETE or UPDATE without WHERE, ...) are refused; a front end that can ask the user about them \
         says to pass `dangerous` true, one that cannot (the MCP server) says so and the user has to run \
         the statement themselves."
+    };
+}
+
+macro_rules! execute_batch_text {
+    () => {
+        "Run several SQL statements in order on one connection, in one call. Needs access `read` or \
+        more; the script is split into statements and each is judged like execute_query: if one \
+        changes data the connection needs `read_write` and the user is asked ONCE to approve all the \
+        changes of the script together, before anything runs. A script with a statement that is not \
+        allowed (a dangerous one: DROP, TRUNCATE, DELETE or UPDATE without WHERE ...; a blocked \
+        function; BEGIN, COMMIT, SET ...) is refused as a whole before anything runs, and so is one \
+        the user cannot review. A refusal or a decline is final for this request: do not retry it or \
+        reword it to get around it, tell the user instead. At most 50 statements. The result has one \
+        entry per statement that ran (rows, affected rows or the error, with the limits of \
+        execute_query and a total size limit for all rows); it stops at the first statement that \
+        fails unless `continue_on_error` is true, and `skipped` counts the ones not run. Statements \
+        that ran before a failure stay applied."
     };
 }
 
@@ -462,6 +504,83 @@ fn spec_for(tool: ToolName, transactions: bool) -> ToolSpec {
                 example: json!({"connection_id": "c1", "statement": "SELECT id, name FROM users ORDER BY id", "row_limit": 50}),
             }
         }
+        ToolName::ExecuteBatch => {
+            let mut properties = vec![
+                connection.clone(),
+                ("script", string("The statements, separated by `;`.")),
+                database("Database to run in."),
+                ("row_limit", integer("Rows to return per statement (default 200, at most 1000).")),
+                ("continue_on_error", boolean("Go on with the next statement after one fails (default: stop at the first failure).")),
+            ];
+            if transactions {
+                properties.push((
+                    "use_transaction",
+                    boolean("Run the whole script in a transaction of its own: committed when every statement succeeds, rolled back when one fails. Not with `continue_on_error` or `transaction_id`."),
+                ));
+                properties.push((
+                    "transaction_id",
+                    string("Run the script inside this open transaction (from begin_transaction) instead of committing by itself; omit `database` then. Not with `use_transaction` or `continue_on_error`."),
+                ));
+            }
+            ToolSpec {
+                name: tool.as_str(),
+                description: if transactions {
+                    concat!(
+                        execute_batch_text!(),
+                        " With `use_transaction` the script is one transaction on a PostgreSQL or SQLite \
+                        connection: it is committed when every statement succeeded, and when one fails \
+                        everything is rolled back (`transaction` is `rolled_back`, and the failed \
+                        statement is named); the user approves the changes once, with the script. With \
+                        `transaction_id` it runs inside that open transaction and is not committed until \
+                        commit_transaction."
+                    )
+                } else {
+                    execute_batch_text!()
+                },
+                input_schema: object(properties, &["connection_id", "script"]),
+                output_schema: object(
+                    vec![
+                        ("statement_count", integer("Statements in the script.")),
+                        (
+                            "statements",
+                            array(
+                                object(
+                                    vec![
+                                        ("index", integer("Position in the script, from 1.")),
+                                        ("statement", string("The start of the statement.")),
+                                        ("ok", boolean("The statement ran without an error.")),
+                                        ("result", statement_output()),
+                                        (
+                                            "error",
+                                            object(
+                                                vec![
+                                                    ("code", string("Error code.")),
+                                                    ("message", string("What went wrong.")),
+                                                ],
+                                                &["code", "message"],
+                                            ),
+                                        ),
+                                    ],
+                                    &["index", "statement", "ok"],
+                                ),
+                                "One entry for each statement that ran, in order; the last is the one that failed, when one did.",
+                            ),
+                        ),
+                        ("skipped", integer("Statements that were not run because an earlier one failed.")),
+                        ("ok", boolean("Every statement ran and none failed.")),
+                        (
+                            "transaction",
+                            string_enum(&["committed", "rolled_back"], "How the transaction of `use_transaction` ended."),
+                        ),
+                        ("changes", integer("Write statements that took effect (none when the transaction was rolled back).")),
+                        ("affected_rows", integer("Rows changed by those statements; present when `changes` is above zero.")),
+                        ("elapsed_ms", integer("Time the script took.")),
+                    ],
+                    &["statement_count", "statements", "skipped", "ok", "changes", "elapsed_ms"],
+                ),
+                example: json!({"connection_id": "c1", "script": "INSERT INTO items (name) VALUES ('a'); UPDATE orders SET status = 'paid' WHERE id = 1", "continue_on_error": false}),
+            }
+        }
         ToolName::ExplainQuery => ToolSpec {
             name: tool.as_str(),
             description: "Show the execution plan of one SQL statement (EXPLAIN, never ANALYZE; the statement \
@@ -476,6 +595,82 @@ fn spec_for(tool: ToolName, transactions: bool) -> ToolSpec {
             ),
             output_schema: statement_output(),
             example: json!({"connection_id": "c1", "statement": "SELECT * FROM orders WHERE user_id = 1"}),
+        },
+        ToolName::MongoInsert => ToolSpec {
+            name: tool.as_str(),
+            description: "Insert documents into a collection of a MongoDB connection. Needs access \
+                `read_write` and the user's permission to change data through this front end; the user is \
+                asked to approve the exact command before anything is sent. A refusal or a decline is \
+                final for this request: do not retry it or reword it to get around it, tell the user \
+                instead. At least 1 and at most 1000 documents, inserted in order (the first failure stops \
+                the rest). `documents` are JSON documents as in mongo_find; typed values use Extended \
+                JSON. Not available inside a transaction. The result has the number inserted (`n`) and \
+                any `write_errors`.",
+            input_schema: object(
+                vec![
+                    connection,
+                    database("Database name."),
+                    ("collection", string("Collection name.")),
+                    ("documents", array(document(MONGO_JSON), "The documents to insert (1 to 1000).")),
+                ],
+                &["connection_id", "database", "collection", "documents"],
+            ),
+            output_schema: mongo_write_output(),
+            example: json!({"connection_id": "c3", "database": "shop", "collection": "items", "documents": [{"sku": "a-1", "stock": 4}]}),
+        },
+        ToolName::MongoUpdate => ToolSpec {
+            name: tool.as_str(),
+            description: "Update documents of a collection of a MongoDB connection. Needs access \
+                `read_write` and the user's permission to change data through this front end; the user is \
+                asked to approve the exact command before anything is sent. A refusal or a decline is \
+                final for this request: do not retry it or reword it to get around it, tell the user \
+                instead. `filter` selects the documents (required; an empty filter is refused unless \
+                `allow_all` is true, and a front end that cannot ask the user about dangerous changes, the \
+                MCP server, refuses it then). Give `update` (update operators such as $set) or `pipeline` \
+                (an update pipeline), not both. Only the first match is updated unless `many` is true; \
+                `upsert` inserts a document when nothing matches. Not available inside a transaction. The \
+                result has `n` (matched), `n_modified`, `upserted` and any `write_errors`.",
+            input_schema: object(
+                vec![
+                    connection,
+                    database("Database name."),
+                    ("collection", string("Collection name.")),
+                    ("filter", document(MONGO_JSON)),
+                    ("update", document("Update operators, e.g. {\"$set\": {\"status\": \"paid\"}}.")),
+                    ("pipeline", array(document("One stage, e.g. {\"$set\": {\"total\": {\"$sum\": \"$lines\"}}}."), "An update pipeline, instead of `update`.")),
+                    ("many", boolean("Update every matching document, not only the first (default false).")),
+                    ("upsert", boolean("Insert a document when nothing matches (default false).")),
+                    ("allow_all", boolean("Allow an empty `filter`, which matches every document.")),
+                ],
+                &["connection_id", "database", "collection", "filter"],
+            ),
+            output_schema: mongo_write_output(),
+            example: json!({"connection_id": "c3", "database": "shop", "collection": "orders", "filter": {"status": "open"}, "update": {"$set": {"status": "paid"}}, "many": true, "upsert": false}),
+        },
+        ToolName::MongoDelete => ToolSpec {
+            name: tool.as_str(),
+            description: "Delete documents from a collection of a MongoDB connection. Needs access \
+                `read_write` and the user's permission to change data through this front end; the user is \
+                asked to approve the exact command before anything is sent. A refusal or a decline is \
+                final for this request: do not retry it or reword it to get around it, tell the user \
+                instead. `filter` selects the documents (required; an empty filter is refused unless \
+                `allow_all` is true, and a front end that cannot ask the user about dangerous changes, the \
+                MCP server, refuses it then). Only the first match is deleted unless `many` is true. Not \
+                available inside a transaction. The result has the number deleted (`n`) and any \
+                `write_errors`.",
+            input_schema: object(
+                vec![
+                    connection,
+                    database("Database name."),
+                    ("collection", string("Collection name.")),
+                    ("filter", document(MONGO_JSON)),
+                    ("many", boolean("Delete every matching document, not only the first (default false).")),
+                    ("allow_all", boolean("Allow an empty `filter`, which matches every document.")),
+                ],
+                &["connection_id", "database", "collection", "filter"],
+            ),
+            output_schema: mongo_write_output(),
+            example: json!({"connection_id": "c3", "database": "shop", "collection": "orders", "filter": {"status": "cancelled"}, "many": true}),
         },
         ToolName::ListRoutines => ToolSpec {
             name: tool.as_str(),
@@ -914,11 +1109,15 @@ mod tests {
                 "describe_table",
                 "get_schema_context",
                 "execute_query",
+                "execute_batch",
                 "explain_query",
                 "execute_redis_command",
                 "mongo_find",
                 "mongo_aggregate",
                 "mongo_count",
+                "mongo_insert",
+                "mongo_update",
+                "mongo_delete",
                 "list_routines",
                 "get_routine_source",
                 "begin_transaction",
@@ -928,10 +1127,19 @@ mod tests {
         );
         // Off by default: neither the tools nor `transaction_id` exist for the model.
         let plain = tool_specs_for(false);
-        assert_eq!(plain.len(), 15);
+        assert_eq!(plain.len(), 19);
         let execute = plain.iter().find(|spec| spec.name == "execute_query").unwrap();
         assert!(execute.input_schema["properties"].get("transaction_id").is_none());
         assert!(!execute.description.contains("transaction"));
+        // The batch tool has no transaction parameters without them either.
+        let batch = plain.iter().find(|spec| spec.name == "execute_batch").unwrap();
+        for name in ["use_transaction", "transaction_id"] {
+            assert!(batch.input_schema["properties"].get(name).is_none(), "{name}");
+        }
+        assert!(!batch.description.contains("transaction"));
+        for name in ["use_transaction", "transaction_id"] {
+            assert!(spec(ToolName::ExecuteBatch).input_schema["properties"].get(name).is_some(), "{name}");
+        }
         assert!(spec(ToolName::ExecuteQuery).input_schema["properties"]
             .get("transaction_id")
             .is_some());
@@ -961,11 +1169,15 @@ mod tests {
                 ToolName::DescribeTable => parses::<DescribeTableRequest>(example),
                 ToolName::GetSchemaContext => parses::<GetSchemaContextRequest>(example),
                 ToolName::ExecuteQuery => parses::<ExecuteQueryRequest>(example),
+                ToolName::ExecuteBatch => parses::<ExecuteBatchRequest>(example),
                 ToolName::ExplainQuery => parses::<ExplainQueryRequest>(example),
                 ToolName::ExecuteRedisCommand => parses::<ExecuteRedisCommandRequest>(example),
                 ToolName::MongoFind => parses::<MongoFindRequest>(example),
                 ToolName::MongoAggregate => parses::<MongoAggregateRequest>(example),
                 ToolName::MongoCount => parses::<MongoCountRequest>(example),
+                ToolName::MongoInsert => parses::<MongoInsertRequest>(example),
+                ToolName::MongoUpdate => parses::<MongoUpdateRequest>(example),
+                ToolName::MongoDelete => parses::<MongoDeleteRequest>(example),
                 ToolName::ListRoutines => parses::<ListRoutinesRequest>(example),
                 ToolName::GetRoutineSource => parses::<GetRoutineSourceRequest>(example),
                 ToolName::BeginTransaction => parses::<ConnectionRequest>(example),
@@ -1110,6 +1322,19 @@ mod tests {
                 .unwrap(),
             ),
             (
+                ToolName::ExecuteBatch,
+                serde_json::to_value(ExecuteBatchRequest {
+                    connection_id: "c".into(),
+                    script: "s".into(),
+                    database: Some("d".into()),
+                    row_limit: Some(1),
+                    continue_on_error: Some(false),
+                    use_transaction: Some(false),
+                    transaction_id: Some("tx-1".into()),
+                })
+                .unwrap(),
+            ),
+            (
                 ToolName::ExplainQuery,
                 serde_json::to_value(ExplainQueryRequest {
                     connection_id: "c".into(),
@@ -1196,6 +1421,43 @@ mod tests {
                     database: "shop".into(),
                     collection: "orders".into(),
                     filter: Some(Map::new()),
+                })
+                .unwrap(),
+            ),
+            (
+                ToolName::MongoInsert,
+                serde_json::to_value(MongoInsertRequest {
+                    connection_id: "c".into(),
+                    database: "shop".into(),
+                    collection: "items".into(),
+                    documents: vec![Map::new()],
+                })
+                .unwrap(),
+            ),
+            (
+                ToolName::MongoUpdate,
+                serde_json::to_value(MongoUpdateRequest {
+                    connection_id: "c".into(),
+                    database: "shop".into(),
+                    collection: "orders".into(),
+                    filter: Map::new(),
+                    update: Some(Map::new()),
+                    pipeline: Some(vec![Map::new()]),
+                    many: Some(true),
+                    upsert: Some(true),
+                    allow_all: Some(true),
+                })
+                .unwrap(),
+            ),
+            (
+                ToolName::MongoDelete,
+                serde_json::to_value(MongoDeleteRequest {
+                    connection_id: "c".into(),
+                    database: "shop".into(),
+                    collection: "orders".into(),
+                    filter: Map::new(),
+                    many: Some(true),
+                    allow_all: Some(true),
                 })
                 .unwrap(),
             ),
