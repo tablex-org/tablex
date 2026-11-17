@@ -59,6 +59,7 @@ mod mongo_admin;
 mod mongo_aggregate;
 mod mongo_result;
 mod mongo_script;
+mod mongo_sql;
 #[cfg(feature = "ui")]
 mod mongo_shell;
 mod navigator;

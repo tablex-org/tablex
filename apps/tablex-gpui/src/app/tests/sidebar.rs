@@ -479,7 +479,7 @@ fn mongo_script_run_rejects_a_missing_database_and_dispatches_no_shell_text_with
         // Not a single find: a shell script, which has no plugin here, so nothing runs (the
         // dialog that offers it needs the window; this test has none).
         this.workspace.tab_mut(tab_id).unwrap().database = "warehouse".into();
-        this.workspace.tab_mut(tab_id).unwrap().sql = "SELECT * FROM users".into();
+        this.workspace.tab_mut(tab_id).unwrap().sql = "print(1)".into();
         this.run_active_tab_query(cx);
         assert!(matches!(this.workspace.runtime(tab_id).unwrap().query.status(), crate::query::QueryStatus::Idle));
         assert!(!this.query_tasks.tasks.contains_key(&tab_id));
@@ -492,6 +492,34 @@ fn mongo_script_run_rejects_a_missing_database_and_dispatches_no_shell_text_with
         assert!(matches!(this.workspace.runtime(tab_id).unwrap().query.status(), crate::query::QueryStatus::Failed(error) if error.contains("UI scenario")));
         assert!(!this.query_tasks.tasks.contains_key(&tab_id));
         assert_eq!(this.workspace.active_tab().unwrap().query_mode, Some(QueryMode::MongoScript));
+    });
+}
+
+/// SQL in a MongoDB script tab runs as the find it reads as: on the fast path, in the database it
+/// names (the tab moves there); SQL it cannot read fails with the line and column.
+#[gpui::test]
+fn sql_in_a_mongo_script_tab_runs_as_a_find_in_the_database_it_names(cx: &mut TestAppContext) {
+    let (app, visual) = sidebar_test_app(cx);
+    app.update(visual, |this, cx| {
+        this.seed_connection_tree_scenario();
+        let id = NavigatorNodeId::Connection { connection: crate::ui_fixture::MONGO_ID.into() };
+        assert!(this.new_query_for_sidebar_node(&id, cx));
+        let tab_id = this.workspace.active_tab().unwrap().id;
+        this.workspace.tab_mut(tab_id).unwrap().database = String::new();
+        this.workspace.tab_mut(tab_id).unwrap().sql =
+            "select * from \"warehouse\".\"users\"\n  where status = 'open' order by name;".into();
+        this.run_active_tab_query(cx);
+        // The fast path ran it (the scenario has no driver to answer), in the named database.
+        assert!(matches!(this.workspace.runtime(tab_id).unwrap().query.status(), crate::query::QueryStatus::Failed(error) if error.contains("UI scenario")));
+        assert_eq!(this.workspace.tab(tab_id).unwrap().database, "warehouse");
+
+        this.workspace.tab_mut(tab_id).unwrap().sql = "db.users.find({});\n\nselect * from users\n  where a = b;".into();
+        this.run_active_tab_query(cx);
+        assert!(
+            matches!(this.workspace.runtime(tab_id).unwrap().query.status(), crate::query::QueryStatus::Failed(error) if error.contains("SQL: expected a value") && error.contains("line 4, column 13")),
+            "{:?}",
+            this.workspace.runtime(tab_id).unwrap().query.status()
+        );
     });
 }
 

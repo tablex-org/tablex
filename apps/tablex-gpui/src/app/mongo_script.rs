@@ -134,15 +134,33 @@ impl AppRoot {
         };
         let selection = script_override.is_some();
         let script_text = script_override.unwrap_or_else(|| tab.sql.clone());
+        // SQL (`SELECT … FROM "db"."collection" WHERE …`) runs as the shell statement it reads as.
+        let (script_text, sql_database) = match crate::mongo_sql::rewrite_script(&script_text) {
+            Ok(rewritten) => (rewritten.script, rewritten.database),
+            Err(message) => {
+                self.fail_mongo_script(tab_id, &message, cx);
+                return;
+            }
+        };
         // A single find stays the fast path (an editable paged grid); anything else is a shell
         // script for the MongoDB Shell plugin.
         let kind = crate::mongo_script::classify(&script_text);
-        let database = match crate::mongo_script::script_database(&tab.database, &saved.uri) {
-            Ok(database) => database,
-            Err(error) => {
-                self.fail_mongo_script(tab_id, &error.to_string(), cx);
-                return;
+        let database = match sql_database {
+            // The statement named its database: the tab moves there, as `use` does, so paging and
+            // refresh read the same collection.
+            Some(database) => {
+                if let Some(tab) = self.workspace.tab_mut(tab_id) {
+                    tab.database = database.clone();
+                }
+                database
             }
+            None => match crate::mongo_script::script_database(&tab.database, &saved.uri) {
+                Ok(database) => database,
+                Err(error) => {
+                    self.fail_mongo_script(tab_id, &error.to_string(), cx);
+                    return;
+                }
+            },
         };
         let plan = match kind {
             crate::mongo_script::ScriptKind::Read(plan) => plan,

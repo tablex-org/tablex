@@ -137,6 +137,18 @@ pub fn statement_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
                 }
                 continue;
             }
+            // An SQL comment (`-- note`, a rule `-----`), not a decrement (`i--`).
+            b'-' if bytes.get(index + 1) == Some(&b'-')
+                && bytes.get(index + 2).is_none_or(|next| matches!(next, b' ' | b'\t' | b'-' | b'\n' | b'\r'))
+                && !index
+                    .checked_sub(1)
+                    .is_some_and(|before| bytes[before].is_ascii_alphanumeric() || matches!(bytes[before], b'_' | b'$' | b')' | b']')) =>
+            {
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+                continue;
+            }
             b'/' if bytes.get(index + 1) == Some(&b'*') => {
                 index += 2;
                 while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/') {
@@ -161,7 +173,16 @@ pub fn statement_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
                 // Inside an open bracket it does too when the next line starts a new statement at
                 // the margin (`db.…`, a name): an unfinished statement above must not swallow the
                 // ones below it, so the statement at the cursor is still the one the user sees.
-                let ends = blank
+                // A line that starts with SELECT starts an SQL statement (`mongo_sql`): a shell
+                // statement never begins with that word.
+                let sql_follows = depth <= 0
+                    && rest.split('\n').next().is_some_and(|line| {
+                        let line = line.trim_start();
+                        line.get(..6).is_some_and(|word| word.eq_ignore_ascii_case("select"))
+                            && line[6..].starts_with(|c: char| c.is_whitespace() || c == '*')
+                    });
+                let ends = sql_follows
+                    || blank
                     && (depth <= 0
                         || rest
                             .split('\n')
@@ -354,6 +375,13 @@ mod tests {
 
         let indented = "db.a.aggregate([\n  { $match: {} },\n\n  { $limit: 1 }\n])";
         assert_eq!(statement_ranges(indented).len(), 1, "a blank line inside an indented body");
+    }
+
+    #[test]
+    fn a_line_that_starts_with_select_starts_a_statement() {
+        let text = "[\n  { a: 1 }\n]\n    select * from c order by a;\nSELECTED = 1";
+        let found: Vec<&str> = statement_ranges(text).into_iter().map(|range| &text[range]).collect();
+        assert_eq!(found, ["[\n  { a: 1 }\n]", "select * from c order by a", "SELECTED = 1"]);
     }
 
     #[test]
