@@ -454,6 +454,9 @@ impl AppRoot {
                 .query_timeout
                 .map(|timeout| timeout.as_millis().min(u128::from(u64::MAX)) as u64),
             cursor: cursor.map(|more| more.cursor),
+            // The statements run one after the other; "On script error" says whether a failed
+            // one stops the run (as for SQL scripts).
+            continue_on_error: self.settings.editor.on_script_error == crate::settings::OnScriptError::Continue,
         };
         let slot = Arc::new(StopSlot::default());
         self.mongo_shell
