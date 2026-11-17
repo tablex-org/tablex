@@ -185,7 +185,9 @@ ENTRY="${OUT_DIR}/${DRIVER_ID}-${TARGET}-manifest-entry.json"
 python3 "${ROOT}/scripts/driver_manifest.py" entry \
     --inspect "${INSPECT_JSON}" --version "${VERSION}" --zip "${ARTIFACT}" --url "${URL}" \
     --target "${TARGET}" --team-id "${TEAM_ID}" --license "${LICENSE}" \
-    --require "${REQUIRED_FEATURES}" --out "${ENTRY}"
+    --require "${REQUIRED_FEATURES}" \
+    --min-app-version "$(python3 "${ROOT}/scripts/driver_manifest.py" min-app-version "${ROOT}/rust-engine/crates/${CRATE}/Cargo.toml")" \
+    --out "${ENTRY}"
 
 echo "Packaged: ${ARTIFACT}"
 echo "Manifest entry: ${ENTRY}"

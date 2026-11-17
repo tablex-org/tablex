@@ -868,3 +868,39 @@ class AppManifestTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CrateMinAppVersionTest(unittest.TestCase):
+    """`[package.metadata.tablex] min-app-version` of a crate's Cargo.toml becomes its catalog
+    entry's minAppVersion (`driver_manifest.py min-app-version`)."""
+
+    def write(self, text: str) -> Path:
+        directory = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(directory, ignore_errors=True))
+        path = directory / "Cargo.toml"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_the_declared_version_is_read(self):
+        path = self.write(
+            '[package]\nname = "x"\nversion = "0.2.0"\n\n'
+            '# comment\n[package.metadata.tablex]\nmin-app-version = "0.1.8"  # needs the new app\n\n'
+            '[dependencies]\nmin-app-version = "9.9.9"\n'
+        )
+        self.assertEqual(dm.crate_min_app_version(path), "0.1.8")
+
+    def test_without_one_it_is_the_default(self):
+        path = self.write('[package]\nname = "x"\nversion = "0.2.0"\n\n[dependencies]\nserde = "1"\n')
+        self.assertEqual(dm.crate_min_app_version(path), dm.DEFAULT_MIN_APP_VERSION)
+
+    def test_a_malformed_one_is_an_error_not_the_default(self):
+        for value in ['"0.1"', "0.1.8", '"latest"']:
+            path = self.write(f"[package.metadata.tablex]\nmin-app-version = {value}\n")
+            with self.assertRaises(SystemExit):
+                dm.crate_min_app_version(path)
+
+    def test_the_repository_crates_read(self):
+        self.assertEqual(dm.crate_min_app_version(ROOT / "apps" / "tablex-mcp" / "Cargo.toml"), "0.1.7")
+        for crate in ["dbengine-postgres", "dbengine-mongo", "tablex-mongo-shell", "tablex-sqruff"]:
+            version = dm.crate_min_app_version(ROOT / "rust-engine" / "crates" / crate / "Cargo.toml")
+            self.assertRegex(version, r"^\d+\.\d+\.\d+$", crate)

@@ -112,7 +112,9 @@ fi
 ENTRY="${OUT_DIR}/${TOOL}-${TARGET}-tool-entry.json"
 python3 "${ROOT}/scripts/driver_manifest.py" tool-entry \
     --binary "${ARTIFACT}" --version "${VERSION}" --target "${TARGET}" --url "${URL}" \
-    --id "${TOOL}" ${REQUIRES[@]+"${REQUIRES[@]}"} --out "${ENTRY}"
+    --id "${TOOL}" ${REQUIRES[@]+"${REQUIRES[@]}"} \
+    --min-app-version "$(python3 "${ROOT}/scripts/driver_manifest.py" min-app-version "${ROOT}/rust-engine/crates/${TOOL}/Cargo.toml")" \
+    --out "${ENTRY}"
 
 echo "Packaged: ${ARTIFACT}"
 echo "Tool entry: ${ENTRY}${REQUIRES[@]+" (needs the mongodb driver >= ${MIN_DRIVER_VERSION})"}"

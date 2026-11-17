@@ -652,6 +652,34 @@ def _cmd_sign(args: argparse.Namespace) -> int:
     return 0
 
 
+def crate_min_app_version(cargo_toml: str | Path) -> str:
+    """The oldest TableX a crate's build works with: `min-app-version` of its Cargo.toml's
+    `[package.metadata.tablex]` table, else DEFAULT_MIN_APP_VERSION. Read line by line (no TOML
+    library: the runners' Python may predate tomllib); a malformed value is an error, never
+    silently the default."""
+    section = None
+    for raw in Path(cargo_toml).read_text(encoding="utf-8").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip()
+            continue
+        if section != "package.metadata.tablex" or "=" not in line:
+            continue
+        key, value = (part.strip() for part in line.split("=", 1))
+        if key != "min-app-version":
+            continue
+        match = re.fullmatch(r'"(\d+\.\d+\.\d+)"', value)
+        if not match:
+            raise SystemExit(f"{cargo_toml}: min-app-version must be a quoted x.y.z version, got {value}")
+        return match.group(1)
+    return DEFAULT_MIN_APP_VERSION
+
+
+def _cmd_min_app_version(args: argparse.Namespace) -> int:
+    print(crate_min_app_version(args.cargo_toml))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -685,6 +713,13 @@ def main(argv: list[str] | None = None) -> int:
     tool.add_argument("--requires-driver", action="append", default=[], metavar="ID:MINVERSION", help="a driver the tool is an add-on of (repeatable)")
     tool.add_argument("--out", required=True)
     tool.set_defaults(func=_cmd_tool_entry)
+
+    minimum = sub.add_parser(
+        "min-app-version",
+        help="print the oldest TableX a crate works with ([package.metadata.tablex] min-app-version of its Cargo.toml)",
+    )
+    minimum.add_argument("cargo_toml")
+    minimum.set_defaults(func=_cmd_min_app_version)
 
     merge = sub.add_parser("merge")
     merge.add_argument("--out", required=True)

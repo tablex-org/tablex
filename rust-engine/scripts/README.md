@@ -178,6 +178,19 @@ it replaces), and per driver `category` (`sql` | `nosql` | `analytics` |
 `key_value`), `description`, `minAppVersion`, `releaseNotesUrl`, `publishedAt`.
 The category and description of each driver live in `DRIVER_META`.
 
+`minAppVersion` (the oldest TableX a build works with; an older app's Driver Manager
+shows "Needs TableX ≥ …" and does not install it) comes from the crate's own
+`Cargo.toml`, for drivers, tools and add-ons alike:
+
+```toml
+[package.metadata.tablex]
+min-app-version = "0.1.8"
+```
+
+Without it the entry says `0.1.0`. Raise it in the same change that makes a build
+need a newer app (a new op, a new file format); `driver_manifest.py min-app-version
+<Cargo.toml>` prints what the release will use.
+
 - **Dev** (`dev-drivers.sh`): `file://` artifact URLs, `teamId: ""` for the
   ad-hoc signed dylibs, no signature (the host's Developer policy accepts it).
 - **Release**: https artifact URLs and a Team ID (`package-driver.sh` with
