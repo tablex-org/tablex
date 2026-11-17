@@ -123,12 +123,28 @@ impl From<Connection> for Connected {
 
 /// Inline result of the dialog's Test button: green "Connected in N ms" or
 /// the (possibly long) server error, truncated with the full text in a tooltip.
+/// A message of the form validation (`connection_form`, which has no texts of its own) in the interface
+/// language; any other text (a driver's or the system's) is shown as it came.
+fn form_message(message: String) -> String {
+    match message.as_str() {
+        "This database type is not supported by the current shell" => {
+            t!("connection_dialog.error_unsupported_type").into_owned()
+        }
+        "Connection name is required" => t!("connection_dialog.error_name_required").into_owned(),
+        "Connection URI is required" => t!("connection_dialog.error_uri_required").into_owned(),
+        "Connection password is required" => t!("connection_dialog.error_password_required").into_owned(),
+        "Port must be between 1 and 65535" => t!("connection_dialog.error_port_range").into_owned(),
+        "Invalid connection URI" => t!("connection_dialog.invalid_connection_uri").into_owned(),
+        _ => message,
+    }
+}
+
 fn test_status_label(status: &crate::connection_dialog::TestStatus) -> AnyElement {
     use crate::connection_dialog::TestStatus;
     let (text, color): (String, gpui::Rgba) = match status {
         TestStatus::Idle => return div().flex_1().into_any_element(),
-        TestStatus::Running => ("Testing connection...".into(), theme::text_muted()),
-        TestStatus::Success { millis } => (format!("Connected in {millis} ms"), theme::success()),
+        TestStatus::Running => (t!("connection_dialog.testing_connection").into_owned(), theme::text_muted()),
+        TestStatus::Success { millis } => (t!("connection_dialog.connected_in", millis = millis).into_owned(), theme::success()),
         TestStatus::Failure(message) => (message.clone(), theme::danger()),
     };
     let full = text.clone();
@@ -460,7 +476,7 @@ impl AppRoot {
                             this.discard_pending_runs(
                                 &connection_key_task,
                                 attempt,
-                                "Connection changed while connecting; run again",
+                                &t!("connection_dialog.connection_changed_while_connecting_run_again"),
                                 cx,
                             );
                             cx.background_executor()
@@ -905,7 +921,7 @@ impl AppRoot {
         ui::primary_action_button(
             "connection-lost-reconnect",
             tab_id,
-            "Reconnect to the database",
+            t!("connection_dialog.reconnect_to_the_database"),
         )
         .debug_selector(|| "connection-lost-reconnect".into())
         .icon(Icon::new(SidebarGlyph::Connected))
@@ -923,7 +939,7 @@ impl AppRoot {
     ) -> Button {
         Button::new(("connection-lost-edit", tab_id))
             .debug_selector(|| "connection-lost-edit".into())
-            .label("Edit Connection")
+            .label(t!("menu.edit_connection"))
             .compact()
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.open_connection_dialog_with_requirement(
@@ -977,7 +993,7 @@ impl AppRoot {
         let icon = Some(Icon::new(SidebarGlyph::Connected));
         let card = match state {
             ResultConnectionState::Connecting => {
-                connection_state_card_with(icon, "Connecting…", description, Vec::new())
+                connection_state_card_with(icon, t!("connection_dialog.connecting"), description, Vec::new())
             }
             ResultConnectionState::Disconnected | ResultConnectionState::Failed(_) => {
                 let failed = matches!(state, ResultConnectionState::Failed(_));
@@ -988,7 +1004,7 @@ impl AppRoot {
                             .into_any_element(),
                     );
                 }
-                connection_state_card_with(icon, "Disconnected", description, actions)
+                connection_state_card_with(icon, t!("connection_dialog.disconnected"), description, actions)
             }
         };
         div()
@@ -1025,9 +1041,9 @@ impl AppRoot {
         let connecting = matches!(state, ResultConnectionState::Connecting);
         let failed = matches!(state, ResultConnectionState::Failed(_));
         let label = match (&state, detail.is_empty()) {
-            (ResultConnectionState::Connecting, _) => "Connecting…".to_string(),
-            (_, true) => "Disconnected".to_string(),
-            _ => format!("Disconnected — {detail}"),
+            (ResultConnectionState::Connecting, _) => t!("connection_dialog.connecting").into_owned(),
+            (_, true) => t!("connection_dialog.disconnected").into_owned(),
+            _ => t!("connection_dialog.disconnected_detail", detail = detail).into_owned(),
         };
         div()
             .debug_selector(|| "connection-lost-banner".into())
@@ -1054,7 +1070,7 @@ impl AppRoot {
                     Button::new(("connection-lost-reconnect", tab_id))
                         .debug_selector(|| "connection-lost-reconnect".into())
                         .icon(Icon::new(SidebarGlyph::Connected).size(px(12.0)))
-                        .label("Reconnect")
+                        .label(t!("connection_dialog.reconnect"))
                         .with_size(gpui_component::Size::XSmall)
                         .outline()
                         .compact()
@@ -1507,10 +1523,10 @@ impl AppRoot {
             let root = root.clone();
             let connection_id = connection_id.clone();
             dialog
-                .title("Delete Connection")
-                .child(format!("Delete {}?", connection.name))
+                .title(t!("menu.delete_connection"))
+                .child(t!("connection_dialog.delete_confirm", name = connection.name).into_owned())
                 .button_props(
-                    gpui_component::dialog::DialogButtonProps::default().ok_text("Delete"),
+                    gpui_component::dialog::DialogButtonProps::default().ok_text(t!("sidebar.delete")),
                 )
                 .confirm()
                 .on_ok(move |_, _, cx| {
@@ -1728,16 +1744,8 @@ impl AppRoot {
         {
             self.connection_ui.last_inputs = Some(inputs.clone());
         }
-        let title = if editing {
-            "Edit Connection"
-        } else {
-            "New Connection"
-        };
-        let ok_text = if require_password {
-            "Save & Connect"
-        } else {
-            "Save"
-        };
+        let title = if editing { ts!("menu.edit_connection") } else { ts!("titlebar.new_connection") };
+        let ok_text = if require_password { ts!("connection_dialog.save_connect") } else { ts!("menu.save") };
         let scenario_enabled = self.scenario_ui.service.is_some();
         #[cfg(feature = "ui-scenarios")]
         let inputs = {
@@ -1760,7 +1768,8 @@ impl AppRoot {
                 let form = tab_inputs.read_form(cx, initial_form.clone());
                 let status = tab_inputs.ssh.test_status.clone();
                 if let Err(error) = form.validate() {
-                    *status.borrow_mut() = crate::connection_dialog::TestStatus::Failure(error);
+                    *status.borrow_mut() =
+                        crate::connection_dialog::TestStatus::Failure(form_message(error));
                     return;
                 }
                 let window_handle = window.window_handle();
@@ -1822,7 +1831,7 @@ impl AppRoot {
                     div()
                         .text_size(px(15.0))
                         .font_weight(gpui::FontWeight::MEDIUM)
-                        .child(title),
+                        .child(title.clone()),
                 )
                 .child(content)
                 .footer({
@@ -1837,7 +1846,7 @@ impl AppRoot {
                             .child(
                                 Button::new("ok")
                                     .debug_selector(|| "connection-save".into())
-                                    .label(ok_text)
+                                    .label(ok_text.clone())
                                     .compact()
                                     .primary(),
                             )
@@ -1847,7 +1856,7 @@ impl AppRoot {
                         if inputs.is_picker() {
                             let inputs_for_next = inputs.clone();
                             let next = Button::new("connection-picker-next")
-                                .label("Next")
+                                .label(t!("connection_dialog.next"))
                                 .debug_selector(|| "connection-picker-next".into())
                                 .compact()
                                 .outline()
@@ -1908,7 +1917,7 @@ impl AppRoot {
                         let status = inputs.test_status.borrow().clone();
                         let running = status == crate::connection_dialog::TestStatus::Running;
                         let test_connection = Button::new("test-connection")
-                            .label(if running { "Testing..." } else { "Test" })
+                            .label(if running { t!("connection_dialog.testing") } else { t!("connection_dialog.test") })
                             .debug_selector(|| "test-connection".into())
                             .compact()
                             .outline()
@@ -1932,7 +1941,7 @@ impl AppRoot {
                                     }
                                     Err(error) => {
                                         *inputs_for_test.test_status.borrow_mut() =
-                                            crate::connection_dialog::TestStatus::Failure(error);
+                                            crate::connection_dialog::TestStatus::Failure(form_message(error));
                                     }
                                 }
                                 window.refresh();
@@ -1948,9 +1957,9 @@ impl AppRoot {
                             .outline()
                             .disabled(!inputs.saved.get())
                             .tooltip(if inputs.saved.get() {
-                                "Select Visible Databases"
+                                t!("connection_dialog.select_visible_databases")
                             } else {
-                                "Save the connection first to choose visible databases"
+                                t!("connection_dialog.save_the_connection_first_to_choose_visible_data")
                             })
                             .on_click({
                                 let root = root.clone();
@@ -1984,7 +1993,7 @@ impl AppRoot {
                     })(_window, _cx);
                     div().children(buttons).into_any_element()
                 })
-                .button_props(gpui_component::dialog::DialogButtonProps::default().ok_text(ok_text))
+                .button_props(gpui_component::dialog::DialogButtonProps::default().ok_text(ok_text.clone()))
                 .on_close({
                     let root_for_close = root.clone();
                     let inputs_for_close = inputs.clone();
@@ -2060,7 +2069,7 @@ impl AppRoot {
                                 Ok(Some(Err(error))) => {
                                     window.open_alert_dialog(cx, move |dialog, _, _| {
                                         dialog
-                                            .title("Could not save connection")
+                                            .title(t!("connection_dialog.could_not_save_connection"))
                                             .child(error.clone())
                                     });
                                 }
@@ -2095,7 +2104,7 @@ impl AppRoot {
                                             });
                                             window.open_alert_dialog(cx, move |dialog, _, _| {
                                                 dialog
-                                                    .title("Invalid connection URI")
+                                                    .title(t!("connection_dialog.invalid_connection_uri"))
                                                     .child(error.clone())
                                             });
                                             return false;
@@ -2166,8 +2175,8 @@ impl AppRoot {
                                 });
                                 window.open_alert_dialog(cx, move |dialog, _, _| {
                                     dialog
-                                        .title("Could not save connection")
-                                        .child(error.clone())
+                                        .title(t!("connection_dialog.could_not_save_connection"))
+                                        .child(form_message(error.clone()))
                                 });
                                 false
                             }

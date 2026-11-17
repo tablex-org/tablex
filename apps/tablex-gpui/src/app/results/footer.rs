@@ -38,7 +38,7 @@ fn auto_refresh_menu(
     let root_stop = root.clone();
     let mut menu = menu
         .item(
-            PopupMenuItem::new("Customize...")
+            PopupMenuItem::new(t!("grid.customize"))
                 .disabled(!is_mongo)
                 .on_click(move |_, window, app| {
                     let _ = root_customize.update(app, |this, cx| {
@@ -47,7 +47,7 @@ fn auto_refresh_menu(
                 }),
         )
         .item(
-            PopupMenuItem::new("Stop")
+            PopupMenuItem::new(t!("grid.stop"))
                 .disabled(auto_refresh.is_none())
                 .on_click(move |_, _, app| {
                     let _ = root_stop.update(app, |this, cx| {
@@ -59,10 +59,11 @@ fn auto_refresh_menu(
     for seconds in crate::auto_refresh::PRESET_INTERVALS {
         let root = root.clone();
         menu = menu.item(
-            PopupMenuItem::new(format!(
-                "Refresh every {seconds} {}",
-                if *seconds == 1 { "second" } else { "seconds" }
-            ))
+            PopupMenuItem::new(if *seconds == 1 {
+                t!("grid.refresh_every_one")
+            } else {
+                t!("grid.refresh_every_other", seconds = seconds)
+            })
             .disabled(!is_mongo)
             .checked(auto_refresh == Some(*seconds))
             .on_click(move |_, _, app| {
@@ -73,15 +74,15 @@ fn auto_refresh_menu(
         );
     }
     menu.label(if is_mongo {
-        "Frequent refresh increases server load"
+        t!("grid.frequent_refresh_increases_server_load")
     } else {
-        "Automatic refresh requires a read-only driver query; unavailable for SQL"
+        t!("grid.automatic_refresh_requires_a_read_only_driver_qu")
     })
 }
 
 /// Compact status-row text of the auto-refresh state.
 fn auto_refresh_label(seconds: Option<u64>) -> String {
-    seconds.map_or_else(|| "Off".to_string(), |seconds| format!("{seconds}s"))
+    seconds.map_or_else(|| t!("grid.auto_refresh_off_short").into_owned(), |seconds| format!("{seconds}s"))
 }
 
 /// A page button whose page is loading: its icon spins. Kept out of the footer
@@ -224,7 +225,7 @@ impl AppRoot {
             )
             .compact()
             .ghost()
-            .tooltip("Previous")
+            .tooltip(t!("grid.previous"))
             .debug_selector(|| "page-previous".into())
             .when(paging == Some(false), spinning_page_button)
             .disabled(!pagination.has_previous() || editing_document || query_running)
@@ -236,7 +237,7 @@ impl AppRoot {
             .icon(Icon::new(IconName::ChevronRight).size(px(14.0)))
             .compact()
             .ghost()
-            .tooltip("Next")
+            .tooltip(t!("grid.next"))
             .debug_selector(|| "page-next".into())
             .when(paging == Some(true), spinning_page_button)
             .disabled(!pagination.has_next() || editing_document || query_running)
@@ -244,7 +245,10 @@ impl AppRoot {
                 this.page_tab_query(tab_id, true, cx);
             }));
 
-        let summary = format!("{} rows", self.grid(tab_id).row_count());
+        let summary = match self.grid(tab_id).row_count() {
+            1 => t!("grid.rows_one").into_owned(),
+            count => t!("grid.rows_other", count = count).into_owned(),
+        };
         let query_time = last_query_ms
             .map(|milliseconds| format!("{milliseconds} ms"))
             .unwrap_or_else(|| "—".to_string());
@@ -256,7 +260,7 @@ impl AppRoot {
                 Button::new(("result-refresh-action", tab_id))
                     .small()
                     .debug_selector(|| "result-refresh".into())
-                    .label("Refresh")
+                    .label(t!("grid.refresh"))
                     .compact()
                     .ghost()
                     .disabled(editing_document)
@@ -284,11 +288,11 @@ impl AppRoot {
                     Button::new(("result-refresh-action", tab_id))
                         .small()
                         .debug_selector(|| "result-refresh".into())
-                        .label("Refresh")
+                        .label(t!("grid.refresh"))
                         .compact()
                         .ghost()
                         .disabled(true)
-                        .tooltip("Run the script again with Run"),
+                        .tooltip(t!("grid.run_the_script_again_with_run")),
                 )
         } else {
             div()
@@ -305,7 +309,7 @@ impl AppRoot {
         let export = Button::new(("result-export", tab_id))
             .small()
             .debug_selector(|| "result-export".into())
-            .label("Export")
+            .label(t!("grid.export"))
             .dropdown_caret(true)
             .compact()
             .ghost()
@@ -345,7 +349,7 @@ impl AppRoot {
                         })
                         .when(can_transfer, |menu| {
                             menu.separator().item(
-                                PopupMenuItem::new("Whole Result to Files or Tables\u{2026}")
+                                PopupMenuItem::new(t!("grid.whole_result_to_files_or_tables"))
                                     .icon(Icon::empty().path("icons/arrow-left-right.svg").size(px(12.0)))
                                     .on_click(move |_, window, app| {
                                         let _ = transfer_root.update(app, |this, cx| this.open_transfer_from_tab(tab_id, window, cx));
@@ -402,12 +406,12 @@ impl AppRoot {
             // Redis edits are applied at once: nothing to commit.
             div().debug_selector(|| "result-group-commit".into()).into_any_element()
         } else if is_mongo {
-            let commit = ui::primary_action_button("mongo-commit", tab_id, "Commit")
+            let commit = ui::primary_action_button("mongo-commit", tab_id, t!("grid.commit"))
                 .small()
                 .debug_selector(|| "mongo-commit".into())
                 .disabled(pending == 0 || commit_running)
                 .on_click(cx.listener(move |this, _, window, cx| this.request_commit_mongo(tab_id, window, cx)));
-            let rollback = ui::action_button("mongo-rollback", tab_id, "Rollback")
+            let rollback = ui::action_button("mongo-rollback", tab_id, t!("grid.rollback"))
                 .small()
                 .debug_selector(|| "mongo-rollback".into())
                 .disabled(pending == 0 || commit_running)
@@ -426,9 +430,9 @@ impl AppRoot {
                 "apply-edit",
                 tab_id,
                 if pending_count == 1 {
-                    "Apply"
+                    t!("grid.apply")
                 } else {
-                    "Apply All"
+                    t!("grid.apply_all")
                 },
             )
             .disabled(
@@ -455,7 +459,7 @@ impl AppRoot {
             let discard = ui::action_button(
                 "discard-edit",
                 tab_id,
-                if cancellable { "Cancel" } else { "Discard" },
+                if cancellable { t!("common.cancel") } else { t!("grid.discard") },
             )
             .small()
             .debug_selector(|| "discard-edit".into())
@@ -479,17 +483,17 @@ impl AppRoot {
                 .into_any_element()
         };
         let row_group = if is_redis_key {
-            let add = ui::icon_button(("redis-add", tab_id), IconName::Plus, "Add")
+            let add = ui::icon_button(("redis-add", tab_id), IconName::Plus, t!("grid.add"))
                 .small()
                 .debug_selector(|| "redis-add".into())
                 .on_click(cx.listener(move |this, _, window, cx| this.open_redis_add_dialog(tab_id, window, cx)));
-            let edit = ui::icon_button(("redis-edit", tab_id), IconName::Frame, "Edit")
+            let edit = ui::icon_button(("redis-edit", tab_id), IconName::Frame, t!("grid.edit"))
                 .small()
                 .icon(Icon::empty().path("icons/pencil.svg").size(px(14.0)))
                 .debug_selector(|| "redis-edit".into())
                 .disabled(!has_selection)
                 .on_click(cx.listener(move |this, _, window, cx| this.open_redis_element_editor(tab_id, window, cx)));
-            let delete = ui::icon_button(("redis-remove", tab_id), IconName::Delete, "Remove")
+            let delete = ui::icon_button(("redis-remove", tab_id), IconName::Delete, t!("grid.remove"))
                 .small()
                 .debug_selector(|| "redis-remove".into())
                 .disabled(!has_selection)
@@ -518,20 +522,20 @@ impl AppRoot {
                 .dropdown_caret(true)
                 .compact()
                 .ghost()
-                .tooltip("Add Row")
+                .tooltip(t!("grid.add_row"))
                 .disabled(commit_running)
                 .dropdown_menu(move |menu, _, _| {
                     let root_new = root_add.clone();
                     let root_duplicate = root_add.clone();
                     menu.item(
-                        PopupMenuItem::new("New Document").on_click(move |_, window, app| {
+                        PopupMenuItem::new(t!("grid.new_document")).on_click(move |_, window, app| {
                             let _ = root_new.update(app, |this, cx| {
                                 this.open_mongo_insert_row_editor_from_menu(tab_id, window, cx);
                             });
                         }),
                     )
                     .item(
-                        PopupMenuItem::new("Duplicate Selected")
+                        PopupMenuItem::new(t!("grid.duplicate_selected"))
                             .disabled(!has_selection)
                             .on_click(move |_, window, app| {
                                 let _ = root_duplicate.update(app, |this, cx| {
@@ -540,14 +544,14 @@ impl AppRoot {
                             }),
                     )
                 });
-            let delete = ui::icon_button(("mongo-delete", tab_id), IconName::Delete, "Delete")
+            let delete = ui::icon_button(("mongo-delete", tab_id), IconName::Delete, t!("grid.delete"))
                 .small()
                 .debug_selector(|| "mongo-delete".into())
                 .disabled(!can_delete || commit_running)
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.confirm_delete_selected_row(tab_id, window, cx);
                 }));
-            let edit = ui::icon_button(("edit-cell", tab_id), IconName::Frame, "Edit")
+            let edit = ui::icon_button(("edit-cell", tab_id), IconName::Frame, t!("grid.edit"))
                 .small()
                 .icon(Icon::empty().path("icons/pencil.svg").size(px(14.0)))
                 .debug_selector(|| "edit-cell".into())
@@ -566,7 +570,7 @@ impl AppRoot {
                 .child(delete)
                 .into_any_element()
         } else {
-            let edit = ui::icon_button(("edit-cell", tab_id), IconName::Frame, "Edit")
+            let edit = ui::icon_button(("edit-cell", tab_id), IconName::Frame, t!("grid.edit"))
                 .small()
                 .icon(Icon::empty().path("icons/pencil.svg").size(px(14.0)))
                 .debug_selector(|| "edit-cell".into())
@@ -580,7 +584,7 @@ impl AppRoot {
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.open_cell_editor(tab_id, window, cx);
                 }));
-            let delete = ui::icon_button(("delete-row", tab_id), IconName::Delete, "Delete")
+            let delete = ui::icon_button(("delete-row", tab_id), IconName::Delete, t!("grid.delete"))
                 .small()
                 .debug_selector(|| "delete-row".into())
                 .disabled(
@@ -595,7 +599,7 @@ impl AppRoot {
                 }));
             // Insert lives in the footer (was the "Structure" block's Insert
             // Row button); it opens the same staged-insert dialog.
-            let add = ui::icon_button(("sql-add-row", tab_id), IconName::Plus, "Insert Row")
+            let add = ui::icon_button(("sql-add-row", tab_id), IconName::Plus, t!("grid.insert_row"))
                 .small()
                 .debug_selector(|| "sql-add-row".into())
                 .disabled(
@@ -620,12 +624,12 @@ impl AppRoot {
                 .into_any_element()
         };
         let history_group = if is_mongo {
-            let undo = ui::icon_button(("mongo-undo", tab_id), IconName::Undo2, "Undo")
+            let undo = ui::icon_button(("mongo-undo", tab_id), IconName::Undo2, t!("grid.undo"))
                 .small()
                 .debug_selector(|| "mongo-undo".into())
                 .disabled(!can_undo || commit_running)
                 .on_click(cx.listener(move |this, _, _, cx| this.undo_mongo_mutation(tab_id, cx)));
-            let redo = ui::icon_button(("mongo-redo", tab_id), IconName::Redo2, "Redo")
+            let redo = ui::icon_button(("mongo-redo", tab_id), IconName::Redo2, t!("grid.redo"))
                 .small()
                 .debug_selector(|| "mongo-redo".into())
                 .disabled(!can_redo || commit_running)
@@ -663,8 +667,8 @@ impl AppRoot {
             .selected(self.record_view_active(tab_id))
             .disabled(record_support.is_err())
             .tooltip(match record_support {
-                Ok(()) => "Record view (Tab)",
-                Err(reason) => reason,
+                Ok(()) => t!("grid.record_view_tab"),
+                Err(reason) => reason.into(),
             })
             .debug_selector(|| "record-view-toggle".into())
             .on_click(cx.listener(move |this, _, _, cx| this.toggle_record_view(tab_id, cx)));
@@ -714,7 +718,7 @@ impl AppRoot {
             .track_scroll(&self.view(tab_id).result_action_scroll)
             .child(action_content);
         let status_error = match commit_status {
-            crate::mongo_result::MongoCommitStatus::Running => Some("Committing...".to_string()),
+            crate::mongo_result::MongoCommitStatus::Running => Some(t!("grid.committing").into_owned()),
             crate::mongo_result::MongoCommitStatus::Partial { committed, error } => {
                 Some(format!("{committed} committed: {error}"))
             }
@@ -743,8 +747,8 @@ impl AppRoot {
                         .icon(Icon::empty().path("icons/refresh-cw.svg").size(px(12.0)))
                         .label(auto_refresh_label(auto_refresh))
                         .tooltip(match auto_refresh {
-                            Some(seconds) => format!("Auto refresh: every {seconds}s"),
-                            None => "Auto refresh: off".to_string(),
+                            Some(seconds) => t!("grid.auto_refresh_every", seconds = seconds).into_owned(),
+                            None => t!("grid.auto_refresh_off").into_owned(),
                         })
                         .dropdown_menu(move |menu, _, _| {
                             auto_refresh_menu(menu, &root, tab_id, true, auto_refresh)

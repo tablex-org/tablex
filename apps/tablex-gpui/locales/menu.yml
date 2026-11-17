@@ -1,0 +1,429 @@
+_version: 2
+menu:
+  mongo_unsupported:
+    en: Not supported by this MongoDB driver version
+    vi: Driver MongoDB phiên bản này không hỗ trợ
+  view_data:
+    en: View Data
+    vi: Xem dữ liệu
+  view_in_new_tab:
+    en: View in New Tab
+    vi: Xem trong tab mới
+  manage_indexes:
+    en: Manage Indexes
+    vi: Quản lý chỉ mục
+  rename:
+    en: Rename
+    vi: Đổi tên
+  clone_collection:
+    en: Clone Collection
+    vi: Nhân bản collection
+  drop_collection:
+    en: Drop Collection
+    vi: Xoá collection
+  clear_default_database:
+    en: Clear Default Database
+    vi: Bỏ cơ sở dữ liệu mặc định
+  set_as_default_database:
+    en: Set as Default Database
+    vi: Đặt làm cơ sở dữ liệu mặc định
+  system_databases_cannot_be_dropped:
+    en: System databases cannot be dropped
+    vi: Không thể xoá cơ sở dữ liệu hệ thống
+  about:
+    en: "About %{name}"
+    vi: "Giới thiệu %{name}"
+  hide:
+    en: "Hide %{name}"
+    vi: "Ẩn %{name}"
+  quit:
+    en: "Quit %{name}"
+    vi: "Thoát %{name}"
+  create_database_unavailable:
+    en: Create Database (unavailable)
+    vi: Tạo cơ sở dữ liệu (không khả dụng)
+  tab:
+    show_full_tab_titles:
+      en: Show Full Tab Titles
+      vi: Hiện đầy đủ tiêu đề tab
+    shorten_tab_titles:
+      en: Shorten Tab Titles
+      vi: Rút gọn tiêu đề tab
+    rename_tab:
+      en: Rename Tab
+      vi: Đổi tên tab
+    duplicate_tab:
+      en: Duplicate Tab
+      vi: Nhân bản tab
+    copy_name:
+      en: Copy Name
+      vi: Sao chép tên
+    locate_in_sidebar:
+      en: Locate in Sidebar
+      vi: Định vị trên thanh bên
+    unpin_tab:
+      en: Unpin Tab
+      vi: Bỏ ghim tab
+    pin_tab:
+      en: Pin Tab
+      vi: Ghim tab
+    split_right:
+      en: Split Right
+      vi: Chia sang phải
+    split_down:
+      en: Split Down
+      vi: Chia xuống dưới
+    move_to_other_pane:
+      en: Move to Other Pane
+      vi: Chuyển sang ngăn khác
+    close_pane:
+      en: Close Pane
+      vi: Đóng ngăn
+    close_tabs_to_the_left:
+      en: Close Tabs to the Left
+      vi: Đóng các tab bên trái
+    close_tabs_to_the_right:
+      en: Close Tabs to the Right
+      vi: Đóng các tab bên phải
+    close_tab_group:
+      en: Close Tab Group
+      vi: Đóng nhóm tab
+    close_pinned_tab:
+      en: Close Pinned Tab
+      vi: Đóng tab đã ghim
+    close_tab:
+      en: Close Tab
+      vi: Đóng tab
+    close_other_pinned_tabs:
+      en: Close Other Pinned Tabs
+      vi: Đóng các tab đã ghim khác
+    close_other_regular_tabs:
+      en: Close Other Regular Tabs
+      vi: Đóng các tab thường khác
+    close_other_tabs:
+      en: Close Other Tabs
+      vi: Đóng các tab khác
+    close_all_pinned_tabs:
+      en: Close All Pinned Tabs
+      vi: Đóng tất cả tab đã ghim
+    close_all_regular_tabs:
+      en: Close All Regular Tabs
+      vi: Đóng tất cả tab thường
+    close_all_tabs:
+      en: Close All Tabs
+      vi: Đóng tất cả tab
+    group_tabs_by:
+      en: Group Tabs By
+      vi: Nhóm tab theo
+    none:
+      en: None
+      vi: Không nhóm
+    connection:
+      en: Connection
+      vi: Kết nối
+    database:
+      en: Database
+      vi: Cơ sở dữ liệu
+    new_query:
+      en: New Query
+      vi: Truy vấn mới
+    close_all_tabs_in_group:
+      en: Close All Tabs in Group
+      vi: Đóng tất cả tab trong nhóm
+    disconnect:
+      en: Disconnect
+      vi: Ngắt kết nối
+  loading:
+    en: Loading…
+    vi: Đang tải…
+  no_saved_queries:
+    en: No Saved Queries
+    vi: Chưa có truy vấn đã lưu
+  script_name:
+    en: Script name
+    vi: Tên script
+  save:
+    en: Save
+    vi: Lưu
+  invalid_script_name:
+    en: Invalid script name
+    vi: Tên script không hợp lệ
+  enter_a_name_without_leading_or_trailing_whitesp:
+    en: Enter a name without leading or trailing whitespace.
+    vi: Nhập tên không có khoảng trắng ở đầu hoặc cuối.
+  database_name:
+    en: Database name
+    vi: Tên cơ sở dữ liệu
+  create_database:
+    en: Create Database
+    vi: Tạo cơ sở dữ liệu
+  names_must_not_be_empty_or_padded_with_whitespac:
+    en: Names must not be empty or padded with whitespace.
+    vi: Tên không được để trống hoặc có khoảng trắng ở hai đầu.
+  invalid_database_name:
+    en: Invalid database name
+    vi: Tên cơ sở dữ liệu không hợp lệ
+  create_this_database:
+    en: "Create this database?"
+    vi: "Tạo cơ sở dữ liệu này?"
+  move_to_new_group:
+    en: Move to New Group
+    vi: Chuyển vào nhóm mới
+  move:
+    en: Move
+    vi: Chuyển
+  invalid_group_name:
+    en: Invalid group name
+    vi: Tên nhóm không hợp lệ
+  enter_a_non_empty_group_name:
+    en: Enter a non-empty group name.
+    vi: Nhập tên nhóm không để trống.
+  search_databases:
+    en: Search databases
+    vi: Tìm cơ sở dữ liệu
+  regex_patterns_one_per_line_optional:
+    en: "Regex patterns, one per line (optional)"
+    vi: "Mẫu regex, mỗi dòng một mẫu (không bắt buộc)"
+  visible_object_filter:
+    en: Visible Object Filter
+    vi: Bộ lọc đối tượng hiển thị
+  select_all:
+    en: Select all
+    vi: Chọn tất cả
+  select_filtered:
+    en: Select filtered
+    vi: Chọn các mục đã lọc
+  clear:
+    en: Clear
+    vi: Xoá
+  show_system_databases:
+    en: Show system databases
+    vi: Hiện cơ sở dữ liệu hệ thống
+  database_for_schemas:
+    en: Database for schemas
+    vi: Cơ sở dữ liệu cho schema
+  show_all:
+    en: Show All
+    vi: Hiện tất cả
+  close_connection:
+    en: Close Connection
+    vi: Đóng kết nối
+  connect:
+    en: Connect
+    vi: Kết nối
+  copy_name:
+    en: Copy Name
+    vi: Sao chép tên
+  copy_connection_info:
+    en: Copy Connection Info
+    vi: Sao chép thông tin kết nối
+  query_history:
+    en: Query History
+    vi: Lịch sử truy vấn
+  run_sql_file:
+    en: Run SQL File…
+    vi: Chạy tệp SQL…
+  users_privileges:
+    en: "Users & Privileges…"
+    vi: "Người dùng & quyền…"
+  process_list:
+    en: Process List…
+    vi: Danh sách tiến trình…
+  refresh:
+    en: Refresh
+    vi: Làm mới
+  edit_connection:
+    en: Edit Connection
+    vi: Sửa kết nối
+  duplicate_connection:
+    en: Duplicate Connection
+    vi: Nhân bản kết nối
+  delete_connection:
+    en: Delete Connection
+    vi: Xoá kết nối
+  new_aggregation:
+    en: New Aggregation
+    vi: Aggregation mới
+  drop_database:
+    en: Drop Database
+    vi: Xoá cơ sở dữ liệu
+  include_indexes:
+    en: Include indexes
+    vi: Gồm cả chỉ mục
+  field_name:
+    en: Field name
+    vi: Tên trường
+  drop_index:
+    en: Drop Index
+    vi: Xoá chỉ mục
+  create_index:
+    en: Create Index
+    vi: Tạo chỉ mục
+  this_collection_has_no_indexes_yet:
+    en: This collection has no indexes yet.
+    vi: Collection này chưa có chỉ mục.
+  index_fields:
+    en: Index fields
+    vi: Các trường của chỉ mục
+  add_field:
+    en: Add field
+    vi: Thêm trường
+  unique:
+    en: Unique
+    vi: Duy nhất
+  sparse:
+    en: Sparse
+    vi: Thưa (sparse)
+  name_generated_if_blank:
+    en: Name (generated if blank)
+    vi: Tên (tự tạo nếu để trống)
+  expire_after_seconds:
+    en: Expire after (seconds)
+    vi: Hết hạn sau (giây)
+  new_table:
+    en: New Table…
+    vi: Bảng mới…
+  import_data:
+    en: Import Data…
+    vi: Nhập dữ liệu…
+  transfer_data:
+    en: Transfer Data…
+    vi: Chuyển dữ liệu…
+  export_data:
+    en: Export Data…
+    vi: Xuất dữ liệu…
+  backup:
+    en: Backup…
+    vi: Sao lưu…
+  restore:
+    en: Restore…
+    vi: Khôi phục…
+  new_schema:
+    en: New Schema…
+    vi: Schema mới…
+  new_database:
+    en: New Database…
+    vi: Cơ sở dữ liệu mới…
+  truncate_table:
+    en: Truncate Table…
+    vi: Làm rỗng bảng…
+  rename_table:
+    en: Rename Table…
+    vi: Đổi tên bảng…
+  rename_view:
+    en: Rename View…
+    vi: Đổi tên view…
+  rename_materialized_view:
+    en: Rename Materialized View…
+    vi: Đổi tên materialized view…
+  drop_table:
+    en: Drop Table…
+    vi: Xoá bảng…
+  drop_view:
+    en: Drop View…
+    vi: Xoá view…
+  drop_materialized_view:
+    en: Drop Materialized View…
+    vi: Xoá materialized view…
+  generate_sql:
+    en: Generate SQL
+    vi: Tạo SQL
+  review_sql:
+    en: Review SQL
+    vi: Xem lại SQL
+  common_types:
+    en: Common types
+    vi: Kiểu thường dùng
+  remove_the_column:
+    en: Remove the column
+    vi: Xoá cột
+  add_column:
+    en: Add column
+    vi: Thêm cột
+  table_name:
+    en: Table name
+    vi: Tên bảng
+  table_comment_optional:
+    en: Table comment (optional)
+    vi: Ghi chú của bảng (không bắt buộc)
+  check_for_updates:
+    en: Check for Updates…
+    vi: Kiểm tra cập nhật…
+  settings:
+    en: Settings…
+    vi: Cài đặt…
+  driver_manager:
+    en: Driver Manager…
+    vi: Driver Manager…
+  hide_others:
+    en: Hide Others
+    vi: Ẩn các ứng dụng khác
+  file:
+    en: File
+    vi: Tệp
+  new_connection:
+    en: New Connection
+    vi: Kết nối mới
+  new_query:
+    en: New Query
+    vi: Truy vấn mới
+  pending_transactions:
+    en: Pending Transactions…
+    vi: Giao dịch đang chờ…
+  close_tab:
+    en: Close Tab
+    vi: Đóng tab
+  edit:
+    en: Edit
+    vi: Sửa
+  undo:
+    en: Undo
+    vi: Hoàn tác
+  redo:
+    en: Redo
+    vi: Làm lại
+  cut:
+    en: Cut
+    vi: Cắt
+  copy:
+    en: Copy
+    vi: Sao chép
+  paste:
+    en: Paste
+    vi: Dán
+  select_all_2:
+    en: Select All
+    vi: Chọn tất cả
+  view:
+    en: View
+    vi: Xem
+  toggle_sidebar:
+    en: Toggle Sidebar
+    vi: Bật/tắt thanh bên
+  error_log:
+    en: Error Log
+    vi: Nhật ký lỗi
+  ai_assistant:
+    en: AI Assistant
+    vi: Trợ lý AI
+  split_right:
+    en: Split Right
+    vi: Chia sang phải
+  split_down:
+    en: Split Down
+    vi: Chia xuống dưới
+  command_palette:
+    en: Command Palette
+    vi: Bảng lệnh
+  window:
+    en: Window
+    vi: Cửa sổ
+  minimize:
+    en: Minimize
+    vi: Thu nhỏ
+  zoom:
+    en: Zoom
+    vi: Phóng to
+  help:
+    en: Help
+    vi: Trợ giúp

@@ -1,0 +1,62 @@
+_version: 2
+titlebar:
+  theme:
+    en: Theme
+    vi: Chủ đề
+  theme_light:
+    en: Light
+    vi: Sáng
+  theme_dark:
+    en: Dark
+    vi: Tối
+  theme_system:
+    en: System
+    vi: Hệ thống
+  settings:
+    en: Settings
+    vi: Cài đặt
+  new_connection:
+    en: New Connection
+    vi: Kết nối mới
+  new_connection_tooltip:
+    en: New connection
+    vi: Kết nối mới
+  new_query:
+    en: New Query
+    vi: Truy vấn mới
+  new_query_tooltip:
+    en: New query for the selected sidebar node
+    vi: Truy vấn mới cho mục đang chọn trên thanh bên
+  data_transfer:
+    en: Data Transfer
+    vi: Chuyển dữ liệu
+  data_transfer_tooltip:
+    en: Copy tables or a query into tables or files
+    vi: Sao chép bảng hoặc truy vấn vào bảng hoặc tệp
+  driver_manager:
+    en: Driver Manager
+    vi: Driver Manager
+  driver_manager_tooltip:
+    en: "Install, update and remove database drivers"
+    vi: "Cài đặt, cập nhật và gỡ driver cơ sở dữ liệu"
+  driver_manager_tooltip_updates:
+    en: "Install, update and remove database drivers (updates available)"
+    vi: "Cài đặt, cập nhật và gỡ driver cơ sở dữ liệu (có bản cập nhật)"
+  assistant:
+    en: Assistant
+    vi: Trợ lý
+  assistant_tooltip:
+    en: Show or hide the AI assistant
+    vi: Hiện hoặc ẩn trợ lý AI
+  assistant_tooltip_asking:
+    en: A statement waits for your answer. Show or hide the AI assistant
+    vi: Có câu lệnh đang chờ bạn trả lời. Hiện hoặc ẩn trợ lý AI
+  read_only:
+    en: "%{name} · read-only"
+    vi: "%{name} · chỉ đọc"
+  show_sidebar:
+    en: Show sidebar
+    vi: Hiện thanh bên
+  language:
+    en: Language
+    vi: Ngôn ngữ

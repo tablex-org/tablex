@@ -260,12 +260,12 @@ impl AppRoot {
                 Button::new(("explain-query", tab_id))
                     .small()
                     .debug_selector(|| "explain-query".into())
-                    .label("Explain")
+                    .label(t!("editor.explain"))
                     .compact()
                     .ghost()
                     .disabled(!can_run)
                     .tooltip(shortcuts::with_label(
-                        "Show the execution plan of the statement",
+                        &t!("editor.show_the_execution_plan"),
                         &self.settings.shortcuts,
                         "editor.explain",
                     ))
@@ -299,7 +299,7 @@ impl AppRoot {
                             let row = div()
                                 .id("explain-menu-analyze")
                                 .debug_selector(|| "explain-menu-analyze".into())
-                                .child("Explain Analyze");
+                                .child(t!("editor.explain_analyze"));
                             match reason.clone() {
                                 Some(reason) => row
                                     .tooltip(move |window, cx| {

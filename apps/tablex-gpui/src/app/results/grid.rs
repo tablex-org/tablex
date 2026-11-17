@@ -48,7 +48,7 @@ impl HeaderPinMenu {
             return menu;
         }
         let is_pinned = column < self.pinned;
-        let item = |label: &'static str, checked: bool, action: fn(&mut AppRoot, u64, usize, &mut Context<AppRoot>)| {
+        let item = |label: std::borrow::Cow<'static, str>, checked: bool, action: fn(&mut AppRoot, u64, usize, &mut Context<AppRoot>)| {
             let root = self.root.clone();
             PopupMenuItem::new(label)
                 .icon(cell_menu_icon("icons/pin.svg"))
@@ -59,17 +59,17 @@ impl HeaderPinMenu {
                 })
         };
         let mut menu = menu.item(if is_pinned {
-            item("Unpin column", false, AppRoot::unpin_column)
+            item(t!("grid.unpin_column"), false, AppRoot::unpin_column)
         } else {
-            item("Pin column", false, AppRoot::pin_column)
+            item(t!("grid.pin_column"), false, AppRoot::pin_column)
         });
         menu = menu.item(item(
-            "Freeze first column",
+            t!("grid.freeze_first_column"),
             self.first_frozen,
             |this, tab_id, _, cx| this.toggle_freeze_first_column(tab_id, cx),
         ));
         if self.pinned > 0 {
-            menu = menu.item(item("Unpin all columns", false, |this, tab_id, _, cx| {
+            menu = menu.item(item(t!("grid.unpin_all_columns"), false, |this, tab_id, _, cx| {
                 this.unpin_all_columns(tab_id, cx)
             }));
         }
@@ -139,7 +139,7 @@ pub(in crate::app) fn sort_menu_items(
         ..
     } = sort;
     // The same words and icons as the cell's right-click menu.
-    let choice = |label: &'static str, icon: &'static str, descending: bool, database_sort: bool| {
+    let choice = |label: std::borrow::Cow<'static, str>, icon: &'static str, descending: bool, database_sort: bool| {
         let checked = if database_sort { database } else { page } == Some(descending);
         let root = root.clone();
         PopupMenuItem::new(label)
@@ -158,13 +158,13 @@ pub(in crate::app) fn sort_menu_items(
     };
     let root = root.clone();
     vec![
-        choice("Sort Database Ascending", "icons/database.svg", false, true),
-        choice("Sort Database Descending", "icons/database.svg", true, true),
+        choice(t!("grid.sort_database_ascending"), "icons/database.svg", false, true),
+        choice(t!("grid.sort_database_descending"), "icons/database.svg", true, true),
         PopupMenuItem::separator(),
-        choice("Sort Current Page Ascending", "icons/arrow-up.svg", false, false),
-        choice("Sort Current Page Descending", "icons/arrow-down.svg", true, false),
+        choice(t!("grid.sort_current_page_ascending"), "icons/arrow-up.svg", false, false),
+        choice(t!("grid.sort_current_page_descending"), "icons/arrow-down.svg", true, false),
         PopupMenuItem::separator(),
-        PopupMenuItem::new("Clear Sort")
+        PopupMenuItem::new(t!("grid.clear_sort"))
             .icon(cell_menu_icon("icons/eraser.svg"))
             .disabled(database.is_none() && page.is_none())
             .on_click(move |_, window, app| {
@@ -203,7 +203,7 @@ fn header_sort_button(
         .flex_shrink_0()
         .debug_selector(move || format!("grid-header-sort-{column}-{state}"))
         .when(sort.database.is_none() && sort.page.is_some(), |this| {
-            this.tooltip("Sorted on the loaded rows only")
+            this.tooltip(t!("grid.sorted_on_the_loaded_rows_only"))
         })
         .dropdown_menu_with_anchor(gpui::Anchor::TopRight, move |menu, _, _| {
             // Built when the menu opens, so the checks follow the sort then.
@@ -838,46 +838,46 @@ impl AppRoot {
                 // the active result cannot run a table sort, so capability
                 // state is honest instead of silently hiding the action.
                 menu.menu_with_icon_and_disabled(
-                    "Sort Database Ascending",
+                    t!("grid.sort_database_ascending"),
                     cell_menu_icon("icons/database.svg"),
                     Box::new(SortGridDatabaseAscending),
                     !can_database_sort,
                 )
                 .menu_with_icon_and_disabled(
-                    "Sort Database Descending",
+                    t!("grid.sort_database_descending"),
                     cell_menu_icon("icons/database.svg"),
                     Box::new(SortGridDatabaseDescending),
                     !can_database_sort,
                 )
                 .separator()
                 .menu_with_icon(
-                    "Sort Current Page Ascending",
+                    t!("grid.sort_current_page_ascending"),
                     cell_menu_icon("icons/arrow-up.svg"),
                     Box::new(SortGridPageAscending),
                 )
                 .menu_with_icon(
-                    "Sort Current Page Descending",
+                    t!("grid.sort_current_page_descending"),
                     cell_menu_icon("icons/arrow-down.svg"),
                     Box::new(SortGridPageDescending),
                 )
                 .menu_with_icon(
-                    "Clear Sort",
+                    t!("grid.clear_sort"),
                     cell_menu_icon("icons/eraser.svg"),
                     Box::new(ClearGridSort),
                 )
                 .separator()
                 .menu_with_icon(
-                    "Open Cell Details",
+                    t!("grid.open_cell_details"),
                     cell_menu_icon("icons/eye.svg"),
                     Box::new(OpenGridCellDetails),
                 )
                 .menu_with_icon(
-                    "Open Column Details",
+                    t!("grid.open_column_details"),
                     cell_menu_icon("icons/columns-3.svg"),
                     Box::new(OpenGridColumnDetails),
                 )
                 .menu_with_icon(
-                    "Open Row Details",
+                    t!("grid.open_row_details"),
                     cell_menu_icon("icons/rows-3.svg"),
                     Box::new(OpenGridRowDetails),
                 )
@@ -891,14 +891,14 @@ impl AppRoot {
                         .unwrap_or(false);
                     if pinned {
                         menu.menu_with_icon_and_disabled(
-                            "Unpin Column",
+                            t!("grid.unpin_column_2"),
                             cell_menu_icon("icons/pin.svg"),
                             Box::new(UnpinGridColumn),
                             pin_locked,
                         )
                     } else {
                         menu.menu_with_icon_and_disabled(
-                            "Pin Column",
+                            t!("grid.pin_column_2"),
                             cell_menu_icon("icons/pin.svg"),
                             Box::new(PinGridColumn),
                             pin_locked,
@@ -907,7 +907,7 @@ impl AppRoot {
                 })
                 .submenu_with_icon(
                     Some(cell_menu_icon("icons/copy.svg")),
-                    "Copy",
+                    t!("grid.copy"),
                     window,
                     cx,
                     {
@@ -949,10 +949,10 @@ impl AppRoot {
                             );
                             let submenu = submenu.separator();
                             let submenu = [
-                                ("Copy Cell", crate::app::results::copy::CopyScope::Cell),
-                                ("Copy Selected Rows", crate::app::results::copy::CopyScope::Rows),
-                                ("Copy All (Current Page)", crate::app::results::copy::CopyScope::Page),
-                                ("Copy Column Names", crate::app::results::copy::CopyScope::ColumnNames),
+                                (t!("grid.copy_cell"), crate::app::results::copy::CopyScope::Cell),
+                                (t!("grid.copy_selected_rows"), crate::app::results::copy::CopyScope::Rows),
+                                (t!("grid.copy_all_current_page"), crate::app::results::copy::CopyScope::Page),
+                                (t!("grid.copy_column_names"), crate::app::results::copy::CopyScope::ColumnNames),
                             ].into_iter().fold(submenu, |submenu, (label, scope)| {
                                 let root = copy_root.clone();
                                 submenu.item(PopupMenuItem::new(label).on_click(move |_, _, app| {
@@ -960,7 +960,7 @@ impl AppRoot {
                                 }))
                             });
                             let submenu = submenu.separator().item(
-                                PopupMenuItem::new("Configure DSV…")
+                                PopupMenuItem::new(t!("grid.configure_dsv"))
                                     .icon(cell_menu_icon("icons/sliders-horizontal.svg"))
                                     .on_click({
                                         let root = dsv_root.clone();
@@ -973,12 +973,12 @@ impl AppRoot {
                             let submenu = submenu.when(!sql_available, |submenu| {
                                 submenu
                                     .separator()
-                                    .label("SQL copy needs")
-                                    .label("a connected table.")
+                                    .label(t!("grid.sql_copy_needs"))
+                                    .label(t!("grid.a_connected_table"))
                             });
                             submenu.separator().submenu_with_icon(
                                 Some(cell_menu_icon("icons/settings-2.svg")),
-                                "Configure Default",
+                                t!("grid.configure_default"),
                                 window,
                                 cx,
                                 move |submenu, _, _| {
@@ -997,18 +997,18 @@ impl AppRoot {
                     },
                 )
                 .menu_with_icon(
-                    "Set NULL",
+                    t!("grid.set_null"),
                     cell_menu_icon("icons/circle-x.svg"),
                     Box::new(SetGridSelectionNull),
                 )
                 .menu_with_icon(
-                    "Bulk Edit Selection",
+                    t!("grid.bulk_edit_selection"),
                     cell_menu_icon("icons/pencil.svg"),
                     Box::new(BulkEditGridSelection),
                 )
                 .submenu_with_icon(
                     Some(cell_menu_icon("icons/wand-sparkles.svg")),
-                    "Generate Value",
+                    t!("grid.generate_value"),
                     window,
                     cx,
                     {
@@ -1031,7 +1031,7 @@ impl AppRoot {
                                 }))
                             });
                             submenu
-                                .item(PopupMenuItem::new("Increment…").icon(cell_menu_icon("icons/hash.svg")).on_click({
+                                .item(PopupMenuItem::new(t!("grid.increment")).icon(cell_menu_icon("icons/hash.svg")).on_click({
                                     let root = generate_root.clone();
                                     move |_, window, app| {
                                         let _ = root.update(app, |this, cx| this.open_context_increment_dialog(tab_id, window, cx));
@@ -1039,7 +1039,7 @@ impl AppRoot {
                                 }))
                                 .separator()
                                 .item(
-                                    PopupMenuItem::new("Snowflake…")
+                                    PopupMenuItem::new(t!("grid.snowflake"))
                                         .icon(cell_menu_icon("icons/snowflake.svg"))
                                         .on_click({
                                             let root = generate_root.clone();
@@ -1054,18 +1054,18 @@ impl AppRoot {
                     },
                 )
                 .menu_with_icon(
-                    "Transpose Row",
+                    t!("grid.transpose_row"),
                     cell_menu_icon("icons/arrow-left-right.svg"),
                     Box::new(TransposeGridRow),
                 )
                 .menu_with_icon(
-                    "Clear Selection",
+                    t!("grid.clear_selection"),
                     cell_menu_icon("icons/square-dashed.svg"),
                     Box::new(ClearGridSelection),
                 )
                 .separator()
                 .item(
-                    PopupMenuItem::new("Screenshot Selected Cells")
+                    PopupMenuItem::new(t!("grid.screenshot_selected_cells"))
                         .icon(cell_menu_icon("icons/camera.svg"))
                         .on_click(move |_, window, app| {
                             let _ = snapshot_root.update(app, |this, cx| {
@@ -1076,26 +1076,26 @@ impl AppRoot {
                 .separator()
                 .when(can_stage_row, |menu| {
                     menu.menu_with_icon(
-                        "Clone as New Row",
+                        t!("grid.clone_as_new_row"),
                         cell_menu_icon("icons/circle-plus.svg"),
                         Box::new(CloneGridRow),
                     )
                 })
                 .when(can_sql_clone, |menu| {
                     menu.menu_with_icon(
-                        "Clone as New Row",
+                        t!("grid.clone_as_new_row"),
                         cell_menu_icon("icons/circle-plus.svg"),
                         Box::new(CloneGridRow),
                     )
                 })
                 .when(can_sql_database_sort && !can_stage_row && !can_sql_clone, |menu| {
                     menu.item(
-                        PopupMenuItem::new("Clone as New Row")
+                        PopupMenuItem::new(t!("grid.clone_as_new_row"))
                             .icon(cell_menu_icon("icons/circle-plus.svg"))
                             .disabled(true),
                     )
-                    .label("SQL clone needs complete")
-                    .label("generated/default metadata.")
+                    .label(t!("grid.sql_clone_needs_complete"))
+                    .label(t!("grid.generated_default_metadata"))
                 })
                 .when(can_stage_row || can_sql_database_sort, |menu| {
                     menu.when(!can_stage_row, |menu| menu.separator())
@@ -1105,7 +1105,7 @@ impl AppRoot {
                         // stays the destructive gate.
                         .item(
                             PopupMenuItem::element(|_, _| {
-                                div().text_color(theme::danger()).child("Delete Row…")
+                                div().text_color(theme::danger()).child(t!("grid.delete_row"))
                             })
                             .icon(cell_menu_icon("icons/trash.svg"))
                             .action(Box::new(DeleteGridRow)),
@@ -1114,14 +1114,14 @@ impl AppRoot {
                 .separator()
                 .submenu_with_icon(
                     Some(cell_menu_icon("icons/download.svg")),
-                    "Export",
+                    t!("grid.export"),
                     window,
                     cx,
                     {
                         let export_root = export_root.clone();
                         let sql_available = can_sql_database_sort;
                         move |submenu, _, _| {
-                            let submenu = submenu.label("Selected Cells");
+                            let submenu = submenu.label(t!("grid.selected_cells"));
                             let submenu = crate::app::results::export::ContextExportFormat::ALL.iter().fold(
                                 submenu,
                                 |submenu, (format, label)| {
@@ -1136,7 +1136,7 @@ impl AppRoot {
                                     )
                                 },
                             );
-                            let submenu = submenu.separator().label("Current Page");
+                            let submenu = submenu.separator().label(t!("grid.current_page"));
                             let submenu = crate::app::results::export::ContextExportFormat::ALL.iter().fold(
                                 submenu,
                                 |submenu, (format, label)| {
@@ -1156,12 +1156,12 @@ impl AppRoot {
                                 .when(!sql_available, |submenu| {
                                     submenu
                                         .separator()
-                                        .label("SQL export needs")
-                                        .label("a connected table.")
+                                        .label(t!("grid.sql_export_needs"))
+                                        .label(t!("grid.a_connected_table"))
                                 })
                                 .when(can_transfer, |submenu| {
                                     submenu.separator().item(
-                                        PopupMenuItem::new("Whole Result to Files or Tables\u{2026}")
+                                        PopupMenuItem::new(t!("grid.whole_result_to_files_or_tables"))
                                             .icon(cell_menu_icon("icons/arrow-left-right.svg"))
                                             .on_click(move |_, window, app| {
                                                 let _ = transfer_root.update(app, |this, cx| this.open_transfer_from_tab(tab_id, window, cx));
@@ -1173,13 +1173,13 @@ impl AppRoot {
                 )
                 .separator()
                 .menu_with_icon(
-                    "Refresh",
+                    t!("grid.refresh"),
                     cell_menu_icon("icons/refresh-cw.svg"),
                     Box::new(RefreshGridResults),
                 )
                 .when(!can_database_sort, |menu| {
-                    menu.label("Database sort needs")
-                        .label("a connected table.")
+                    menu.label(t!("grid.database_sort_needs"))
+                        .label(t!("grid.a_connected_table"))
                 })
             })
     }
@@ -1196,12 +1196,12 @@ impl AppRoot {
             .shell_view(tab_id)
             .is_some_and(|view| view.error.is_some());
         let message = match status {
-            _ if shell_failed => "No result: the script failed".to_string(),
-            Some(QueryStatus::Ready { .. }) => "No rows returned".to_string(),
-            Some(QueryStatus::Running { .. }) => "Running query…".to_string(),
+            _ if shell_failed => t!("grid.no_result_script_failed").into_owned(),
+            Some(QueryStatus::Ready { .. }) => t!("grid.no_rows_returned").into_owned(),
+            Some(QueryStatus::Running { .. }) => t!("grid.running_query").into_owned(),
             Some(QueryStatus::Failed(error)) => failed_query_text(error),
-            Some(QueryStatus::Cancelled) => "Query cancelled".to_string(),
-            _ => "Run a query to see results".to_string(),
+            Some(QueryStatus::Cancelled) => t!("grid.query_cancelled").into_owned(),
+            _ => t!("grid.run_a_query_to_see_results").into_owned(),
         };
         div()
             .debug_selector(|| "result-empty-state".into())
@@ -1972,7 +1972,7 @@ pub(in crate::app) fn failed_query_text(error: &str) -> String {
         let detail = crate::error_log::DriverRejection::parse(&error)
             .and_then(|rejection| rejection.message_if_leading)
             .unwrap_or(&error);
-        return format!("The connection to the database was lost ({detail}). Reconnect, then run the query again.");
+        return t!("grid.connection_lost", detail = detail).into_owned();
     }
-    format!("Query failed: {error}")
+    t!("grid.query_failed", error = error).into_owned()
 }

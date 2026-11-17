@@ -915,6 +915,11 @@ impl NavigatorState {
         true
     }
 
+    /// Whether `id` is a "Load More" placeholder row (its label is drawn in the interface language).
+    pub fn is_load_more(id: &NavigatorNodeId) -> bool {
+        matches!(id, NavigatorNodeId::Provider { node, .. } if node.starts_with(LOAD_MORE_PREFIX))
+    }
+
     pub fn load_more_parent(&self, id: &NavigatorNodeId) -> Option<NavigatorNodeId> {
         let NavigatorNodeId::Provider { connection, node } = id else {
             return None;

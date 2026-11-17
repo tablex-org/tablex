@@ -363,7 +363,7 @@ fn open_decision(window: &mut Window, cx: &mut gpui::App, decision: Decision) {
     });
 }
 
-fn fact_row(label: &'static str, value: String, selector: &'static str) -> AnyElement {
+fn fact_row(label: std::borrow::Cow<'static, str>, value: String, selector: &'static str) -> AnyElement {
     // Key types and recorded locations come from the server and from files: shown as plain text.
     let value = ssh_tunnel::plain_text(&value, 160);
     div()
@@ -876,7 +876,7 @@ impl AppRoot {
                         let texts = trust_texts(&body_request, &known_hosts);
                         let mut children = vec![paragraph(texts.intro)];
                         for (label, value, selector) in texts.rows {
-                            children.push(fact_row(label, value, selector));
+                            children.push(fact_row(label.into(), value, selector));
                         }
                         children.push(paragraph(texts.outro));
                         column(children)
@@ -948,7 +948,7 @@ impl AppRoot {
                         ))];
                         children.extend(
                             rows.iter()
-                                .map(|(label, value, selector)| fact_row(label, value.clone(), selector)),
+                                .map(|(label, value, selector)| fact_row((*label).into(), value.clone(), selector)),
                         );
                         children.push(paragraph(
                             "This could be a man-in-the-middle attack, or the server was reinstalled. TableX never accepts a changed key by itself and offers no button to do so.",
@@ -1107,7 +1107,7 @@ impl AppRoot {
                                 .debug_selector(|| "password-prompt-save".into())
                                 .child(
                                     Checkbox::new("password-prompt-save-box")
-                                        .label("Save password")
+                                        .label(ts!("connection_dialog.save_password"))
                                         .checked(keep.get())
                                         .on_click(move |checked, _, cx| {
                                             keep.set(*checked);

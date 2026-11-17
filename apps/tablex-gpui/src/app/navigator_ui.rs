@@ -828,17 +828,17 @@ impl AppRoot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Group name"));
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(t!("common.group_name")));
         let root = cx.entity().downgrade();
         window.open_alert_dialog(cx, move |dialog, _, _| {
             let root = root.clone();
             let input = input.clone();
             let parent = parent.clone();
             dialog
-                .title("New Group")
+                .title(t!("sidebar.new_group"))
                 .child(Input::new(&input))
                 .button_props(
-                    gpui_component::dialog::DialogButtonProps::default().ok_text("Create"),
+                    gpui_component::dialog::DialogButtonProps::default().ok_text(t!("common.create")),
                 )
                 .confirm()
                 .on_ok(move |_, _, cx| {
@@ -858,7 +858,7 @@ impl AppRoot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Group name"));
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(t!("common.group_name")));
         input.update(cx, |state, cx| {
             state.set_value(current.as_str(), window, cx);
         });
@@ -868,10 +868,10 @@ impl AppRoot {
             let input = input.clone();
             let id = id.clone();
             dialog
-                .title("Rename Group")
+                .title(t!("sidebar.rename_group"))
                 .child(Input::new(&input))
                 .button_props(
-                    gpui_component::dialog::DialogButtonProps::default().ok_text("Rename"),
+                    gpui_component::dialog::DialogButtonProps::default().ok_text(t!("sidebar.rename")),
                 )
                 .confirm()
                 .on_ok(move |_, _, cx| {
@@ -953,13 +953,13 @@ impl AppRoot {
                 Button::new("sidebar-import-export")
                     .debug_selector(|| "sidebar-import-export".into())
                     .icon(Icon::new(SidebarGlyph::Transfer))
-                    .label("Import / Export")
+                    .label(t!("sidebar.import_export"))
                     .xsmall()
                     .compact()
                     .ghost()
                     .h(px(28.0))
                     .dropdown_caret(true)
-                    .tooltip("Import or export connection configurations")
+                    .tooltip(t!("sidebar.import_or_export_connection_configurations"))
                     .dropdown_menu(move |menu, _, _| {
                         let import_root = transfer_root.clone();
                         let tablex_root = transfer_root.clone();
@@ -992,7 +992,7 @@ impl AppRoot {
                             .item(import_item("import-menu-datagrip", "Import DataGrip", ImportSource::DataGrip))
                             .separator()
                             .item(
-                                PopupMenuItem::new("Export Connections")
+                                PopupMenuItem::new(t!("sidebar.export_connections"))
                                     .icon(Icon::new(SidebarGlyph::Upload).size(px(14.0)))
                                     .disabled(export_ids.is_empty())
                                     .on_click(move |_, window, app| {
@@ -1007,7 +1007,7 @@ impl AppRoot {
                             )
                             .separator()
                             .item(
-                                PopupMenuItem::new("Import TableX file…")
+                                PopupMenuItem::new(t!("sidebar.import_tablex_file"))
                                     .icon(Icon::new(SidebarGlyph::Download).size(px(14.0)))
                                     .on_click(move |_, window, app| {
                                         let _ = tablex_root.update(app, |this, cx| {
@@ -1027,7 +1027,7 @@ impl AppRoot {
                 toolbar_icon("sidebar-collapse-all")
                     .debug_selector(|| "sidebar-collapse-all".into())
                     .icon(Icon::new(SidebarGlyph::CollapseAll).size(toolbar_glyph))
-                    .tooltip("Collapse all")
+                    .tooltip(t!("sidebar.collapse_all"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.collapse_navigator(cx);
                     }))
@@ -1038,7 +1038,7 @@ impl AppRoot {
                 toolbar_icon("sidebar-new-group")
                     .debug_selector(|| "sidebar-new-group".into())
                     .icon(Icon::new(SidebarGlyph::NewGroup).size(toolbar_glyph))
-                    .tooltip("New group")
+                    .tooltip(t!("sidebar.new_group_2"))
                     .on_click(cx.listener(|this, _, window, cx| {
                         if this.navigator.connection_multi_mode() {
                             this.open_create_selected_group_dialog(window, cx);
@@ -1053,7 +1053,7 @@ impl AppRoot {
                 toolbar_icon("sidebar-refresh")
                     .debug_selector(|| "sidebar-refresh".into())
                     .icon(Icon::new(SidebarGlyph::Refresh).size(toolbar_glyph))
-                    .tooltip("Refresh connections")
+                    .tooltip(t!("sidebar.refresh_connections"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.refresh_saved_connections(cx);
                     }))
@@ -1067,7 +1067,7 @@ impl AppRoot {
                     .small()
                     .compact()
                     .ghost()
-                    .tooltip("Hide sidebar")
+                    .tooltip(t!("sidebar.hide_sidebar"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.shell.sidebar_collapsed = true;
                         this.notify_chrome(cx);
@@ -1122,7 +1122,7 @@ impl AppRoot {
                     div()
                         .text_size(px(12.0))
                         .text_color(theme::text_muted())
-                        .child("Connections"),
+                        .child(t!("sidebar.connections")),
                 )
                 .child(
                     div()
@@ -1136,7 +1136,7 @@ impl AppRoot {
                     multi_button("sidebar-multi-group")
                         .debug_selector(|| "sidebar-multi-group".into())
                         .icon(Icon::new(SidebarGlyph::NewGroup).size(toolbar_glyph))
-                        .tooltip("Group selected connections")
+                        .tooltip(t!("sidebar.group_selected_connections"))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             if this.selected_sidebar_snapshot_matches(&group_ids) {
                                 this.open_create_selected_group_dialog(window, cx);
@@ -1151,12 +1151,12 @@ impl AppRoot {
                         multi_button("sidebar-multi-move")
                             .debug_selector(|| "sidebar-multi-move".into())
                             .icon(Icon::new(SidebarGlyph::MoveToGroup).size(toolbar_glyph))
-                            .tooltip("Move selected to group")
+                            .tooltip(t!("sidebar.move_selected_to_group"))
                             .dropdown_menu(move |menu, _, _| {
                                 let ungroup_root = move_root.clone();
                                 let ungroup_ids = move_ids.clone();
                                 let mut built = menu.item(
-                                    PopupMenuItem::new("Ungrouped").on_click(move |_, _, app| {
+                                    PopupMenuItem::new(t!("sidebar.ungrouped")).on_click(move |_, _, app| {
                                         let _ = ungroup_root.update(app, |this, cx| {
                                             if this.selected_sidebar_snapshot_matches(&ungroup_ids)
                                             {
@@ -1193,7 +1193,10 @@ impl AppRoot {
                     multi_button("sidebar-multi-delete")
                         .debug_selector(|| "sidebar-multi-delete".into())
                         .icon(Icon::new(SidebarGlyph::Trash).size(toolbar_glyph))
-                        .tooltip(format!("Delete {count} selected connections"))
+                        .tooltip(match count {
+                            1 => t!("sidebar.delete_selected_one"),
+                            count => t!("sidebar.delete_selected_other", count = count),
+                        })
                         .on_click(cx.listener(move |this, _, window, cx| {
                             if this.selected_sidebar_snapshot_matches(&delete_ids) {
                                 this.confirm_delete_selected_connections(window, cx);
@@ -1206,7 +1209,7 @@ impl AppRoot {
                     multi_button("sidebar-multi-select-all")
                         .debug_selector(|| "sidebar-multi-select-all".into())
                         .icon(Icon::new(SidebarGlyph::SelectAll).size(toolbar_glyph))
-                        .tooltip("Select all visible connections")
+                        .tooltip(t!("sidebar.select_all_visible_connections"))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.navigator.select_all_connections();
                             this.notify_chrome(cx);
@@ -1218,7 +1221,7 @@ impl AppRoot {
                     multi_button("sidebar-multi-exit")
                         .debug_selector(|| "sidebar-multi-exit".into())
                         .icon(Icon::new(IconName::Close).size(toolbar_glyph))
-                        .tooltip("Exit selection")
+                        .tooltip(t!("sidebar.exit_selection"))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.navigator.clear_multi_selection();
                             this.notify_chrome(cx);
@@ -1243,12 +1246,12 @@ impl AppRoot {
         // plus a one-line message in the `.*` tooltip.
         let regex_tip: gpui::SharedString = match (&self.sidebar.search_error, regex_invalid) {
             (Some(message), true) => message.clone().into(),
-            _ => "Match sidebar names, comments, and aliases with regular expressions.".into(),
+            _ => t!("sidebar.regex_tip").into_owned().into(),
         };
         let switch_tip = if search.regex {
-            "Local search is unavailable in regular expression mode."
+            t!("sidebar.local_search_regex_tip")
         } else {
-            "Search only currently loaded sidebar objects without remote requests."
+            t!("sidebar.local_search_tip")
         };
         // Official ghost Button: `.selected()` carries the armed state through
         // the theme; only the invalid-pattern text is overridden (danger).
@@ -1263,7 +1266,7 @@ impl AppRoot {
             .selected(search.regex)
             .toggled(search.regex)
             .when(regex_invalid, |this| this.text_color(theme::danger()))
-            .accessibility_label("Regular expression search")
+            .accessibility_label(t!("sidebar.regular_expression_search"))
             .tooltip(regex_tip)
             .on_click(cx.listener(|this, _, _, cx| {
                 let mut options = this.navigator.search_options().clone();
@@ -1337,7 +1340,7 @@ impl AppRoot {
                                                 .small()
                                                 .checked(local_search)
                                                 .disabled(search.regex)
-                                                .accessibility_label("Local search")
+                                                .accessibility_label(t!("sidebar.local_search"))
                                                 .tooltip(switch_tip)
                                                 .on_click(cx.listener(|this, checked: &bool, _, cx| {
                                                     this.set_sidebar_local_search(*checked, cx);
@@ -1356,7 +1359,7 @@ impl AppRoot {
                     .compact()
                     .secondary()
                     .outline()
-                    .tooltip("Locate in sidebar")
+                    .tooltip(t!("sidebar.locate_in_sidebar"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.locate_active_sidebar_tab(cx);
                     }))
@@ -1388,22 +1391,22 @@ impl AppRoot {
                         .secondary()
                         .outline()
                         .selected(settings_active)
-                        .tooltip("Sort connections / Filter by type")
+                        .tooltip(t!("sidebar.sort_connections_filter_by_type"))
                         .dropdown_menu(move |menu, _, _| {
                             let scope_root = settings_root.clone();
                             let sort_root = settings_root.clone();
                             let hidden_root = settings_root.clone();
-                            let mut built = menu.label("Sort connections");
+                            let mut built = menu.label(t!("sidebar.sort_connections"));
                             for (value, label, glyph) in [
-                                (ConnectionSort::Manual, "Manual", SidebarGlyph::SortManual),
+                                (ConnectionSort::Manual, t!("sidebar.sort_manual"), SidebarGlyph::SortManual),
                                 (
                                     ConnectionSort::Ascending,
-                                    "Ascending",
+                                    t!("sidebar.sort_ascending"),
                                     SidebarGlyph::SortAsc,
                                 ),
                                 (
                                     ConnectionSort::Descending,
-                                    "Descending",
+                                    t!("sidebar.sort_descending"),
                                     SidebarGlyph::SortDesc,
                                 ),
                             ] {
@@ -1423,12 +1426,12 @@ impl AppRoot {
                                         }),
                                 );
                             }
-                            built = built.separator().label("Filter by type");
+                            built = built.separator().label(t!("sidebar.filter_by_type"));
                             for (scope, label) in [
-                                (navigator::SearchScope::All, "All"),
-                                (navigator::SearchScope::Connections, "Connections"),
-                                (navigator::SearchScope::Databases, "Databases"),
-                                (navigator::SearchScope::Objects, "Objects"),
+                                (navigator::SearchScope::All, t!("sidebar.scope_all")),
+                                (navigator::SearchScope::Connections, t!("sidebar.connections")),
+                                (navigator::SearchScope::Databases, t!("sidebar.scope_databases")),
+                                (navigator::SearchScope::Objects, t!("sidebar.scope_objects")),
                             ] {
                                 let item_root = scope_root.clone();
                                 let checked = search.scope == scope;
@@ -1446,7 +1449,7 @@ impl AppRoot {
                                 );
                             }
                             built = built.separator().item(
-                                PopupMenuItem::new("Show hidden connections")
+                                PopupMenuItem::new(t!("sidebar.show_hidden_connections"))
                                     .checked(search.show_hidden)
                                     .on_click(move |_, _, app| {
                                         let _ = hidden_root.update(app, |this, cx| {
@@ -1459,7 +1462,7 @@ impl AppRoot {
                             );
                             if has_scope_filter {
                                 let item_root = scope_root.clone();
-                                built = built.item(PopupMenuItem::new("Clear filter").on_click(
+                                built = built.item(PopupMenuItem::new(t!("sidebar.clear_filter")).on_click(
                                     move |_, _, app| {
                                         let _ = item_root.update(app, |this, cx| {
                                             let mut options =
@@ -1474,12 +1477,12 @@ impl AppRoot {
                             // connection menu stay reachable here, acting on
                             // the selected connection.
                             let selected_id = settings_selected.clone();
-                            built = built.separator().label("Selected connection");
+                            built = built.separator().label(t!("sidebar.selected_connection"));
                             {
                                 let item_root = settings_root.clone();
                                 let id = selected_id.clone();
                                 built = built.item(
-                                    PopupMenuItem::new("Toggle Pin")
+                                    PopupMenuItem::new(t!("sidebar.toggle_pin"))
                                         .disabled(id.is_none())
                                         .on_click(move |_, _, app| {
                                             let _ = item_root.update(app, |this, cx| {
@@ -1494,7 +1497,7 @@ impl AppRoot {
                                 let item_root = settings_root.clone();
                                 let id = selected_id.clone();
                                 built = built.item(
-                                    PopupMenuItem::new("Hide / Unhide")
+                                    PopupMenuItem::new(t!("sidebar.hide_unhide"))
                                         .disabled(id.is_none())
                                         .on_click(move |_, _, app| {
                                             let _ = item_root.update(app, |this, cx| {
@@ -1518,7 +1521,7 @@ impl AppRoot {
                                 let item_root = settings_root.clone();
                                 let id = settings_copy_target.clone();
                                 built = built.item(
-                                    PopupMenuItem::new("Copy Connection Config")
+                                    PopupMenuItem::new(t!("sidebar.copy_connection_config"))
                                         .disabled(id.is_none())
                                         .on_click(move |_, _, app| {
                                             let _ = item_root.update(app, |this, cx| {
@@ -1533,7 +1536,7 @@ impl AppRoot {
                                 let item_root = settings_root.clone();
                                 let id = selected_id.clone();
                                 built = built.item(
-                                    PopupMenuItem::new("Export Connection Config…")
+                                    PopupMenuItem::new(t!("sidebar.export_connection_config"))
                                         .disabled(id.is_none())
                                         .on_click(move |_, window, app| {
                                             let _ = item_root.update(app, |this, cx| {
@@ -1554,7 +1557,7 @@ impl AppRoot {
                             {
                                 let item_root = settings_root.clone();
                                 built = built.item(
-                                    PopupMenuItem::new("Paste Connection Config")
+                                    PopupMenuItem::new(t!("sidebar.paste_connection_config"))
                                         .on_click(move |_, window, app| {
                                             let _ = item_root.update(app, |this, cx| {
                                                 this.paste_sidebar_connection_config(window, cx);
@@ -1590,8 +1593,8 @@ impl AppRoot {
                         .outline()
                         .selected(pressed)
                         .toggled(pressed)
-                        .accessibility_label("Show active connections only")
-                        .tooltip("Show active connections only")
+                        .accessibility_label(t!("sidebar.show_active_connections_only"))
+                        .tooltip(t!("sidebar.show_active_connections_only"))
                         .child(if live {
                             div()
                                 .debug_selector(|| "sidebar-connected-dot".into())
@@ -1761,7 +1764,11 @@ impl AppRoot {
                                     .overflow_hidden()
                                     .whitespace_nowrap()
                                     .text_ellipsis()
-                                    .child(row.label.clone()),
+                                    .child(if navigator::NavigatorState::is_load_more(&row.id) {
+                                        t!("sidebar.load_more").into_owned()
+                                    } else {
+                                        row.label.clone()
+                                    }),
                             );
                         // A pinned row carries a small pin after its name.
                         if this.navigator.is_pinned(&row.id) {
@@ -1960,7 +1967,7 @@ impl AppRoot {
                                     let delete_root = menu_root.clone();
                                     let move_root = menu_root.clone();
                                     let parent = row_group.clone();
-                                    menu.item(PopupMenuItem::new("New Subgroup").on_click(
+                                    menu.item(PopupMenuItem::new(t!("sidebar.new_subgroup")).on_click(
                                         move |_, window, app| {
                                             let _ = new_root.update(app, |this, cx| {
                                                 this.open_new_sidebar_group_dialog(
@@ -1971,7 +1978,7 @@ impl AppRoot {
                                             });
                                         },
                                     ))
-                                    .item(PopupMenuItem::new("Select group connections").on_click(
+                                    .item(PopupMenuItem::new(t!("sidebar.select_group_connections")).on_click(
                                         move |_, _, app| {
                                             let _ = select_root.update(app, |this, cx| {
                                                 if this
@@ -1989,7 +1996,7 @@ impl AppRoot {
                                             });
                                         },
                                     ))
-                                    .item(PopupMenuItem::new("Rename Group").on_click(
+                                    .item(PopupMenuItem::new(t!("sidebar.rename_group")).on_click(
                                         move |_, window, app| {
                                             let _ = rename_root.update(app, |this, cx| {
                                                 this.open_rename_sidebar_group_dialog(
@@ -2001,11 +2008,11 @@ impl AppRoot {
                                             });
                                         },
                                     ))
-                                    .submenu("Move to Group", window, cx, move |submenu, _, _| {
+                                    .submenu(t!("sidebar.move_to_group"), window, cx, move |submenu, _, _| {
                                         let ungroup_root = move_root.clone();
                                         let moved = row_group.clone();
                                         let mut built =
-                                            submenu.item(PopupMenuItem::new("Ungrouped").on_click(
+                                            submenu.item(PopupMenuItem::new(t!("sidebar.ungrouped")).on_click(
                                                 move |_, _, app| {
                                                     let _ = ungroup_root.update(app, |this, cx| {
                                                         let target = NavigatorNodeId::Group {
@@ -2057,7 +2064,7 @@ impl AppRoot {
                                         built
                                     })
                                     .item(
-                                        PopupMenuItem::new("Delete Group").on_click(
+                                        PopupMenuItem::new(t!("sidebar.delete_group")).on_click(
                                             move |_, window, app| {
                                                 let _ = delete_root.update(app, |this, cx| {
                                                     this.confirm_delete_sidebar_group(
@@ -2080,7 +2087,7 @@ impl AppRoot {
                                 .context_menu(move |menu, _, _| {
                                     let (source_root, source_row) =
                                         (source_root.clone(), source_row.clone());
-                                    menu.item(PopupMenuItem::new("View Source").on_click(
+                                    menu.item(PopupMenuItem::new(t!("sidebar.view_source")).on_click(
                                         move |_, _, app| {
                                             let _ = source_root.update(app, |this, cx| {
                                                 this.handle_navigator_open(&source_row, cx);
@@ -2123,7 +2130,7 @@ impl AppRoot {
                             let new_query_item = move || {
                                 let query_root = query_root.clone();
                                 let query_id = query_id.clone();
-                                PopupMenuItem::new("New Query")
+                                PopupMenuItem::new(t!("titlebar.new_query"))
                                     .disabled(!can_query)
                                     .on_click(move |_, _, app| {
                                         let _ = query_root.update(app, |this, cx| {
@@ -2166,11 +2173,11 @@ impl AppRoot {
                                             menu, &ask_root, &ask_id, cx,
                                         );
                                         let menu = menu
-                                            .menu("Open", Box::new(OpenNavigatorNode))
-                                            .menu("Copy SQL", Box::new(CopyNavigatorSql));
+                                            .menu(t!("sidebar.open"), Box::new(OpenNavigatorNode))
+                                            .menu(t!("sidebar.copy_sql"), Box::new(CopyNavigatorSql));
                                         let menu = match view_source.clone() {
                                             Some((source_root, source_row)) => menu.item(
-                                                PopupMenuItem::new("View Source").on_click(
+                                                PopupMenuItem::new(t!("sidebar.view_source")).on_click(
                                                     move |_, _, app| {
                                                         let _ = source_root.update(app, |this, cx| {
                                                             this.open_schema_object_source(
@@ -2272,7 +2279,7 @@ impl AppRoot {
                                             super::sidebar_pins::pin_menu_head(menu, &open_root, &open_id, cx);
                                         if can_open {
                                             built =
-                                                built.item(PopupMenuItem::new("Open").on_click(
+                                                built.item(PopupMenuItem::new(t!("sidebar.open")).on_click(
                                                     move |_, _, app| {
                                                         let _ =
                                                             open_root.update(app, |this, cx| {
@@ -2322,7 +2329,7 @@ impl AppRoot {
                                     let menu = match diagram_id.clone() {
                                         Some(id) => {
                                             let root = diagram_root.clone();
-                                            menu.item(PopupMenuItem::new("View Diagram").on_click(move |_, _, app| {
+                                            menu.item(PopupMenuItem::new(t!("sidebar.view_diagram")).on_click(move |_, _, app| {
                                                 let _ = root.update(app, |this, cx| {
                                                     this.open_diagram_for_node(&id, cx);
                                                 });
@@ -2335,7 +2342,7 @@ impl AppRoot {
                                             menu.item(super::mongo_admin_view::entry_item(
                                                 super::mongo_admin_view::Entry {
                                                     selector: "database-menu-another-user",
-                                                    label: "Connect as Another User\u{2026}",
+                                                    label: t!("sidebar.connect_as_another_user"),
                                                     icon: Icon::empty().path("icons/key-round.svg").size(px(12.0)),
                                                     disabled: None,
                                                     destructive: false,

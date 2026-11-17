@@ -124,9 +124,9 @@ impl AppRoot {
                     .text_size(px(11.0))
                     .line_height(px(14.0))
                     .text_color(theme::accent())
-                    .child("FILTER"),
+                    .child(t!("editor.filter")),
             )
-            .tooltip("Build filter");
+            .tooltip(t!("editor.build_filter"));
         let grid = self.grid(tab_id);
         let result_columns: Vec<String> = (0..grid.column_count())
             .filter_map(|column| grid.column_name(column).map(str::to_string))
@@ -177,9 +177,9 @@ impl AppRoot {
                     .debug_selector(|| "mongo-query-toolbar-text".into())
                     .text_size(px(11.0))
                     .line_height(px(14.0))
-                    .child("Query"),
+                    .child(t!("editor.query")),
             )
-            .tooltip("Show generated Mongo query");
+            .tooltip(t!("editor.show_generated_mongo_query"));
         let query_preview_popover = self.render_mongo_query_preview_popover(
             tab_id,
             collection,
@@ -206,7 +206,7 @@ impl AppRoot {
             .compact()
             .selected(column_open)
             .disabled(known_columns.is_empty())
-            .tooltip("Columns");
+            .tooltip(t!("editor.columns"));
         let column_popover = self.render_mongo_column_popover(
             tab_id,
             known_columns,
@@ -232,7 +232,7 @@ impl AppRoot {
             .compact()
             .ghost()
             .selected(find_expanded)
-            .tooltip("Expand Find Query");
+            .tooltip(t!("editor.expand_find_query"));
         let find_popover = self.render_mongo_find_popover(
             tab_id,
             find_expanded,
@@ -247,7 +247,7 @@ impl AppRoot {
             .icon(Icon::new(IconName::Close).size(px(11.0)))
             .compact()
             .ghost()
-            .tooltip("Clear Find Query")
+            .tooltip(t!("editor.clear_find_query"))
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.clear_mongo_filters(tab_id, false, window, cx);
             }));
@@ -266,7 +266,7 @@ impl AppRoot {
             .compact()
             .ghost()
             .selected(sort_expanded)
-            .tooltip("Expand Sort Query");
+            .tooltip(t!("editor.expand_sort_query"));
         let sort_popover = self.render_mongo_sort_popover(
             tab_id,
             sort_expanded,
@@ -281,7 +281,7 @@ impl AppRoot {
             .icon(Icon::new(IconName::Close).size(px(11.0)))
             .compact()
             .ghost()
-            .tooltip("Clear Sort Query")
+            .tooltip(t!("editor.clear_sort_query"))
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.clear_mongo_sort(tab_id, window, cx);
             }));
@@ -384,7 +384,7 @@ impl AppRoot {
                     .flex_shrink_0()
                     .text_size(px(11.0))
                     .text_color(theme::warning())
-                    .child("SORT"),
+                    .child(t!("editor.sort")),
             )
             .child(
                 div().flex_1().min_w(px(0.0)).child(
@@ -434,7 +434,7 @@ impl AppRoot {
             .icon(Icon::empty().path("icons/play.svg").size(px(11.0)))
             .small()
             .compact()
-            .tooltip("Execute query")
+            .tooltip(t!("editor.execute_query"))
             .disabled(!can_run)
             .on_click(cx.listener(move |this, _, _, cx| this.run_tab_query_explicit(tab_id, cx)));
         let run_control = div()

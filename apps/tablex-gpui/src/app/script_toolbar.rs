@@ -456,7 +456,7 @@ impl AppRoot {
             _ => {
                 self.script_toolbar
                     .notice
-                    .insert(tab_id, "Nothing to run: select text or put the cursor in a statement.".into());
+                    .insert(tab_id, t!("editor.nothing_to_run").into_owned());
                 cx.notify();
             }
         }
@@ -493,12 +493,12 @@ impl AppRoot {
         };
         let text = editor.read(cx).value().to_string();
         let notice = match crate::mongo_script::format_script(&text) {
-            Ok(formatted) if formatted == text => "Already formatted".to_string(),
+            Ok(formatted) if formatted == text => t!("editor.already_formatted").into_owned(),
             Ok(formatted) => {
                 self.set_script_text(tab_id, formatted, window, cx);
-                "Formatted".to_string()
+                t!("editor.formatted").into_owned()
             }
-            Err(error) => format!("Cannot format: {error}"),
+            Err(error) => t!("editor.cannot_format", error = error).into_owned(),
         };
         self.script_toolbar.notice.insert(tab_id, notice);
         cx.notify();
@@ -521,7 +521,7 @@ impl AppRoot {
                     let _ = this.update(cx, |this, cx| {
                         this.script_toolbar
                             .notice
-                            .insert(tab_id, "Could not open the file picker".into());
+                            .insert(tab_id, t!("editor.could_not_open_the_file_picker").into_owned());
                         cx.notify();
                     });
                     return;
@@ -598,7 +598,7 @@ impl AppRoot {
                     let _ = this.update(cx, |this, cx| {
                         this.script_toolbar
                             .notice
-                            .insert(tab_id, "Could not open the save dialog".into());
+                            .insert(tab_id, t!("editor.could_not_open_the_save_dialog").into_owned());
                         cx.notify();
                     });
                     return;
@@ -641,7 +641,7 @@ impl AppRoot {
         if database.is_empty() || connection.is_empty() {
             self.script_toolbar
                 .notice
-                .insert(tab_id, "Select a database first.".into());
+                .insert(tab_id, t!("editor.select_a_database_first").into_owned());
             cx.notify();
             return;
         }
@@ -703,7 +703,7 @@ impl AppRoot {
             .small()
             .debug_selector(|| "run-query".into())
             .icon(Icon::empty().path("icons/play.svg").size(px(12.0)))
-            .label(if running { "Cancel" } else { "Run" })
+            .label(if running { t!("common.cancel") } else { t!("editor.run") })
             .compact()
             .primary()
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -720,17 +720,17 @@ impl AppRoot {
         let run_selected = Button::new(("script-run-selected", tab_id))
             .small()
             .debug_selector(|| "script-run-selected".into())
-            .label("Run Selected")
+            .label(t!("editor.run_selected"))
             .compact()
             .ghost()
-            .tooltip("Run the selection, or the statement at the cursor")
+            .tooltip(t!("editor.run_the_selection_or_the_statement_at_the_cursor"))
             .disabled(running)
             .on_click(cx.listener(move |this, _, _, cx| this.run_script_selection(tab_id, cx)));
         let format = Button::new(("script-format", tab_id))
             .small()
             .debug_selector(|| "script-format".into())
             .icon(Icon::empty().path("icons/wand-sparkles.svg").size(px(12.0)))
-            .label("Format")
+            .label(t!("editor.format"))
             .compact()
             .ghost()
             .on_click(cx.listener(move |this, _, window, cx| this.format_script_tab(tab_id, window, cx)));
@@ -740,7 +740,7 @@ impl AppRoot {
             .icon(Icon::new(IconName::FolderOpen).size(px(12.0)))
             .compact()
             .ghost()
-            .tooltip("Open a .js file")
+            .tooltip(t!("editor.open_a_js_file"))
             .on_click(cx.listener(move |this, _, window, cx| this.open_script_file(tab_id, window, cx)));
         let save_file = Button::new(("script-save-file", tab_id))
             .small()
@@ -748,14 +748,14 @@ impl AppRoot {
             .icon(Icon::empty().path("icons/download.svg").size(px(12.0)))
             .compact()
             .ghost()
-            .tooltip("Save the script as a .js file")
+            .tooltip(t!("editor.save_the_script_as_a_js_file"))
             .on_click(cx.listener(move |this, _, _, cx| this.save_script_file(tab_id, cx)));
         let export_root = root.clone();
         let rows = self.grid(tab_id).row_count();
         let export = Button::new(("script-export", tab_id))
             .small()
             .debug_selector(|| "script-export".into())
-            .label("Export")
+            .label(t!("editor.export"))
             .dropdown_caret(true)
             .compact()
             .ghost()
@@ -786,11 +786,11 @@ impl AppRoot {
         let save = Button::new("save-sql-script")
             .small()
             .debug_selector(|| "save-sql-script".into())
-            .label("Save")
+            .label(t!("editor.save"))
             .compact()
             .ghost()
             .tooltip(shortcuts::with_label(
-                "Save Mongo script to the library",
+                &t!("editor.save_mongo_script_to_the_library"),
                 &self.settings.shortcuts,
                 "editor.save_script",
             ))
@@ -804,9 +804,9 @@ impl AppRoot {
             .ghost()
             .selected(is_default)
             .tooltip(if is_default {
-                "Default database for this connection (click to clear)"
+                t!("editor.default_database_for_this_connection_click_to_cl")
             } else {
-                "Set as default database for this connection"
+                t!("editor.set_as_default_database_for_this_connection")
             })
             .on_click(cx.listener(move |this, _, _, cx| this.toggle_script_default_database(tab_id, cx)));
         let separator = || div().w(px(1.0)).h(px(16.0)).bg(theme::border());
@@ -855,8 +855,8 @@ impl AppRoot {
                                 Select::new(&conn_select)
                                     .id(("script-connection-select", tab_id))
                                     .with_size(Size::Small)
-                                    .placeholder("Connection")
-                                    .search_placeholder("Search connections")
+                                    .placeholder(t!("editor.connection"))
+                                    .search_placeholder(t!("editor.search_connections"))
                                     .menu_width(px(240.0)),
                             ),
                     )
@@ -879,8 +879,8 @@ impl AppRoot {
                                 Select::new(&db_select)
                                     .id(("script-database-select", tab_id))
                                     .with_size(Size::Small)
-                                    .placeholder("Database")
-                                    .search_placeholder("Search databases")
+                                    .placeholder(t!("editor.database"))
+                                    .search_placeholder(t!("editor.search_databases"))
                                     .menu_width(px(240.0)),
                             ),
                     )

@@ -116,3 +116,8 @@ button of the title bar's theme picker) are copied verbatim from the pinned
 `cloud-download.svg` (the title bar's "Updates" button, left of the theme picker) is
 copied verbatim from the pinned `gpui-kit-assets 0.8.0` Lucide set, ISC licensed like
 the glyphs above.
+
+## Title bar language glyph
+
+`languages.svg` (the button of the title bar's language picker, left of the Settings gear) is copied
+verbatim from the pinned `gpui-kit-assets 0.8.0` Lucide set, ISC licensed like the glyphs above.

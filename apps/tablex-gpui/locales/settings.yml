@@ -1,0 +1,1031 @@
+_version: 2
+settings:
+  nav:
+    appearance:
+      en: Appearance
+      vi: Giao diện
+    editor:
+      en: Editor
+      vi: Trình soạn thảo
+    results:
+      en: "Results & Data"
+      vi: "Kết quả & dữ liệu"
+    query:
+      en: "Query & Connections"
+      vi: "Truy vấn & kết nối"
+    navigation:
+      en: Navigation
+      vi: Điều hướng
+    ai:
+      en: AI Assistant
+      vi: Trợ lý AI
+    shortcuts:
+      en: Shortcuts
+      vi: Phím tắt
+    drivers:
+      en: Drivers
+      vi: Driver
+    about:
+      en: About
+      vi: Giới thiệu
+  default_font:
+    en: Default
+    vi: Mặc định
+  search_placeholder:
+    en: Search settings
+    vi: Tìm cài đặt
+  discard:
+    title:
+      en: "Discard changes?"
+      vi: "Bỏ các thay đổi?"
+    body:
+      en: Some settings were changed but not applied.
+      vi: Một số cài đặt đã được đổi nhưng chưa áp dụng.
+    confirm:
+      en: Discard
+      vi: Bỏ
+  error:
+    not_a_number:
+      en: Enter a number
+      vi: Nhập một số
+    out_of_range:
+      en: "Enter a value from %{min} to %{max}"
+      vi: "Nhập giá trị từ %{min} đến %{max}"
+    not_whole:
+      en: Enter a whole number
+      vi: Nhập một số nguyên
+    too_long:
+      en: "At most %{max} characters"
+      vi: "Tối đa %{max} ký tự"
+    choose_model:
+      en: Choose a model
+      vi: Chọn một mô hình
+    min_over_max:
+      en: Must not exceed the maximum width
+      vi: Không được vượt quá độ rộng tối đa
+    default_out_of_range:
+      en: Must lie between the minimum and maximum width
+      vi: Phải nằm giữa độ rộng tối thiểu và tối đa
+    enter_delimiter:
+      en: Enter a delimiter
+      vi: Nhập dấu phân cách
+    install_sqruff:
+      en: Install SQL Formatter (sqruff) from the Driver Manager first
+      vi: Hãy cài SQL Formatter (sqruff) từ Driver Manager trước
+  unavailable:
+    external_sets_case:
+      en: The external command sets the case itself.
+      vi: Lệnh ngoài tự đặt kiểu chữ.
+    external_sets_indent:
+      en: The external command sets the indent itself.
+      vi: Lệnh ngoài tự đặt thụt lề.
+    built_in_only:
+      en: Only the built-in formatter uses this.
+      vi: Chỉ trình định dạng tích hợp sẵn dùng mục này.
+    external_only:
+      en: Used when the formatter is an external command.
+      vi: Dùng khi trình định dạng là lệnh ngoài.
+    built_in_needs_no_process:
+      en: The built-in formatter needs no process.
+      vi: Trình định dạng tích hợp sẵn không cần tiến trình.
+    fallback_anthropic_only:
+      en: "Not available: only Anthropic can retry on a fallback model."
+      vi: "Không khả dụng: chỉ Anthropic mới thử lại được bằng mô hình dự phòng."
+  model:
+    id_placeholder:
+      en: Model id
+      vi: ID mô hình
+    pick_placeholder:
+      en: Pick from the list
+      vi: Chọn từ danh sách
+    search:
+      en: Search models
+      vi: Tìm mô hình
+    choose:
+      en: Choose a model
+      vi: Chọn một mô hình
+  font:
+    search:
+      en: Search fonts
+      vi: Tìm phông
+  reset_to_default:
+    en: Reset to default
+    vi: Đặt lại mặc định
+  reset_section:
+    en: Reset section
+    vi: Đặt lại mục này
+  search_results:
+    en: Search results
+    vi: Kết quả tìm kiếm
+  found_one:
+    en: "1 setting for “%{query}”"
+    vi: "1 cài đặt cho “%{query}”"
+  found_other:
+    en: "%{count} settings for “%{query}”"
+    vi: "%{count} cài đặt cho “%{query}”"
+  shortcuts_found:
+    en: "SHORTCUTS (%{count})"
+    vi: "PHÍM TẮT (%{count})"
+  api_key:
+    en: API KEY
+    vi: KHOÁ API
+  developer:
+    title:
+      en: Developer mode
+      vi: Chế độ nhà phát triển
+    description:
+      en: "Accept unsigned local drivers and manifests. Takes effect immediately; it is stored with the drivers, not in this Settings file."
+      vi: "Chấp nhận driver và manifest cục bộ chưa ký. Có hiệu lực ngay; được lưu cùng các driver, không lưu trong tệp Cài đặt này."
+    open_driver_manager:
+      en: Open Driver Manager
+      vi: Mở Driver Manager
+  about:
+    not_saved:
+      en: not saved (no config folder)
+      vi: không lưu (không có thư mục cấu hình)
+    version:
+      en: Version
+      vi: Phiên bản
+    settings_file:
+      en: Settings file
+      vi: Tệp cài đặt
+  footer:
+    reset_defaults:
+      en: Reset Defaults
+      vi: Đặt lại mặc định
+    fix_values:
+      en: Fix the highlighted values to apply
+      vi: Sửa các giá trị được tô sáng để áp dụng
+    not_applied:
+      en: Changes not applied
+      vi: Thay đổi chưa được áp dụng
+    apply:
+      en: Apply
+      vi: Áp dụng
+    apply_close:
+      en: Apply and Close
+      vi: Áp dụng và đóng
+  types:
+    unnamed:
+      en: "(unnamed)"
+      vi: "(chưa đặt tên)"
+    add:
+      en: Add type
+      vi: Thêm loại
+    heading:
+      en: CONNECTION TYPES
+      vi: LOẠI KẾT NỐI
+    help:
+      en: A connection type gives its connections a color and safety presets. Pick one in the connection dialog (Environment); connections without a type follow the global settings only.
+      vi: Loại kết nối cho các kết nối của nó một màu và các cài đặt an toàn có sẵn. Chọn loại trong hộp thoại kết nối (Môi trường); kết nối không có loại chỉ theo cài đặt chung.
+    name:
+      en: Name
+      vi: Tên
+    color:
+      en: Color
+      vi: Màu
+    agent_access:
+      en: Agent access
+      vi: Quyền của agent
+    agent_access_help:
+      en: "What an AI agent (the in-app assistant, MCP clients) may do on connections of this type that set nothing themselves. Never more than Read; a Production type always needs the connection's own setting, and a read-only type caps every connection at Read."
+      vi: "Việc mà một agent AI (trợ lý trong ứng dụng, client MCP) được làm trên các kết nối thuộc loại này mà không tự đặt gì. Không bao giờ hơn Đọc; loại Production luôn cần cài đặt riêng của kết nối, và loại chỉ đọc giới hạn mọi kết nối ở mức Đọc."
+    delete:
+      en: Delete type
+      vi: Xoá loại
+  shortcuts:
+    reset_all:
+      en: Reset all
+      vi: Đặt lại tất cả
+    fixed:
+      en: Fixed
+      vi: Cố định
+    press_keys:
+      en: Press keys…
+      vi: Nhấn phím…
+    change:
+      en: Click to change this shortcut
+      vi: Bấm để đổi phím tắt này
+    remove:
+      en: Remove this shortcut
+      vi: Xoá phím tắt này
+    not_set:
+      en: Not set
+      vi: Chưa đặt
+    record:
+      en: Record
+      vi: Ghi
+  item:
+    appearance:
+      theme:
+        title:
+          en: Theme
+          vi: Chủ đề
+        description:
+          en: "Dark, Light, or follow the operating system's appearance and switch with it."
+          vi: "Tối, Sáng hoặc theo giao diện của hệ điều hành và đổi theo nó."
+        options:
+          dark:
+            en: Dark
+            vi: Tối
+          light:
+            en: Light
+            vi: Sáng
+          system:
+            en: System (follow the OS)
+            vi: Hệ thống (theo hệ điều hành)
+      language:
+        title:
+          en: Language
+          vi: Ngôn ngữ
+        description:
+          en: "Language of menus, labels and messages. System follows the preferred language of the operating system. Data, SQL and database messages are never translated."
+          vi: "Ngôn ngữ của menu, nhãn và thông báo. Hệ thống theo ngôn ngữ ưu tiên của hệ điều hành. Dữ liệu, SQL và thông báo của cơ sở dữ liệu không bao giờ được dịch."
+        options:
+          system:
+            en: System (follow the OS)
+            vi: Hệ thống (theo hệ điều hành)
+          en:
+            en: English
+            vi: English
+          vi:
+            en: Tiếng Việt
+            vi: Tiếng Việt
+      ui_scale:
+        title:
+          en: UI scale
+          vi: Tỷ lệ giao diện
+        description:
+          en: Zoom of the whole interface.
+          vi: Thu phóng toàn bộ giao diện.
+      interface_font:
+        title:
+          en: Interface font
+          vi: Phông giao diện
+        description:
+          en: "Font of menus, tabs, the sidebar and dialogs. Empty uses the system font."
+          vi: "Phông của menu, tab, thanh bên và hộp thoại. Để trống để dùng phông hệ thống."
+      grid_font:
+        title:
+          en: Grid font
+          vi: Phông lưới
+        description:
+          en: Font of result grid cells. Empty uses the interface font.
+          vi: Phông của các ô trong lưới kết quả. Để trống để dùng phông giao diện.
+      grid_font_size:
+        title:
+          en: Grid font size
+          vi: Cỡ chữ lưới
+        description:
+          en: "Text size of result grid cells, in pixels."
+          vi: "Cỡ chữ của các ô trong lưới kết quả, tính bằng pixel."
+      editor_font:
+        title:
+          en: Editor font
+          vi: Phông trình soạn thảo
+        description:
+          en: Monospace font of SQL and script editors. Empty uses the platform default.
+          vi: Phông đơn cách của trình soạn thảo SQL và script. Để trống để dùng phông mặc định của nền tảng.
+      editor_font_size:
+        title:
+          en: Editor font size
+          vi: Cỡ chữ trình soạn thảo
+        description:
+          en: "Text size of SQL and script editors, in pixels."
+          vi: "Cỡ chữ của trình soạn thảo SQL và script, tính bằng pixel."
+      tab_group_by:
+        title:
+          en: Group tabs by
+          vi: Nhóm tab theo
+        description:
+          en: Default grouping of the tab bar.
+          vi: Cách nhóm mặc định của thanh tab.
+        options:
+          none:
+            en: Do not group
+            vi: Không nhóm
+          connection:
+            en: Connection
+            vi: Kết nối
+          database:
+            en: Database
+            vi: Cơ sở dữ liệu
+      tab_rows:
+        title:
+          en: Show tabs in a second row
+          vi: Hiện tab ở dòng thứ hai
+        description:
+          en: "Group chips on one row and the active group's tabs on a second. Needs grouping."
+          vi: "Các nhóm nằm trên một dòng, tab của nhóm đang chọn nằm ở dòng thứ hai. Cần bật nhóm tab."
+      compact_tab_titles:
+        title:
+          en: Shorten tab titles
+          vi: Rút gọn tiêu đề tab
+        description:
+          en: "Drop the @database suffix from tab labels."
+          vi: "Bỏ phần @database ở cuối tiêu đề tab."
+      show_fps:
+        title:
+          en: Show FPS counter
+          vi: Hiện bộ đếm FPS
+        description:
+          en: "Debug metric: frames per second in the status bar."
+          vi: "Chỉ số gỡ lỗi: số khung hình mỗi giây trên thanh trạng thái."
+    updates:
+      check_automatically:
+        title:
+          en: Check for updates automatically
+          vi: Tự động kiểm tra cập nhật
+        description:
+          en: "Once a day, when TableX starts, ask GitHub whether a newer version exists. Nothing but the request itself is sent. Check for Updates in the command palette works either way."
+          vi: "Mỗi ngày một lần, khi TableX khởi động, hỏi GitHub xem có phiên bản mới không. Chỉ gửi đúng yêu cầu đó. Lệnh Kiểm tra cập nhật trong bảng lệnh vẫn dùng được dù bật hay tắt."
+    editor:
+      line_numbers:
+        title:
+          en: Line numbers
+          vi: Số dòng
+        description:
+          en: Show line numbers in the gutter.
+          vi: Hiện số dòng ở lề trái.
+      soft_wrap:
+        title:
+          en: Soft wrap
+          vi: Tự xuống dòng
+        description:
+          en: Wrap long lines instead of scrolling horizontally.
+          vi: Xuống dòng với dòng dài thay vì cuộn ngang.
+      tab_size:
+        title:
+          en: Tab size
+          vi: Cỡ tab
+        description:
+          en: "Width of an indent, in spaces."
+          vi: "Độ rộng của một mức thụt lề, tính bằng khoảng trắng."
+      auto_close:
+        title:
+          en: Auto-close brackets and quotes
+          vi: Tự đóng ngoặc và dấu nháy
+        description:
+          en: Type an opening bracket or quote and get the closing one.
+          vi: Gõ ngoặc hoặc dấu nháy mở thì tự thêm dấu đóng.
+      autocomplete_auto_trigger:
+        title:
+          en: Open suggestions while typing
+          vi: Mở gợi ý khi đang gõ
+        description:
+          en: Show the suggestion list while typing. Off disables the list.
+          vi: Hiện danh sách gợi ý khi đang gõ. Tắt thì không hiện danh sách.
+      autocomplete_insert_space:
+        title:
+          en: Insert a space after keywords
+          vi: Thêm khoảng trắng sau từ khoá
+        description:
+          en: Accepting a keyword suggestion adds a trailing space.
+          vi: Chọn một gợi ý từ khoá sẽ thêm một khoảng trắng phía sau.
+      autocomplete_max_items:
+        title:
+          en: Maximum suggestions
+          vi: Số gợi ý tối đa
+        description:
+          en: Most entries the suggestion list shows.
+          vi: Số mục nhiều nhất mà danh sách gợi ý hiện ra.
+      highlight_current_statement:
+        title:
+          en: Highlight the current statement
+          vi: Tô sáng câu lệnh hiện tại
+        description:
+          en: Tint the statement under the cursor.
+          vi: Tô nền câu lệnh đang chứa con trỏ.
+      run_scope:
+        title:
+          en: Run executes
+          vi: Chạy
+        description:
+          en: What the Run button and the run shortcut execute. A selection is always preferred except for the whole-script choice.
+          vi: "Phạm vi mà nút Chạy và phím tắt chạy sẽ thực thi. Phần đang chọn luôn được ưu tiên, trừ khi chọn chạy cả script."
+        options:
+          current:
+            en: Current statement
+            vi: Câu lệnh hiện tại
+          selection:
+            en: Selection (else everything)
+            vi: Phần đã chọn (không thì tất cả)
+          all:
+            en: Whole script
+            vi: Cả script
+      confirm_dangerous:
+        title:
+          en: Confirm dangerous statements
+          vi: Xác nhận câu lệnh nguy hiểm
+        description:
+          en: "Ask before running statements a driver flags as dangerous (DROP, DELETE without WHERE, ...). Off runs them without asking."
+          vi: "Hỏi trước khi chạy câu lệnh mà driver đánh dấu là nguy hiểm (DROP, DELETE không có WHERE, ...). Tắt thì chạy mà không hỏi."
+      confirm_unsaved_close:
+        title:
+          en: Confirm closing unsaved scripts
+          vi: Xác nhận khi đóng script chưa lưu
+        description:
+          en: Ask before closing a query tab whose script was never saved.
+          vi: Hỏi trước khi đóng tab truy vấn có script chưa từng được lưu.
+      formatter:
+        title:
+          en: Formatter
+          vi: Trình định dạng
+        description:
+          en: What formats SQL. The built-in formatter needs nothing. SQL Formatter (sqruff) is a separate program installed from the Driver Manager. An external command is a program of yours that reads SQL on its standard input and writes the formatted SQL on its standard output.
+          vi: "Thứ dùng để định dạng SQL. Trình tích hợp sẵn không cần gì thêm. SQL Formatter (sqruff) là chương trình riêng, cài từ Driver Manager. Lệnh ngoài là chương trình của bạn, đọc SQL từ đầu vào chuẩn và ghi SQL đã định dạng ra đầu ra chuẩn."
+        options:
+          built_in:
+            en: Built-in
+            vi: Tích hợp sẵn
+          sqruff:
+            en: SQL Formatter (sqruff)
+            vi: SQL Formatter (sqruff)
+          external:
+            en: External command
+            vi: Lệnh ngoài
+      format_keyword_case:
+        title:
+          en: Keyword case
+          vi: Kiểu chữ của từ khoá
+        description:
+          en: "The case Format SQL gives reserved words (SELECT, FROM, WHERE, ...). Other words keep the case they were typed in."
+          vi: "Kiểu chữ mà Định dạng SQL áp cho các từ dành riêng (SELECT, FROM, WHERE, ...). Các từ khác giữ nguyên như đã gõ."
+        options:
+          upper:
+            en: UPPER CASE
+            vi: CHỮ HOA
+          lower:
+            en: lower case
+            vi: chữ thường
+          keep:
+            en: As typed
+            vi: Như đã gõ
+      format_indent:
+        title:
+          en: Indent width
+          vi: Độ rộng thụt lề
+        description:
+          en: Spaces per indent level in formatted SQL. 0 uses the tab size.
+          vi: Số khoảng trắng cho mỗi mức thụt lề trong SQL đã định dạng. 0 là dùng cỡ tab.
+      format_lines_between_statements:
+        title:
+          en: Blank lines between statements
+          vi: Dòng trống giữa các câu lệnh
+        description:
+          en: "Blank lines Format SQL leaves after each statement's semicolon."
+          vi: Số dòng trống mà Định dạng SQL để lại sau dấu chấm phẩy của mỗi câu lệnh.
+      format_external_program:
+        title:
+          en: External command
+          vi: Lệnh ngoài
+        description:
+          en: "The program for an external formatter: a name found on your PATH (sqruff, sqlfluff, pg_format, sql-formatter) or a full path."
+          vi: "Chương trình của trình định dạng ngoài: tên có trong PATH (sqruff, sqlfluff, pg_format, sql-formatter) hoặc đường dẫn đầy đủ."
+      format_external_args:
+        title:
+          en: External command arguments
+          vi: Tham số của lệnh ngoài
+        description:
+          en: "Arguments, separated by blanks (quote one that contains blanks). {dialect} becomes postgres, mysql, mariadb, sqlite, clickhouse or ansi; {language} the name sql-formatter uses (postgresql, sql, ...)."
+          vi: "Các tham số, cách nhau bằng khoảng trắng (đặt trong dấu nháy nếu tham số có khoảng trắng). {dialect} thành postgres, mysql, mariadb, sqlite, clickhouse hoặc ansi; {language} là tên mà sql-formatter dùng (postgresql, sql, ...)."
+      format_external_exit_codes:
+        title:
+          en: External command exit codes that succeed
+          vi: Mã thoát của lệnh ngoài được coi là thành công
+        description:
+          en: "Exit codes, separated by commas, that mean the command worked. A command that prints its result and exits 1 when it could not fix everything (sqruff fix, sqlfluff) needs 0,1. Anything else is a failure and its error output is shown."
+          vi: "Các mã thoát, cách nhau bằng dấu phẩy, cho biết lệnh đã chạy được. Lệnh in kết quả rồi thoát với mã 1 khi không sửa hết (sqruff fix, sqlfluff) cần 0,1. Mã khác là lỗi và nội dung lỗi sẽ được hiện ra."
+      format_timeout:
+        title:
+          en: Formatter timeout
+          vi: Thời gian chờ của trình định dạng
+        description:
+          en: Seconds SQL Formatter (sqruff) or an external command may take before it is stopped.
+          vi: Số giây tối đa SQL Formatter (sqruff) hoặc lệnh ngoài được chạy trước khi bị dừng.
+      on_script_error:
+        title:
+          en: On error in a script
+          vi: Khi script gặp lỗi
+        description:
+          en: "What a script of several statements does when one fails: stop there (the rest show as skipped in Statistics) or run the remaining statements."
+          vi: "Việc script nhiều câu lệnh làm khi một câu lệnh lỗi: dừng tại đó (phần còn lại hiện là đã bỏ qua trong Thống kê) hoặc chạy tiếp các câu lệnh còn lại."
+        options:
+          stop:
+            en: Stop at the failing statement
+            vi: Dừng ở câu lệnh lỗi
+          continue:
+            en: Run the remaining statements
+            vi: Chạy các câu lệnh còn lại
+      max_result_tabs:
+        title:
+          en: Result tabs per script
+          vi: Số tab kết quả mỗi script
+        description:
+          en: Most result tabs a script run keeps. Statements past it still run and appear in Statistics as rows not kept.
+          vi: Số tab kết quả nhiều nhất mà một lần chạy script giữ lại. Các câu lệnh vượt quá vẫn chạy và hiện trong Thống kê là dòng không được giữ.
+      parameters:
+        title:
+          en: Ask for parameters
+          vi: Hỏi tham số
+        description:
+          en: "Ask for a value before running a statement that has :name or ${name} parameters. Off runs the text as written."
+          vi: "Hỏi giá trị trước khi chạy câu lệnh có tham số :name hoặc ${name}. Tắt thì chạy nguyên văn bản."
+    results:
+      page_size:
+        title:
+          en: Default page size
+          vi: Số dòng mỗi trang
+        description:
+          en: Rows fetched per page in a new tab.
+          vi: Số dòng tải về mỗi trang trong một tab mới.
+      null_text:
+        title:
+          en: NULL display text
+          vi: Chữ hiện cho NULL
+        description:
+          en: What a NULL value shows in the grid.
+          vi: Thứ hiện ra trong lưới khi giá trị là NULL.
+      right_align_numbers:
+        title:
+          en: Right-align numbers
+          vi: Căn phải số
+        description:
+          en: Align numeric columns to the right.
+          vi: Căn các cột số về bên phải.
+      show_row_numbers:
+        title:
+          en: Show row numbers
+          vi: Hiện số dòng
+        description:
+          en: Show the row number gutter.
+          vi: Hiện cột số thứ tự dòng.
+      column_width_default:
+        title:
+          en: Default column width
+          vi: Độ rộng cột mặc định
+        description:
+          en: "Initial width of a column, in pixels."
+          vi: "Độ rộng ban đầu của một cột, tính bằng pixel."
+      column_width_min:
+        title:
+          en: Minimum column width
+          vi: Độ rộng cột tối thiểu
+        description:
+          en: "Smallest width a column can be resized to, in pixels."
+          vi: "Độ rộng nhỏ nhất khi kéo đổi cỡ cột, tính bằng pixel."
+      column_width_max:
+        title:
+          en: Maximum column width
+          vi: Độ rộng cột tối đa
+        description:
+          en: "Largest width a column can be resized to, in pixels."
+          vi: "Độ rộng lớn nhất khi kéo đổi cỡ cột, tính bằng pixel."
+      auto_size_columns:
+        title:
+          en: Size columns from their values
+          vi: Cỡ cột theo giá trị
+        description:
+          en: Fit each column to a sample of its values (within the minimum and maximum) instead of the default width.
+          vi: Vừa mỗi cột với một mẫu giá trị của nó (trong khoảng tối thiểu và tối đa) thay vì dùng độ rộng mặc định.
+      boolean_display:
+        title:
+          en: Booleans
+          vi: Giá trị boolean
+        description:
+          en: Show boolean values as text or as a checkbox.
+          vi: Hiện giá trị boolean dạng chữ hoặc ô đánh dấu.
+        options:
+          text:
+            en: Text
+            vi: Chữ
+          checkbox:
+            en: Checkbox
+            vi: Ô đánh dấu
+      datetime_format:
+        title:
+          en: Date and time format
+          vi: Định dạng ngày giờ
+        description:
+          en: How date-time values are written.
+          vi: Cách ghi giá trị ngày giờ.
+        options:
+          source:
+            en: As returned by the database
+            vi: Như cơ sở dữ liệu trả về
+          iso:
+            en: "YYYY-MM-DD HH:MM:SS"
+            vi: "YYYY-MM-DD HH:MM:SS"
+          iso_millis:
+            en: "YYYY-MM-DD HH:MM:SS.mmm"
+            vi: "YYYY-MM-DD HH:MM:SS.mmm"
+      binary_display:
+        title:
+          en: Binary values
+          vi: Giá trị nhị phân
+        description:
+          en: Show binary values as hexadecimal or Base64.
+          vi: Hiện giá trị nhị phân dạng thập lục phân hoặc Base64.
+        options:
+          hex:
+            en: Hexadecimal
+            vi: Thập lục phân
+          base64:
+            en: Base64
+            vi: Base64
+      binary_preview_max:
+        title:
+          en: Binary preview length
+          vi: Độ dài xem trước nhị phân
+        description:
+          en: Most bytes of a binary value shown in a cell.
+          vi: Số byte nhiều nhất của giá trị nhị phân hiện trong một ô.
+      mongo_json_mode:
+        title:
+          en: MongoDB JSON mode
+          vi: Chế độ JSON của MongoDB
+        description:
+          en: Relaxed or canonical extended JSON for documents.
+          vi: JSON mở rộng dạng Relaxed hoặc Canonical cho các document.
+        options:
+          relaxed:
+            en: Relaxed
+            vi: Relaxed
+          canonical:
+            en: Canonical
+            vi: Canonical
+      default_copy_format:
+        title:
+          en: Default copy format
+          vi: Định dạng sao chép mặc định
+        description:
+          en: Format used by the plain Copy command.
+          vi: Định dạng mà lệnh Sao chép thông thường dùng.
+        options:
+          smart:
+            en: Smart
+            vi: Thông minh
+          raw:
+            en: Raw values
+            vi: Giá trị thô
+          tsv:
+            en: TSV
+            vi: TSV
+          tsv_with_headers:
+            en: TSV with headers
+            vi: TSV có tiêu đề
+          csv:
+            en: CSV
+            vi: CSV
+          csv_with_headers:
+            en: CSV with headers
+            vi: CSV có tiêu đề
+          json:
+            en: JSON
+            vi: JSON
+          markdown:
+            en: Markdown
+            vi: Markdown
+      export_delimiter:
+        title:
+          en: Export delimiter
+          vi: Dấu phân cách khi xuất
+        description:
+          en: Column separator of CSV exports.
+          vi: Ký tự ngăn cách các cột trong tệp CSV xuất ra.
+      export_header:
+        title:
+          en: Export header row
+          vi: Dòng tiêu đề khi xuất
+        description:
+          en: Write column names as the first row of CSV exports.
+          vi: Ghi tên cột ở dòng đầu của tệp CSV xuất ra.
+      export_null_text:
+        title:
+          en: Export NULL text
+          vi: Chữ cho NULL khi xuất
+        description:
+          en: What a NULL is written as in CSV exports.
+          vi: Cách ghi giá trị NULL trong tệp CSV xuất ra.
+      export_folder:
+        title:
+          en: Export folder
+          vi: Thư mục xuất
+        description:
+          en: Where exports are saved. Empty uses the downloads folder.
+          vi: Nơi lưu các tệp xuất ra. Để trống để dùng thư mục Tải về.
+    query:
+      query_timeout_secs:
+        title:
+          en: Query timeout
+          vi: Thời gian chờ truy vấn
+        description:
+          en: Seconds a query may run before it is cancelled. 0 means no limit.
+          vi: Số giây một truy vấn được chạy trước khi bị huỷ. 0 là không giới hạn.
+      connect_timeout_secs:
+        title:
+          en: Connect timeout
+          vi: Thời gian chờ kết nối
+        description:
+          en: Seconds to wait for a connection. 0 means the driver default.
+          vi: Số giây chờ một kết nối. 0 là dùng mặc định của driver.
+      keep_alive_secs:
+        title:
+          en: Connection keep-alive interval
+          vi: Chu kỳ giữ kết nối
+        description:
+          en: "Seconds an open connection may sit idle before TableX checks it is still alive, so one that died (a server restart, a night asleep) is noticed and reopened on its next use. 0 means never check."
+          vi: "Số giây một kết nối đang mở được nằm yên trước khi TableX kiểm tra nó còn sống không, để kết nối đã chết (máy chủ khởi động lại, máy ngủ qua đêm) được phát hiện và mở lại ở lần dùng kế tiếp. 0 là không kiểm tra."
+      pg_dump_path:
+        title:
+          en: pg_dump
+          vi: pg_dump
+        description:
+          en: The pg_dump program to back up PostgreSQL with. Empty looks for it on your PATH and in the usual install folders and takes the newest version that is not older than the server. A path set here is used as it is.
+          vi: "Chương trình pg_dump dùng để sao lưu PostgreSQL. Để trống thì tìm trong PATH và các thư mục cài đặt thường dùng, rồi lấy bản mới nhất không cũ hơn máy chủ. Đường dẫn đặt ở đây được dùng nguyên như vậy."
+      pg_restore_path:
+        title:
+          en: pg_restore
+          vi: pg_restore
+        description:
+          en: The pg_restore program to restore PostgreSQL archives with. Empty looks for it like pg_dump.
+          vi: Chương trình pg_restore dùng để khôi phục tệp lưu trữ PostgreSQL. Để trống thì tìm giống như pg_dump.
+      mysqldump_path:
+        title:
+          en: mysqldump
+          vi: mysqldump
+        description:
+          en: "The mysqldump program to back up MySQL with (and MariaDB, when it has no mariadb-dump). Empty looks for it on your PATH and in the usual install folders."
+          vi: "Chương trình mysqldump dùng để sao lưu MySQL (và MariaDB, khi không có mariadb-dump). Để trống thì tìm trong PATH và các thư mục cài đặt thường dùng."
+      mariadb_dump_path:
+        title:
+          en: mariadb-dump
+          vi: mariadb-dump
+        description:
+          en: The mariadb-dump program to back up MariaDB with. Empty looks for it on your PATH and in the usual install folders.
+          vi: Chương trình mariadb-dump dùng để sao lưu MariaDB. Để trống thì tìm trong PATH và các thư mục cài đặt thường dùng.
+    navigation:
+      connection_sort:
+        title:
+          en: Sort connections
+          vi: Sắp xếp kết nối
+        description:
+          en: Order of connections in the sidebar.
+          vi: Thứ tự các kết nối trên thanh bên.
+        options:
+          manual:
+            en: Manual
+            vi: Thủ công
+          ascending:
+            en: Name A-Z
+            vi: Tên A-Z
+          descending:
+            en: Name Z-A
+            vi: Tên Z-A
+      global_search:
+        title:
+          en: Search unloaded catalogs
+          vi: Tìm trong catalog chưa tải
+        description:
+          en: Sidebar search also crawls catalogs that were never expanded.
+          vi: Tìm kiếm trên thanh bên cũng quét cả các catalog chưa từng được mở.
+      show_system_objects:
+        title:
+          en: Show system objects
+          vi: Hiện đối tượng hệ thống
+        description:
+          en: Default for connections without their own visible-objects filter.
+          vi: Mặc định cho các kết nối không có bộ lọc đối tượng hiển thị riêng.
+      navigator_page_size:
+        title:
+          en: Navigator page size
+          vi: Số mục mỗi lần tải của thanh bên
+        description:
+          en: "Objects loaded per \"load more\" in the sidebar tree."
+          vi: "Số đối tượng tải về mỗi lần bấm \"tải thêm\" trong cây thanh bên."
+      table_double_click:
+        title:
+          en: Double-click a table
+          vi: Nhấp đúp vào bảng
+        description:
+          en: What double-clicking a table or view opens.
+          vi: Việc xảy ra khi nhấp đúp vào một bảng hoặc view.
+        options:
+          data:
+            en: Open data
+            vi: Mở dữ liệu
+          properties:
+            en: Open properties
+            vi: Mở thuộc tính
+          diagram:
+            en: Open diagram
+            vi: Mở sơ đồ
+      single_click_opens:
+        title:
+          en: Single click opens
+          vi: Nhấp một lần để mở
+        description:
+          en: A single click on a table opens it instead of only selecting it.
+          vi: Nhấp một lần vào bảng sẽ mở nó thay vì chỉ chọn.
+      open_data_tabs_next_to_active:
+        title:
+          en: Open data tabs next to the active tab
+          vi: Mở tab dữ liệu cạnh tab đang chọn
+        description:
+          en: New data tabs open beside the active tab instead of at the end.
+          vi: Tab dữ liệu mới mở ngay cạnh tab đang chọn thay vì ở cuối.
+      restore_tabs:
+        title:
+          en: Restore tabs on start
+          vi: Khôi phục tab khi khởi động
+        description:
+          en: Which tabs come back after restarting TableX.
+          vi: Những tab nào quay lại sau khi khởi động lại TableX.
+        options:
+          all:
+            en: All tabs
+            vi: Tất cả tab
+          pinned:
+            en: Pinned tabs only
+            vi: Chỉ tab đã ghim
+          none:
+            en: None
+            vi: Không
+    ai:
+      provider:
+        title:
+          en: Provider
+          vi: Nhà cung cấp
+        description:
+          en: "Who answers the assistant's questions. The API key, the model and the address below are kept for each provider."
+          vi: "Bên trả lời các câu hỏi của trợ lý. Khoá API, mô hình và địa chỉ bên dưới được lưu riêng cho từng nhà cung cấp."
+        options:
+          anthropic:
+            en: Anthropic
+            vi: Anthropic
+          openai:
+            en: OpenAI
+            vi: OpenAI
+          openai_compatible:
+            en: OpenAI-compatible
+            vi: OpenAI-compatible
+          ollama:
+            en: Ollama
+            vi: Ollama
+      model:
+        title:
+          en: Model
+          vi: Mô hình
+        description:
+          en: "The model the assistant uses. Refresh loads the provider's current list."
+          vi: Mô hình mà trợ lý dùng. Làm mới sẽ tải danh sách hiện tại của nhà cung cấp.
+      effort:
+        title:
+          en: Reasoning effort
+          vi: Mức suy luận
+        description:
+          en: "How much the model thinks before it answers: low is quick, max is thorough and slower. A change applies from the next new chat."
+          vi: "Mức mô hình suy nghĩ trước khi trả lời: thấp thì nhanh, tối đa thì kỹ hơn nhưng chậm hơn. Thay đổi có hiệu lực từ cuộc trò chuyện mới kế tiếp."
+        options:
+          low:
+            en: Low
+            vi: Thấp
+          medium:
+            en: Medium
+            vi: Trung bình
+          high:
+            en: High
+            vi: Cao
+          xhigh:
+            en: Extra high
+            vi: Rất cao
+          max:
+            en: Max
+            vi: Tối đa
+      fallback:
+        title:
+          en: Retry a declined request on a fallback model
+          vi: Thử lại bằng mô hình dự phòng khi yêu cầu bị từ chối
+        description:
+          en: "When the model declines a request, let Anthropic answer it with a fallback model instead. Only Anthropic has this."
+          vi: "Khi mô hình từ chối một yêu cầu, để Anthropic trả lời bằng một mô hình dự phòng. Chỉ Anthropic có tính năng này."
+      keep_conversations:
+        title:
+          en: Keep conversations on this computer
+          vi: Lưu cuộc trò chuyện trên máy này
+        description:
+          en: "Each finished conversation is saved in TableX's app database (tablex.db in its data folder), so History can reopen it. They can contain query results. Turning this off stops saving; it does not delete what is saved."
+          vi: "Mỗi cuộc trò chuyện đã xong được lưu trong cơ sở dữ liệu ứng dụng của TableX (tablex.db trong thư mục dữ liệu), để Lịch sử có thể mở lại. Chúng có thể chứa kết quả truy vấn. Tắt thì ngừng lưu; không xoá những gì đã lưu."
+      agent_access:
+        title:
+          en: Default agent access
+          vi: Quyền truy cập mặc định của agent
+        description:
+          en: How far the assistant and MCP clients may go on a connection that sets no level itself. Production connections stay off; writes always need Read and write on the connection.
+          vi: Mức mà trợ lý và các client MCP được phép làm trên một kết nối không tự đặt mức. Kết nối production luôn tắt; thao tác ghi luôn cần Đọc và ghi trên kết nối.
+        options:
+          "off":
+            en: "Off"
+            vi: Tắt
+          schema:
+            en: Schema only
+            vi: Chỉ schema
+          read:
+            en: Read
+            vi: Đọc
+      mcp_writes:
+        title:
+          en: Let MCP clients run changes
+          vi: Cho phép client MCP chạy thay đổi
+        description:
+          en: "An MCP client (the program you connected TableX's MCP server to) may then ask to run statements that change data on connections whose assistant access is \"Read and write\". TableX asks that client to put each one to you; a client set to answer by itself can run them without you seeing them, so turn this on only for a client you trust. Never on a connection of a production type (only the built-in Production type counts; a custom type is not production). Off by default."
+          vi: "Khi bật, một client MCP (chương trình bạn đã nối với máy chủ MCP của TableX) có thể yêu cầu chạy các câu lệnh làm thay đổi dữ liệu trên những kết nối có quyền trợ lý là \"Đọc và ghi\". TableX yêu cầu client đó hỏi bạn từng câu lệnh; client được đặt để tự trả lời có thể chạy chúng mà bạn không thấy, nên chỉ bật cho client bạn tin cậy. Không bao giờ áp dụng cho kết nối loại production (chỉ loại Production có sẵn được tính; loại tuỳ chỉnh không phải production). Mặc định tắt."
+      base_url:
+        title:
+          en: Base URL
+          vi: URL gốc
+        description:
+          en: "The provider's address. Use https://; http:// only for a server on this machine, such as Ollama or LM Studio."
+          vi: "Địa chỉ của nhà cung cấp. Dùng https://; http:// chỉ cho máy chủ trên máy này, như Ollama hoặc LM Studio."
+  group:
+    interface:
+      en: Interface
+      vi: Chung
+    result_grid:
+      en: Result grid
+      vi: Lưới kết quả
+    editor:
+      en: Editor
+      vi: Trình soạn thảo
+    tab_bar:
+      en: Tab bar
+      vi: Thanh tab
+    status_bar:
+      en: Status bar
+      vi: Thanh trạng thái
+    updates:
+      en: Updates
+      vi: Cập nhật
+    display:
+      en: Display
+      vi: Hiển thị
+    typing:
+      en: Typing
+      vi: Nhập liệu
+    autocomplete:
+      en: Autocomplete
+      vi: Tự động hoàn thành
+    running:
+      en: Running
+      vi: Chạy
+    safety:
+      en: Safety
+      vi: An toàn
+    format_sql:
+      en: Format SQL
+      vi: Định dạng SQL
+    fetching:
+      en: Fetching
+      vi: Tải dữ liệu
+    cells:
+      en: Cells
+      vi: Ô
+    columns:
+      en: Columns
+      vi: Cột
+    formats:
+      en: Formats
+      vi: Định dạng
+    copy_and_export:
+      en: Copy and export
+      vi: Sao chép và xuất
+    timeouts:
+      en: Timeouts
+      vi: Thời gian chờ
+    backup_tools:
+      en: Backup tools
+      vi: Công cụ sao lưu
+    sidebar:
+      en: Sidebar
+      vi: Thanh bên
+    scripts:
+      en: Scripts
+      vi: Script
+    opening:
+      en: Opening
+      vi: Mở
+    model:
+      en: Model
+      vi: Mô hình
+    conversations:
+      en: Conversations
+      vi: Cuộc trò chuyện
+    agent_access:
+      en: Agent access
+      vi: Quyền của agent
+    mcp_server:
+      en: MCP server
+      vi: Máy chủ MCP
+    advanced:
+      en: Advanced
+      vi: Nâng cao

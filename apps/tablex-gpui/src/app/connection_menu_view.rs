@@ -30,13 +30,13 @@ fn history_menu_contents(
     error: Option<String>,
 ) -> PopupMenu {
     if loading {
-        return submenu.item(PopupMenuItem::new("Loading…").disabled(true));
+        return submenu.item(PopupMenuItem::new(t!("menu.loading")).disabled(true));
     }
     if let Some(error) = error {
         return submenu.item(PopupMenuItem::new(format!("Error: {error}")).disabled(true));
     }
     if entries.is_empty() {
-        return submenu.item(PopupMenuItem::new("No Saved Queries").disabled(true));
+        return submenu.item(PopupMenuItem::new(t!("menu.no_saved_queries")).disabled(true));
     }
     entries.into_iter().take(10).fold(submenu, |menu, entry| {
         let root = root.clone();
@@ -306,7 +306,7 @@ impl AppRoot {
         let mongo_script = tab.query_mode.is_mongo_script();
         let input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Script name")
+                .placeholder(t!("menu.script_name"))
                 .default_value(tab.title.clone())
         });
         let root = cx.entity().downgrade();
@@ -320,15 +320,15 @@ impl AppRoot {
                     "Save SQL Script"
                 })
                 .child(Input::new(&input))
-                .button_props(gpui_component::dialog::DialogButtonProps::default().ok_text("Save"))
+                .button_props(gpui_component::dialog::DialogButtonProps::default().ok_text(t!("menu.save")))
                 .confirm()
                 .on_ok(move |_, window, cx| {
                     let name = input.read(cx).value().to_string();
                     if name.trim().is_empty() || name.trim() != name {
                         window.open_alert_dialog(cx, move |dialog, _, _| {
                             dialog
-                                .title("Invalid script name")
-                                .child("Enter a name without leading or trailing whitespace.")
+                                .title(t!("menu.invalid_script_name"))
+                                .child(t!("menu.enter_a_name_without_leading_or_trailing_whitesp"))
                         });
                         return false;
                     }
@@ -379,7 +379,7 @@ impl AppRoot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Database name"));
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(t!("menu.database_name")));
         let root = cx.entity().downgrade();
         let connection = connection_id.to_string();
         let focus_input = input.clone();
@@ -388,7 +388,7 @@ impl AppRoot {
             let root = root.clone();
             let connection = connection.clone();
             dialog
-                .title("Create Database")
+                .title(t!("menu.create_database"))
                 .child(
                     div()
                         .flex()
@@ -403,18 +403,18 @@ impl AppRoot {
                             div()
                                 .text_size(px(10.0))
                                 .text_color(theme::text_muted())
-                                .child("Names must not be empty or padded with whitespace."),
+                                .child(t!("menu.names_must_not_be_empty_or_padded_with_whitespac")),
                         ),
                 )
                 .button_props(
-                    gpui_component::dialog::DialogButtonProps::default().ok_text("Create"),
+                    gpui_component::dialog::DialogButtonProps::default().ok_text(t!("common.create")),
                 )
                 .confirm()
                 .on_ok(move |_, window, cx| {
                     let name = input.read(cx).value().to_string();
                     if let Some(message) = driver_database_name_error(&name) {
                         window.open_alert_dialog(cx, move |dialog, _, _| {
-                            dialog.title("Invalid database name").child(message)
+                            dialog.title(t!("menu.invalid_database_name")).child(message)
                         });
                         return false;
                     }
@@ -454,14 +454,14 @@ impl AppRoot {
         window.open_alert_dialog(cx, move |dialog, _, _| {
             let (root, connection, name) = (root.clone(), connection.clone(), name.clone());
             dialog
-                .title("Create this database?")
+                .title(t!("menu.create_this_database"))
                 .child(
                     div()
                         .debug_selector(|| "driver-create-db-confirm".into())
                         .child(format!("The database {} will be created on {subject}.", name)),
                 )
                 .button_props(
-                    gpui_component::dialog::DialogButtonProps::default().ok_text("Create"),
+                    gpui_component::dialog::DialogButtonProps::default().ok_text(t!("common.create")),
                 )
                 .confirm()
                 .on_ok(move |_, _, cx| {
@@ -508,7 +508,7 @@ impl AppRoot {
             cx.notify();
             return;
         }
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Group name"));
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(t!("common.group_name")));
         let root = cx.entity().downgrade();
         let connection = connection_id.to_string();
         window.open_alert_dialog(cx, move |dialog, _, _| {
@@ -516,17 +516,17 @@ impl AppRoot {
             let root = root.clone();
             let connection = connection.clone();
             dialog
-                .title("Move to New Group")
+                .title(t!("menu.move_to_new_group"))
                 .child(Input::new(&input))
-                .button_props(gpui_component::dialog::DialogButtonProps::default().ok_text("Move"))
+                .button_props(gpui_component::dialog::DialogButtonProps::default().ok_text(t!("menu.move")))
                 .confirm()
                 .on_ok(move |_, window, cx| {
                     let name = input.read(cx).value().to_string();
                     if name.trim().is_empty() {
                         window.open_alert_dialog(cx, move |dialog, _, _| {
                             dialog
-                                .title("Invalid group name")
-                                .child("Enter a non-empty group name.")
+                                .title(t!("menu.invalid_group_name"))
+                                .child(t!("menu.enter_a_non_empty_group_name"))
                         });
                         return false;
                     }
@@ -684,11 +684,11 @@ impl AppRoot {
             self.visible_filter_schema_select =
                 Some((connection_id.into(), select.clone(), window.window_handle()));
         }
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search databases"));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder(t!("menu.search_databases")));
         let patterns = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(2, 5)
-                .placeholder("Regex patterns, one per line (optional)")
+                .placeholder(t!("menu.regex_patterns_one_per_line_optional"))
                 .default_value(current.patterns.join("\n"))
         });
         self.visible_filter_dialog = Some((connection_id.to_string(), draft.clone()));
@@ -873,7 +873,7 @@ impl AppRoot {
             .track_scroll(&schema_scroll);
             dialog
                 .w(px(480.0))
-                .title("Visible Object Filter")
+                .title(t!("menu.visible_object_filter"))
                 .child(
                     div()
                         .flex()
@@ -917,7 +917,7 @@ impl AppRoot {
                                 .gap(px(6.0))
                                 .child(
                                     Button::new("visible-filter-select-all")
-                                        .label("Select all")
+                                        .label(t!("menu.select_all"))
                                         .small()
                                         .debug_selector(|| "visible-filter-select-all".into())
                                         .on_click(move |_, _, cx| {
@@ -929,7 +929,7 @@ impl AppRoot {
                                 )
                                 .child(
                                     Button::new("visible-filter-select-filtered")
-                                        .label("Select filtered")
+                                        .label(t!("menu.select_filtered"))
                                         .small()
                                         .debug_selector(|| "visible-filter-select-filtered".into())
                                         .on_click(move |_, window, cx| {
@@ -958,7 +958,7 @@ impl AppRoot {
                                 )
                                 .child(
                                     Button::new("visible-filter-clear")
-                                        .label("Clear")
+                                        .label(t!("menu.clear"))
                                         .small()
                                         .debug_selector(|| "visible-filter-clear".into())
                                         .on_click(move |_, window, cx| {
@@ -979,7 +979,7 @@ impl AppRoot {
                                         .child(
                                             Checkbox::new("visible-filter-show-system-box")
                                                 .checked(draft_show_system)
-                                                .label("Show system databases")
+                                                .label(ts!("menu.show_system_databases"))
                                                 .on_click(move |checked: &bool, _, cx| {
                                                     let requested = *checked;
                                                     draft_system.update(cx, |state, cx| {
@@ -997,7 +997,7 @@ impl AppRoot {
                                     .flex()
                                     .flex_col()
                                     .gap(px(6.0))
-                                    .child(Select::new(&select).placeholder("Database for schemas"))
+                                    .child(Select::new(&select).placeholder(t!("menu.database_for_schemas")))
                                     .child(
                                         div()
                                             .text_size(px(10.0))
@@ -1018,7 +1018,7 @@ impl AppRoot {
                     gpui_component::dialog::DialogFooter::new()
                         .child(
                             Button::new("visible-filter-show-all")
-                                .label("Show All")
+                                .label(t!("menu.show_all"))
                                 .compact()
                                 .ghost()
                                 .debug_selector(|| "visible-filter-show-all".into())
@@ -1033,7 +1033,7 @@ impl AppRoot {
                         )
                         .child(
                             Button::new("visible-filter-cancel")
-                                .label("Cancel")
+                                .label(t!("common.cancel"))
                                 .compact()
                                 .ghost()
                                 .debug_selector(|| "visible-filter-cancel".into())
@@ -1043,7 +1043,7 @@ impl AppRoot {
                         )
                         .child(
                             Button::new("visible-filter-apply")
-                                .label("Apply")
+                                .label(t!("settings.footer.apply"))
                                 .compact()
                                 .primary()
                                 .debug_selector(|| "visible-filter-apply".into())
@@ -1154,7 +1154,7 @@ pub(super) fn build_connection_menu(
     let connect_id = connection_id.clone();
     let menu = if connecting {
         menu.item(
-            PopupMenuItem::new("Cancel")
+            PopupMenuItem::new(t!("common.cancel"))
                 .icon(menu_icon(navigator_ui::SidebarGlyph::Collapse))
                 .action(Box::new(CancelConnectionConnect))
                 .on_click(move |_, _, app| {
@@ -1165,7 +1165,7 @@ pub(super) fn build_connection_menu(
         )
     } else if connected {
         menu.item(
-            PopupMenuItem::new("Close Connection")
+            PopupMenuItem::new(t!("menu.close_connection"))
                 .icon(menu_icon(navigator_ui::SidebarGlyph::Connected))
                 .action(Box::new(DisconnectConnection))
                 .on_click(move |_, window, app| {
@@ -1176,7 +1176,7 @@ pub(super) fn build_connection_menu(
         )
     } else {
         menu.item(
-            PopupMenuItem::new("Connect")
+            PopupMenuItem::new(t!("menu.connect"))
                 .icon(menu_icon(navigator_ui::SidebarGlyph::Connected))
                 .action(Box::new(ConnectConnection))
                 .disabled(!can_connect)
@@ -1201,7 +1201,7 @@ pub(super) fn build_connection_menu(
     let name_root = menu_root.clone();
     let name_id = connection_id.clone();
     let menu = menu.separator().item(
-        PopupMenuItem::new("Copy Name")
+        PopupMenuItem::new(t!("menu.copy_name"))
             .icon(menu_icon(navigator_ui::SidebarGlyph::Copy))
             .action(Box::new(CopyConnectionName))
             .on_click(move |_, _, app| {
@@ -1212,7 +1212,7 @@ pub(super) fn build_connection_menu(
     );
     let info_root = menu_root.clone();
     let info_id = connection_id.clone();
-    let menu = menu.submenu("Copy Connection Info", window, cx, move |submenu, _, _| {
+    let menu = menu.submenu(t!("menu.copy_connection_info"), window, cx, move |submenu, _, _| {
         let mut built = submenu;
         for (label, item, action) in [
             (
@@ -1251,7 +1251,7 @@ pub(super) fn build_connection_menu(
     let query_root = menu_root.clone();
     let query_id = connection_id.clone();
     let menu = menu.separator().item(
-        PopupMenuItem::new("New Query")
+        PopupMenuItem::new(t!("titlebar.new_query"))
             .icon(Icon::new(IconName::SquareTerminal).size(px(12.0)))
             .action(Box::new(NewConnectionQuery))
             .disabled(!can_query)
@@ -1280,7 +1280,7 @@ pub(super) fn build_connection_menu(
     let _ = history_root.update(cx, |this, cx| {
         let _ = this.request_saved_query_history(&history_id, cx);
     });
-    let menu = menu.submenu("Query History", window, cx, move |submenu, _, cx| {
+    let menu = menu.submenu(t!("menu.query_history"), window, cx, move |submenu, _, cx| {
         let weak_submenu = cx.entity().downgrade();
         let _ = history_root.update(cx, |this, _| {
             this.history_popup = Some((
@@ -1304,9 +1304,9 @@ pub(super) fn build_connection_menu(
     let create_root = menu_root.clone();
     let create_id = connection_id.clone();
     let create_label = if can_create {
-        "Create Database".to_string()
+        t!("menu.create_database").into_owned()
     } else {
-        "Create Database (unavailable)".to_string()
+        t!("menu.create_database_unavailable").into_owned()
     };
     let menu = menu.item(
         PopupMenuItem::new(create_label)
@@ -1324,7 +1324,7 @@ pub(super) fn build_connection_menu(
     let run_file_root = menu_root.clone();
     let run_file_id = connection_id.clone();
     let menu = menu.item(
-        PopupMenuItem::new("Run SQL File\u{2026}")
+        PopupMenuItem::new(t!("menu.run_sql_file"))
             .icon(Icon::empty().path("icons/play.svg").size(px(12.0)))
             .on_click(move |_, window, app| {
                 let _ = run_file_root.update(app, |this, cx| {
@@ -1336,7 +1336,7 @@ pub(super) fn build_connection_menu(
 
     // Backup and Restore with the server's native tools (PostgreSQL, MySQL, MariaDB).
     let menu = if can_backup {
-        [(super::backup::Mode::Backup, "Backup\u{2026}", "icons/download.svg"), (super::backup::Mode::Restore, "Restore\u{2026}", "icons/upload.svg")].into_iter().fold(menu, |menu, (mode, label, icon)| {
+        [(super::backup::Mode::Backup, t!("menu.backup"), "icons/download.svg"), (super::backup::Mode::Restore, t!("menu.restore"), "icons/upload.svg")].into_iter().fold(menu, |menu, (mode, label, icon)| {
             let (root, id) = (menu_root.clone(), connection_id.clone());
             menu.item(PopupMenuItem::new(label).icon(Icon::empty().path(icon).size(px(12.0))).on_click(move |_, window, app| {
                 let _ = root.update(app, |this, cx| this.open_backup_for_connection(mode, &id, window, cx));
@@ -1352,7 +1352,7 @@ pub(super) fn build_connection_menu(
         menu.item(super::mongo_admin_view::entry_item(
             super::mongo_admin_view::Entry {
                 selector: "connection-menu-accounts",
-                label: "Users & Privileges\u{2026}",
+                label: t!("menu.users_privileges"),
                 icon: Icon::empty().path("icons/key-round.svg").size(px(12.0)),
                 disabled: None,
                 destructive: false,
@@ -1371,7 +1371,7 @@ pub(super) fn build_connection_menu(
         menu.item(super::mongo_admin_view::entry_item(
             super::mongo_admin_view::Entry {
                 selector: "connection-menu-process-list",
-                label: "Process List\u{2026}",
+                label: t!("menu.process_list"),
                 icon: Icon::empty().path("icons/list-checks.svg").size(px(12.0)),
                 disabled: None,
                 destructive: false,
@@ -1389,7 +1389,7 @@ pub(super) fn build_connection_menu(
     let move_root = menu_root.clone();
     let move_id = connection_id.clone();
     let menu = menu.separator().item(
-        PopupMenuItem::new("Move to New Group")
+        PopupMenuItem::new(t!("menu.move_to_new_group"))
             .icon(menu_icon(navigator_ui::SidebarGlyph::MoveToGroup))
             .action(Box::new(MoveConnectionToNewGroup))
             .on_click(move |_, window, app| {
@@ -1403,7 +1403,7 @@ pub(super) fn build_connection_menu(
     let refresh_root = menu_root.clone();
     let refresh_id = connection_id.clone();
     let menu = menu.item(
-        PopupMenuItem::new("Refresh")
+        PopupMenuItem::new(t!("menu.refresh"))
             .icon(menu_icon(navigator_ui::SidebarGlyph::Refresh))
             .action(Box::new(RefreshConnection))
             .disabled(!can_refresh)
@@ -1424,7 +1424,7 @@ pub(super) fn build_connection_menu(
     let filter_root = menu_root.clone();
     let filter_id = connection_id.clone();
     let menu = menu.item(
-        PopupMenuItem::new("Visible Object Filter")
+        PopupMenuItem::new(t!("menu.visible_object_filter"))
             .icon(menu_icon(navigator_ui::SidebarGlyph::Filter))
             .action(Box::new(OpenVisibleFilter))
             .on_click(move |_, window, app| {
@@ -1436,7 +1436,7 @@ pub(super) fn build_connection_menu(
     let edit_root = menu_root.clone();
     let edit_id = connection_id.clone();
     let menu = menu.item(
-        PopupMenuItem::new("Edit Connection")
+        PopupMenuItem::new(t!("menu.edit_connection"))
             .icon(menu_icon(navigator_ui::SidebarGlyph::Edit))
             .action(Box::new(EditConnection))
             .on_click(move |_, window, app| {
@@ -1453,7 +1453,7 @@ pub(super) fn build_connection_menu(
     let duplicate_root = menu_root.clone();
     let duplicate_id = connection_id.clone();
     let menu = menu.item(
-        PopupMenuItem::new("Duplicate Connection")
+        PopupMenuItem::new(t!("menu.duplicate_connection"))
             .icon(menu_icon(navigator_ui::SidebarGlyph::Copy))
             .action(Box::new(DuplicateConnection))
             .on_click(move |_, _, app| {
@@ -1468,7 +1468,7 @@ pub(super) fn build_connection_menu(
     // standard item chrome (hover, keyboard, dismissal intact); only the
     // label carries the danger color. Confirmation stays the destructive gate.
     menu.separator().item(
-        PopupMenuItem::element(|_, _| div().text_color(theme::danger()).child("Delete Connection"))
+        PopupMenuItem::element(|_, _| div().text_color(theme::danger()).child(t!("menu.delete_connection")))
             .icon(menu_icon(navigator_ui::SidebarGlyph::Trash))
             .action(Box::new(DeleteConnection))
             .on_click(move |_, window, app| {

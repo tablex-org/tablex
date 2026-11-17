@@ -71,24 +71,24 @@ pub(in crate::app) enum ObjectMenuItem {
 }
 
 impl ObjectMenuItem {
-    fn label(self) -> &'static str {
+    fn label(self) -> std::borrow::Cow<'static, str> {
         match self {
-            Self::NewTable => "New Table\u{2026}",
-            Self::ImportData => "Import Data\u{2026}",
-            Self::TransferData => "Transfer Data\u{2026}",
-            Self::ExportData => "Export Data\u{2026}",
-            Self::RunSqlFile => "Run SQL File\u{2026}",
-            Self::Backup => "Backup\u{2026}",
-            Self::Restore => "Restore\u{2026}",
-            Self::NewNamespace(NamespaceKind::Schema) => "New Schema\u{2026}",
-            Self::NewNamespace(NamespaceKind::Database) => "New Database\u{2026}",
-            Self::Truncate => "Truncate Table\u{2026}",
-            Self::Rename(ObjectKind::Table) => "Rename Table\u{2026}",
-            Self::Rename(ObjectKind::View) => "Rename View\u{2026}",
-            Self::Rename(ObjectKind::MaterializedView) => "Rename Materialized View\u{2026}",
-            Self::Drop(ObjectKind::Table) => "Drop Table\u{2026}",
-            Self::Drop(ObjectKind::View) => "Drop View\u{2026}",
-            Self::Drop(ObjectKind::MaterializedView) => "Drop Materialized View\u{2026}",
+            Self::NewTable => t!("menu.new_table"),
+            Self::ImportData => t!("menu.import_data"),
+            Self::TransferData => t!("menu.transfer_data"),
+            Self::ExportData => t!("menu.export_data"),
+            Self::RunSqlFile => t!("menu.run_sql_file"),
+            Self::Backup => t!("menu.backup"),
+            Self::Restore => t!("menu.restore"),
+            Self::NewNamespace(NamespaceKind::Schema) => t!("menu.new_schema"),
+            Self::NewNamespace(NamespaceKind::Database) => t!("menu.new_database"),
+            Self::Truncate => t!("menu.truncate_table"),
+            Self::Rename(ObjectKind::Table) => t!("menu.rename_table"),
+            Self::Rename(ObjectKind::View) => t!("menu.rename_view"),
+            Self::Rename(ObjectKind::MaterializedView) => t!("menu.rename_materialized_view"),
+            Self::Drop(ObjectKind::Table) => t!("menu.drop_table"),
+            Self::Drop(ObjectKind::View) => t!("menu.drop_view"),
+            Self::Drop(ObjectKind::MaterializedView) => t!("menu.drop_materialized_view"),
         }
     }
 
@@ -151,11 +151,11 @@ pub(in crate::app) fn append_object_items(
         menu
     } else {
         let (generate_root, generate_id) = (root.clone(), id.clone());
-        menu.submenu("Generate SQL", window, cx, move |submenu, _, _| {
+        menu.submenu(t!("menu.generate_sql"), window, cx, move |submenu, _, _| {
             generate.iter().fold(submenu, |submenu, &kind| {
                 let (root, id) = (generate_root.clone(), generate_id.clone());
                 submenu.item(entry_item(
-                    Entry { selector: kind.selector(), label: kind.label(), icon: kind.icon(), disabled: None, destructive: false },
+                    Entry { selector: kind.selector(), label: kind.label().into(), icon: kind.icon(), disabled: None, destructive: false },
                     move |_, app| {
                         let _ = root.update(app, |this, cx| this.open_generated_sql(kind, &id, cx));
                     },

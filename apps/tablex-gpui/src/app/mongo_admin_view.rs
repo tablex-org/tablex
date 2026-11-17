@@ -31,9 +31,9 @@ pub(super) fn glyph(glyph: SidebarGlyph) -> Icon {
 /// a disabled entry explains itself in a tooltip.
 pub(super) struct Entry {
     pub(super) selector: &'static str,
-    pub(super) label: &'static str,
+    pub(super) label: std::borrow::Cow<'static, str>,
     pub(super) icon: Icon,
-    pub(super) disabled: Option<&'static str>,
+    pub(super) disabled: Option<std::borrow::Cow<'static, str>>,
     pub(super) destructive: bool,
 }
 
@@ -48,23 +48,24 @@ pub(super) fn entry_item(
         disabled,
         destructive,
     } = entry;
+    let is_disabled = disabled.is_some();
     PopupMenuItem::element(move |_, _| {
         let row = div()
             .id(selector)
             .debug_selector(move || selector.to_string())
             .when(destructive, |this| this.text_color(theme::danger()))
-            .child(label);
-        match disabled {
+            .child(label.clone());
+        match disabled.clone() {
             Some(reason) => row
                 .tooltip(move |window, cx| {
-                    gpui_component::tooltip::Tooltip::new(reason).build(window, cx)
+                    gpui_component::tooltip::Tooltip::new(gpui::SharedString::from(reason.clone())).build(window, cx)
                 })
                 .into_any_element(),
             None => row.into_any_element(),
         }
     })
     .icon(icon)
-    .disabled(disabled.is_some())
+    .disabled(is_disabled)
     .on_click(move |_, window, app| on_click(window, app))
 }
 
@@ -108,7 +109,7 @@ pub(super) fn build_mongo_node_menu(
     cx: &mut gpui::App,
 ) -> PopupMenu {
     let snapshot = snapshot(&root, &target, cx);
-    let gate = |allowed: bool| (!allowed).then_some(UNAVAILABLE);
+    let gate = |allowed: bool| (!allowed).then(|| t!("menu.mongo_unsupported"));
     let copy_root = root.clone();
     let copy_id = target.id.clone();
     // Copy Name carries the real Cmd-C action for its hint; the click handler
@@ -117,7 +118,7 @@ pub(super) fn build_mongo_node_menu(
         div()
             .id("mongo-menu-copy-name")
             .debug_selector(|| "mongo-menu-copy-name".into())
-            .child("Copy Name")
+            .child(t!("menu.copy_name"))
     })
     .icon(glyph(SidebarGlyph::Copy))
     .action(Box::new(CopyConnectionName))
@@ -131,7 +132,7 @@ pub(super) fn build_mongo_node_menu(
         entry_item(
             Entry {
                 selector: "mongo-menu-new-query",
-                label: "New Query",
+                label: t!("titlebar.new_query"),
                 icon: Icon::new(IconName::SquareTerminal).size(px(12.0)),
                 disabled: gate(snapshot.can_query),
                 destructive: false,
@@ -148,7 +149,7 @@ pub(super) fn build_mongo_node_menu(
         entry_item(
             Entry {
                 selector: "mongo-menu-refresh",
-                label: "Refresh",
+                label: t!("menu.refresh"),
                 icon: glyph(SidebarGlyph::Refresh),
                 disabled: None,
                 destructive: false,
@@ -180,13 +181,13 @@ pub(super) fn build_mongo_node_menu(
         let view_data = open(
             false,
             "mongo-menu-view-data",
-            "View Data",
+            t!("menu.view_data"),
             glyph(SidebarGlyph::TableProperties),
         );
         let new_tab = open(
             true,
             "mongo-menu-view-new-tab",
-            "View in New Tab",
+            t!("menu.view_in_new_tab"),
             glyph(SidebarGlyph::CopyPlus),
         );
         let dialog_item = |selector,
@@ -217,7 +218,7 @@ pub(super) fn build_mongo_node_menu(
         };
         let indexes = dialog_item(
             "mongo-menu-manage-indexes",
-            "Manage Indexes",
+            t!("menu.manage_indexes"),
             glyph(SidebarGlyph::PencilRuler),
             false,
             snapshot.caps.indexes,
@@ -225,7 +226,7 @@ pub(super) fn build_mongo_node_menu(
         );
         let rename = dialog_item(
             "mongo-menu-rename",
-            "Rename",
+            t!("menu.rename"),
             glyph(SidebarGlyph::Edit),
             false,
             snapshot.caps.collection,
@@ -233,7 +234,7 @@ pub(super) fn build_mongo_node_menu(
         );
         let clone = dialog_item(
             "mongo-menu-clone",
-            "Clone Collection",
+            t!("menu.clone_collection"),
             glyph(SidebarGlyph::CopyPlus),
             false,
             snapshot.caps.collection,
@@ -241,7 +242,7 @@ pub(super) fn build_mongo_node_menu(
         );
         let drop = dialog_item(
             "mongo-menu-drop-collection",
-            "Drop Collection",
+            t!("menu.drop_collection"),
             glyph(SidebarGlyph::Trash),
             true,
             snapshot.caps.collection,
@@ -254,7 +255,7 @@ pub(super) fn build_mongo_node_menu(
             entry_item(
                 Entry {
                     selector: "mongo-menu-new-aggregation",
-                    label: "New Aggregation",
+                    label: t!("menu.new_aggregation"),
                     icon: Icon::empty().path("icons/list-ordered.svg").size(px(12.0)),
                     disabled: gate(snapshot.can_aggregate),
                     destructive: false,
@@ -290,9 +291,9 @@ pub(super) fn build_mongo_node_menu(
                         "mongo-menu-set-default-database"
                     },
                     label: if is_default {
-                        "Clear Default Database"
+                        t!("menu.clear_default_database")
                     } else {
-                        "Set as Default Database"
+                        t!("menu.set_as_default_database")
                     },
                     icon: glyph(SidebarGlyph::Database),
                     disabled: None,
@@ -315,10 +316,10 @@ pub(super) fn build_mongo_node_menu(
             entry_item(
                 Entry {
                     selector: "mongo-menu-drop-database",
-                    label: "Drop Database",
+                    label: t!("menu.drop_database"),
                     icon: glyph(SidebarGlyph::Trash),
                     disabled: if crate::mongo_admin::is_protected_database(&target.database) {
-                        Some("System databases cannot be dropped")
+                        Some(t!("menu.system_databases_cannot_be_dropped"))
                     } else {
                         gate(snapshot.caps.database)
                     },
@@ -467,7 +468,7 @@ impl Render for NameDialog {
                         .debug_selector(|| "mongo-clone-include-indexes".into())
                         .child(
                             Checkbox::new("mongo-clone-include-indexes-box")
-                                .label("Include indexes")
+                                .label(ts!("menu.include_indexes"))
                                 .checked(self.include_indexes)
                                 .on_click(cx.listener(|this, checked: &bool, _, cx| {
                                     this.include_indexes = *checked;
@@ -490,7 +491,7 @@ impl Render for NameDialog {
 
 fn dialog_cancel(id: &'static str) -> Button {
     Button::new(id)
-        .label("Cancel")
+        .label(t!("common.cancel"))
         .compact()
         .ghost()
         .debug_selector(move || id.to_string())
@@ -890,7 +891,7 @@ fn key_type_labels() -> Vec<String> {
 impl IndexManager {
     fn new_key_row(window: &mut Window, cx: &mut Context<Self>) -> KeyRow {
         KeyRow {
-            field: cx.new(|cx| InputState::new(window, cx).placeholder("Field name")),
+            field: cx.new(|cx| InputState::new(window, cx).placeholder(t!("menu.field_name"))),
             key_type: cx.new(|cx| {
                 SelectState::new(
                     key_type_labels(),
@@ -1056,12 +1057,12 @@ impl IndexManager {
             let name = name.clone();
             let collection = collection.clone();
             dialog
-                .title("Drop Index")
+                .title(t!("menu.drop_index"))
                 .child(format!(
                     "Drop index \"{name}\" from \"{collection}\"? Queries that rely on it may become slower."
                 ))
                 .button_props(
-                    gpui_component::dialog::DialogButtonProps::default().ok_text("Drop Index"),
+                    gpui_component::dialog::DialogButtonProps::default().ok_text(t!("menu.drop_index")),
                 )
                 .confirm()
                 .on_ok(move |_, _, cx| {
@@ -1084,7 +1085,7 @@ impl Render for IndexManager {
             .gap(px(6.0))
             .child(
                 Button::new("mongo-index-create")
-                    .label("Create Index")
+                    .label(t!("menu.create_index"))
                     .small()
                     .outline()
                     .disabled(self.creating || self.loading)
@@ -1093,7 +1094,7 @@ impl Render for IndexManager {
             )
             .child(
                 Button::new("mongo-index-drop")
-                    .label("Drop Index")
+                    .label(t!("menu.drop_index"))
                     .small()
                     .outline()
                     .disabled(!can_drop || self.creating || self.loading)
@@ -1103,7 +1104,7 @@ impl Render for IndexManager {
             .child(
                 div().ml_auto().child(
                     Button::new("mongo-index-refresh")
-                        .label("Refresh")
+                        .label(t!("menu.refresh"))
                         .small()
                         .ghost()
                         .disabled(self.loading || self.creating)
@@ -1123,7 +1124,7 @@ impl Render for IndexManager {
                     div()
                         .text_size(px(11.0))
                         .text_color(theme::text_muted())
-                        .child("This collection has no indexes yet."),
+                        .child(t!("menu.this_collection_has_no_indexes_yet")),
                 )
             });
         let status = self
@@ -1220,10 +1221,10 @@ impl IndexManager {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .child(div().text_size(px(12.0)).child("Index fields"))
+                    .child(div().text_size(px(12.0)).child(t!("menu.index_fields")))
                     .child(
                         Button::new("mongo-index-add-field")
-                            .label("Add field")
+                            .label(t!("menu.add_field"))
                             .small()
                             .outline()
                             .debug_selector(|| "mongo-index-add-field".into())
@@ -1248,7 +1249,7 @@ impl IndexManager {
                     .child(
                         div().debug_selector(|| "mongo-index-unique".into()).child(
                             Checkbox::new("mongo-index-unique-box")
-                                .label("Unique")
+                                .label(ts!("menu.unique"))
                                 .checked(self.unique)
                                 .on_click(cx.listener(|this, checked: &bool, _, cx| {
                                     this.unique = *checked;
@@ -1259,7 +1260,7 @@ impl IndexManager {
                     .child(
                         div().debug_selector(|| "mongo-index-sparse".into()).child(
                             Checkbox::new("mongo-index-sparse-box")
-                                .label("Sparse")
+                                .label(ts!("menu.sparse"))
                                 .checked(self.sparse)
                                 .on_click(cx.listener(|this, checked: &bool, _, cx| {
                                     this.sparse = *checked;
@@ -1290,7 +1291,7 @@ impl IndexManager {
                     .gap(px(6.0))
                     .child(
                         Button::new("mongo-index-form-cancel")
-                            .label("Cancel")
+                            .label(t!("common.cancel"))
                             .small()
                             .ghost()
                             .disabled(self.create_busy)
@@ -1303,7 +1304,7 @@ impl IndexManager {
                     )
                     .child(
                         Button::new("mongo-index-form-submit")
-                            .label("Create")
+                            .label(t!("common.create"))
                             .small()
                             .primary()
                             .disabled(self.create_busy)
@@ -1352,9 +1353,9 @@ impl AppRoot {
                 },
             );
             let name =
-                cx.new(|cx| InputState::new(window, cx).placeholder("Name (generated if blank)"));
+                cx.new(|cx| InputState::new(window, cx).placeholder(t!("menu.name_generated_if_blank")));
             let ttl =
-                cx.new(|cx| InputState::new(window, cx).placeholder("Expire after (seconds)"));
+                cx.new(|cx| InputState::new(window, cx).placeholder(t!("menu.expire_after_seconds")));
             IndexManager {
                 root,
                 target,
@@ -1414,7 +1415,7 @@ impl AppRoot {
                     false
                 })
                 .footer(
-                    DialogFooter::new().child(dialog_cancel("mongo-index-close").label("Close")),
+                    DialogFooter::new().child(dialog_cancel("mongo-index-close").label(t!("common.close"))),
                 )
         });
     }

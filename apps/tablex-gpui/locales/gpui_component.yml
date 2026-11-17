@@ -1,0 +1,114 @@
+_version: 2
+gpui_component:
+  Attachment:
+    Remove:
+      vi: Xoá
+    Retry:
+      vi: Thử lại
+  Calendar:
+    week:
+      "0":
+        vi: CN
+      "1":
+        vi: T2
+      "2":
+        vi: T3
+      "3":
+        vi: T4
+      "4":
+        vi: T5
+      "5":
+        vi: T6
+      "6":
+        vi: T7
+    month:
+      January:
+        vi: Tháng 1
+      February:
+        vi: Tháng 2
+      March:
+        vi: Tháng 3
+      April:
+        vi: Tháng 4
+      May:
+        vi: Tháng 5
+      June:
+        vi: Tháng 6
+      July:
+        vi: Tháng 7
+      August:
+        vi: Tháng 8
+      September:
+        vi: Tháng 9
+      October:
+        vi: Tháng 10
+      November:
+        vi: Tháng 11
+      December:
+        vi: Tháng 12
+  DatePicker:
+    placeholder:
+      vi: Chọn ngày
+    time:
+      vi: Giờ
+  Select:
+    placeholder:
+      vi: Vui lòng chọn
+  ComboBox:
+    placeholder:
+      vi: Vui lòng chọn
+    search_placeholder:
+      vi: Tìm kiếm...
+    empty:
+      vi: Không có kết quả
+  DropdownButton:
+    more_options:
+      vi: Tuỳ chọn khác
+  Dialog:
+    ok:
+      vi: OK
+    cancel:
+      vi: Huỷ
+  Command:
+    placeholder:
+      vi: Nhập lệnh hoặc tìm kiếm...
+    empty:
+      vi: Không tìm thấy kết quả.
+  List:
+    search_placeholder:
+      vi: Tìm kiếm...
+  Input:
+    Decrement:
+      vi: Giảm
+    Increment:
+      vi: Tăng
+    Replace:
+      vi: Thay thế
+    Replace All:
+      vi: Thay thế tất cả
+    Clear:
+      vi: Xoá
+    Cut:
+      vi: Cắt
+    Copy:
+      vi: Sao chép
+    Paste:
+      vi: Dán
+    Select All:
+      vi: Chọn tất cả
+    Go to Definition:
+      vi: Đến định nghĩa
+    Show Code Actions:
+      vi: Hiện hành động mã
+    Show Password:
+      vi: Hiện mật khẩu
+    Hide Password:
+      vi: Ẩn mật khẩu
+  Pagination:
+    previous:
+      vi: Trước
+    next:
+      vi: Sau
+  Table:
+    SortBy:
+      vi: "Sắp xếp theo %{column}"

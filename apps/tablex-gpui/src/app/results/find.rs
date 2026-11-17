@@ -227,7 +227,7 @@ impl AppRoot {
         if let Some(input) = self.view(tab_id).grid_ui.find.input.clone() {
             return input;
         }
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Search…"));
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(t!("grid.search")));
         cx.subscribe_in(
             &input,
             window,
@@ -550,7 +550,7 @@ impl AppRoot {
                 })
                 .size(px(12.0)),
             )
-            .tooltip("Search options")
+            .tooltip(t!("grid.search_options"))
             .debug_selector(|| "grid-find-expand".into())
             .on_click(cx.listener(move |this, _, _, cx| {
                 let find = &mut this.view_mut(tab_id).grid_ui.find;
@@ -561,7 +561,7 @@ impl AppRoot {
             .ghost()
             .xsmall()
             .icon(Icon::new(IconName::ChevronDown).rotate(gpui::percentage(0.5)).size(px(12.0)))
-            .tooltip("Previous match (Shift+Enter)")
+            .tooltip(t!("grid.previous_match_shift_enter"))
             .disabled(!has_matches)
             .debug_selector(|| "grid-find-prev".into())
             .on_click(cx.listener(move |this, _, _, cx| this.find_navigate(tab_id, -1, cx)));
@@ -569,7 +569,7 @@ impl AppRoot {
             .ghost()
             .xsmall()
             .icon(Icon::new(IconName::ChevronDown).size(px(12.0)))
-            .tooltip("Next match (Enter)")
+            .tooltip(t!("grid.next_match_enter"))
             .disabled(!has_matches)
             .debug_selector(|| "grid-find-next".into())
             .on_click(cx.listener(move |this, _, _, cx| this.find_navigate(tab_id, 1, cx)));
@@ -577,7 +577,7 @@ impl AppRoot {
             .ghost()
             .xsmall()
             .icon(Icon::new(IconName::Close).size(px(12.0)))
-            .tooltip("Close (Esc)")
+            .tooltip(t!("grid.close_esc"))
             .debug_selector(|| "grid-find-close".into())
             .on_click(cx.listener(move |this, _, window, cx| this.close_grid_find(tab_id, window, cx)));
         let counter = div()
@@ -652,7 +652,7 @@ impl AppRoot {
                     .child(
                         div().debug_selector(|| "grid-find-match-case".into()).child(
                             Checkbox::new("grid-find-match-case")
-                                .label("Match case")
+                                .label(ts!("grid.match_case"))
                                 .checked(find.options.match_case)
                                 .on_click(cx.listener(move |this, checked: &bool, _, cx| {
                                     this.set_find_option(tab_id, false, *checked, cx);
@@ -662,7 +662,7 @@ impl AppRoot {
                     .child(
                         div().debug_selector(|| "grid-find-whole-cell".into()).child(
                             Checkbox::new("grid-find-whole-cell")
-                                .label("Whole cell")
+                                .label(ts!("grid.whole_cell"))
                                 .checked(find.options.whole_cell)
                                 .on_click(cx.listener(move |this, checked: &bool, _, cx| {
                                     this.set_find_option(tab_id, true, *checked, cx);

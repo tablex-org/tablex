@@ -23,7 +23,7 @@ impl AppRoot {
         column: Option<&CellDetailColumn>,
     ) -> AnyElement {
         let Some(column) = column else {
-            return cell_detail_empty_state("cell-detail-column-panel", "Select a column");
+            return cell_detail_empty_state("cell-detail-column-panel", t!("grid.select_a_column"));
         };
         let rows = column.property_rows();
         div()
@@ -38,7 +38,7 @@ impl AppRoot {
             .gap(px(6.0))
             .text_size(px(11.0))
             .children(rows.into_iter().map(|(name, value)| {
-                property_row(name, 88.0, theme::text(), value, None)
+                property_row(name.into(), 88.0, theme::text(), value, None)
             }))
             .into_any_element()
     }
@@ -57,7 +57,7 @@ impl AppRoot {
             .unwrap_or_default();
         let button = |selector: &'static str,
                       path: &'static str,
-                      label: &'static str,
+                      label: std::borrow::Cow<'static, str>,
                       tab: CellDetailTab,
                       cell_height: f32| {
             let active = active_tab == Some(tab);
@@ -121,7 +121,7 @@ impl AppRoot {
                     .child(button(
                         "cell-detail-rail-details",
                         "icons/frame.svg",
-                        "Cell details",
+                        t!("grid.cell_details"),
                         CellDetailTab::Details,
                         theme::RESULT_GRID_HEADER_HEIGHT - 1.0,
                     ))
@@ -138,14 +138,14 @@ impl AppRoot {
                     .child(button(
                         "cell-detail-rail-column",
                         "icons/columns-3.svg",
-                        "Column details",
+                        t!("grid.column_details"),
                         CellDetailTab::Column,
                         32.0,
                     ))
                     .child(button(
                         "cell-detail-rail-row",
                         "icons/list-checks.svg",
-                        "Row details",
+                        t!("grid.row_details"),
                         CellDetailTab::Row,
                         32.0,
                     )),
@@ -166,7 +166,7 @@ impl AppRoot {
                 .items_center()
                 .justify_center()
                 .text_color(theme::text_muted())
-                .child("Select a row to inspect")
+                .child(t!("grid.select_a_row_to_inspect"))
                 .into_any_element();
         };
         // Only the visible range is materialized; the flattened rows are
@@ -272,25 +272,26 @@ impl AppRoot {
         let root = cx.entity().downgrade();
         let view_toggle = {
             use crate::cell_detail::RowView;
-            const OPTIONS: [(RowView, &str, &str); 2] = [
-                (RowView::Tree, "Tree", "cell-detail-row-view-tree"),
-                (RowView::Json, "JSON", "cell-detail-row-view-json"),
+            let options: [(RowView, std::borrow::Cow<'static, str>, &'static str); 2] = [
+                (RowView::Tree, t!("grid.tree"), "cell-detail-row-view-tree"),
+                (RowView::Json, "JSON".into(), "cell-detail-row-view-json"),
             ];
             ButtonGroup::new(("cell-detail-row-view", tab_id))
                 .outline()
                 .compact()
                 .with_size(Size::XSmall)
-                .children(OPTIONS.iter().enumerate().map(|(index, (option, label, selector))| {
+                .children(options.iter().enumerate().map(|(index, (option, label, selector))| {
                     Button::new(("cell-detail-row-view-option", index))
-                        .label(*label)
+                        .label(label.clone())
                         .debug_selector(|| (*selector).into())
                         .selected(view == *option)
                 }))
                 .on_click({
                     let root = root.clone();
+                    let options = options.clone();
                     move |selected, _, app| {
                         if let Some((option, _, _)) =
-                            selected.first().and_then(|index| OPTIONS.get(*index))
+                            selected.first().and_then(|index| options.get(*index))
                         {
                             let option = *option;
                             let _ = root.update(app, |this, cx| {
@@ -397,19 +398,19 @@ impl AppRoot {
                 "cell-detail-details-tab",
                 "cell-detail-details-tab-close",
                 "icons/frame.svg",
-                "Value",
+                t!("grid.value"),
             ),
             CellDetailTab::Column => (
                 "cell-detail-column-tab",
                 "cell-detail-column-tab-close",
                 "icons/columns-3.svg",
-                "Column",
+                t!("grid.column"),
             ),
             CellDetailTab::Row => (
                 "cell-detail-row-tab",
                 "cell-detail-row-tab-close",
                 "icons/list-checks.svg",
-                "Row",
+                t!("grid.row"),
             ),
         };
         let color = if active {
@@ -425,7 +426,7 @@ impl AppRoot {
             .rounded(px(3.0))
             .w(px(16.0))
             .h(px(16.0))
-            .tooltip("Close tab")
+            .tooltip(t!("grid.close_tab"))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.close_cell_detail_tab(tab_id, tab, cx);
             }));
@@ -469,8 +470,9 @@ impl AppRoot {
                         this.open_cell_detail_tab(tab_id, tab, cx);
                     }))
                     .when(compact, |this| {
+                        let label = label.clone();
                         this.tooltip(move |window, cx| {
-                            gpui_component::tooltip::Tooltip::new(label).build(window, cx)
+                            gpui_component::tooltip::Tooltip::new(gpui::SharedString::from(label.clone())).build(window, cx)
                         })
                     })
                     .child(
@@ -500,10 +502,10 @@ impl AppRoot {
             .context_menu(move |menu, _, _| {
                 let close_root = root.clone();
                 let others_root = root.clone();
-                menu.item(PopupMenuItem::new("Close").on_click(move |_, _, app| {
+                menu.item(PopupMenuItem::new(t!("common.close")).on_click(move |_, _, app| {
                     let _ = close_root.update(app, |this, cx| this.close_cell_detail_tab(tab_id, tab, cx));
                 }))
-                .item(PopupMenuItem::new("Close Others").on_click(move |_, _, app| {
+                .item(PopupMenuItem::new(t!("grid.close_others")).on_click(move |_, _, app| {
                     let _ = others_root
                         .update(app, |this, cx| this.close_other_cell_detail_tabs(tab_id, tab, cx));
                 }))
@@ -744,13 +746,13 @@ impl AppRoot {
             .custom(chrome_button_variant(false, cx))
             .rounded(px(4.0))
             .dropdown_caret(true)
-            .tooltip("Panel placement")
+            .tooltip(t!("grid.panel_placement"))
             .dropdown_menu_with_anchor(gpui::Anchor::TopRight, move |menu, _, _| {
                 let mut menu = menu.min_w(px(160.0));
                 for (option, label) in [
-                    (CellDetailPlacement::Right, "Side (right)"),
-                    (CellDetailPlacement::Bottom, "Bottom"),
-                    (CellDetailPlacement::Popup, "Popup"),
+                    (CellDetailPlacement::Right, t!("grid.side_right")),
+                    (CellDetailPlacement::Bottom, t!("grid.bottom")),
+                    (CellDetailPlacement::Popup, t!("grid.popup")),
                 ] {
                     let root = placement_root.clone();
                     menu = menu.item(
@@ -771,7 +773,7 @@ impl AppRoot {
             .compact()
             .custom(chrome_button_variant(false, cx))
             .rounded(px(4.0))
-            .tooltip("Close panel")
+            .tooltip(t!("grid.close_panel"))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.close_cell_detail_panel(tab_id, cx);
             }));
@@ -847,7 +849,7 @@ impl AppRoot {
         let metadata_label_width = if panel_is_bottom { 44.0 } else { 64.0 };
         let metadata_row = |selector: &'static str,
                             value_selector: &'static str,
-                            label: &'static str,
+                            label: std::borrow::Cow<'static, str>,
                             value: String,
                             color: gpui::Rgba| {
             property_row(label, metadata_label_width, color, value, Some(value_selector))
@@ -856,21 +858,21 @@ impl AppRoot {
         let row_row = metadata_row(
             "cell-detail-row",
             "cell-detail-row-value",
-            "Row",
+            t!("grid.row"),
             detail.row_number.to_string(),
             theme::text(),
         );
         let length_row = metadata_row(
             "cell-detail-length",
             "cell-detail-length-value",
-            "Length",
+            t!("grid.length"),
             detail.length.to_string(),
             theme::text(),
         );
         let null_row = metadata_row(
             "cell-detail-null",
             "cell-detail-null-value",
-            "NULL",
+            "NULL".into(),
             detail.is_null.to_string(),
             if detail.is_null {
                 theme::warning()
@@ -882,7 +884,7 @@ impl AppRoot {
             metadata_row(
                 "cell-detail-comment",
                 "cell-detail-comment-value",
-                "Comment",
+                t!("grid.comment"),
                 detail.comment.clone(),
                 theme::text(),
             )
@@ -1043,7 +1045,7 @@ impl AppRoot {
                                     .font_family("Inter")
                                     .text_size(px(10.0))
                                     .text_color(theme::text_muted())
-                                    .child("Preview truncated; edit to inspect the full value."),
+                                    .child(t!("grid.preview_truncated_edit_to_inspect_the_full_value")),
                             )
                         })
                         .when(detail.json_unformatted, |this| {
@@ -1090,16 +1092,16 @@ impl AppRoot {
             .child(value_box_child);
 
         let root = cx.entity().downgrade();
-        let mode_options: Vec<(crate::cell_value::ValueMode, &'static str)> = if is_mongo {
+        let mode_options: Vec<(crate::cell_value::ValueMode, std::borrow::Cow<'static, str>)> = if is_mongo {
             vec![
-                (crate::cell_value::ValueMode::Formatted, "Formatted"),
-                (crate::cell_value::ValueMode::Canonical, "Canonical"),
-                (crate::cell_value::ValueMode::Raw, "Raw"),
+                (crate::cell_value::ValueMode::Formatted, t!("grid.formatted")),
+                (crate::cell_value::ValueMode::Canonical, t!("grid.canonical")),
+                (crate::cell_value::ValueMode::Raw, t!("grid.raw")),
             ]
         } else {
             vec![
-                (crate::cell_value::ValueMode::Formatted, "Formatted JSON"),
-                (crate::cell_value::ValueMode::Raw, "Raw"),
+                (crate::cell_value::ValueMode::Formatted, t!("grid.formatted_json")),
+                (crate::cell_value::ValueMode::Raw, t!("grid.raw")),
             ]
         };
         let mode_toggle = ButtonGroup::new(("cell-detail-value-mode", tab_id))
@@ -1108,7 +1110,7 @@ impl AppRoot {
             .with_size(Size::XSmall)
             .children(mode_options.iter().enumerate().map(|(index, (option, label))| {
                 Button::new(("cell-detail-value-mode-option", index))
-                    .label(*label)
+                    .label(label.clone())
                     .selected(mode == *option)
             }))
             .on_click({
@@ -1126,7 +1128,7 @@ impl AppRoot {
             });
         let convert_menu = Button::new(("cell-detail-convert", tab_id))
             .icon(Icon::empty().path("icons/arrow-left-right.svg").size(px(12.0)))
-            .label("Convert preview")
+            .label(t!("grid.convert_preview"))
             .with_size(Size::XSmall)
             .compact()
             .ghost()
@@ -1139,7 +1141,7 @@ impl AppRoot {
                 let position = detail.position;
                 move |menu, _, _| {
                     let mut menu = menu.min_w(px(220.0)).item(
-                        PopupMenuItem::new("Original value")
+                        PopupMenuItem::new(t!("grid.original_value"))
                             .checked(active_convert.is_none())
                             .on_click({
                                 let root = root.clone();
@@ -1170,7 +1172,7 @@ impl AppRoot {
             });
         let icon_action = |selector: &'static str,
                            path: &'static str,
-                           label: &'static str,
+                           label: std::borrow::Cow<'static, str>,
                            cx: &mut Context<Self>| {
             Button::new((selector, tab_id))
                 .icon(Icon::empty().path(path).size(px(13.0)))
@@ -1194,7 +1196,7 @@ impl AppRoot {
                     .min_w_0()
                     .text_size(px(11.0))
                     .text_color(theme::text_muted())
-                    .child("Value"),
+                    .child(t!("grid.value")),
             )
             .when(json_like && !editing, |this| {
                 this.child(div().debug_selector(|| "cell-detail-value-mode".into()).child(mode_toggle))
@@ -1207,7 +1209,7 @@ impl AppRoot {
                             "cell-detail-binary-load",
                             tab_id,
                             "icons/upload.svg",
-                            "Load from file",
+                            t!("grid.load_from_file"),
                             chrome_button_variant(false, cx),
                         )
                         .on_click(cx.listener(move |this, _, _, cx| this.load_cell_binary(tab_id, cx))),
@@ -1226,7 +1228,7 @@ impl AppRoot {
                         "cell-detail-binary-save",
                         tab_id,
                         "icons/download.svg",
-                        "Save to file",
+                        t!("grid.save_to_file"),
                         variant,
                     )
                     .on_click(cx.listener(move |this, _, _, cx| this.save_cell_binary(tab_id, cx))),
@@ -1237,7 +1239,7 @@ impl AppRoot {
                             "cell-detail-binary-load",
                             tab_id,
                             "icons/upload.svg",
-                            "Load from file",
+                            t!("grid.load_from_file"),
                             variant,
                         )
                         .on_click(cx.listener(move |this, _, _, cx| this.load_cell_binary(tab_id, cx))),
@@ -1253,7 +1255,7 @@ impl AppRoot {
                     && binary.is_none_or(crate::cell_detail::BinaryDetail::text_editable),
                 |this| {
                 this.child(div().debug_selector(|| "cell-detail-edit".into()).child(
-                    icon_action("cell-detail-edit", "icons/pencil.svg", "Edit value", cx).on_click(
+                    icon_action("cell-detail-edit", "icons/pencil.svg", t!("grid.edit_value"), cx).on_click(
                         cx.listener(move |this, _, window, cx| {
                             this.open_cell_detail_editor(tab_id, window, cx);
                         }),
@@ -1263,7 +1265,7 @@ impl AppRoot {
             )
             .when(!editing, |this| {
                 this.child(div().debug_selector(|| "cell-detail-copy-value".into()).child(
-                    icon_action("cell-detail-copy-value", "icons/copy.svg", "Copy value", cx)
+                    icon_action("cell-detail-copy-value", "icons/copy.svg", t!("grid.copy_value"), cx)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.copy_cell_detail_value(tab_id, cx);
                         })),
@@ -1277,7 +1279,7 @@ impl AppRoot {
             .child(
                 div().debug_selector(|| "cell-detail-cancel".into()).child(
                     Button::new(("cell-detail-cancel", tab_id))
-                        .label("Cancel")
+                        .label(t!("common.cancel"))
                         .with_size(Size::Small)
                         .compact()
                         .outline()
@@ -1289,7 +1291,7 @@ impl AppRoot {
             .child(
                 div().debug_selector(|| "cell-detail-confirm".into()).child(
                     Button::new(("cell-detail-confirm", tab_id))
-                        .label("Confirm")
+                        .label(t!("grid.confirm"))
                         .with_size(Size::Small)
                         .compact()
                         .primary()
@@ -1336,7 +1338,7 @@ impl AppRoot {
             })
             .when(editing, |this| this.child(editing_controls));
 
-        let action_row = |selector: &'static str, path: &'static str, label: &'static str| {
+        let action_row = |selector: &'static str, path: &'static str, label: std::borrow::Cow<'static, str>| {
             div()
                 .id((selector, tab_id))
                 .debug_selector(move || selector.into())
@@ -1373,7 +1375,7 @@ impl AppRoot {
                 !editing && detail.nullable && detail.editable && !detail.is_null,
                 |this| {
                     this.child(
-                        action_row("cell-detail-set-null", "icons/eraser.svg", "Set NULL")
+                        action_row("cell-detail-set-null", "icons/eraser.svg", t!("grid.set_null"))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.set_cell_detail_null(tab_id, window, cx);
                             })),
@@ -1381,7 +1383,7 @@ impl AppRoot {
                 },
             )
             .child(
-                action_row("cell-detail-copy-column", "icons/copy.svg", "Copy Column Name")
+                action_row("cell-detail-copy-column", "icons/copy.svg", t!("grid.copy_column_name"))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.copy_cell_detail_column_name(tab_id, cx);
                     })),
@@ -1390,7 +1392,7 @@ impl AppRoot {
                 action_row(
                     "cell-detail-copy-sql-condition",
                     "icons/filter.svg",
-                    "Copy SQL Condition",
+                    t!("grid.copy_sql_condition"),
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.copy_cell_detail_sql_condition(tab_id, cx);
@@ -1399,7 +1401,7 @@ impl AppRoot {
 
         let body_content = match state.tab {
             CellDetailTab::Details if !has_detail => {
-                cell_detail_empty_state("cell-detail-empty", "Select a cell in the grid")
+                cell_detail_empty_state("cell-detail-empty", t!("grid.select_a_cell_in_the_grid"))
             }
             CellDetailTab::Details => div()
                 .w_full()
@@ -1436,7 +1438,7 @@ impl AppRoot {
                 .into_any_element(),
             CellDetailTab::Column => self.render_cell_detail_column(state.column.as_ref()),
             CellDetailTab::Row if state.target.is_none() => {
-                cell_detail_empty_state("cell-detail-empty", "Select a cell in the grid")
+                cell_detail_empty_state("cell-detail-empty", t!("grid.select_a_cell_in_the_grid"))
             }
             CellDetailTab::Row => self.render_cell_detail_row(tab_id, state, cx),
                     };
@@ -1548,7 +1550,7 @@ pub(super) fn chrome_button_variant(active: bool, cx: &gpui::App) -> ButtonCusto
 }
 
 /// Muted, centered placeholder for a panel tab with nothing to show yet.
-fn cell_detail_empty_state(selector: &'static str, message: &'static str) -> AnyElement {
+fn cell_detail_empty_state(selector: &'static str, message: std::borrow::Cow<'static, str>) -> AnyElement {
     div()
         .debug_selector(move || selector.into())
         .size_full()
@@ -1564,7 +1566,7 @@ fn cell_detail_empty_state(selector: &'static str, message: &'static str) -> Any
 
 /// One row of a compact properties table: fixed-width muted label + value.
 fn property_row(
-    label: &'static str,
+    label: std::borrow::Cow<'static, str>,
     label_width: f32,
     value_color: gpui::Rgba,
     value: impl Into<gpui::SharedString>,

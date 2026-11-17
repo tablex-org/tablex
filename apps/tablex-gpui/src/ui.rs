@@ -7,7 +7,7 @@ use crate::theme;
 pub fn icon_button(
     id: impl Into<gpui::ElementId>,
     icon: IconName,
-    tooltip: &'static str,
+    tooltip: impl Into<gpui::SharedString>,
 ) -> Button {
     Button::new(id)
         .icon(Icon::new(icon).size(px(14.0)))
@@ -16,14 +16,14 @@ pub fn icon_button(
         .tooltip(tooltip)
 }
 
-pub fn action_button(id_prefix: &'static str, tab_id: u64, label: &'static str) -> Button {
+pub fn action_button(id_prefix: &'static str, tab_id: u64, label: impl Into<gpui::SharedString>) -> Button {
     Button::new((id_prefix, tab_id))
         .label(label)
         .compact()
         .ghost()
 }
 
-pub fn primary_action_button(id_prefix: &'static str, tab_id: u64, label: &'static str) -> Button {
+pub fn primary_action_button(id_prefix: &'static str, tab_id: u64, label: impl Into<gpui::SharedString>) -> Button {
     Button::new((id_prefix, tab_id))
         .label(label)
         .compact()
@@ -38,7 +38,7 @@ pub fn status_dot(color: Rgba) -> Div {
     div().size(px(6.0)).rounded(px(3.0)).bg(color)
 }
 
-pub fn section_header(title: impl Into<String>) -> Div {
+pub fn section_header(title: impl ToString) -> Div {
     div()
         .flex()
         .items_center()
@@ -46,5 +46,5 @@ pub fn section_header(title: impl Into<String>) -> Div {
         .px(px(12.0))
         .text_size(px(11.0))
         .text_color(theme::text_muted())
-        .child(title.into())
+        .child(title.to_string())
 }

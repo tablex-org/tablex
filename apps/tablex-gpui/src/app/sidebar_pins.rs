@@ -28,7 +28,7 @@ pub(super) fn pin_menu_head(
     };
     let (root, id) = (root.clone(), id.clone());
     menu.item(
-        PopupMenuItem::new(if pinned { "Unpin" } else { "Pin" })
+        PopupMenuItem::new(if pinned { t!("sidebar.unpin") } else { t!("sidebar.pin") })
             .icon(Icon::empty().path("icons/pin.svg").size(px(12.0)))
             .on_click(move |_, _, app| {
                 let _ = root.update(app, |this, cx| this.toggle_node_pin(&id, cx));

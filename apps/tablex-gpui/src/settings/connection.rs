@@ -58,12 +58,12 @@ impl OverridesExt for Overrides {
             };
             let valid = value
                 .to_value(descriptor)
-                .ok_or_else(|| format!("{}: wrong kind of value", descriptor.title))
+                .ok_or_else(|| format!("{}: wrong kind of value", descriptor.title_text()))
                 .and_then(|value| {
                     descriptor
                         .validate(value)
                         .map(|_| ())
-                        .map_err(|error| format!("{}: {error}", descriptor.title))
+                        .map_err(|error| format!("{}: {error}", descriptor.title_text()))
                 });
             valid?;
         }

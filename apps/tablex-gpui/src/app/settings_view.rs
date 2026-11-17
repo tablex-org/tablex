@@ -19,8 +19,10 @@ const NAV_WIDTH: f32 = 208.0;
 const CONTROL_WIDTH: f32 = 220.0;
 const NUMBER_WIDTH: f32 = 150.0;
 const RESET_SLOT: f32 = 28.0;
-/// The label of the empty font family (the inherited / platform font).
-const DEFAULT_FONT_LABEL: &str = "Default";
+/// The label of the empty font family (the inherited / platform font), in the interface language.
+fn default_font_label() -> SharedString {
+    SharedString::from(t!("settings.default_font").into_owned())
+}
 
 /// A page of the Settings tab.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,12 +46,12 @@ impl Page {
         Self::About,
     ];
 
-    fn title(self) -> &'static str {
+    fn title(self) -> std::borrow::Cow<'static, str> {
         match self {
-            Self::Section(section) => section.title(),
-            Self::Shortcuts => "Shortcuts",
-            Self::Drivers => "Drivers",
-            Self::About => "About",
+            Self::Section(section) => section.title_text(),
+            Self::Shortcuts => t!("settings.nav.shortcuts"),
+            Self::Drivers => t!("settings.nav.drivers"),
+            Self::About => t!("settings.nav.about"),
         }
     }
 
@@ -125,7 +127,7 @@ pub(super) struct SettingsPage {
 
 impl SettingsPage {
     fn new(saved: &Settings, window: &mut Window, cx: &mut Context<AppRoot>) -> Self {
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search settings"));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder(t!("settings.search_placeholder")));
         let subscription = cx.subscribe_in(
             &search,
             window,
@@ -142,7 +144,7 @@ impl SettingsPage {
                 _ => {}
             },
         );
-        let mut fonts: Vec<SharedString> = vec![DEFAULT_FONT_LABEL.into()];
+        let mut fonts: Vec<SharedString> = vec![default_font_label()];
         fonts.extend(
             cx.text_system()
                 .all_font_names()
@@ -169,6 +171,13 @@ impl SettingsPage {
             fonts,
             _subscriptions: vec![subscription],
         }
+    }
+
+    /// The text the Select of setting `id` shows (tests read what the page draws).
+    #[cfg(test)]
+    pub(super) fn select_text(&self, id: &str, cx: &gpui::App) -> Option<String> {
+        let select = self.selects.get(id)?;
+        select.read(cx).selected_value().map(|value| value.to_string())
     }
 
     /// The control of setting `id` is rewritten from the draft on its next paint.
@@ -478,14 +487,14 @@ impl AppRoot {
             let root = root.clone();
             dialog
                 .width(px(440.0))
-                .title("Discard changes?")
+                .title(t!("settings.discard.title"))
                 .child(
                     div()
                         .debug_selector(|| "settings-discard-body".into())
-                        .child("Some settings were changed but not applied."),
+                        .child(t!("settings.discard.body")),
                 )
                 .button_props(
-                    gpui_component::dialog::DialogButtonProps::default().ok_text("Discard"),
+                    gpui_component::dialog::DialogButtonProps::default().ok_text(t!("settings.discard.confirm")),
                 )
                 .confirm()
                 .footer(
@@ -495,14 +504,16 @@ impl AppRoot {
                                 .debug_selector(|| "settings-discard-cancel".into())
                                 .child(
                                     gpui_component::dialog::DialogClose::new()
-                                        .trigger(|button| button.label("Cancel")),
+                                        .trigger(|button| button.label(t!("common.cancel"))),
                                 ),
                         )
                         .child(
                             div()
                                 .debug_selector(|| "settings-discard-confirm".into())
                                 .child(gpui_component::dialog::DialogAction::new().child(
-                                    Button::new("settings-discard").label("Discard").danger(),
+                                    Button::new("settings-discard")
+                                        .label(t!("settings.discard.confirm"))
+                                        .danger(),
                                 )),
                         ),
                 )
@@ -514,6 +525,26 @@ impl AppRoot {
                     true
                 })
         });
+    }
+
+    /// The interface language changed: what the open page's controls hold in the old language (the
+    /// selects' option labels, the "Default" font, the placeholders) is made again.
+    pub(super) fn settings_language_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(page) = self.settings_page_mut() else {
+            return;
+        };
+        page.selects.clear();
+        page.fonts[0] = default_font_label();
+        let search = page.search.clone();
+        let model_id = page.inputs.get("ai.model").cloned();
+        search.update(cx, |state, cx| {
+            state.set_placeholder(t!("settings.search_placeholder"), window, cx)
+        });
+        if let Some(input) = model_id {
+            input.update(cx, |state, cx| {
+                state.set_placeholder(t!("settings.model.id_placeholder"), window, cx)
+            });
+        }
     }
 
     // ---- draft edits ----------------------------------------------------------
@@ -551,7 +582,7 @@ impl AppRoot {
                 Ok(number) => Value::Number(number),
                 Err(_) => {
                     if let Some(page) = self.settings_page_mut() {
-                        page.errors.insert(id, "Enter a number".into());
+                        page.errors.insert(id, t!("settings.error.not_a_number").into_owned());
                     }
                     self.notify_pane_views(cx);
                     return;
@@ -570,11 +601,11 @@ impl AppRoot {
         };
         // The formatter tool can be chosen once it is installed.
         if id == "editor.formatter"
-            && label == <crate::settings::FormatterChoice as crate::settings::Choice>::label(crate::settings::FormatterChoice::Sqruff)
+            && label == descriptor.option_text("sqruff")
             && self.formatter_tool_missing()
         {
             if let Some(page) = self.settings_page_mut() {
-                page.errors.insert(id, "Install SQL Formatter (sqruff) from the Driver Manager first".into());
+                page.errors.insert(id, t!("settings.error.install_sqruff").into_owned());
             }
             self.notify_pane_views(cx);
             return;
@@ -582,9 +613,9 @@ impl AppRoot {
         let value = match &descriptor.kind {
             Kind::Choice { options } => options
                 .iter()
-                .find(|(_, option_label)| *option_label == label)
+                .find(|(option, _)| descriptor.option_text(option) == label)
                 .map(|(option, _)| Value::Choice(option)),
-            Kind::Font => Some(Value::Text(if label == DEFAULT_FONT_LABEL {
+            Kind::Font => Some(Value::Text(if label == default_font_label().as_ref() {
                 String::new()
             } else {
                 label.to_owned()
@@ -811,12 +842,12 @@ impl AppRoot {
                 (Kind::Choice { options }, Value::Choice(choice)) => {
                     let labels: Vec<SharedString> = options
                         .iter()
-                        .map(|(_, label)| SharedString::from(*label))
+                        .map(|(option, _)| SharedString::from(descriptor.option_text(option).into_owned()))
                         .collect();
                     let current = options
                         .iter()
                         .find(|(option, _)| option == choice)
-                        .map(|(_, label)| SharedString::from(*label));
+                        .map(|(option, _)| SharedString::from(descriptor.option_text(option).into_owned()));
                     ensure_select(
                         page,
                         id,
@@ -850,7 +881,7 @@ impl AppRoot {
                                 let input = cx.new(|cx| {
                                     InputState::new(window, cx)
                                         .default_value(text)
-                                        .placeholder("Model id")
+                                        .placeholder(t!("settings.model.id_placeholder"))
                                 });
                                 new_subscriptions.push(subscribe_text(&input, id, window, cx));
                                 page.inputs.insert(id, input.clone());
@@ -898,7 +929,7 @@ impl AppRoot {
                 (Kind::Font, Value::Text(family)) => {
                     let mut labels = page.fonts.clone();
                     let current = if family.is_empty() {
-                        SharedString::from(DEFAULT_FONT_LABEL)
+                        default_font_label()
                     } else {
                         SharedString::from(family.clone())
                     };
@@ -986,8 +1017,8 @@ impl AppRoot {
                                     Select::new(select)
                                         .small()
                                         .w(px(CONTROL_WIDTH))
-                                        .placeholder("Pick from the list")
-                                        .search_placeholder("Search models")
+                                        .placeholder(t!("settings.model.pick_placeholder"))
+                                        .search_placeholder(t!("settings.model.search"))
                                         .menu_max_h(px(320.0)),
                                 ),
                         )
@@ -1004,12 +1035,12 @@ impl AppRoot {
                             .small()
                             .w(px(CONTROL_WIDTH))
                             .search_placeholder(if matches!(descriptor.kind, Kind::Model) {
-                                "Search models"
+                                t!("settings.model.search")
                             } else {
-                                "Search fonts"
+                                t!("settings.font.search")
                             })
                             .when(matches!(descriptor.kind, Kind::Model), |select| {
-                                select.placeholder("Choose a model")
+                                select.placeholder(t!("settings.model.choose"))
                             })
                             .menu_max_h(px(320.0)),
                     )
@@ -1041,7 +1072,7 @@ impl AppRoot {
             registry::cross_field_errors(&page.draft)
                 .into_iter()
                 .find(|(error_id, _)| *error_id == id)
-                .map(|(_, message)| message.to_owned())
+                .map(|(_, message)| message.into_owned())
         });
         let control = self.render_setting_control(descriptor, &value, unavailable.is_some(), cx);
         div()
@@ -1086,7 +1117,7 @@ impl AppRoot {
                                 div()
                                     .text_size(px(13.0))
                                     .text_color(theme::text())
-                                    .child(descriptor.title),
+                                    .child(descriptor.title_text()),
                             )
                             .when(breadcrumb, |this| {
                                 this.child(
@@ -1094,8 +1125,8 @@ impl AppRoot {
                                         .debug_selector(move || format!("setting-goto-{id}"))
                                         .label(format!(
                                             "{} \u{203A} {}",
-                                            descriptor.section.title(),
-                                            descriptor.group
+                                            descriptor.section.title_text(),
+                                            descriptor.group_text()
                                         ))
                                         .compact()
                                         .ghost()
@@ -1109,7 +1140,7 @@ impl AppRoot {
                         div()
                             .text_size(px(12.0))
                             .text_color(theme::text_muted())
-                            .child(descriptor.description),
+                            .child(descriptor.description_text()),
                     )
                     .when_some(unavailable, |this, reason| {
                         this.child(
@@ -1148,7 +1179,7 @@ impl AppRoot {
                                         .icon(Icon::empty().path("icons/undo-2.svg").size(px(14.0)))
                                         .compact()
                                         .ghost()
-                                        .tooltip("Reset to default")
+                                        .tooltip(t!("settings.reset_to_default"))
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.settings_reset_one(id, cx);
                                         })),
@@ -1234,7 +1265,7 @@ impl AppRoot {
 
     fn render_section_heading(
         &self,
-        title: &'static str,
+        title: impl Into<SharedString>,
         section: Option<Section>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1247,7 +1278,7 @@ impl AppRoot {
                 div()
                     .text_size(px(18.0))
                     .text_color(theme::text())
-                    .child(title),
+                    .child(title.into()),
             )
             .when_some(section, |this, section| {
                 this.child(
@@ -1256,7 +1287,7 @@ impl AppRoot {
                         section.key()
                     )))
                     .debug_selector(move || format!("settings-reset-section-{}", section.key()))
-                    .label("Reset section")
+                    .label(t!("settings.reset_section"))
                     .compact()
                     .ghost()
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -1297,19 +1328,16 @@ impl AppRoot {
 
         let mut content: Vec<AnyElement> = Vec::new();
         if searching {
-            content.push(self.render_section_heading("Search results", None, cx));
+            content.push(self.render_section_heading(t!("settings.search_results"), None, cx));
             content.push(
                 div()
                     .debug_selector(|| "settings-result-count".into())
                     .text_size(px(12.0))
                     .text_color(theme::text_muted())
-                    .child(format!(
-                        "{} for \u{201C}{query}\u{201D}",
-                        match rows.len() {
-                            1 => "1 setting".to_owned(),
-                            count => format!("{count} settings"),
-                        }
-                    ))
+                    .child(match rows.len() {
+                        1 => t!("settings.found_one", query = query),
+                        count => t!("settings.found_other", count = count, query = query),
+                    }.into_owned())
                     .into_any_element(),
             );
             for descriptor in &rows {
@@ -1323,7 +1351,7 @@ impl AppRoot {
                         .pt(px(12.0))
                         .text_size(px(11.0))
                         .text_color(theme::text_faint())
-                        .child(format!("SHORTCUTS ({})", found.len()))
+                        .child(t!("settings.shortcuts_found", count = found.len()).into_owned())
                         .into_any_element(),
                 );
                 for def in found {
@@ -1333,14 +1361,14 @@ impl AppRoot {
         } else {
             match target {
                 Page::Section(section) => {
-                    content.push(self.render_section_heading(section.title(), Some(section), cx));
+                    content.push(self.render_section_heading(section.title_text(), Some(section), cx));
                     if ai_page {
                         content.push(
                             div()
                                 .pt(px(12.0))
                                 .text_size(px(11.0))
                                 .text_color(theme::text_faint())
-                                .child("API KEY")
+                                .child(t!("settings.api_key"))
                                 .into_any_element(),
                         );
                         content.push(self.render_ai_key_row(window, cx));
@@ -1362,7 +1390,7 @@ impl AppRoot {
                                 .pt(px(12.0))
                                 .text_size(px(11.0))
                                 .text_color(theme::text_faint())
-                                .child(group.to_uppercase())
+                                .child(registry::group_text(group).to_uppercase())
                                 .into_any_element(),
                         );
                         for descriptor in descriptors {
@@ -1384,11 +1412,11 @@ impl AppRoot {
                 }
                 Page::Shortcuts => content.extend(self.render_shortcuts_page(cx)),
                 Page::Drivers => {
-                    content.push(self.render_section_heading("Drivers", None, cx));
+                    content.push(self.render_section_heading(t!("settings.nav.drivers"), None, cx));
                     content.push(self.render_drivers_page(cx));
                 }
                 Page::About => {
-                    content.push(self.render_section_heading("About", None, cx));
+                    content.push(self.render_section_heading(t!("settings.nav.about"), None, cx));
                     content.push(self.render_about_page());
                 }
             }
@@ -1436,12 +1464,12 @@ impl AppRoot {
                             .flex()
                             .flex_col()
                             .gap(px(2.0))
-                            .child(div().text_size(px(13.0)).text_color(theme::text()).child("Developer mode"))
+                            .child(div().text_size(px(13.0)).text_color(theme::text()).child(t!("settings.developer.title")))
                             .child(
                                 div()
                                     .text_size(px(12.0))
                                     .text_color(theme::text_muted())
-                                    .child("Accept unsigned local drivers and manifests. Takes effect immediately; it is stored with the drivers, not in this Settings file."),
+                                    .child(t!("settings.developer.description")),
                             ),
                     )
                     .child(
@@ -1458,7 +1486,7 @@ impl AppRoot {
                 div().px(px(12.0)).py(px(6.0)).child(
                     Button::new("settings-open-driver-manager")
                         .debug_selector(|| "settings-open-driver-manager".into())
-                        .label("Open Driver Manager")
+                        .label(t!("settings.developer.open_driver_manager"))
                         .compact()
                         .on_click(cx.listener(|this, _, _, cx| this.open_driver_manager(cx))),
                 ),
@@ -1468,10 +1496,10 @@ impl AppRoot {
 
     fn render_about_page(&self) -> AnyElement {
         let path = self.settings_ui.path.as_ref().map_or_else(
-            || "not saved (no config folder)".to_owned(),
+            || t!("settings.about.not_saved").into_owned(),
             |path| path.display().to_string(),
         );
-        let line = |label: &'static str, value: String| {
+        let line = |label: std::borrow::Cow<'static, str>, value: String| {
             div()
                 .flex()
                 .gap(px(12.0))
@@ -1496,8 +1524,8 @@ impl AppRoot {
             .debug_selector(|| "settings-about".into())
             .flex()
             .flex_col()
-            .child(line("Version", env!("CARGO_PKG_VERSION").to_owned()))
-            .child(line("Settings file", path))
+            .child(line(t!("settings.about.version"), env!("CARGO_PKG_VERSION").to_owned()))
+            .child(line(t!("settings.about.settings_file"), path))
             .into_any_element()
     }
 
@@ -1523,7 +1551,7 @@ impl AppRoot {
             .child(
                 Button::new("settings-reset-defaults")
                     .debug_selector(|| "settings-reset-defaults".into())
-                    .label("Reset Defaults")
+                    .label(t!("settings.footer.reset_defaults"))
                     .compact()
                     .ghost()
                     .on_click(cx.listener(|this, _, _, cx| this.settings_reset_defaults(cx))),
@@ -1539,17 +1567,17 @@ impl AppRoot {
                     })
                     .debug_selector(|| "settings-status".into())
                     .child(if invalid {
-                        "Fix the highlighted values to apply"
+                        t!("settings.footer.fix_values")
                     } else if dirty {
-                        "Changes not applied"
+                        t!("settings.footer.not_applied")
                     } else {
-                        ""
+                        "".into()
                     }),
             )
             .child(
                 Button::new("settings-close")
                     .debug_selector(|| "settings-close".into())
-                    .label("Close")
+                    .label(t!("common.close"))
                     .compact()
                     .on_click(
                         cx.listener(|this, _, window, cx| this.request_close_settings(window, cx)),
@@ -1558,7 +1586,7 @@ impl AppRoot {
             .child(
                 Button::new("settings-apply")
                     .debug_selector(|| "settings-apply".into())
-                    .label("Apply")
+                    .label(t!("settings.footer.apply"))
                     .compact()
                     .disabled(!dirty || invalid)
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -1568,7 +1596,7 @@ impl AppRoot {
             .child(
                 Button::new("settings-apply-close")
                     .debug_selector(|| "settings-apply-close".into())
-                    .label("Apply and Close")
+                    .label(t!("settings.footer.apply_close"))
                     .compact()
                     .primary()
                     .disabled(invalid)
@@ -1821,7 +1849,7 @@ impl AppRoot {
                                     .text_ellipsis()
                                     .text_left()
                                     .child(if ty.name.trim().is_empty() {
-                                        "(unnamed)".to_owned()
+                                        t!("settings.types.unnamed").into_owned()
                                     } else {
                                         ty.name.clone()
                                     }),
@@ -1847,7 +1875,7 @@ impl AppRoot {
                             .items_center()
                             .gap(px(6.0))
                             .child(Icon::new(IconName::Plus).size(px(14.0)))
-                            .child("Add type"),
+                            .child(t!("settings.types.add")),
                     )
                     .w_full()
                     .ghost()
@@ -1872,14 +1900,14 @@ impl AppRoot {
                     .pt(px(12.0))
                     .text_size(px(11.0))
                     .text_color(theme::text_faint())
-                    .child("CONNECTION TYPES"),
+                    .child(t!("settings.types.heading")),
             )
             .child(
                 div()
                     .px(px(12.0))
                     .text_size(px(12.0))
                     .text_color(theme::text_muted())
-                    .child("A connection type gives its connections a color and safety presets. Pick one in the connection dialog (Environment); connections without a type follow the global settings only."),
+                    .child(t!("settings.types.help")),
             )
             .child(div().flex().items_start().gap(px(16.0)).px(px(12.0)).child(list).child(editor))
             .into_any_element()
@@ -1897,7 +1925,7 @@ impl AppRoot {
             .iter()
             .find(|(id, _)| *id == ty.id)
             .map(|(_, error)| error.to_string());
-        let field = |label: &'static str, control: AnyElement| {
+        let field = |label: std::borrow::Cow<'static, str>, control: AnyElement| {
             div()
                 .flex()
                 .items_center()
@@ -1921,7 +1949,7 @@ impl AppRoot {
             .flex_col()
             .gap(px(10.0))
             .child(field(
-                "Name",
+                t!("settings.types.name"),
                 div()
                     .debug_selector(|| "connection-type-name".into())
                     .w(px(CONTROL_WIDTH))
@@ -1929,7 +1957,7 @@ impl AppRoot {
                     .into_any_element(),
             ))
             .child(field(
-                "Color",
+                t!("settings.types.color"),
                 div()
                     .flex()
                     .items_center()
@@ -2021,12 +2049,10 @@ impl AppRoot {
                             .flex()
                             .flex_col()
                             .gap(px(2.0))
-                            .child(div().text_size(px(13.0)).text_color(theme::text()).child("Agent access"))
+                            .child(div().text_size(px(13.0)).text_color(theme::text()).child(t!("settings.types.agent_access")))
                             .child(
                                 div().text_size(px(12.0)).text_color(theme::text_muted()).child(
-                                    "What an AI agent (the in-app assistant, MCP clients) may do on connections of this type \
-                                     that set nothing themselves. Never more than Read; a Production type always needs the \
-                                     connection's own setting, and a read-only type caps every connection at Read.",
+                                    t!("settings.types.agent_access_help"),
                                 ),
                             )
                             .child(
@@ -2051,7 +2077,7 @@ impl AppRoot {
                     div().child(
                         Button::new("connection-type-delete")
                             .debug_selector(|| "connection-type-delete".into())
-                            .label("Delete type")
+                            .label(t!("settings.types.delete"))
                             .compact()
                             .danger()
                             .on_click(cx.listener(move |this, _, _, cx| this.settings_delete_type(&id, cx))),
@@ -2304,12 +2330,12 @@ impl AppRoot {
                     div()
                         .text_size(px(18.0))
                         .text_color(theme::text())
-                        .child("Shortcuts"),
+                        .child(t!("settings.nav.shortcuts")),
                 )
                 .child(
                     Button::new("shortcuts-reset-all")
                         .debug_selector(|| "shortcuts-reset-all".into())
-                        .label("Reset all")
+                        .label(t!("settings.shortcuts.reset_all"))
                         .compact()
                         .ghost()
                         .on_click(cx.listener(|this, _, _, cx| this.shortcuts_reset_all(cx))),
@@ -2387,7 +2413,7 @@ impl AppRoot {
                         .text_color(theme::text_muted())
                         .child(shortcuts::display(chord, macos))
                 }))
-                .child(div().text_color(theme::text_faint()).child("Fixed"))
+                .child(div().text_color(theme::text_faint()).child(t!("settings.shortcuts.fixed")))
                 .into_any_element()
         } else {
             div()
@@ -2397,7 +2423,7 @@ impl AppRoot {
                 .children(chords.iter().enumerate().map(|(slot, chord)| {
                     let capturing = recording.is_some_and(|recording| recording.slot == Some(slot));
                     let label = if capturing {
-                        "Press keys\u{2026}".to_owned()
+                        t!("settings.shortcuts.press_keys").into_owned()
                     } else {
                         shortcuts::display(chord, macos)
                     };
@@ -2410,7 +2436,7 @@ impl AppRoot {
                                 .label(label)
                                 .compact()
                                 .selected(capturing)
-                                .tooltip("Click to change this shortcut")
+                                .tooltip(t!("settings.shortcuts.change"))
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.shortcut_start_record(id, Some(slot), window, cx);
                                 })),
@@ -2421,7 +2447,7 @@ impl AppRoot {
                                 .icon(Icon::empty().path("icons/close.svg").size(px(12.0)))
                                 .compact()
                                 .ghost()
-                                .tooltip("Remove this shortcut")
+                                .tooltip(t!("settings.shortcuts.remove"))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.shortcut_remove(id, slot, cx);
                                 })),
@@ -2432,15 +2458,15 @@ impl AppRoot {
                         div()
                             .text_size(px(12.0))
                             .text_color(theme::text_faint())
-                            .child("Not set"),
+                            .child(t!("settings.shortcuts.not_set")),
                     )
                 })
                 .child(
                     Button::new(SharedString::from(format!("shortcut-record-{id}")))
                         .debug_selector(move || format!("shortcut-record-{id}"))
                         .label(match recording {
-                            Some(recording) if recording.slot.is_none() => "Press keys\u{2026}",
-                            _ => "Record",
+                            Some(recording) if recording.slot.is_none() => t!("settings.shortcuts.press_keys"),
+                            _ => t!("settings.shortcuts.record"),
                         })
                         .compact()
                         .ghost()
@@ -2521,7 +2547,7 @@ impl AppRoot {
                                     .icon(Icon::empty().path("icons/undo-2.svg").size(px(14.0)))
                                     .compact()
                                     .ghost()
-                                    .tooltip("Reset to default")
+                                    .tooltip(t!("settings.reset_to_default"))
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.shortcut_reset(id, cx)
                                     })),

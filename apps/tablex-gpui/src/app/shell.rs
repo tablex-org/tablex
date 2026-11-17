@@ -64,7 +64,7 @@ impl AppRoot {
             .icon(Icon::empty().path(theme_icon(current)).size(px(14.0)))
             .compact()
             .ghost()
-            .tooltip("Theme")
+            .tooltip(t!("titlebar.theme"))
             .dropdown_menu_with_anchor(gpui::Anchor::TopRight, move |menu, _, _| {
                 // Icon on the left, check on the right: both show at once.
                 theme_menu_items(current, &root)
@@ -74,6 +74,61 @@ impl AppRoot {
                     })
             })
     }
+}
+
+impl AppRoot {
+    /// The title bar's language picker: a ghost icon button opening System / English / Tiếng Việt
+    /// with the current choice checked (the Settings > Appearance > Language setting).
+    fn render_language_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let current = self.settings.appearance.language;
+        let root = cx.entity().downgrade();
+        Button::new("title-language")
+            .debug_selector(|| "title-language-button".into())
+            .icon(Icon::empty().path("icons/languages.svg").size(px(14.0)))
+            .compact()
+            .ghost()
+            .tooltip(t!("titlebar.language"))
+            .dropdown_menu_with_anchor(gpui::Anchor::TopRight, move |menu, _, _| {
+                language_menu_items(current, &root)
+                    .into_iter()
+                    .fold(menu.check_side(gpui_component::Side::Right), |menu, item| {
+                        menu.item(item)
+                    })
+            })
+    }
+}
+
+/// The language picker's entries; `current` is the checked one.
+pub(super) fn language_menu_items(
+    current: crate::settings::LanguageChoice,
+    root: &gpui::WeakEntity<AppRoot>,
+) -> Vec<PopupMenuItem> {
+    use crate::settings::{Choice, LanguageChoice};
+    let descriptor = crate::settings::registry::find("appearance.language");
+    LanguageChoice::OPTIONS
+        .iter()
+        .filter_map(|(id, _)| LanguageChoice::from_id(id).map(|choice| (choice, *id)))
+        .map(|(choice, id)| {
+            // The language names read in their own language; only System follows the interface language.
+            let label = SharedString::from(
+                descriptor
+                    .map(|descriptor| descriptor.option_text(id).into_owned())
+                    .unwrap_or_default(),
+            );
+            let selector = format!("title-language-{id}");
+            let root = root.clone();
+            PopupMenuItem::element(move |_, _| {
+                let selector = selector.clone();
+                div()
+                    .debug_selector(move || selector.clone())
+                    .child(label.clone())
+            })
+            .checked(choice == current)
+            .on_click(move |_, window, app| {
+                let _ = root.update(app, |this, cx| this.set_language_choice(choice, window, cx));
+            })
+        })
+        .collect()
 }
 
 pub(super) fn theme_icon(choice: crate::settings::ThemeChoice) -> &'static str {
@@ -92,14 +147,17 @@ pub(super) fn theme_menu_items(
 ) -> Vec<PopupMenuItem> {
     use crate::settings::ThemeChoice;
     [
-        (ThemeChoice::Light, "Light", "title-theme-light"),
-        (ThemeChoice::Dark, "Dark", "title-theme-dark"),
-        (ThemeChoice::System, "System", "title-theme-system"),
+        (ThemeChoice::Light, t!("titlebar.theme_light"), "title-theme-light"),
+        (ThemeChoice::Dark, t!("titlebar.theme_dark"), "title-theme-dark"),
+        (ThemeChoice::System, t!("titlebar.theme_system"), "title-theme-system"),
     ]
     .into_iter()
     .map(|(choice, label, selector)| {
         let root = root.clone();
-        PopupMenuItem::element(move |_, _| div().debug_selector(|| selector.into()).child(label))
+        let label = SharedString::from(label);
+        PopupMenuItem::element(move |_, _| {
+            div().debug_selector(|| selector.into()).child(label.clone())
+        })
             .icon(Icon::empty().path(theme_icon(choice)))
             .checked(choice == current)
             .on_click(move |_, window, app| {
@@ -179,6 +237,7 @@ impl Render for AppRoot {
                     .pr(px(8.0))
                     .child(self.render_updates_button(cx))
                     .child(self.render_theme_button(cx))
+                    .child(self.render_language_button(cx))
                     .child(
                         Button::new("open-settings")
                             .debug_selector(|| "open-settings".into())
@@ -186,7 +245,7 @@ impl Render for AppRoot {
                             .compact()
                             .ghost()
                             .tooltip(shortcuts::with_label(
-                                "Settings",
+                                &t!("titlebar.settings"),
                                 &self.settings.shortcuts,
                                 "workspace.open_settings",
                             ))
@@ -217,11 +276,11 @@ impl Render for AppRoot {
                 Button::new("global-new-connection")
                     .debug_selector(|| "global-new-connection".into())
                     .icon(Icon::new(IconName::Plus).size(px(14.0)))
-                    .label("New Connection")
+                    .label(t!("titlebar.new_connection"))
                     .small()
                     .compact()
                     .ghost()
-                    .tooltip("New connection")
+                    .tooltip(t!("titlebar.new_connection_tooltip"))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.open_connection_dialog(None, window, cx);
                     })),
@@ -230,11 +289,11 @@ impl Render for AppRoot {
                 Button::new("global-new-query")
                     .debug_selector(|| "global-new-query".into())
                     .icon(Icon::new(IconName::SquareTerminal).size(px(14.0)))
-                    .label("New Query")
+                    .label(t!("titlebar.new_query"))
                     .small()
                     .compact()
                     .ghost()
-                    .tooltip("New query for the selected sidebar node")
+                    .tooltip(t!("titlebar.new_query_tooltip"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.open_scoped_or_generic_query(cx);
                     })),
@@ -243,11 +302,11 @@ impl Render for AppRoot {
                 Button::new("global-transfer")
                     .debug_selector(|| "global-transfer".into())
                     .icon(Icon::new(super::navigator_ui::SidebarGlyph::Transfer).size(px(14.0)))
-                    .label("Data Transfer")
+                    .label(t!("titlebar.data_transfer"))
                     .small()
                     .compact()
                     .ghost()
-                    .tooltip("Copy tables or a query into tables or files")
+                    .tooltip(t!("titlebar.data_transfer_tooltip"))
                     .on_click(cx.listener(|this, _, window, cx| this.open_transfer_from_toolbar(window, cx))),
             )
             .child(
@@ -258,14 +317,14 @@ impl Render for AppRoot {
                         Button::new("global-driver-manager")
                             .debug_selector(|| "global-driver-manager".into())
                             .icon(Icon::default().path("icons/settings-2.svg").size(px(14.0)))
-                            .label("Driver Manager")
+                            .label(t!("titlebar.driver_manager"))
                             .small()
                             .compact()
                             .ghost()
                             .tooltip(if self.driver_ui.pending_updates() > 0 {
-                                "Install, update and remove database drivers (updates available)"
+                                t!("titlebar.driver_manager_tooltip_updates")
                             } else {
-                                "Install, update and remove database drivers"
+                                t!("titlebar.driver_manager_tooltip")
                             })
                             .on_click(cx.listener(|this, _, _, cx| this.open_driver_manager(cx))),
                     )
@@ -299,16 +358,16 @@ impl Render for AppRoot {
                                     .path("icons/wand-sparkles.svg")
                                     .size(px(14.0)),
                             )
-                            .label("Assistant")
+                            .label(t!("titlebar.assistant"))
                             .small()
                             .compact()
                             .ghost()
                             .selected(self.assistant.dock.open)
                             .tooltip(shortcuts::with_label(
-                                if self.assistant.asking {
-                                    "A statement waits for your answer. Show or hide the AI assistant"
+                                &if self.assistant.asking {
+                                    t!("titlebar.assistant_tooltip_asking")
                                 } else {
-                                    "Show or hide the AI assistant"
+                                    t!("titlebar.assistant_tooltip")
                                 },
                                 &self.settings.shortcuts,
                                 "workspace.toggle_assistant",
@@ -351,7 +410,7 @@ impl Render for AppRoot {
             .filter(|ty| ty.is_production() || ty.read_only)
             .map(|ty| {
                 let label = if ty.read_only {
-                    format!("{} \u{00B7} read-only", ty.name)
+                    t!("titlebar.read_only", name = ty.name).into_owned()
                 } else {
                     ty.name.clone()
                 };
@@ -471,7 +530,7 @@ impl Render for AppRoot {
                             ui::icon_button(
                                 "expand-sidebar",
                                 IconName::ChevronRight,
-                                "Show sidebar",
+                                t!("titlebar.show_sidebar"),
                             )
                             .debug_selector(|| "expand-sidebar".into())
                             .on_click(cx.listener(|this, _, _, cx| {

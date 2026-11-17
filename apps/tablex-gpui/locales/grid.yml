@@ -1,0 +1,512 @@
+_version: 2
+grid:
+  select_a_column:
+    en: Select a column
+    vi: Chọn một cột
+  edit_value:
+    en: Edit value
+    vi: Sửa giá trị
+  copy_value:
+    en: Copy value
+    vi: Sao chép giá trị
+  copy_column_name:
+    en: Copy Column Name
+    vi: Sao chép tên cột
+  select_a_cell_in_the_grid:
+    en: Select a cell in the grid
+    vi: Chọn một ô trong lưới
+  refresh_every_one:
+    en: Refresh every 1 second
+    vi: Làm mới mỗi 1 giây
+  refresh_every_other:
+    en: "Refresh every %{seconds} seconds"
+    vi: "Làm mới mỗi %{seconds} giây"
+  auto_refresh_off_short:
+    en: "Off"
+    vi: Tắt
+  rows_one:
+    en: 1 row
+    vi: 1 dòng
+  rows_other:
+    en: "%{count} rows"
+    vi: "%{count} dòng"
+  commit:
+    en: Commit
+    vi: Commit
+  rollback:
+    en: Rollback
+    vi: Rollback
+  discard:
+    en: Discard
+    vi: Bỏ
+  record_view_tab:
+    en: Record view (Tab)
+    vi: Xem từng bản ghi (Tab)
+  committing:
+    en: Committing...
+    vi: Đang commit...
+  auto_refresh_every:
+    en: "Auto refresh: every %{seconds}s"
+    vi: "Tự làm mới: mỗi %{seconds} giây"
+  auto_refresh_off:
+    en: "Auto refresh: off"
+    vi: "Tự làm mới: tắt"
+  no_rows:
+    en: No rows
+    vi: Không có dòng
+  row_of:
+    en: "Row %{row} of %{rows}"
+    vi: "Dòng %{row} / %{rows}"
+  next_row_page_down:
+    en: Next row (Page Down)
+    vi: Dòng sau (Page Down)
+  previous_row_page_up:
+    en: Previous row (Page Up)
+    vi: Dòng trước (Page Up)
+  no_result_script_failed:
+    en: "No result: the script failed"
+    vi: "Không có kết quả: script đã lỗi"
+  no_rows_returned:
+    en: No rows returned
+    vi: Không có dòng nào được trả về
+  running_query:
+    en: Running query…
+    vi: Đang chạy truy vấn…
+  query_cancelled:
+    en: Query cancelled
+    vi: Truy vấn đã bị huỷ
+  run_a_query_to_see_results:
+    en: Run a query to see results
+    vi: Chạy một truy vấn để xem kết quả
+  connection_lost:
+    en: "The connection to the database was lost (%{detail}). Reconnect, then run the query again."
+    vi: "Mất kết nối đến cơ sở dữ liệu (%{detail}). Hãy kết nối lại rồi chạy lại truy vấn."
+  query_failed:
+    en: "Query failed: %{error}"
+    vi: "Truy vấn thất bại: %{error}"
+  results:
+    en: Results
+    vi: Kết quả
+  clear_sort:
+    en: Clear Sort
+    vi: Bỏ sắp xếp
+  sorted_on_the_loaded_rows_only:
+    en: Sorted on the loaded rows only
+    vi: Chỉ sắp xếp trên các dòng đã tải
+  configure_dsv:
+    en: Configure DSV…
+    vi: Cấu hình DSV…
+  sql_copy_needs:
+    en: SQL copy needs
+    vi: Sao chép SQL cần
+  a_connected_table:
+    en: a connected table.
+    vi: một bảng đã kết nối.
+  increment:
+    en: Increment…
+    vi: Tăng dần…
+  snowflake:
+    en: Snowflake…
+    vi: Snowflake…
+  screenshot_selected_cells:
+    en: Screenshot Selected Cells
+    vi: Chụp ảnh các ô đã chọn
+  clone_as_new_row:
+    en: Clone as New Row
+    vi: Nhân bản thành dòng mới
+  sql_clone_needs_complete:
+    en: SQL clone needs complete
+    vi: Nhân bản SQL cần đủ
+  generated_default_metadata:
+    en: generated/default metadata.
+    vi: siêu dữ liệu tự sinh/mặc định.
+  delete_row:
+    en: Delete Row…
+    vi: Xoá dòng…
+  selected_cells:
+    en: Selected Cells
+    vi: Các ô đã chọn
+  current_page:
+    en: Current Page
+    vi: Trang hiện tại
+  sql_export_needs:
+    en: SQL export needs
+    vi: Xuất SQL cần
+  whole_result_to_files_or_tables:
+    en: Whole Result to Files or Tables…
+    vi: Cả kết quả ra tệp hoặc bảng…
+  database_sort_needs:
+    en: Database sort needs
+    vi: Sắp xếp bằng cơ sở dữ liệu cần
+  customize:
+    en: Customize...
+    vi: Tuỳ chỉnh...
+  stop:
+    en: Stop
+    vi: Dừng
+  previous:
+    en: Previous
+    vi: Trước
+  next:
+    en: Next
+    vi: Tiếp
+  refresh:
+    en: Refresh
+    vi: Làm mới
+  run_the_script_again_with_run:
+    en: Run the script again with Run
+    vi: Chạy lại script bằng Chạy
+  export:
+    en: Export
+    vi: Xuất
+  add_row:
+    en: Add Row
+    vi: Thêm dòng
+  new_document:
+    en: New Document
+    vi: Document mới
+  duplicate_selected:
+    en: Duplicate Selected
+    vi: Nhân bản mục đã chọn
+  search:
+    en: Search…
+    vi: Tìm…
+  search_options:
+    en: Search options
+    vi: Tuỳ chọn tìm kiếm
+  previous_match_shift_enter:
+    en: Previous match (Shift+Enter)
+    vi: Kết quả trước (Shift+Enter)
+  next_match_enter:
+    en: Next match (Enter)
+    vi: Kết quả sau (Enter)
+  close_esc:
+    en: Close (Esc)
+    vi: Đóng (Esc)
+  match_case:
+    en: Match case
+    vi: Phân biệt hoa thường
+  whole_cell:
+    en: Whole cell
+    vi: Cả ô
+  value:
+    en: Value
+    vi: Giá trị
+  range_end:
+    en: Range end
+    vi: Cuối khoảng
+  values_separated_by_commas_or_new_lines:
+    en: "Values, separated by commas or new lines"
+    vi: "Các giá trị, cách nhau bằng dấu phẩy hoặc xuống dòng"
+  column:
+    en: Column
+    vi: Cột
+  search_columns:
+    en: Search columns
+    vi: Tìm cột
+  no_value:
+    en: No value
+    vi: Không có giá trị
+  remove_rule:
+    en: Remove rule
+    vi: Xoá điều kiện
+  toggle_and_or:
+    en: Toggle AND / OR
+    vi: Đổi AND / OR
+  clear_filter:
+    en: Clear Filter
+    vi: Xoá bộ lọc
+  add_rule:
+    en: Add rule
+    vi: Thêm điều kiện
+  reset_rules:
+    en: Reset rules
+    vi: Đặt lại điều kiện
+  apply_filter:
+    en: Apply Filter
+    vi: Áp dụng bộ lọc
+  filter:
+    en: Filter
+    vi: Bộ lọc
+  where_edited_manually_apply_filter_replaces_it_w:
+    en: WHERE edited manually - Apply Filter replaces it with these rules.
+    vi: WHERE đã được sửa tay - Áp dụng bộ lọc sẽ thay nó bằng các điều kiện này.
+  filter_builder:
+    en: Filter builder
+    vi: Trình tạo bộ lọc
+  snowflake_worker_id:
+    en: Snowflake Worker ID
+    vi: ID worker Snowflake
+  enter_0_1023_use_a_unique_worker_id_across_machi:
+    en: Enter 0–1023. Use a unique worker ID across machines and users that do not share this state folder. Processes sharing this folder coordinate through a lock. Keep the state file; deleting or restoring it can reuse IDs.
+    vi: Nhập 0–1023. Dùng một ID worker riêng cho mỗi máy và người dùng không chung thư mục trạng thái này. Các tiến trình dùng chung thư mục này phối hợp qua một khoá. Hãy giữ tệp trạng thái; xoá hoặc khôi phục nó có thể làm trùng ID.
+  stage_snowflake_ids:
+    en: Stage Snowflake IDs
+    vi: Chuẩn bị ID Snowflake
+  refresh_unavailable:
+    en: Refresh unavailable
+    vi: Không thể làm mới
+  wait_for_the_current_operation_to_finish:
+    en: Wait for the current operation to finish.
+    vi: Hãy chờ thao tác hiện tại kết thúc.
+  discard_staged_changes_and_refresh:
+    en: "Discard staged changes and refresh?"
+    vi: "Bỏ các thay đổi đang chờ và làm mới?"
+  cancel_preserves_all_edits_inserts_and_deletions:
+    en: "Cancel preserves all edits, inserts and deletions in this tab."
+    vi: "Huỷ sẽ giữ nguyên mọi thay đổi sửa, thêm và xoá trong tab này."
+  discard_and_refresh:
+    en: Discard and Refresh
+    vi: Bỏ và làm mới
+  increment_from:
+    en: Increment from
+    vi: Tăng dần từ
+  stage_values:
+    en: Stage values
+    vi: Chuẩn bị giá trị
+  cannot_set_null:
+    en: Cannot set NULL
+    vi: Không thể đặt NULL
+  bulk_edit_selected_cells:
+    en: Bulk edit selected cells
+    vi: Sửa hàng loạt các ô đã chọn
+  stage_changes:
+    en: Stage changes
+    vi: Chuẩn bị thay đổi
+  sort_unavailable:
+    en: Sort unavailable
+    vi: Không thể sắp xếp
+  sort_failed:
+    en: Sort failed
+    vi: Sắp xếp thất bại
+  database_sort_unavailable:
+    en: Database sort unavailable
+    vi: Không dùng được sắp xếp bằng cơ sở dữ liệu
+  this_sql_connection_cannot_run_a_table_sort:
+    en: This SQL connection cannot run a table sort.
+    vi: Kết nối SQL này không thể sắp xếp bảng.
+  wait_for_the_query_and_finish_pending_changes_be:
+    en: Wait for the query and finish pending changes before clearing sort.
+    vi: Hãy chờ truy vấn và hoàn tất các thay đổi đang chờ trước khi bỏ sắp xếp.
+  cannot_clone_sql_row:
+    en: Cannot clone SQL row
+    vi: Không thể nhân bản dòng SQL
+  select_a_row_to_inspect:
+    en: Select a row to inspect
+    vi: Chọn một dòng để xem
+  close_tab:
+    en: Close tab
+    vi: Đóng tab
+  close_others:
+    en: Close Others
+    vi: Đóng các tab khác
+  panel_placement:
+    en: Panel placement
+    vi: Vị trí bảng
+  close_panel:
+    en: Close panel
+    vi: Đóng bảng
+  preview_truncated_edit_to_inspect_the_full_value:
+    en: Preview truncated; edit to inspect the full value.
+    vi: Bản xem trước đã bị cắt; hãy sửa để xem toàn bộ giá trị.
+  convert_preview:
+    en: Convert preview
+    vi: Chuyển đổi bản xem trước
+  original_value:
+    en: Original value
+    vi: Giá trị gốc
+  confirm:
+    en: Confirm
+    vi: Xác nhận
+  table:
+    en: Table
+    vi: Bảng
+  back_to_the_table_tab:
+    en: Back to the table (Tab)
+    vi: Quay lại bảng (Tab)
+  type:
+    en: Type
+    vi: Loại
+  no_rows_to_show:
+    en: No rows to show
+    vi: Không có dòng nào để hiện
+  execute:
+    en: Execute
+    vi: Thực thi
+  enter_executes_shift_enter_inserts_a_newline:
+    en: Enter executes. Shift+Enter inserts a newline.
+    vi: Enter để chạy. Shift+Enter để xuống dòng.
+  query:
+    en: Query
+    vi: Truy vấn
+  show_generated_sql:
+    en: Show generated SQL
+    vi: Hiện SQL đã tạo
+  copy_query:
+    en: Copy query
+    vi: Sao chép truy vấn
+  close_preview:
+    en: Close preview
+    vi: Đóng xem trước
+  sql_query_preview:
+    en: SQL Query Preview
+    vi: Xem trước truy vấn SQL
+  execute_query:
+    en: Execute query
+    vi: Thực thi truy vấn
+  unpin_column:
+    en: Unpin column
+    vi: Bỏ ghim cột
+  pin_column:
+    en: Pin column
+    vi: Ghim cột
+  freeze_first_column:
+    en: Freeze first column
+    vi: Cố định cột đầu
+  unpin_all_columns:
+    en: Unpin all columns
+    vi: Bỏ ghim tất cả cột
+  sort_database_ascending:
+    en: Sort Database Ascending
+    vi: Sắp xếp bằng cơ sở dữ liệu tăng dần
+  sort_database_descending:
+    en: Sort Database Descending
+    vi: Sắp xếp bằng cơ sở dữ liệu giảm dần
+  sort_current_page_ascending:
+    en: Sort Current Page Ascending
+    vi: Sắp xếp trang hiện tại tăng dần
+  sort_current_page_descending:
+    en: Sort Current Page Descending
+    vi: Sắp xếp trang hiện tại giảm dần
+  open_cell_details:
+    en: Open Cell Details
+    vi: Mở chi tiết ô
+  open_column_details:
+    en: Open Column Details
+    vi: Mở chi tiết cột
+  open_row_details:
+    en: Open Row Details
+    vi: Mở chi tiết dòng
+  unpin_column_2:
+    en: Unpin Column
+    vi: Bỏ ghim cột
+  pin_column_2:
+    en: Pin Column
+    vi: Ghim cột
+  copy:
+    en: Copy
+    vi: Sao chép
+  copy_cell:
+    en: Copy Cell
+    vi: Sao chép ô
+  copy_selected_rows:
+    en: Copy Selected Rows
+    vi: Sao chép các dòng đã chọn
+  copy_all_current_page:
+    en: Copy All (Current Page)
+    vi: Sao chép tất cả (trang hiện tại)
+  copy_column_names:
+    en: Copy Column Names
+    vi: Sao chép tên cột
+  configure_default:
+    en: Configure Default
+    vi: Cấu hình mặc định
+  set_null:
+    en: Set NULL
+    vi: Đặt NULL
+  bulk_edit_selection:
+    en: Bulk Edit Selection
+    vi: Sửa hàng loạt phần đã chọn
+  generate_value:
+    en: Generate Value
+    vi: Tạo giá trị
+  transpose_row:
+    en: Transpose Row
+    vi: Chuyển vị dòng
+  clear_selection:
+    en: Clear Selection
+    vi: Bỏ chọn
+  frequent_refresh_increases_server_load:
+    en: Frequent refresh increases server load
+    vi: Làm mới thường xuyên làm tăng tải cho máy chủ
+  automatic_refresh_requires_a_read_only_driver_qu:
+    en: Automatic refresh requires a read-only driver query; unavailable for SQL
+    vi: Tự làm mới cần truy vấn chỉ đọc của driver; không dùng được cho SQL
+  apply:
+    en: Apply
+    vi: Áp dụng
+  apply_all:
+    en: Apply All
+    vi: Áp dụng tất cả
+  add:
+    en: Add
+    vi: Thêm
+  edit:
+    en: Edit
+    vi: Sửa
+  remove:
+    en: Remove
+    vi: Gỡ
+  delete:
+    en: Delete
+    vi: Xoá
+  insert_row:
+    en: Insert Row
+    vi: Chèn dòng
+  undo:
+    en: Undo
+    vi: Hoàn tác
+  redo:
+    en: Redo
+    vi: Làm lại
+  cell_details:
+    en: Cell details
+    vi: Chi tiết ô
+  column_details:
+    en: Column details
+    vi: Chi tiết cột
+  row_details:
+    en: Row details
+    vi: Chi tiết dòng
+  tree:
+    en: Tree
+    vi: Cây
+  row:
+    en: Row
+    vi: Dòng
+  side_right:
+    en: Side (right)
+    vi: Cạnh (bên phải)
+  bottom:
+    en: Bottom
+    vi: Dưới
+  popup:
+    en: Popup
+    vi: Cửa sổ nổi
+  length:
+    en: Length
+    vi: Độ dài
+  comment:
+    en: Comment
+    vi: Ghi chú
+  formatted:
+    en: Formatted
+    vi: Đã định dạng
+  canonical:
+    en: Canonical
+    vi: Canonical
+  raw:
+    en: Raw
+    vi: Thô
+  formatted_json:
+    en: Formatted JSON
+    vi: JSON đã định dạng
+  load_from_file:
+    en: Load from file
+    vi: Tải từ tệp
+  save_to_file:
+    en: Save to file
+    vi: Lưu ra tệp
+  copy_sql_condition:
+    en: Copy SQL Condition
+    vi: Sao chép điều kiện SQL

@@ -306,7 +306,7 @@ fn problem_panel(
     root: &WeakEntity<AppRoot>,
 ) -> AnyElement {
     let (row, message) = (&target.0, &target.1);
-    let action = |label: &'static str, id: &'static str, kind: ProblemAction| {
+    let action = |label: std::borrow::Cow<'static, str>, id: &'static str, kind: ProblemAction| {
         let (target, root) = (target.clone(), root.clone());
         Button::new((id, index))
             .debug_selector(move || format!("{id}-{index}"))
@@ -339,9 +339,9 @@ fn problem_panel(
                         .text_color(theme::danger()),
                 )
                 .child(if connection {
-                    "Connection failed"
+                    t!("sidebar.connection_failed")
                 } else {
-                    "Could not load"
+                    t!("sidebar.could_not_load")
                 })
                 .child(
                     div()
@@ -371,7 +371,7 @@ fn problem_panel(
             let (target, root) = (target.clone(), root.clone());
             Button::new(("nav-problem-another-user", index))
                 .debug_selector(move || format!("sidebar-problem-another-user-{index}"))
-                .label("Connect as Another User\u{2026}")
+                .label(t!("sidebar.connect_as_another_user"))
                 .compact()
                 .outline()
                 .on_click(move |_, window, app| {
@@ -388,10 +388,10 @@ fn problem_panel(
                 .flex()
                 .justify_end()
                 .gap(px(6.0))
-                .child(action("Clear", "sidebar-problem-clear", ProblemAction::Clear))
-                .child(action("Copy", "sidebar-problem-copy", ProblemAction::Copy))
+                .child(action(t!("sidebar.clear"), "sidebar-problem-clear", ProblemAction::Clear))
+                .child(action(t!("sidebar.copy"), "sidebar-problem-copy", ProblemAction::Copy))
                 .child(
-                    action("Retry", "sidebar-problem-retry", ProblemAction::Retry).primary(),
+                    action(t!("sidebar.retry"), "sidebar-problem-retry", ProblemAction::Retry).primary(),
                 ),
         )
         .into_any_element()

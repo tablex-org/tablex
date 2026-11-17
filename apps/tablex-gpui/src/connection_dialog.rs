@@ -61,13 +61,13 @@ pub enum ConfigTab {
 }
 
 impl ConfigTab {
-    fn label(self) -> &'static str {
+    fn label(self) -> std::borrow::Cow<'static, str> {
         match self {
-            Self::Connection => "Connection",
-            Self::Tls => "TLS/SSL",
-            Self::Tunnel => "Tunnel / Proxy",
-            Self::Advanced => "Advanced",
-            Self::Overrides => "Overrides",
+            Self::Connection => t!("connection_dialog.tab_connection"),
+            Self::Tls => t!("connection_dialog.tab_tls"),
+            Self::Tunnel => t!("connection_dialog.tab_tunnel"),
+            Self::Advanced => t!("connection_dialog.tab_advanced"),
+            Self::Overrides => t!("connection_dialog.tab_overrides"),
         }
     }
 
@@ -105,15 +105,15 @@ pub enum TestStatus {
     Failure(String),
 }
 
-/// Color swatches: (value, name); `""` is the "none" swatch.
+/// Color swatches: (value, key of the name); `""` is the "none" swatch.
 const COLOR_SWATCHES: [(&str, &str); 7] = [
-    ("", "None"),
-    ("#22c55e", "Green"),
-    ("#eab308", "Yellow"),
-    ("#f97316", "Orange"),
-    ("#ef4444", "Red"),
-    ("#3b82f6", "Blue"),
-    ("#a855f7", "Purple"),
+    ("", "connection_dialog.color_none"),
+    ("#22c55e", "connection_dialog.color_green"),
+    ("#eab308", "connection_dialog.color_yellow"),
+    ("#f97316", "connection_dialog.color_orange"),
+    ("#ef4444", "connection_dialog.color_red"),
+    ("#3b82f6", "connection_dialog.color_blue"),
+    ("#a855f7", "connection_dialog.color_purple"),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -207,7 +207,7 @@ impl ConnectionDialogInputs {
         let profile = form.profile.clone().unwrap_or_default();
         let types = Rc::new(settings.connection_types.clone());
         let type_ids: Rc<Vec<String>> = Rc::new(types.iter().map(|ty| ty.id.clone()).collect());
-        let type_labels: Vec<gpui::SharedString> = std::iter::once(NO_TYPE_LABEL.into())
+        let type_labels: Vec<gpui::SharedString> = std::iter::once(t!("connection_dialog.no_type").into_owned().into())
             .chain(types.iter().map(|ty| ty.name.clone().into()))
             .collect();
         let selected_type = type_ids
@@ -281,7 +281,7 @@ impl ConnectionDialogInputs {
             )
         };
         let picker_search =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Search databases"));
+            cx.new(|cx| InputState::new(window, cx).placeholder(t!("menu.search_databases")));
         let picker_filter = Rc::new(RefCell::new(String::new()));
         let picker_filter_for_events = picker_filter.clone();
         let picker_search_for_events = picker_search.clone();
@@ -671,49 +671,50 @@ impl ConnectionDialogInputs {
         let (uri, database, port, host) = match kind {
             ConnectionKind::Postgres => (
                 "postgresql://user:password@host:port/database",
-                "Optional, defaults to postgres",
+                t!("connection_dialog.optional_defaults_to_postgres"),
                 "5432",
                 "localhost",
             ),
             ConnectionKind::Mongodb => (
                 "mongodb://user:password@host:port/database",
-                "Optional",
+                t!("connection_dialog.optional"),
                 "27017",
                 "localhost",
             ),
             ConnectionKind::Clickhouse => (
                 "clickhouse://user:password@host:8123/database",
-                "Optional, defaults to default",
+                t!("connection_dialog.optional_defaults_to_default"),
                 "8123",
                 "localhost",
             ),
             ConnectionKind::Redis => (
                 "redis://user:password@host:6379/0",
-                "Database index, defaults to 0",
+                t!("connection_dialog.database_index_defaults_to_0"),
                 "6379",
                 "localhost",
             ),
-            _ => ("", "Optional", "", "localhost"),
+            _ => ("", t!("connection_dialog.optional"), "", "localhost"),
         };
-        let set = |input: &Entity<InputState>, text: &'static str, window: &mut Window, cx: &mut App| {
+        let set = |input: &Entity<InputState>, text: gpui::SharedString, window: &mut Window, cx: &mut App| {
             input.update(cx, |state, cx| state.set_placeholder(text, window, cx));
         };
-        set(&self.uri, uri, window, cx);
-        set(&self.database, database, window, cx);
-        set(&self.port, port, window, cx);
-        set(&self.host, host, window, cx);
-        set(&self.auth_database, "Optional, often admin", window, cx);
+        set(&self.uri, uri.into(), window, cx);
+        set(&self.database, database.into(), window, cx);
+        set(&self.port, port.into(), window, cx);
+        set(&self.host, host.into(), window, cx);
+        set(&self.auth_database, t!("connection_dialog.optional_often_admin").into(), window, cx);
         set(
             &self.uri_options,
             match kind {
                 ConnectionKind::Postgres => "application_name=tablex",
                 ConnectionKind::Clickhouse => "max_execution_time=30&async_insert=1",
                 _ => "",
-            },
+            }
+            .into(),
             window,
             cx,
         );
-        set(&self.ca_cert, "Optional PEM file, e.g. ~/ca.pem", window, cx);
+        set(&self.ca_cert, t!("connection_dialog.optional_pem_file").into(), window, cx);
         self.tls.sync_kind(window, cx);
         cx.refresh_windows();
     }
@@ -730,11 +731,14 @@ impl ConnectionDialogInputs {
             .text_size(px(13.0))
             .text_color(theme::text_muted())
             .child(database_logo(kind, 18.0))
-            .child(div().truncate().child(format!(
-                "Selected: {}{}",
-                kind_label(kind),
-                status.unwrap_or_default()
-            )))
+            .child(div().truncate().child(
+                t!(
+                    "connection_dialog.selected",
+                    kind = kind_label(kind),
+                    status = status.unwrap_or_default()
+                )
+                .into_owned(),
+            ))
             .into_any_element()
     }
 
@@ -821,7 +825,7 @@ impl ConnectionDialogInputs {
                         .outline()
                         .w(px(32.0))
                         .h(px(32.0))
-                        .tooltip("Parse the URL into the fields below")
+                        .tooltip(t!("connection_dialog.parse_the_url_into_the_fields_below"))
                         .on_click(move |_, window, cx| {
                             let result = inputs_for_url.apply_uri_to_fields(window, cx);
                             *inputs_for_url.url_error.borrow_mut() = result.err();
@@ -830,7 +834,7 @@ impl ConnectionDialogInputs {
                 );
             let url_error = self.url_error.borrow().clone();
             body = body.child(config_row(
-                "URL",
+                t!("connection_dialog.url"),
                 "connection-config-url",
                 div()
                     .flex()
@@ -847,12 +851,12 @@ impl ConnectionDialogInputs {
             ));
         }
         body = body.child(config_row(
-            "Name",
+            t!("settings.types.name"),
             "connection-config-name",
             Input::new(&self.name).appearance(true),
         ));
         body = body.child(config_row(
-            "Type",
+            t!("connection_dialog.type"),
             "connection-config-type",
             config_type_selector(
                 kind,
@@ -868,12 +872,12 @@ impl ConnectionDialogInputs {
             ),
         ));
         body = body.child(config_row(
-            "Environment",
+            t!("connection_dialog.environment"),
             "connection-config-environment",
             self.environment_control(),
         ));
         body = body.child(config_row(
-            "Color",
+            t!("settings.types.color"),
             "connection-config-color",
             self.color_swatches(),
         ));
@@ -916,7 +920,7 @@ impl ConnectionDialogInputs {
                     .flex_shrink_0()
                     .child(NumberInput::new(&self.port)),
             );
-        fields = fields.child(config_row("Host", "connection-config-host", host_and_port));
+        fields = fields.child(config_row(t!("connection_dialog.host"), "connection-config-host", host_and_port));
         if kind == ConnectionKind::Clickhouse {
             fields = fields.child(self.clickhouse_tls_rows());
         }
@@ -924,13 +928,13 @@ impl ConnectionDialogInputs {
             fields = fields.child(self.redis_tls_rows());
         }
         fields = fields.child(config_row(
-            "User",
+            t!("connection_dialog.user"),
             "connection-config-username",
             Input::new(&self.username).appearance(true),
         ));
         fields = fields.child(self.password_rows());
         fields = fields.child(config_row(
-            "Database",
+            t!("connection_dialog.database"),
             "connection-config-database",
             Input::new(&self.database).appearance(true),
         ));
@@ -939,13 +943,13 @@ impl ConnectionDialogInputs {
         }
         if kind == ConnectionKind::Mongodb {
             fields = fields.child(config_row(
-                "Auth DB",
+                t!("connection_dialog.auth_db"),
                 "connection-config-auth-database",
                 Input::new(&self.auth_database).appearance(true),
             ));
         }
         fields = fields.child(config_row(
-            if kind == ConnectionKind::Clickhouse { "Settings" } else { "URL Params" },
+            if kind == ConnectionKind::Clickhouse { t!("connection_dialog.settings") } else { t!("connection_dialog.url_params") },
             "connection-config-uri-options",
             Input::new(&self.uri_options).appearance(true),
         ));
@@ -956,7 +960,7 @@ impl ConnectionDialogInputs {
     /// no other of the server (a server's other databases may belong to other users).
     fn only_database_row(&self) -> AnyElement {
         let only_database = Checkbox::new("only-connection-database")
-            .label("Show only the connection's database")
+            .label(ts!("connection_dialog.show_only_the_connection_s_database"))
             .checked(self.only_database.get())
             .on_click({
                 let (only, touched) = (self.only_database.clone(), self.only_database_touched.clone());
@@ -977,7 +981,7 @@ impl ConnectionDialogInputs {
                 div()
                     .text_size(px(11.0))
                     .text_color(theme::text_muted())
-                    .child("Without a database named above, every database is listed."),
+                    .child(t!("connection_dialog.without_a_database_named_above_every_database_is")),
             )
             .into_any_element()
     }
@@ -986,7 +990,7 @@ impl ConnectionDialogInputs {
     /// 8443) and the optional CA certificate file.
     fn clickhouse_tls_rows(&self) -> AnyElement {
         let secure = Checkbox::new("clickhouse-secure")
-            .label("Use HTTPS (TLS)")
+            .label(ts!("connection_dialog.use_https_tls"))
             .checked(self.secure.get())
             .on_click({
                 let inputs = self.clone();
@@ -1005,9 +1009,9 @@ impl ConnectionDialogInputs {
             .flex()
             .flex_col()
             .gap(px(14.0))
-            .child(config_row("Secure", "connection-config-secure", secure))
+            .child(config_row(t!("connection_dialog.secure"), "connection-config-secure", secure))
             .child(config_row(
-                "CA Cert",
+                t!("connection_dialog.ca_cert"),
                 "connection-config-ca-cert",
                 Input::new(&self.ca_cert).appearance(true),
             ))
@@ -1017,7 +1021,7 @@ impl ConnectionDialogInputs {
     /// Redis: the TLS toggle (`rediss://`); a default port stays 6379.
     fn redis_tls_rows(&self) -> AnyElement {
         let secure = Checkbox::new("redis-secure")
-            .label("Use TLS (rediss://)")
+            .label(ts!("connection_dialog.use_tls_rediss"))
             .checked(self.secure.get())
             .on_click({
                 let inputs = self.clone();
@@ -1026,14 +1030,14 @@ impl ConnectionDialogInputs {
                     cx.refresh_windows();
                 }
             });
-        config_row("Secure", "connection-config-secure", secure)
+        config_row(t!("connection_dialog.secure"), "connection-config-secure", secure)
     }
 
     /// Password (eye toggle inside the input) plus the Save-password checkbox
     /// with its help tooltip.
     fn password_rows(&self) -> AnyElement {
         let save_password = Checkbox::new("save-password")
-            .label("Save password")
+            .label(ts!("connection_dialog.save_password"))
             .checked(self.save_password.get())
             .on_click({
                 let save_password = self.save_password.clone();
@@ -1047,7 +1051,7 @@ impl ConnectionDialogInputs {
             .flex_col()
             .gap(px(8.0))
             .child(config_row(
-                "Password",
+                t!("connection_dialog.password"),
                 "connection-config-password",
                 Input::new(&self.password).mask_toggle().appearance(true),
             ))
@@ -1087,7 +1091,7 @@ impl ConnectionDialogInputs {
     fn sqlite_file_row(&self) -> AnyElement {
         let file = self.file_path.clone();
         config_row(
-            "File Path",
+            t!("connection_dialog.file_path"),
             "connection-config-file",
             div()
                 .flex()
@@ -1106,7 +1110,7 @@ impl ConnectionDialogInputs {
                         .outline()
                         .w(px(32.0))
                         .h(px(32.0))
-                        .tooltip("Choose a database file")
+                        .tooltip(t!("connection_dialog.choose_a_database_file"))
                         .on_click(move |_, window, cx| {
                             let picked = cx.prompt_for_paths(gpui::PathPromptOptions {
                                 files: true,
@@ -1158,7 +1162,7 @@ impl ConnectionDialogInputs {
                         this.border_2().border_color(theme::text())
                     })
                     .tooltip(move |window, cx| {
-                        gpui_component::tooltip::Tooltip::new(*name).build(window, cx)
+                        gpui_component::tooltip::Tooltip::new(gpui::SharedString::from(crate::i18n::lookup(name))).build(window, cx)
                     })
                     .on_click(move |_, _, cx| {
                         *color.borrow_mut() = Some(value.to_string());
@@ -1179,7 +1183,7 @@ impl ConnectionDialogInputs {
                     .when(custom_selected, |this| {
                         this.bg(parse_swatch(&selected_value).unwrap_or(gpui::rgb(0x888888)))
                     })
-                    .tooltip("Custom color"),
+                    .tooltip(t!("connection_dialog.custom_color")),
             )
             .p(px(8.0))
             .child(
@@ -1201,7 +1205,7 @@ impl ConnectionDialogInputs {
             .flex_col()
             .gap(px(14.0))
             .child(config_row(
-                "Timeout",
+                t!("connection_dialog.timeout"),
                 "connection-config-timeout",
                 div()
                     .flex()
@@ -1217,17 +1221,17 @@ impl ConnectionDialogInputs {
                             .text_size(px(12.0))
                             .text_color(theme::text_muted())
                             .child(if timeout_supported {
-                                "seconds (empty = driver default)"
+                                t!("connection_dialog.seconds_empty_driver_default")
                             } else {
-                                "not applicable to file databases"
+                                t!("connection_dialog.not_applicable_to_file_databases")
                             }),
                     ),
             ))
             .child(config_row(
-                "Options",
+                t!("connection_dialog.options"),
                 "connection-config-options",
                 Checkbox::new("pin-connection")
-                    .label("Pin connection in sidebar")
+                    .label(ts!("connection_dialog.pin_connection_in_sidebar"))
                     .checked(self.is_pinned.get())
                     .on_click({
                         let is_pinned = self.is_pinned.clone();
@@ -1239,7 +1243,7 @@ impl ConnectionDialogInputs {
             ))
             .child(notice(
                 "connection-config-readonly-note",
-                "Read-only, confirmations and the other safety presets belong to the connection type (Environment on the Connection tab). Edit the types in Settings \u{203A} Query & Connections.",
+                t!("connection_dialog.read_only_confirmations_and_the_other_safety_pre"),
             ))
             .into_any_element()
     }
@@ -1252,7 +1256,7 @@ impl ConnectionDialogInputs {
             .iter()
             .find(|ty| ty.id == chosen)
             .map_or_else(
-                || "No type: the global settings apply and nothing is confirmed.".to_owned(),
+                || t!("connection_dialog.no_type_summary").into_owned(),
                 preset_summary,
             );
         div()
@@ -1336,7 +1340,7 @@ impl ConnectionDialogInputs {
             .gap(px(14.0))
             .child(notice(
                 "connection-config-overrides-notice",
-                "Each setting follows the global value (Settings) unless you uncheck \"Use global\" and give this connection its own.",
+                t!("connection_dialog.each_setting_follows_the_global_value_settings_u"),
             ))
             .children(
                 self.override_rows
@@ -1356,7 +1360,7 @@ impl ConnectionDialogInputs {
         let effective_with = |profile: &ConnectionProfile| self.global.for_connection(profile).agent_access;
         let default_level = effective_with(&ConnectionProfile { overrides: Overrides::default(), ..profile.clone() });
         let use_default = Checkbox::new("override-use-global-agent")
-            .label(format!("Use default ({})", default_level.as_str().replace('_', " ")))
+            .label(t!("connection_dialog.use_default", level = default_level.as_str().replace('_', " ")).into_owned())
             .checked(!custom)
             .on_click({
                 let custom = self.agent_custom.clone();
@@ -1368,7 +1372,7 @@ impl ConnectionDialogInputs {
         let explanation = if custom {
             self.agent_level.get().description().to_owned()
         } else {
-            "Follows the connection type's default, else the default for all connections (Settings \u{2192} AI). Off unless one of them says otherwise.".to_owned()
+            t!("connection_dialog.agent_follows_default").into_owned()
         };
         let resolution = AgentResolution::of(&self.global.connection_types, self.global.ai.agent_access, &profile);
         div()
@@ -1381,12 +1385,11 @@ impl ConnectionDialogInputs {
                     .text_size(px(14.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(theme::text())
-                    .child("Agent access"),
+                    .child(t!("settings.types.agent_access")),
             )
             .child(
                 div().text_size(px(11.0)).text_color(theme::text_muted()).child(
-                    "How far an AI agent (the in-app assistant, MCP clients) may go on this connection. \
-                     A Production type needs an explicit level here, and a read-only type caps it at Read.",
+                    t!("connection_dialog.agent_access_help"),
                 ),
             )
             .child(
@@ -1421,7 +1424,7 @@ impl ConnectionDialogInputs {
                     .debug_selector(|| "override-agent-effective".into())
                     .text_size(px(12.0))
                     .text_color(theme::text())
-                    .child(format!("Resulting level: {}", resolution.note)),
+                    .child(t!("connection_dialog.resulting_level", level = resolution.note).into_owned()),
             )
             .into_any_element()
     }
@@ -1440,7 +1443,7 @@ impl ConnectionDialogInputs {
         let id = descriptor.id;
         let custom = row.custom.get();
         let use_global = Checkbox::new(("override-use-global", index))
-            .label(format!("Use global ({})", global_label(descriptor, &self.global)))
+            .label(t!("connection_dialog.use_global", value = global_label(descriptor, &self.global)).into_owned())
             .checked(!custom)
             .on_click({
                 let custom = row.custom.clone();
@@ -1475,13 +1478,13 @@ impl ConnectionDialogInputs {
                     .text_size(px(14.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(theme::text())
-                    .child(descriptor.title),
+                    .child(descriptor.title_text()),
             )
             .child(
                 div()
                     .text_size(px(11.0))
                     .text_color(theme::text_muted())
-                    .child(descriptor.description),
+                    .child(descriptor.description_text()),
             )
             .child(
                 div()
@@ -1514,7 +1517,7 @@ impl ConnectionDialogInputs {
         crate::connections::validate_uri(form.kind, &form.uri)?;
         form.parse_uri_fields();
         if form.use_uri {
-            return Err("This URL uses a cluster format; keep URL mode enabled.".to_string());
+            return Err(t!("connection_dialog.cluster_url_keep_url_mode").into_owned());
         }
         replace_input(&self.host, &form.host, window, cx);
         replace_input(&self.port, &form.port, window, cx);
@@ -1555,7 +1558,7 @@ impl ConnectionDialogInputs {
             form.password.clear();
             let uri = uri_for_url_mode(&form)?;
             if uri.is_empty() {
-                return Err("Enter connection fields before switching to URL mode.".to_string());
+                return Err(t!("connection_dialog.enter_fields_before_url_mode").into_owned());
             }
             replace_input(&self.uri, &uri, window, cx);
         } else {
@@ -1567,7 +1570,6 @@ impl ConnectionDialogInputs {
     }
 }
 
-const NO_TYPE_LABEL: &str = "None (global settings)";
 
 /// One overridable setting on the Overrides tab.
 #[derive(Clone)]
@@ -1582,10 +1584,24 @@ struct OverrideRow {
 }
 
 /// How the global value reads in "Use global (...)".
+/// A picker category's name in the interface language (`label` is the English one, kept for searching).
+fn category_label(category: PickerCategory) -> std::borrow::Cow<'static, str> {
+    match category {
+        PickerCategory::Relational => t!("connection_dialog.category_relational"),
+        PickerCategory::Analytics => t!("connection_dialog.category_analytics"),
+        PickerCategory::Lightweight => t!("connection_dialog.category_lightweight"),
+        PickerCategory::DocsCacheSearch => t!("connection_dialog.category_docs_cache_search"),
+        PickerCategory::GraphVector => t!("connection_dialog.category_graph_vector"),
+        PickerCategory::TimeSeries => t!("connection_dialog.category_time_series"),
+        PickerCategory::MessageQueues => t!("connection_dialog.category_message_queues"),
+        PickerCategory::RegistryConfig => t!("connection_dialog.category_registry_config"),
+    }
+}
+
 fn global_label(descriptor: &SettingDescriptor, settings: &Settings) -> String {
     match descriptor.get(settings) {
-        Value::Bool(true) => "on".into(),
-        Value::Bool(false) => "off".into(),
+        Value::Bool(true) => t!("connection_dialog.global_on").into_owned(),
+        Value::Bool(false) => t!("connection_dialog.global_off").into_owned(),
         Value::Number(number) => format_number(number),
         Value::Text(text) => text,
         Value::Choice(id) => id.into(),
@@ -1670,7 +1686,7 @@ fn database_picker(
                 .text_size(px(13.0))
                 .font_semibold()
                 .text_color(theme::text())
-                .child("Search results"),
+                .child(t!("settings.search_results")),
         );
     }
     for candidate in visible_categories.iter().copied() {
@@ -1684,7 +1700,7 @@ fn database_picker(
                     .text_size(px(12.0))
                     .font_semibold()
                     .text_color(theme::text_muted())
-                    .child(candidate.label()),
+                    .child(category_label(candidate)),
             );
         }
         if view.get() == PickerView::Grid {
@@ -1737,9 +1753,9 @@ fn database_picker(
             .text_size(px(12.0))
             .text_color(theme::text_muted())
             .child(if search_active {
-                "No matching databases."
+                t!("connection_dialog.no_matching_databases")
             } else {
-                "No database types available in this category yet."
+                t!("connection_dialog.no_database_types_available_in_this_category_yet")
             })
             .into_any_element()
     } else {
@@ -1781,7 +1797,7 @@ fn database_picker(
                         } else {
                             theme::text_muted()
                         })
-                        .child(candidate.label()),
+                        .child(category_label(candidate)),
                 )
                 .on_click({
                     let category = category.clone();
@@ -1821,7 +1837,7 @@ fn database_picker(
                         .child(view_toggle_button(
                             "connection-picker-grid-toggle",
                             "icons/layout-dashboard.svg",
-                            "Grid view",
+                            t!("connection_dialog.grid_view"),
                             view.get() == PickerView::Grid,
                             view.clone(),
                             PickerView::Grid,
@@ -1830,7 +1846,7 @@ fn database_picker(
                         .child(view_toggle_button(
                             "connection-picker-list-toggle",
                             "icons/list-ordered.svg",
-                            "List view",
+                            t!("connection_dialog.list_view"),
                             view.get() == PickerView::List,
                             view.clone(),
                             PickerView::List,
@@ -1863,7 +1879,7 @@ fn database_picker(
 fn view_toggle_button(
     id: &'static str,
     icon: &'static str,
-    tooltip: &'static str,
+    tooltip: std::borrow::Cow<'static, str>,
     active: bool,
     view: Rc<Cell<PickerView>>,
     target: PickerView,
@@ -1929,7 +1945,7 @@ fn picker_tile(
         .p(px(6.0))
         .outline()
         .selected(is_selected)
-        .when(download, |this| this.tooltip("The driver is not installed yet"))
+        .when(download, |this| this.tooltip(t!("connection_dialog.the_driver_is_not_installed_yet")))
         .child(
             // The tile's own box: the Button centres its content in a wrapper,
             // so the corner mark is placed against this one instead.
@@ -1998,7 +2014,7 @@ fn picker_row(
         .px(px(10.0))
         .outline()
         .selected(is_selected)
-        .when(download, |this| this.tooltip("The driver is not installed yet"))
+        .when(download, |this| this.tooltip(t!("connection_dialog.the_driver_is_not_installed_yet")))
         .child(
             div()
                 .w_full()
@@ -2040,7 +2056,7 @@ fn picker_button(
     let button = Button::new(entry.id);
     if !entry.is_supported() {
         // Listed with the catalog, but dimmed and not selectable.
-        return button.disabled(true).tooltip("Not supported yet");
+        return button.disabled(true).tooltip(t!("connection_dialog.not_supported_yet"));
     }
     button.on_click(move |event, window, cx| {
         let Some(kind) = entry.kind else {
@@ -2182,7 +2198,7 @@ pub(crate) fn kind_label(kind: ConnectionKind) -> &'static str {
 const LABEL_WIDTH: f32 = 110.0;
 
 fn config_row(
-    label: &'static str,
+    label: std::borrow::Cow<'static, str>,
     selector: &'static str,
     control: impl IntoElement,
 ) -> AnyElement {
@@ -2204,7 +2220,7 @@ fn config_row(
         .into_any_element()
 }
 
-fn notice(selector: &'static str, text: &'static str) -> AnyElement {
+fn notice(selector: &'static str, text: std::borrow::Cow<'static, str>) -> AnyElement {
     div()
         .debug_selector(move || selector.into())
         .px(px(10.0))

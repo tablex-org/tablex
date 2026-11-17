@@ -1,3 +1,21 @@
+// The interface texts: `t!` with a key like `area.name` reads them in the language of `i18n::code()` (a plain
+// `rust_i18n::t!` would read the process-wide locale, which tests must not share).
+#[cfg(feature = "ui")]
+rust_i18n::i18n!("locales", fallback = "en");
+#[cfg(feature = "ui")]
+macro_rules! t {
+    ($key:expr $(, $($args:tt)*)?) => {
+        rust_i18n::t!($key, locale = crate::i18n::code() $(, $($args)*)?)
+    };
+}
+// `t!` as a `SharedString`, for the components that take one by `From` and not by `Into` (a checkbox label).
+#[cfg(feature = "ui")]
+macro_rules! ts {
+    ($($args:tt)*) => {
+        gpui::SharedString::from(t!($($args)*))
+    };
+}
+
 #[cfg(feature = "ui")]
 mod agent_access;
 mod aggregate;
@@ -47,6 +65,8 @@ mod grid_bench;
 mod grid_bson;
 #[cfg(feature = "ui")]
 mod grid_source;
+#[cfg(feature = "ui")]
+mod i18n;
 #[cfg(feature = "ui")]
 mod import;
 #[cfg(feature = "ui")]

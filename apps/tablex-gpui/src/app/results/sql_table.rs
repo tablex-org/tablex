@@ -568,7 +568,7 @@ impl AppRoot {
         }
         if self.context_sort_blocked(tab.id) {
             window.open_alert_dialog(cx, |dialog, _, _| {
-                dialog.title("Sort unavailable").child(
+                dialog.title(t!("grid.sort_unavailable")).child(
                     "Wait for the query and finish pending changes before sorting the table.",
                 )
             });
@@ -624,14 +624,14 @@ impl AppRoot {
                 ))
                 .child(Editor::new(&editor).appearance(true).h_full());
             let close = Button::new((field.id(Control::Close), tab_id))
-                .label("Close")
+                .label(t!("common.close"))
                 .compact()
                 .ghost()
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.set_sql_table_expanded(tab_id, field, false, window, cx);
                 }));
             let execute = Button::new((field.id(Control::Execute), tab_id))
-                .label("Execute")
+                .label(t!("grid.execute"))
                 .compact()
                 .primary()
                 .disabled(!can_run)
@@ -672,7 +672,7 @@ impl AppRoot {
                             div()
                                 .text_size(px(10.0))
                                 .text_color(theme::text_muted())
-                                .child("Enter executes. Shift+Enter inserts a newline."),
+                                .child(t!("grid.enter_executes_shift_enter_inserts_a_newline")),
                         )
                         .child(execute),
                 )
@@ -710,9 +710,9 @@ impl AppRoot {
                     .debug_selector(|| "sql-query-toolbar-text".into())
                     .text_size(px(11.0))
                     .line_height(px(14.0))
-                    .child("Query"),
+                    .child(t!("grid.query")),
             )
-            .tooltip("Show generated SQL");
+            .tooltip(t!("grid.show_generated_sql"));
         let text = statement.clone().unwrap_or_else(|error| error);
         let copyable = statement.ok();
         let copy = Button::new(("sql-query-preview-copy", tab_id))
@@ -720,7 +720,7 @@ impl AppRoot {
             .compact()
             .ghost()
             .disabled(copyable.is_none())
-            .tooltip("Copy query")
+            .tooltip(t!("grid.copy_query"))
             .on_click(cx.listener(move |_, _, _, cx| {
                 if let Some(sql) = copyable.clone() {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(sql));
@@ -730,7 +730,7 @@ impl AppRoot {
             .icon(Icon::new(IconName::Close).size(px(14.0)))
             .compact()
             .ghost()
-            .tooltip("Close preview")
+            .tooltip(t!("grid.close_preview"))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.set_sql_table_preview_open(tab_id, false, cx);
             }));
@@ -750,7 +750,7 @@ impl AppRoot {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .child(div().text_size(px(13.0)).child("SQL Query Preview"))
+                    .child(div().text_size(px(13.0)).child(t!("grid.sql_query_preview")))
                     .child(close),
             )
             .child(
@@ -960,7 +960,7 @@ impl AppRoot {
             .icon(Icon::empty().path("icons/play.svg").size(px(11.0)))
             .small()
             .compact()
-            .tooltip("Execute query")
+            .tooltip(t!("grid.execute_query"))
             .disabled(!can_run)
             .on_click(cx.listener(move |this, _, _, cx| this.submit_sql_table_query(tab_id, cx)));
         let run_control = div()

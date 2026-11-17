@@ -1445,7 +1445,7 @@ impl AppRoot {
             return;
         }
         if self.tab_busy(tab_id) {
-            window.push_notification("Wait for the running statement to finish, or cancel it.", cx);
+            window.push_notification(t!("editor.wait_for_the_running_statement_to_finish_or_canc"), cx);
             return;
         }
         match mode {
@@ -1940,7 +1940,7 @@ impl AppRoot {
                             div().flex().child(
                                 Button::new("tx-guard-pending")
                                     .debug_selector(|| "tx-guard-pending".into())
-                                    .label("Pending transactions\u{2026}")
+                                    .label(t!("editor.pending_transactions"))
                                     .ghost()
                                     .compact()
                                     .on_click({
@@ -1960,16 +1960,16 @@ impl AppRoot {
                         .child(
                             div()
                                 .debug_selector(|| "tx-guard-cancel".into())
-                                .child(DialogClose::new().trigger(|button| button.label("Cancel"))),
+                                .child(DialogClose::new().trigger(|button| button.label(t!("common.cancel")))),
                         )
                         .child(div().debug_selector(|| "tx-guard-rollback".into()).child(
-                            Button::new("tx-guard-rollback").label("Roll Back").primary().on_click(move |_, window, cx| {
+                            Button::new("tx-guard-rollback").label(t!("editor.roll_back")).primary().on_click(move |_, window, cx| {
                                 window.close_dialog(cx);
                                 click_roll_back(cx);
                             }),
                         ))
                         .child(div().debug_selector(|| "tx-guard-commit".into()).child(
-                            Button::new("tx-guard-commit").label("Commit").on_click(
+                            Button::new("tx-guard-commit").label(t!("editor.commit")).on_click(
                                 move |_, window, cx| {
                                     window.close_dialog(cx);
                                     let (tabs, then) = (commit_tabs.clone(), commit_then.borrow_mut().take());
@@ -2226,7 +2226,7 @@ impl AppRoot {
         let root = cx.entity().downgrade();
         let auto_button = Button::new(("tx-mode-auto", tab_id))
             .debug_selector(|| "tx-mode-auto".into())
-            .label("Auto-commit")
+            .label(t!("editor.auto_commit"))
             .selected(mode == CommitMode::Auto)
             .disabled(!idle)
             .tooltip(if self.facts(tab_id).smart_commit && self.transactions.shared_ran.contains(&tab_id) {
@@ -2236,7 +2236,7 @@ impl AppRoot {
             });
         let manual_button = Button::new(("tx-mode-manual", tab_id))
             .debug_selector(|| "tx-mode-manual".into())
-            .label("Manual")
+            .label(t!("editor.manual"))
             .selected(mode == CommitMode::Manual)
             .disabled(!idle || unavailable.is_some())
             .tooltip(unavailable.unwrap_or(MANUAL_TOOLTIP));

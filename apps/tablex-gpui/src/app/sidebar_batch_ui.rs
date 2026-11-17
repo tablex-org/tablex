@@ -10,7 +10,7 @@ impl AppRoot {
         let Ok(snapshot) = self.selected_sidebar_connection_ids() else {
             return;
         };
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Group name"));
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(t!("common.group_name")));
         let root = cx.entity().downgrade();
         window.open_alert_dialog(cx, move |dialog, _, _| {
             let root = root.clone();
@@ -20,7 +20,7 @@ impl AppRoot {
                 .title(format!("Group {} Selected Connections", snapshot.len()))
                 .child(Input::new(&input))
                 .button_props(
-                    gpui_component::dialog::DialogButtonProps::default().ok_text("Create Group"),
+                    gpui_component::dialog::DialogButtonProps::default().ok_text(t!("sidebar.create_group")),
                 )
                 .confirm()
                 .on_ok(move |_, _, app| {
@@ -83,7 +83,7 @@ pub(super) fn append_selected_connection_menu(
     menu.separator()
         .label(format!("{count} selected connections"))
         .item(
-            PopupMenuItem::new("Group selected…").on_click(move |_, window, app| {
+            PopupMenuItem::new(t!("sidebar.group_selected")).on_click(move |_, window, app| {
                 let _ = group_root.update(app, |this, cx| {
                     if this.selected_sidebar_snapshot_matches(&group_ids) {
                         this.open_create_selected_group_dialog(window, cx);
@@ -92,14 +92,14 @@ pub(super) fn append_selected_connection_menu(
             }),
         )
         .submenu(
-            "Move selected to group",
+            t!("sidebar.move_selected_to_group"),
             window,
             cx,
             move |submenu, _, _| {
                 let root = move_root.clone();
                 let ids = move_ids.clone();
                 let mut built =
-                    submenu.item(PopupMenuItem::new("Ungrouped").on_click(move |_, _, app| {
+                    submenu.item(PopupMenuItem::new(t!("sidebar.ungrouped")).on_click(move |_, _, app| {
                         let _ = root.update(app, |this, cx| {
                             if this.selected_sidebar_snapshot_matches(&ids) {
                                 let _ = this.move_selected_sidebar_connections(None, cx);
@@ -121,7 +121,7 @@ pub(super) fn append_selected_connection_menu(
             },
         )
         .item(
-            PopupMenuItem::new("Hide selected connections").on_click(move |_, _, app| {
+            PopupMenuItem::new(t!("sidebar.hide_selected_connections")).on_click(move |_, _, app| {
                 let _ = hide_root.update(app, |this, cx| {
                     if this.selected_sidebar_snapshot_matches(&hide_ids) {
                         let _ = this.hide_selected_sidebar_connections(true, cx);
@@ -164,7 +164,7 @@ pub(super) fn append_selected_connection_menu(
         )
         .separator()
         .item(
-            PopupMenuItem::new("Select all visible connections").on_click(move |_, _, app| {
+            PopupMenuItem::new(t!("sidebar.select_all_visible_connections")).on_click(move |_, _, app| {
                 let _ = select_root.update(app, |this, cx| {
                     this.navigator.select_all_connections();
                     cx.notify();
@@ -172,7 +172,7 @@ pub(super) fn append_selected_connection_menu(
             }),
         )
         .item(
-            PopupMenuItem::new("Exit selection").on_click(move |_, _, app| {
+            PopupMenuItem::new(t!("sidebar.exit_selection")).on_click(move |_, _, app| {
                 let _ = exit_root.update(app, |this, cx| {
                     this.navigator.clear_multi_selection();
                     cx.notify();

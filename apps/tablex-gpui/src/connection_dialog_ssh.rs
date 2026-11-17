@@ -619,18 +619,18 @@ impl SshTabInputs {
         let mut body = div().flex().flex_col().gap(px(14.0));
         body = body.child(note(
             "connection-config-tunnel-notice",
-            "The SSH server (bastion) opens the connection to the database for you: the database host and port are reached from the SSH server, optionally through jump hosts and a proxy. Each database session of the connection gets its own tunnel.",
+            t!("connection_dialog.the_ssh_server_bastion_opens_the_connection_to_t"),
         ));
         if self.unreadable.get() {
             body = body.child(small_note(
                 "connection-config-ssh-unreadable",
-                "The stored tunnel settings were unreadable and have been reset; review them. Saving writes the settings shown here.".to_owned(),
+                t!("connection_dialog.stored_tunnel_unreadable").into_owned(),
                 true,
                 false,
             ));
         }
         body = body.child(config_row(
-            "SSH Tunnel",
+            t!("connection_dialog.ssh_tunnel"),
             "connection-config-ssh-enable",
             div()
                 .flex()
@@ -651,11 +651,11 @@ impl SshTabInputs {
                     div()
                         .text_size(px(13.0))
                         .text_color(theme::text_muted())
-                        .child("Connect through an SSH tunnel"),
+                        .child(t!("connection_dialog.connect_through_an_ssh_tunnel")),
                 ),
         ));
         body = body.child(config_row(
-            "SSH Config",
+            t!("connection_dialog.ssh_config"),
             "connection-config-ssh-config",
             div()
                 .flex()
@@ -664,8 +664,8 @@ impl SshTabInputs {
                 .child(
                     div().debug_selector(|| "connection-config-ssh-config-select".into()).child(
                         Select::new(&self.config_select)
-                            .placeholder("Use a ~/.ssh/config host")
-                            .search_placeholder("Search hosts")
+                            .placeholder(t!("connection_dialog.use_a_ssh_config_host"))
+                            .search_placeholder(t!("connection_dialog.search_hosts"))
                             .disabled(off),
                     ),
                 )
@@ -692,7 +692,7 @@ impl SshTabInputs {
                 }),
         ));
         body = body.child(config_row(
-            "SSH Host",
+            t!("connection_dialog.ssh_host"),
             "connection-config-ssh-host",
             div()
                 .flex()
@@ -713,7 +713,7 @@ impl SshTabInputs {
                 ),
         ));
         body = body.child(config_row(
-            "SSH User",
+            t!("connection_dialog.ssh_user"),
             "connection-config-ssh-user",
             Input::new(&self.user).appearance(true).disabled(off),
         ));
@@ -726,7 +726,7 @@ impl SshTabInputs {
             ));
         }
         body = body.child(config_row(
-            "Auth Method",
+            t!("connection_dialog.auth_method"),
             "connection-config-ssh-auth",
             div()
                 .debug_selector(|| "connection-config-ssh-auth-select".into())
@@ -734,7 +734,7 @@ impl SshTabInputs {
         ));
         body = match method {
             SshAuthMethod::Password => body.child(config_row(
-                "Password",
+                t!("connection_dialog.password"),
                 "connection-config-ssh-password",
                 Input::new(&self.password)
                     .mask_toggle()
@@ -743,12 +743,12 @@ impl SshTabInputs {
             )),
             SshAuthMethod::KeyFile => body
                 .child(config_row(
-                    "Private Key",
+                    t!("connection_dialog.private_key"),
                     "connection-config-ssh-key",
                     self.key_file_control(off),
                 ))
                 .child(config_row(
-                    "Passphrase",
+                    t!("connection_dialog.passphrase"),
                     "connection-config-ssh-passphrase",
                     Input::new(&self.passphrase)
                         .mask_toggle()
@@ -757,11 +757,11 @@ impl SshTabInputs {
                 )),
             SshAuthMethod::Agent => body.child(note(
                 "connection-config-ssh-agent-note",
-                "Signs in with the keys of your running ssh-agent (SSH_AUTH_SOCK on macOS and Linux, the OpenSSH agent or Pageant on Windows).",
+                t!("connection_dialog.signs_in_with_the_keys_of_your_running_ssh_agent"),
             )),
             SshAuthMethod::KeyboardInteractive => body.child(note(
                 "connection-config-ssh-ki-note",
-                "The server's questions (a one-time code, a second factor) are shown in a dialog when you connect. All database sessions of this connection share one tunnel, so you answer once.",
+                t!("connection_dialog.the_server_s_questions_a_one_time_code_a_second"),
             )),
         };
         let jump_methods: Vec<SshAuthMethod> =
@@ -781,7 +781,7 @@ impl SshTabInputs {
         body = body.child(self.test_row(route_off));
         body = body
             .child(config_row(
-                "Remote Host",
+                t!("connection_dialog.remote_host"),
                 "connection-config-ssh-remote",
                 div()
                     .flex()
@@ -806,10 +806,10 @@ impl SshTabInputs {
                 true,
             ))
             .child(config_row(
-                "Algorithms",
+                t!("connection_dialog.algorithms"),
                 "connection-config-ssh-legacy",
                 Checkbox::new("ssh-legacy")
-                    .label("Allow legacy algorithms (diffie-hellman-group14-sha1, ssh-rsa)")
+                    .label(ts!("connection_dialog.allow_legacy_algorithms_diffie_hellman_group14_s"))
                     .checked(self.allow_legacy.get())
                     .disabled(off)
                     .on_click({
@@ -844,7 +844,7 @@ impl SshTabInputs {
                     .w(px(32.0))
                     .h(px(32.0))
                     .disabled(off)
-                    .tooltip("Choose a private key file")
+                    .tooltip(t!("connection_dialog.choose_a_private_key_file"))
                     .on_click(move |_, window, cx| {
                         let picked = cx.prompt_for_paths(gpui::PathPromptOptions {
                             files: true,
@@ -933,7 +933,7 @@ impl SshTabInputs {
         let add = Button::new("ssh-jump-add")
             .debug_selector(|| "ssh-jump-add".into())
             .icon(Icon::empty().path("icons/plus.svg").size(px(14.0)))
-            .label("Add jump host")
+            .label(t!("connection_dialog.add_jump_host"))
             .compact()
             .outline()
             .disabled(off || count >= engine_net::MAX_JUMPS)
@@ -942,7 +942,7 @@ impl SshTabInputs {
                 cx.refresh_windows();
             });
         let mut section = div().flex().flex_col().gap(px(8.0)).child(config_row(
-            "Jump hosts",
+            t!("connection_dialog.jump_hosts"),
             "connection-config-ssh-jumps",
             div()
                 .flex()
@@ -956,9 +956,9 @@ impl SshTabInputs {
                         .text_size(px(12.0))
                         .text_color(theme::text_muted())
                         .child(if count == 0 {
-                            "Optional. SSH servers to pass through before the SSH host, in the order shown."
+                            t!("connection_dialog.optional_ssh_servers_to_pass_through_before_the")
                         } else {
-                            "Dialled in this order, then the SSH host above."
+                            t!("connection_dialog.dialled_in_this_order_then_the_ssh_host_above")
                         }),
                 ),
         ));
@@ -970,7 +970,7 @@ impl SshTabInputs {
 
     fn jump_row(&self, index: usize, count: usize, row: &JumpRow, off: bool) -> AnyElement {
         let select = |name: &str| format!("ssh-jump-{index}-{name}");
-        let caption = |text: &'static str| {
+        let caption = |text: std::borrow::Cow<'static, str>| {
             div()
                 .text_size(px(11.0))
                 .text_color(theme::text_muted())
@@ -1020,7 +1020,7 @@ impl SshTabInputs {
                 .flex_shrink_0()
                 .child(Select::new(&row.auth_select).disabled(off)),
         );
-        let secret_input = |label: &'static str, selector: String| {
+        let secret_input = |label: std::borrow::Cow<'static, str>, selector: String| {
             div()
                 .debug_selector(move || selector.clone())
                 .flex_1()
@@ -1034,7 +1034,7 @@ impl SshTabInputs {
                 )
         };
         second = match method {
-            SshAuthMethod::Password => second.child(secret_input("Password", select("secret"))),
+            SshAuthMethod::Password => second.child(secret_input(t!("connection_dialog.password"), select("secret"))),
             SshAuthMethod::KeyFile => second.child(
                 div()
                     .debug_selector({
@@ -1046,7 +1046,7 @@ impl SshTabInputs {
                     .child(
                         Input::new(&row.key_path)
                             .appearance(true)
-                            .prefix(caption("Key"))
+                            .prefix(caption(t!("connection_dialog.key")))
                             .disabled(off),
                     ),
             ),
@@ -1054,16 +1054,16 @@ impl SshTabInputs {
                 div()
                     .text_size(px(12.0))
                     .text_color(theme::text_muted())
-                    .child("Keys of your running ssh-agent"),
+                    .child(t!("connection_dialog.keys_of_your_running_ssh_agent")),
             ),
             SshAuthMethod::KeyboardInteractive => second.child(
                 div()
                     .text_size(px(12.0))
                     .text_color(theme::text_muted())
-                    .child("Questions are asked in a dialog"),
+                    .child(t!("connection_dialog.questions_are_asked_in_a_dialog")),
             ),
         };
-        let field = |input: &Entity<gpui_component::input::InputState>, label: &'static str, name: &str, width: Option<f32>| {
+        let field = |input: &Entity<gpui_component::input::InputState>, label: std::borrow::Cow<'static, str>, name: &str, width: Option<f32>| {
             let selector = select(name);
             let wrapper = div().debug_selector(move || selector.clone());
             match width {
@@ -1123,14 +1123,14 @@ impl SshTabInputs {
                             .items_center()
                             .gap(px(8.0))
                             // The host takes what the narrow port and user fields leave.
-                            .child(field(&row.host, "Host", "host", None))
-                            .child(field(&row.port, "Port", "port", Some(88.0)))
-                            .child(field(&row.user, "User", "user", Some(128.0))),
+                            .child(field(&row.host, t!("connection_dialog.host"), "host", None))
+                            .child(field(&row.port, t!("connection_dialog.port"), "port", Some(88.0)))
+                            .child(field(&row.user, t!("connection_dialog.user"), "user", Some(128.0))),
                     )
                     .child(second)
                     .children(
                         (method == SshAuthMethod::KeyFile)
-                            .then(|| secret_input("Passphrase", select("secret"))),
+                            .then(|| secret_input(t!("connection_dialog.passphrase"), select("secret"))),
                     ),
             )
             .into_any_element()
@@ -1141,7 +1141,7 @@ impl SshTabInputs {
         let off = !enabled;
         let mut section = div().flex().flex_col().gap(px(14.0));
         section = section.child(config_row(
-            "Proxy",
+            t!("connection_dialog.proxy"),
             "connection-config-proxy",
             div()
                 .flex()
@@ -1164,7 +1164,7 @@ impl SshTabInputs {
                     div()
                         .text_size(px(13.0))
                         .text_color(theme::text_muted())
-                        .child("Connect through a SOCKS5 or HTTP proxy"),
+                        .child(t!("connection_dialog.connect_through_a_socks5_or_http_proxy")),
                 ),
         ));
         if !enabled {
@@ -1173,14 +1173,14 @@ impl SshTabInputs {
         let kind = self.proxy_kind.get();
         section = section
             .child(config_row(
-                "Proxy Type",
+                t!("connection_dialog.proxy_type"),
                 "connection-config-proxy-kind",
                 div()
                     .debug_selector(|| "connection-config-proxy-kind-select".into())
                     .child(Select::new(&self.proxy_kind_select).disabled(off)),
             ))
             .child(config_row(
-                "Proxy Host",
+                t!("connection_dialog.proxy_host"),
                 "connection-config-proxy-host",
                 div()
                     .flex()
@@ -1202,12 +1202,12 @@ impl SshTabInputs {
                     ),
             ))
             .child(config_row(
-                "Proxy User",
+                t!("connection_dialog.proxy_user"),
                 "connection-config-proxy-user",
                 Input::new(&self.proxy_user).appearance(true).disabled(off),
             ))
             .child(config_row(
-                "Proxy Password",
+                t!("connection_dialog.proxy_password"),
                 "connection-config-proxy-password",
                 Input::new(&self.proxy_password)
                     .mask_toggle()
@@ -1220,7 +1220,7 @@ impl SshTabInputs {
                     .pl(px(LABEL_WIDTH + 12.0))
                     .child(
                         Checkbox::new("proxy-save-secrets")
-                            .label("Save password")
+                            .label(ts!("connection_dialog.save_password"))
                             .checked(self.proxy_save.get())
                             .disabled(off)
                             .on_click({
@@ -1264,7 +1264,7 @@ impl SshTabInputs {
         };
         let full = text.clone();
         config_row(
-            "Test",
+            t!("connection_dialog.test"),
             "connection-config-ssh-test",
             div()
                 .flex()
@@ -1306,7 +1306,7 @@ impl SshTabInputs {
     }
 }
 
-fn note(selector: &'static str, text: &'static str) -> AnyElement {
+fn note(selector: &'static str, text: std::borrow::Cow<'static, str>) -> AnyElement {
     div()
         .debug_selector(move || selector.into())
         .px(px(10.0))

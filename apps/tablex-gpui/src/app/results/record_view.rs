@@ -190,7 +190,7 @@ impl AppRoot {
                 )
                 .compact()
                 .ghost()
-                .tooltip(if forward { "Next row (Page Down)" } else { "Previous row (Page Up)" })
+                .tooltip(if forward { t!("grid.next_row_page_down") } else { t!("grid.previous_row_page_up") })
                 .debug_selector(move || id.into())
                 .disabled(!enabled)
                 .on_click(cx.listener(move |this, _, _, cx| this.record_step(tab_id, forward, cx)))
@@ -214,9 +214,9 @@ impl AppRoot {
                     .debug_selector(|| "record-position".into())
                     .text_color(theme::text())
                     .child(if rows == 0 {
-                        "No rows".to_string()
+                        t!("grid.no_rows").into_owned()
                     } else {
-                        format!("Row {} of {rows}", row + 1)
+                        t!("grid.row_of", row = row + 1, rows = rows).into_owned()
                     }),
             )
             .child(
@@ -230,10 +230,10 @@ impl AppRoot {
             .child(
                 Button::new(("record-to-table", tab_id))
                     .small()
-                    .label("Table")
+                    .label(t!("grid.table"))
                     .compact()
                     .ghost()
-                    .tooltip("Back to the table (Tab)")
+                    .tooltip(t!("grid.back_to_the_table_tab"))
                     .debug_selector(|| "record-to-table".into())
                     .on_click(cx.listener(move |this, _, _, cx| this.toggle_record_view(tab_id, cx))),
             );
@@ -248,9 +248,9 @@ impl AppRoot {
             .bg(theme::grid_header())
             .text_size(px(11.0))
             .text_color(theme::text_muted())
-            .child(div().w(px(NAME_WIDTH)).px(px(10.0)).flex_shrink_0().child("Column"))
-            .child(div().w(px(TYPE_WIDTH)).px(px(8.0)).flex_shrink_0().child("Type"))
-            .child(div().flex_1().min_w_0().px(px(8.0)).child("Value"));
+            .child(div().w(px(NAME_WIDTH)).px(px(10.0)).flex_shrink_0().child(t!("grid.column")))
+            .child(div().w(px(TYPE_WIDTH)).px(px(8.0)).flex_shrink_0().child(t!("grid.type")))
+            .child(div().flex_1().min_w_0().px(px(8.0)).child(t!("grid.value")));
 
         let list = uniform_list(
             ("record-fields", tab_id),
@@ -380,7 +380,7 @@ impl AppRoot {
                             .justify_center()
                             .text_size(px(12.0))
                             .text_color(theme::text_muted())
-                            .child("No rows to show")
+                            .child(t!("grid.no_rows_to_show"))
                             .into_any_element()
                     } else {
                         body.into_any_element()

@@ -406,7 +406,7 @@ impl AppRoot {
         .detach();
         let value = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Value")
+                .placeholder(t!("grid.value"))
                 .default_value(rule.value.clone())
         });
         cx.subscribe_in(
@@ -428,7 +428,7 @@ impl AppRoot {
         .detach();
         let end_value = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Range end")
+                .placeholder(t!("grid.range_end"))
                 .default_value(rule.end_value.clone())
         });
         cx.subscribe_in(
@@ -450,7 +450,7 @@ impl AppRoot {
         .detach();
         let list = cx.new(|cx| {
             TextareaState::new(window, cx)
-                .placeholder("Values, separated by commas or new lines")
+                .placeholder(t!("grid.values_separated_by_commas_or_new_lines"))
                 .default_value(rule.value.clone())
         });
         cx.subscribe(
@@ -596,8 +596,8 @@ impl AppRoot {
                 Select::new(&editors.column)
                     .id(id("sql-filter-column-select"))
                     .with_size(Size::Small)
-                    .placeholder("Column")
-                    .search_placeholder("Search columns")
+                    .placeholder(t!("grid.column"))
+                    .search_placeholder(t!("grid.search_columns"))
                     .menu_width(px(240.0))
                     .disabled(disabled),
             );
@@ -626,7 +626,7 @@ impl AppRoot {
                     .border_color(theme::border())
                     .text_size(px(11.0))
                     .text_color(theme::text_muted())
-                    .child("No value"),
+                    .child(t!("grid.no_value")),
             )
         } else if mode.uses_range() || mode.uses_list() {
             // These belong on a second row; the slot keeps the grid aligned.
@@ -666,7 +666,7 @@ impl AppRoot {
             .compact()
             .ghost()
             .disabled(rule_count == 1)
-            .tooltip("Remove rule")
+            .tooltip(t!("grid.remove_rule"))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.remove_sql_filter_rule(tab_id, rule_id, cx);
             }));
@@ -763,7 +763,7 @@ impl AppRoot {
                         .when(current == SqlFilterConjunction::Or, |button| {
                             button.text_color(theme::accent())
                         })
-                        .tooltip("Toggle AND / OR")
+                        .tooltip(t!("grid.toggle_and_or"))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.update_sql_filter_rule(
                                 tab_id,
@@ -819,7 +819,7 @@ impl AppRoot {
             .debug_selector(|| "sql-filter-clear".into())
             .with_size(Size::XSmall)
             .icon(Icon::new(IconName::Delete).size(px(14.0)))
-            .label("Clear Filter")
+            .label(t!("grid.clear_filter"))
             .compact()
             .ghost()
             .h(px(28.0))
@@ -830,7 +830,7 @@ impl AppRoot {
             .debug_selector(|| "sql-filter-add".into())
             .with_size(Size::XSmall)
             .icon(Icon::new(IconName::Plus).size(px(14.0)))
-            .label("Add rule")
+            .label(t!("grid.add_rule"))
             .compact()
             .ghost()
             .h(px(28.0))
@@ -839,7 +839,7 @@ impl AppRoot {
         let reset = Button::new(("sql-filter-reset", tab_id))
             .debug_selector(|| "sql-filter-reset".into())
             .with_size(Size::XSmall)
-            .label("Reset rules")
+            .label(t!("grid.reset_rules"))
             .compact()
             .ghost()
             .h(px(28.0))
@@ -847,7 +847,7 @@ impl AppRoot {
         let apply = Button::new(("sql-filter-apply", tab_id))
             .debug_selector(|| "sql-filter-apply".into())
             .with_size(Size::XSmall)
-            .label("Apply Filter")
+            .label(t!("grid.apply_filter"))
             .compact()
             .primary()
             .h(px(28.0))
@@ -875,7 +875,7 @@ impl AppRoot {
                         div()
                             .text_size(px(12.0))
                             .text_color(theme::text())
-                            .child("Filter"),
+                            .child(t!("grid.filter")),
                     )
                     .child(clear),
             )
@@ -886,7 +886,7 @@ impl AppRoot {
                         .debug_selector(|| "sql-filter-notice".into())
                         .text_size(px(10.0))
                         .text_color(theme::warning())
-                        .child("WHERE edited manually - Apply Filter replaces it with these rules."),
+                        .child(t!("grid.where_edited_manually_apply_filter_replaces_it_w")),
                 )
             })
             .when_some(error, |this, error| {
@@ -961,7 +961,7 @@ impl AppRoot {
             .compact()
             .ghost()
             .selected(open || active)
-            .tooltip("Filter builder");
+            .tooltip(t!("grid.filter_builder"));
         let panel = if open {
             let can_run = self.sql_table_can_run(tab_id);
             self.render_sql_filter_panel(tab, error, can_run, window, cx)

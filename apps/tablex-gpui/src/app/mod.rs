@@ -590,6 +590,7 @@ impl AppRoot {
         }
         if scenario_enabled {
             app.apply_scenario_theme(cx);
+            app.apply_scenario_language(cx);
         }
         app.apply_tab_bar_preferences(cx);
         app.init_workspace_session(scenario_enabled, cx);
@@ -794,6 +795,7 @@ mod tests {
     include!("tests/error_log.rs");
     include!("tests/command_palette.rs");
     include!("tests/settings.rs");
+    include!("tests/i18n.rs");
     include!("tests/assistant_panel.rs");
     include!("tests/shortcuts.rs");
     include!("tests/reopen_tab.rs");

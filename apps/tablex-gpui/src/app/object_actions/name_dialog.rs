@@ -181,7 +181,7 @@ impl AppRoot {
                     DialogFooter::new()
                         .child(
                             Button::new("object-name-cancel")
-                                .label("Cancel")
+                                .label(t!("common.cancel"))
                                 .compact()
                                 .ghost()
                                 .debug_selector(|| "object-name-cancel".into())
@@ -189,7 +189,7 @@ impl AppRoot {
                         )
                         .child(
                             Button::new("object-name-submit")
-                                .label("Review SQL")
+                                .label(t!("menu.review_sql"))
                                 .compact()
                                 .primary()
                                 .debug_selector(|| "object-name-submit".into())

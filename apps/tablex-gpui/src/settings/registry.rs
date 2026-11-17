@@ -4,10 +4,11 @@
 //! modified markers are all driven from this list, so a new setting is one
 //! entry here (plus the code that reads it).
 
-use super::{AiProvider, Choice, FormatterChoice, Settings, ThemeChoice};
+use super::{AiProvider, Choice, FormatterChoice, LanguageChoice, Settings, ThemeChoice};
 use crate::sidebar_preferences::{ConnectionSort, TabGroupBy};
 use engine_ai::Effort;
 use engine_connect::profile::{self, AgentLevel};
+use std::borrow::Cow;
 use std::fmt;
 use std::sync::OnceLock;
 
@@ -45,6 +46,8 @@ impl Section {
         }
     }
 
+    /// The English name (the locale files are tested against it).
+    #[cfg(test)]
     pub fn title(self) -> &'static str {
         match self {
             Self::Appearance => "Appearance",
@@ -54,6 +57,11 @@ impl Section {
             Self::Navigation => "Navigation",
             Self::Ai => "AI Assistant",
         }
+    }
+
+    /// The name in the interface language.
+    pub fn title_text(self) -> Cow<'static, str> {
+        crate::i18n::lookup(&format!("settings.nav.{}", self.key()))
     }
 }
 
@@ -128,11 +136,15 @@ impl fmt::Display for SettingError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::WrongType { id } => write!(f, "{id}: wrong kind of value"),
-            Self::NotANumber { .. } => f.write_str("Enter a number"),
-            Self::OutOfRange { min, max, .. } => write!(f, "Enter a value from {min} to {max}"),
-            Self::NotWhole { .. } => f.write_str("Enter a whole number"),
-            Self::TooLong { max_len, .. } => write!(f, "At most {max_len} characters"),
-            Self::Empty { .. } => f.write_str("Choose a model"),
+            Self::NotANumber { .. } => f.write_str(&t!("settings.error.not_a_number")),
+            Self::OutOfRange { min, max, .. } => {
+                f.write_str(&t!("settings.error.out_of_range", min = min, max = max))
+            }
+            Self::NotWhole { .. } => f.write_str(&t!("settings.error.not_whole")),
+            Self::TooLong { max_len, .. } => {
+                f.write_str(&t!("settings.error.too_long", max = max_len))
+            }
+            Self::Empty { .. } => f.write_str(&t!("settings.error.choose_model")),
             Self::UnknownOption { id } => write!(f, "{id}: unknown option"),
         }
     }
@@ -159,7 +171,11 @@ pub struct SettingDescriptor {
     pub section: Section,
     /// Sub-heading inside the section.
     pub group: &'static str,
+    /// The English texts: the keys of the interface texts are built from the id (`title_text`,
+    /// `description_text`), and a test keeps `locales/` equal to these.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub title: &'static str,
+    #[cfg_attr(not(test), allow(dead_code))]
     pub description: &'static str,
     pub kind: Kind,
     pub default: Value,
@@ -266,8 +282,30 @@ impl SettingDescriptor {
     }
 
     /// Why the control is off with these settings, in one line; `None`: it works.
-    pub fn unavailable_reason(&self, settings: &Settings) -> Option<&'static str> {
-        self.unavailable.and_then(|reason| reason(settings))
+    pub fn unavailable_reason(&self, settings: &Settings) -> Option<Cow<'static, str>> {
+        self.unavailable
+            .and_then(|reason| reason(settings))
+            .map(crate::i18n::lookup)
+    }
+
+    /// The title in the interface language.
+    pub fn title_text(&self) -> Cow<'static, str> {
+        crate::i18n::lookup(&format!("settings.item.{}.title", self.id))
+    }
+
+    /// The description in the interface language.
+    pub fn description_text(&self) -> Cow<'static, str> {
+        crate::i18n::lookup(&format!("settings.item.{}.description", self.id))
+    }
+
+    /// The sub-heading in the interface language.
+    pub fn group_text(&self) -> Cow<'static, str> {
+        group_text(self.group)
+    }
+
+    /// The label of the option `option` of a choice, in the interface language.
+    pub fn option_text(&self, option: &str) -> Cow<'static, str> {
+        crate::i18n::lookup(&format!("settings.item.{}.options.{option}", self.id))
     }
 
     #[cfg(test)]
@@ -288,10 +326,10 @@ impl SettingDescriptor {
     pub fn matches(&self, query: &str) -> bool {
         let query = query.trim().to_lowercase();
         query.is_empty()
-            || self.title.to_lowercase().contains(&query)
-            || self.description.to_lowercase().contains(&query)
-            || self.section.title().to_lowercase().contains(&query)
-            || self.group.to_lowercase().contains(&query)
+            || self.title_text().to_lowercase().contains(&query)
+            || self.description_text().to_lowercase().contains(&query)
+            || self.section.title_text().to_lowercase().contains(&query)
+            || self.group_text().to_lowercase().contains(&query)
     }
 
     pub fn overridable(mut self) -> Self {
@@ -318,6 +356,19 @@ impl SettingDescriptor {
         self.unavailable = Some(reason);
         self
     }
+}
+
+/// A sub-heading (the English name a descriptor carries) in the interface language.
+pub fn group_text(group: &str) -> Cow<'static, str> {
+    crate::i18n::lookup(&format!("settings.group.{}", group_slug(group)))
+}
+
+/// The key segment of a sub-heading (`Copy and export` is `copy_and_export`).
+pub fn group_slug(group: &str) -> String {
+    group
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+        .collect()
 }
 
 /// Where a descriptor lives on the page.
@@ -522,6 +573,12 @@ fn build_registry() -> Vec<SettingDescriptor> {
             |s, v| s.appearance.theme = v,
             d,
         ),
+        choice::<LanguageChoice>(
+            place!("appearance.language", Appearance, "Interface", "Language", "Language of menus, labels and messages. System follows the preferred language of the operating system. Data, SQL and database messages are never translated."),
+            |s| s.appearance.language,
+            |s, v| s.appearance.language = v,
+            d,
+        ),
         number::<f32>(
             place!("appearance.ui_scale", Appearance, "Interface", "UI scale", "Zoom of the whole interface."),
             (0.75, 2.0, 0.05),
@@ -676,7 +733,7 @@ fn build_registry() -> Vec<SettingDescriptor> {
             |s, v| s.editor.format_keyword_case = v,
             d,
         )
-        .unavailable_when(|s| (s.editor.formatter == FormatterChoice::External).then_some("The external command sets the case itself.")),
+        .unavailable_when(|s| (s.editor.formatter == FormatterChoice::External).then_some("settings.unavailable.external_sets_case")),
         number::<u32>(
             place!("editor.format_indent", Editor, "Format SQL", "Indent width", "Spaces per indent level in formatted SQL. 0 uses the tab size."),
             (0.0, 16.0, 1.0),
@@ -684,7 +741,7 @@ fn build_registry() -> Vec<SettingDescriptor> {
             |s, v| s.editor.format_indent = v,
             d,
         )
-        .unavailable_when(|s| (s.editor.formatter == FormatterChoice::External).then_some("The external command sets the indent itself.")),
+        .unavailable_when(|s| (s.editor.formatter == FormatterChoice::External).then_some("settings.unavailable.external_sets_indent")),
         number::<u32>(
             place!("editor.format_lines_between_statements", Editor, "Format SQL", "Blank lines between statements", "Blank lines Format SQL leaves after each statement's semicolon."),
             (0.0, 5.0, 1.0),
@@ -692,7 +749,7 @@ fn build_registry() -> Vec<SettingDescriptor> {
             |s, v| s.editor.format_lines_between_statements = v,
             d,
         )
-        .unavailable_when(|s| (s.editor.formatter != FormatterChoice::BuiltIn).then_some("Only the built-in formatter uses this.")),
+        .unavailable_when(|s| (s.editor.formatter != FormatterChoice::BuiltIn).then_some("settings.unavailable.built_in_only")),
         text(
             place!("editor.format_external_program", Editor, "Format SQL", "External command", "The program for an external formatter: a name found on your PATH (sqruff, sqlfluff, pg_format, sql-formatter) or a full path."),
             512,
@@ -700,7 +757,7 @@ fn build_registry() -> Vec<SettingDescriptor> {
             |s, v| s.editor.format_external_program = v,
             d,
         )
-        .unavailable_when(|s| (s.editor.formatter != FormatterChoice::External).then_some("Used when the formatter is an external command.")),
+        .unavailable_when(|s| (s.editor.formatter != FormatterChoice::External).then_some("settings.unavailable.external_only")),
         text(
             place!("editor.format_external_args", Editor, "Format SQL", "External command arguments", "Arguments, separated by blanks (quote one that contains blanks). {dialect} becomes postgres, mysql, mariadb, sqlite, clickhouse or ansi; {language} the name sql-formatter uses (postgresql, sql, ...)."),
             1024,
@@ -708,7 +765,7 @@ fn build_registry() -> Vec<SettingDescriptor> {
             |s, v| s.editor.format_external_args = v,
             d,
         )
-        .unavailable_when(|s| (s.editor.formatter != FormatterChoice::External).then_some("Used when the formatter is an external command.")),
+        .unavailable_when(|s| (s.editor.formatter != FormatterChoice::External).then_some("settings.unavailable.external_only")),
         text(
             place!("editor.format_external_exit_codes", Editor, "Format SQL", "External command exit codes that succeed", "Exit codes, separated by commas, that mean the command worked. A command that prints its result and exits 1 when it could not fix everything (sqruff fix, sqlfluff) needs 0,1. Anything else is a failure and its error output is shown."),
             32,
@@ -716,7 +773,7 @@ fn build_registry() -> Vec<SettingDescriptor> {
             |s, v| s.editor.format_external_exit_codes = v,
             d,
         )
-        .unavailable_when(|s| (s.editor.formatter != FormatterChoice::External).then_some("Used when the formatter is an external command.")),
+        .unavailable_when(|s| (s.editor.formatter != FormatterChoice::External).then_some("settings.unavailable.external_only")),
         number::<u32>(
             place!("editor.format_timeout", Editor, "Format SQL", "Formatter timeout", "Seconds SQL Formatter (sqruff) or an external command may take before it is stopped."),
             (1.0, 600.0, 1.0),
@@ -724,7 +781,7 @@ fn build_registry() -> Vec<SettingDescriptor> {
             |s, v| s.editor.format_timeout = v,
             d,
         )
-        .unavailable_when(|s| (s.editor.formatter == FormatterChoice::BuiltIn).then_some("The built-in formatter needs no process.")),
+        .unavailable_when(|s| (s.editor.formatter == FormatterChoice::BuiltIn).then_some("settings.unavailable.built_in_needs_no_process")),
         // ---- Results & Data --------------------------------------------------
         number::<u32>(
             place!("results.page_size", Results, "Fetching", "Default page size", "Rows fetched per page in a new tab."),
@@ -1004,7 +1061,7 @@ fn build_registry() -> Vec<SettingDescriptor> {
         )
         .unavailable_when(|s| {
             (s.ai.provider != AiProvider::Anthropic)
-                .then_some("Not available: only Anthropic can retry on a fallback model.")
+                .then_some("settings.unavailable.fallback_anthropic_only")
         }),
         toggle(
             place!("ai.keep_conversations", Ai, "Conversations", "Keep conversations on this computer", "Each finished conversation is saved in TableX's app database (tablex.db in its data folder), so History can reopen it. They can contain query results. Turning this off stops saving; it does not delete what is saved."),
@@ -1091,13 +1148,13 @@ pub fn reset_all(settings: &mut Settings) {
 
 /// Rules that span several settings; `(setting id, message)` per violation.
 /// The page shows them inline and keeps Apply disabled until none is left.
-pub fn cross_field_errors(settings: &Settings) -> Vec<(&'static str, &'static str)> {
+pub fn cross_field_errors(settings: &Settings) -> Vec<(&'static str, Cow<'static, str>)> {
     let results = &settings.results;
     let mut errors = Vec::new();
     if results.column_width_min > results.column_width_max {
         errors.push((
             "results.column_width_min",
-            "Must not exceed the maximum width",
+            t!("settings.error.min_over_max"),
         ));
     }
     if results.column_width_default < results.column_width_min
@@ -1105,16 +1162,16 @@ pub fn cross_field_errors(settings: &Settings) -> Vec<(&'static str, &'static st
     {
         errors.push((
             "results.column_width_default",
-            "Must lie between the minimum and maximum width",
+            t!("settings.error.default_out_of_range"),
         ));
     }
     if settings.results.export.delimiter.is_empty() {
-        errors.push(("results.export_delimiter", "Enter a delimiter"));
+        errors.push(("results.export_delimiter", t!("settings.error.enter_delimiter")));
     }
     if let Some(problem) =
         crate::ai::base_url_problem(settings.ai.provider, &settings.ai.selected().base_url)
     {
-        errors.push(("ai.base_url", problem));
+        errors.push(("ai.base_url", Cow::Borrowed(problem)));
     }
     errors
 }

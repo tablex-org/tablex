@@ -212,7 +212,7 @@ impl TlsInputs {
         let mut body = div().flex().flex_col().gap(px(14.0));
         if let Some(select) = select {
             body = body.child(config_row(
-                "SSL Mode",
+                t!("connection_dialog.ssl_mode"),
                 "connection-config-ssl-mode",
                 div()
                     .flex()
@@ -223,19 +223,19 @@ impl TlsInputs {
                             .debug_selector(|| "connection-config-ssl-mode-select".into())
                             .child(Select::new(&select)),
                     )
-                    .child(hint(None, family.describe(mode))),
+                    .child(hint(None, family.describe(mode).into())),
             ));
         }
         body = body.child(config_row(
-            "CA Certificate",
+            t!("connection_dialog.ca_certificate"),
             "connection-config-ssl-ca",
-            file_control("tls-browse-ca", "Choose the CA certificate", &self.parts.ca, false),
+            file_control("tls-browse-ca", t!("connection_dialog.choose_the_ca_certificate"), &self.parts.ca, false),
         ));
         body = body.child(config_row(
-            "Client Cert",
+            t!("connection_dialog.client_cert"),
             "connection-config-ssl-cert",
             if family.has_key_file() {
-                file_control("tls-browse-cert", "Choose the client certificate", &self.parts.cert, false)
+                file_control("tls-browse-cert", t!("connection_dialog.choose_the_client_certificate"), &self.parts.cert, false)
             } else {
                 div()
                     .flex()
@@ -243,29 +243,29 @@ impl TlsInputs {
                     .gap(px(4.0))
                     .child(file_control(
                         "tls-browse-cert",
-                        "Choose the client certificate and key file",
+                        t!("connection_dialog.choose_the_client_certificate_and_key_file"),
                         &self.parts.cert,
                         false,
                     ))
-                    .child(hint(None, "One PEM file holding the certificate and its private key."))
+                    .child(hint(None, t!("connection_dialog.one_pem_file")))
                     .into_any_element()
             },
         ));
         body = body.child(config_row(
-            "Client Key",
+            t!("connection_dialog.client_key"),
             "connection-config-ssl-key",
             if family.has_key_file() {
-                file_control("tls-browse-key", "Choose the client key", &self.parts.key, false)
+                file_control("tls-browse-key", t!("connection_dialog.choose_the_client_key"), &self.parts.key, false)
             } else {
                 unsupported(
                     "connection-config-ssl-key-unsupported",
                     &self.parts.key,
-                    "MongoDB reads the key from the client certificate file.",
+                    t!("connection_dialog.mongodb_reads_the_key_from_the_client_certificat"),
                 )
             },
         ));
         body = body.child(config_row(
-            "Server Name",
+            t!("connection_dialog.server_name"),
             "connection-config-ssl-server-name",
             if family.has_server_name() {
                 Input::new(&self.parts.server_name).appearance(true).into_any_element()
@@ -275,9 +275,9 @@ impl TlsInputs {
                     &self.parts.server_name,
                     match family {
                         TlsFamily::Postgres => {
-                            "PostgreSQL checks the certificate against the Host. To reach another address, add hostaddr to URL Params."
+                            t!("connection_dialog.postgresql_checks_the_certificate_against_the_ho")
                         }
-                        _ => "MongoDB checks the certificate against the host of the URL.",
+                        _ => t!("connection_dialog.mongodb_checks_the_certificate"),
                     },
                 )
             },
@@ -286,9 +286,9 @@ impl TlsInputs {
             body = body.child(hint(
                 Some("connection-config-tls-key-note"),
                 if cfg!(unix) {
-                    "Private keys must be unencrypted PEM files that group and others cannot read (chmod 600). Key passphrases are not supported."
+                    t!("connection_dialog.private_keys_must_be_unencrypted_pem_files_that")
                 } else {
-                    "Private keys must be unencrypted PEM files. Key passphrases are not supported."
+                    t!("connection_dialog.private_keys_must_be_unencrypted_pem_files_key_p")
                 },
             ));
         }
@@ -309,7 +309,7 @@ fn mode_row(family: TlsFamily, mode: TlsMode) -> usize {
     family.modes().iter().position(|offered| *offered == mode).unwrap_or(0)
 }
 
-fn hint(selector: Option<&'static str>, text: &'static str) -> AnyElement {
+fn hint(selector: Option<&'static str>, text: std::borrow::Cow<'static, str>) -> AnyElement {
     let line = div().text_size(px(11.0)).text_color(theme::text_muted()).child(text);
     match selector {
         Some(selector) => line.debug_selector(move || selector.into()).into_any_element(),
@@ -320,7 +320,7 @@ fn hint(selector: Option<&'static str>, text: &'static str) -> AnyElement {
 /// A path input with the system file picker next to it.
 fn file_control(
     id: &'static str,
-    tooltip: &'static str,
+    tooltip: std::borrow::Cow<'static, str>,
     target: &Entity<InputState>,
     off: bool,
 ) -> AnyElement {
@@ -375,7 +375,7 @@ fn file_control(
 fn unsupported(
     selector: &'static str,
     target: &Entity<InputState>,
-    reason: &'static str,
+    reason: std::borrow::Cow<'static, str>,
 ) -> AnyElement {
     div()
         .debug_selector(move || selector.into())

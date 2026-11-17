@@ -151,11 +151,15 @@ impl AppRoot {
             mono_size: theme.mono_font_size,
         });
         let mut notice = None;
+        // The language the loaded settings ask for, before the first view is drawn.
+        let mut language_applied = false;
         if let Some(path) = self.settings_ui.path.clone() {
             let legacy = store::Legacy::read(self.sidebar.path.as_deref());
             let loaded = store::load(&path, &legacy);
             notice = loaded.notice;
             self.settings = Arc::new(loaded.settings);
+            crate::i18n::apply(self.settings.appearance.language);
+            language_applied = true;
             if loaded.needs_save {
                 self.save_settings_now(cx);
             }
@@ -173,6 +177,9 @@ impl AppRoot {
                 self.settings = Arc::new(next);
                 self.save_settings_now(cx);
             }
+        }
+        if !language_applied {
+            crate::i18n::apply(self.settings.appearance.language);
         }
         if let Some(message) = notice {
             self.report_warning(Area::App, None, &message);
@@ -238,6 +245,21 @@ impl AppRoot {
         self.notify_pane_views(cx);
     }
 
+    /// The title bar's language picker: the same change as picking the language on the Settings page
+    /// and pressing Apply (applied at once, saved after the debounce, and an open page's draft
+    /// follows unless it holds an edit of its own).
+    pub(super) fn set_language_choice(
+        &mut self,
+        choice: crate::settings::LanguageChoice,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut next = (*self.settings).clone();
+        next.appearance.language = choice;
+        self.apply_settings(next, Some(window), cx);
+        self.notify_pane_views(cx);
+    }
+
     /// A sidebar / tab-bar control changed one of the settings it mirrors
     /// (connection sort, global search, tab group-by, compact titles, second
     /// row): record it in the settings without pushing it back.
@@ -293,7 +315,7 @@ impl AppRoot {
     pub(super) fn after_settings_changed(
         &mut self,
         old: &Settings,
-        window: Option<&mut Window>,
+        mut window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
         let changed = registry::changed_ids(old, &self.settings);
@@ -328,6 +350,15 @@ impl AppRoot {
             u64::from(settings.navigation.navigator_page_size),
         );
 
+        // A new language shows at once: the locale first, then every window redraws and the native
+        // menus are rebuilt from the new texts.
+        if changed.contains(&"appearance.language") && crate::i18n::apply(settings.appearance.language) {
+            menus::refresh(cx);
+            if let Some(window) = window.as_deref_mut() {
+                self.settings_language_changed(window, cx);
+            }
+            cx.refresh_windows();
+        }
         if changed.contains(&"appearance.theme") {
             let system = window
                 .as_deref()
@@ -432,6 +463,22 @@ impl AppRoot {
         };
         let mut next = (*self.settings).clone();
         next.appearance.theme = choice;
+        let old = std::mem::replace(&mut self.settings, Arc::new(next));
+        self.after_settings_changed(&old, None, cx);
+    }
+
+    /// Scenario runs only: `TABLEX_LANGUAGE=system|en|vi` forces the interface language for the
+    /// capture (not saved, scenario settings are isolated anyway).
+    pub(super) fn apply_scenario_language(&mut self, cx: &mut Context<Self>) {
+        let Ok(value) = std::env::var("TABLEX_LANGUAGE") else {
+            return;
+        };
+        let Some(choice) = <crate::settings::LanguageChoice as crate::settings::Choice>::from_id(&value) else {
+            eprintln!("TABLEX_LANGUAGE: expected system, en or vi, got '{value}'");
+            return;
+        };
+        let mut next = (*self.settings).clone();
+        next.appearance.language = choice;
         let old = std::mem::replace(&mut self.settings, Arc::new(next));
         self.after_settings_changed(&old, None, cx);
     }

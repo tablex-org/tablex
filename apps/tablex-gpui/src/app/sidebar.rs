@@ -844,12 +844,10 @@ impl AppRoot {
             let root = root.clone();
             let id = id.clone();
             dialog
-                .title("Delete Group")
-                .child(format!(
-                    "Delete {title}? Its subgroups and connections will move to the parent group."
-                ))
+                .title(t!("sidebar.delete_group"))
+                .child(t!("sidebar.delete_group_confirm", name = title).into_owned())
                 .button_props(
-                    gpui_component::dialog::DialogButtonProps::default().ok_text("Delete"),
+                    gpui_component::dialog::DialogButtonProps::default().ok_text(t!("sidebar.delete")),
                 )
                 .confirm()
                 .on_ok(move |_, _, cx| {
@@ -941,7 +939,7 @@ impl AppRoot {
         if let Some(input) = &self.sidebar.search_input {
             return input.clone();
         }
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Search..."));
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(t!("sidebar.search")));
         let observed = input.clone();
         cx.subscribe(
             &input,

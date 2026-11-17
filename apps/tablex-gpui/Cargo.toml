@@ -6,7 +6,7 @@ publish = false
 
 [features]
 default = ["ui"]
-ui = ["dep:gpui", "dep:gpui_platform", "dep:gpui-component", "dep:gpui-base", "gpui-component/tree-sitter-sql", "gpui-component/tree-sitter-javascript", "dep:tree-sitter-sequel", "dep:lsp-types"]
+ui = ["dep:gpui", "dep:gpui_platform", "dep:gpui-component", "dep:gpui-base", "dep:rust-i18n", "dep:sys-locale", "gpui-component/tree-sitter-sql", "gpui-component/tree-sitter-javascript", "dep:tree-sitter-sequel", "dep:lsp-types"]
 ui-scenarios = ["ui", "engine-connect/testing"]
 # Dev-only: GPUI's headless `BenchContext` + Criterion harness for the ignored
 # render benchmark (`src/app/tests/grid_bench_context.rs`). Never default.
@@ -64,6 +64,10 @@ gpui_platform = { package = "gpui-pre-platform", version = "=0.3.12", optional =
 gpui-component = { version = "=0.10.0", optional = true }
 # SelectableText: plain text the window-level text selection can select (not re-exported by gpui-component).
 gpui-base = { version = "=0.10.0", optional = true }
+# The app's own translations (`locales/`), by the crate gpui-component uses for its strings (shared locale and
+# an `extend!` of its keys). `sys-locale` reads the macOS preferred language (already in the tree through gpui).
+rust-i18n = { version = "4.2.2", optional = true }
+sys-locale = { version = "0.3.2", optional = true }
 # CompletionItem types of the editor's CompletionProvider (already in the tree via gpui-component).
 lsp-types = { version = "0.97.0", optional = true }
 resvg = { version = "=0.46.0", default-features = false, features = ["text", "system-fonts", "memmap-fonts", "raster-images"] }

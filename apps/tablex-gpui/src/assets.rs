@@ -124,6 +124,7 @@ impl AssetSource for Assets {
                 "moon.svg",
                 "monitor.svg",
                 "cloud-download.svg",
+                "languages.svg",
             ]
             .into_iter()
             .map(SharedString::from)
@@ -259,6 +260,7 @@ pub fn asset(path: &str) -> Option<&'static [u8]> {
         "icons/moon.svg" => Some(include_bytes!("../assets/icons/moon.svg")),
         "icons/monitor.svg" => Some(include_bytes!("../assets/icons/monitor.svg")),
         "icons/cloud-download.svg" => Some(include_bytes!("../assets/icons/cloud-download.svg")),
+        "icons/languages.svg" => Some(include_bytes!("../assets/icons/languages.svg")),
         _ => None,
     }
 }
@@ -272,6 +274,7 @@ mod tests {
         assert!(super::asset("icons/moon.svg").is_some());
         assert!(super::asset("icons/monitor.svg").is_some());
         assert!(super::asset("icons/cloud-download.svg").is_some());
+        assert!(super::asset("icons/languages.svg").is_some());
         assert!(super::asset("icons/building-2.svg").is_some());
         assert!(super::asset("icons/chart-column-big.svg").is_some());
         assert!(super::asset("icons/filter.svg").is_some());

@@ -1,0 +1,425 @@
+_version: 2
+connection_dialog:
+  choose_the_ca_certificate:
+    en: Choose the CA certificate
+    vi: Chọn chứng chỉ CA
+  choose_the_client_certificate:
+    en: Choose the client certificate
+    vi: Chọn chứng chỉ máy khách
+  one_pem_file:
+    en: One PEM file holding the certificate and its private key.
+    vi: Một tệp PEM chứa cả chứng chỉ và khoá riêng của nó.
+  choose_the_client_key:
+    en: Choose the client key
+    vi: Chọn khoá máy khách
+  mongodb_checks_the_certificate:
+    en: MongoDB checks the certificate against the host of the URL.
+    vi: MongoDB kiểm tra chứng chỉ theo máy chủ trong URL.
+  key:
+    en: Key
+    vi: Khoá
+  port:
+    en: Port
+    vi: Cổng
+  stored_tunnel_unreadable:
+    en: The stored tunnel settings were unreadable and have been reset; review them. Saving writes the settings shown here.
+    vi: Không đọc được cài đặt đường hầm đã lưu nên đã đặt lại; hãy xem lại. Khi lưu sẽ ghi các cài đặt đang hiện ở đây.
+  optional_often_admin:
+    en: "Optional, often admin"
+    vi: "Không bắt buộc, thường là admin"
+  optional_pem_file:
+    en: "Optional PEM file, e.g. ~/ca.pem"
+    vi: "Tệp PEM (không bắt buộc), ví dụ ~/ca.pem"
+  settings:
+    en: Settings
+    vi: Cài đặt
+  url_params:
+    en: URL Params
+    vi: Tham số URL
+  testing_connection:
+    en: Testing connection...
+    vi: Đang thử kết nối...
+  connected_in:
+    en: "Connected in %{millis} ms"
+    vi: "Đã kết nối sau %{millis} ms"
+  connecting:
+    en: Connecting…
+    vi: Đang kết nối…
+  disconnected:
+    en: Disconnected
+    vi: Đã ngắt kết nối
+  disconnected_detail:
+    en: "Disconnected — %{detail}"
+    vi: "Đã ngắt kết nối — %{detail}"
+  testing:
+    en: Testing...
+    vi: Đang thử...
+  delete_confirm:
+    en: "Delete %{name}?"
+    vi: "Xoá %{name}?"
+  tab_connection:
+    en: Connection
+    vi: Kết nối
+  tab_tls:
+    en: TLS/SSL
+    vi: TLS/SSL
+  tab_tunnel:
+    en: Tunnel / Proxy
+    vi: Đường hầm / Proxy
+  tab_advanced:
+    en: Advanced
+    vi: Nâng cao
+  tab_overrides:
+    en: Overrides
+    vi: Ghi đè
+  color_none:
+    en: None
+    vi: Không
+  color_green:
+    en: Green
+    vi: Xanh lá
+  color_yellow:
+    en: Yellow
+    vi: Vàng
+  color_orange:
+    en: Orange
+    vi: Cam
+  color_red:
+    en: Red
+    vi: Đỏ
+  color_blue:
+    en: Blue
+    vi: Xanh dương
+  color_purple:
+    en: Purple
+    vi: Tím
+  selected:
+    en: "Selected: %{kind}%{status}"
+    vi: "Đã chọn: %{kind}%{status}"
+  no_type:
+    en: None (global settings)
+    vi: Không (theo cài đặt chung)
+  enter_fields_before_url_mode:
+    en: Enter connection fields before switching to URL mode.
+    vi: Hãy nhập các trường kết nối trước khi chuyển sang chế độ URL.
+  cluster_url_keep_url_mode:
+    en: This URL uses a cluster format; keep URL mode enabled.
+    vi: URL này dùng định dạng cụm; hãy giữ chế độ URL.
+  no_type_summary:
+    en: "No type: the global settings apply and nothing is confirmed."
+    vi: "Không có loại: áp dụng cài đặt chung và không xác nhận gì cả."
+  use_default:
+    en: "Use default (%{level})"
+    vi: "Dùng mặc định (%{level})"
+  agent_follows_default:
+    en: "Follows the connection type's default, else the default for all connections (Settings → AI). Off unless one of them says otherwise."
+    vi: "Theo mặc định của loại kết nối, nếu không thì theo mặc định cho mọi kết nối (Cài đặt → AI). Tắt trừ khi một trong hai quy định khác."
+  agent_access_help:
+    en: "How far an AI agent (the in-app assistant, MCP clients) may go on this connection. A Production type needs an explicit level here, and a read-only type caps it at Read."
+    vi: "Mức mà một agent AI (trợ lý trong ứng dụng, client MCP) được làm trên kết nối này. Loại Production cần đặt mức rõ ràng ở đây, và loại chỉ đọc giới hạn ở mức Đọc."
+  resulting_level:
+    en: "Resulting level: %{level}"
+    vi: "Mức kết quả: %{level}"
+  use_global:
+    en: "Use global (%{value})"
+    vi: "Dùng giá trị chung (%{value})"
+  global_on:
+    en: "on"
+    vi: bật
+  global_off:
+    en: "off"
+    vi: tắt
+  error_unsupported_type:
+    en: This database type is not supported by the current shell
+    vi: Ứng dụng hiện tại chưa hỗ trợ loại cơ sở dữ liệu này
+  error_name_required:
+    en: Connection name is required
+    vi: Cần nhập tên kết nối
+  error_uri_required:
+    en: Connection URI is required
+    vi: Cần nhập URI kết nối
+  error_password_required:
+    en: Connection password is required
+    vi: Cần nhập mật khẩu kết nối
+  error_port_range:
+    en: Port must be between 1 and 65535
+    vi: Cổng phải nằm trong khoảng 1 đến 65535
+  category_relational:
+    en: Relational
+    vi: Quan hệ
+  category_analytics:
+    en: Analytics
+    vi: Phân tích
+  category_lightweight:
+    en: Lightweight
+    vi: Nhẹ
+  category_docs_cache_search:
+    en: Docs/Cache/Search
+    vi: Tài liệu/Cache/Tìm kiếm
+  category_graph_vector:
+    en: Graph/Vector
+    vi: Đồ thị/Vector
+  category_time_series:
+    en: Time series
+    vi: Chuỗi thời gian
+  category_message_queues:
+    en: Message queues
+    vi: Hàng đợi tin nhắn
+  category_registry_config:
+    en: Registry/Config
+    vi: Registry/Cấu hình
+  optional_defaults_to_postgres:
+    en: "Optional, defaults to postgres"
+    vi: "Không bắt buộc, mặc định là postgres"
+  optional:
+    en: Optional
+    vi: Không bắt buộc
+  optional_defaults_to_default:
+    en: "Optional, defaults to default"
+    vi: "Không bắt buộc, mặc định là default"
+  database_index_defaults_to_0:
+    en: "Database index, defaults to 0"
+    vi: "Chỉ số cơ sở dữ liệu, mặc định là 0"
+  parse_the_url_into_the_fields_below:
+    en: Parse the URL into the fields below
+    vi: Tách URL vào các trường bên dưới
+  url:
+    en: URL
+    vi: URL
+  type:
+    en: Type
+    vi: Loại
+  environment:
+    en: Environment
+    vi: Môi trường
+  host:
+    en: Host
+    vi: Máy chủ
+  user:
+    en: User
+    vi: Người dùng
+  database:
+    en: Database
+    vi: Cơ sở dữ liệu
+  auth_db:
+    en: Auth DB
+    vi: CSDL xác thực
+  show_only_the_connection_s_database:
+    en: "Show only the connection's database"
+    vi: Chỉ hiện cơ sở dữ liệu của kết nối
+  without_a_database_named_above_every_database_is:
+    en: "Without a database named above, every database is listed."
+    vi: "Nếu không nêu cơ sở dữ liệu ở trên, mọi cơ sở dữ liệu sẽ được liệt kê."
+  use_https_tls:
+    en: Use HTTPS (TLS)
+    vi: Dùng HTTPS (TLS)
+  secure:
+    en: Secure
+    vi: Bảo mật
+  ca_cert:
+    en: CA Cert
+    vi: Chứng chỉ CA
+  use_tls_rediss:
+    en: "Use TLS (rediss://)"
+    vi: "Dùng TLS (rediss://)"
+  save_password:
+    en: Save password
+    vi: Lưu mật khẩu
+  password:
+    en: Password
+    vi: Mật khẩu
+  file_path:
+    en: File Path
+    vi: Đường dẫn tệp
+  choose_a_database_file:
+    en: Choose a database file
+    vi: Chọn tệp cơ sở dữ liệu
+  custom_color:
+    en: Custom color
+    vi: Màu tuỳ chọn
+  timeout:
+    en: Timeout
+    vi: Thời gian chờ
+  seconds_empty_driver_default:
+    en: seconds (empty = driver default)
+    vi: giây (để trống = mặc định của driver)
+  not_applicable_to_file_databases:
+    en: not applicable to file databases
+    vi: không áp dụng cho cơ sở dữ liệu dạng tệp
+  options:
+    en: Options
+    vi: Tuỳ chọn
+  pin_connection_in_sidebar:
+    en: Pin connection in sidebar
+    vi: Ghim kết nối trên thanh bên
+  read_only_confirmations_and_the_other_safety_pre:
+    en: "Read-only, confirmations and the other safety presets belong to the connection type (Environment on the Connection tab). Edit the types in Settings › Query & Connections."
+    vi: "Chế độ chỉ đọc, xác nhận và các thiết lập an toàn khác thuộc về loại kết nối (Môi trường ở tab Kết nối). Sửa các loại trong Cài đặt › Truy vấn & kết nối."
+  each_setting_follows_the_global_value_settings_u:
+    en: "Each setting follows the global value (Settings) unless you uncheck \"Use global\" and give this connection its own."
+    vi: "Mỗi cài đặt theo giá trị chung (Cài đặt) trừ khi bạn bỏ chọn \"Dùng giá trị chung\" và đặt giá trị riêng cho kết nối này."
+  no_matching_databases:
+    en: No matching databases.
+    vi: Không có cơ sở dữ liệu phù hợp.
+  no_database_types_available_in_this_category_yet:
+    en: No database types available in this category yet.
+    vi: Chưa có loại cơ sở dữ liệu nào trong nhóm này.
+  grid_view:
+    en: Grid view
+    vi: Dạng lưới
+  list_view:
+    en: List view
+    vi: Dạng danh sách
+  the_driver_is_not_installed_yet:
+    en: The driver is not installed yet
+    vi: Driver chưa được cài đặt
+  not_supported_yet:
+    en: Not supported yet
+    vi: Chưa được hỗ trợ
+  the_ssh_server_bastion_opens_the_connection_to_t:
+    en: "The SSH server (bastion) opens the connection to the database for you: the database host and port are reached from the SSH server, optionally through jump hosts and a proxy. Each database session of the connection gets its own tunnel."
+    vi: "Máy chủ SSH (bastion) mở kết nối đến cơ sở dữ liệu giúp bạn: máy chủ và cổng cơ sở dữ liệu được truy cập từ máy chủ SSH, có thể qua các máy chủ trung gian và proxy. Mỗi phiên cơ sở dữ liệu của kết nối có đường hầm riêng."
+  ssh_tunnel:
+    en: SSH Tunnel
+    vi: Đường hầm SSH
+  connect_through_an_ssh_tunnel:
+    en: Connect through an SSH tunnel
+    vi: Kết nối qua đường hầm SSH
+  ssh_config:
+    en: SSH Config
+    vi: Cấu hình SSH
+  use_a_ssh_config_host:
+    en: Use a ~/.ssh/config host
+    vi: Dùng một host trong ~/.ssh/config
+  search_hosts:
+    en: Search hosts
+    vi: Tìm host
+  ssh_host:
+    en: SSH Host
+    vi: Máy chủ SSH
+  ssh_user:
+    en: SSH User
+    vi: Người dùng SSH
+  auth_method:
+    en: Auth Method
+    vi: Phương thức xác thực
+  private_key:
+    en: Private Key
+    vi: Khoá riêng
+  passphrase:
+    en: Passphrase
+    vi: Cụm mật khẩu
+  signs_in_with_the_keys_of_your_running_ssh_agent:
+    en: "Signs in with the keys of your running ssh-agent (SSH_AUTH_SOCK on macOS and Linux, the OpenSSH agent or Pageant on Windows)."
+    vi: "Đăng nhập bằng các khoá của ssh-agent đang chạy (SSH_AUTH_SOCK trên macOS và Linux, OpenSSH agent hoặc Pageant trên Windows)."
+  the_server_s_questions_a_one_time_code_a_second:
+    en: "The server's questions (a one-time code, a second factor) are shown in a dialog when you connect. All database sessions of this connection share one tunnel, so you answer once."
+    vi: "Các câu hỏi của máy chủ (mã dùng một lần, yếu tố xác thực thứ hai) hiện trong hộp thoại khi bạn kết nối. Mọi phiên cơ sở dữ liệu của kết nối này dùng chung một đường hầm nên bạn chỉ trả lời một lần."
+  remote_host:
+    en: Remote Host
+    vi: Máy chủ đích
+  algorithms:
+    en: Algorithms
+    vi: Thuật toán
+  allow_legacy_algorithms_diffie_hellman_group14_s:
+    en: "Allow legacy algorithms (diffie-hellman-group14-sha1, ssh-rsa)"
+    vi: "Cho phép thuật toán cũ (diffie-hellman-group14-sha1, ssh-rsa)"
+  choose_a_private_key_file:
+    en: Choose a private key file
+    vi: Chọn tệp khoá riêng
+  add_jump_host:
+    en: Add jump host
+    vi: Thêm máy chủ trung gian
+  jump_hosts:
+    en: Jump hosts
+    vi: Máy chủ trung gian
+  optional_ssh_servers_to_pass_through_before_the:
+    en: "Optional. SSH servers to pass through before the SSH host, in the order shown."
+    vi: "Không bắt buộc. Các máy chủ SSH đi qua trước máy chủ SSH, theo thứ tự hiển thị."
+  dialled_in_this_order_then_the_ssh_host_above:
+    en: "Dialled in this order, then the SSH host above."
+    vi: "Kết nối theo thứ tự này, rồi đến máy chủ SSH ở trên."
+  keys_of_your_running_ssh_agent:
+    en: Keys of your running ssh-agent
+    vi: Các khoá của ssh-agent đang chạy
+  questions_are_asked_in_a_dialog:
+    en: Questions are asked in a dialog
+    vi: Câu hỏi được hỏi trong một hộp thoại
+  proxy:
+    en: Proxy
+    vi: Proxy
+  connect_through_a_socks5_or_http_proxy:
+    en: Connect through a SOCKS5 or HTTP proxy
+    vi: Kết nối qua proxy SOCKS5 hoặc HTTP
+  proxy_type:
+    en: Proxy Type
+    vi: Loại proxy
+  proxy_host:
+    en: Proxy Host
+    vi: Máy chủ proxy
+  proxy_user:
+    en: Proxy User
+    vi: Người dùng proxy
+  proxy_password:
+    en: Proxy Password
+    vi: Mật khẩu proxy
+  test:
+    en: Test
+    vi: Thử
+  ssl_mode:
+    en: SSL Mode
+    vi: Chế độ SSL
+  ca_certificate:
+    en: CA Certificate
+    vi: Chứng chỉ CA
+  client_cert:
+    en: Client Cert
+    vi: Chứng chỉ máy khách
+  choose_the_client_certificate_and_key_file:
+    en: Choose the client certificate and key file
+    vi: Chọn tệp chứng chỉ và khoá của máy khách
+  client_key:
+    en: Client Key
+    vi: Khoá máy khách
+  mongodb_reads_the_key_from_the_client_certificat:
+    en: MongoDB reads the key from the client certificate file.
+    vi: MongoDB đọc khoá từ tệp chứng chỉ máy khách.
+  server_name:
+    en: Server Name
+    vi: Tên máy chủ
+  postgresql_checks_the_certificate_against_the_ho:
+    en: "PostgreSQL checks the certificate against the Host. To reach another address, add hostaddr to URL Params."
+    vi: "PostgreSQL kiểm tra chứng chỉ theo Máy chủ. Để dùng địa chỉ khác, thêm hostaddr vào Tham số URL."
+  private_keys_must_be_unencrypted_pem_files_that:
+    en: Private keys must be unencrypted PEM files that group and others cannot read (chmod 600). Key passphrases are not supported.
+    vi: Khoá riêng phải là tệp PEM không mã hoá mà nhóm và người khác không đọc được (chmod 600). Không hỗ trợ cụm mật khẩu của khoá.
+  private_keys_must_be_unencrypted_pem_files_key_p:
+    en: Private keys must be unencrypted PEM files. Key passphrases are not supported.
+    vi: Khoá riêng phải là tệp PEM không mã hoá. Không hỗ trợ cụm mật khẩu của khoá.
+  connection_changed_while_connecting_run_again:
+    en: Connection changed while connecting; run again
+    vi: Kết nối đã thay đổi trong lúc đang kết nối; hãy chạy lại
+  reconnect_to_the_database:
+    en: Reconnect to the database
+    vi: Kết nối lại cơ sở dữ liệu
+  reconnect:
+    en: Reconnect
+    vi: Kết nối lại
+  save_connect:
+    en: "Save & Connect"
+    vi: "Lưu & kết nối"
+  next:
+    en: Next
+    vi: Tiếp
+  select_visible_databases:
+    en: Select Visible Databases
+    vi: Chọn cơ sở dữ liệu hiển thị
+  save_the_connection_first_to_choose_visible_data:
+    en: Save the connection first to choose visible databases
+    vi: Hãy lưu kết nối trước để chọn cơ sở dữ liệu hiển thị
+  could_not_save_connection:
+    en: Could not save connection
+    vi: Không lưu được kết nối
+  invalid_connection_uri:
+    en: Invalid connection URI
+    vi: URI kết nối không hợp lệ

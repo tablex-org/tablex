@@ -93,7 +93,7 @@ impl AppRoot {
         };
         let lex = self.sql_lex(tab_id);
         let Some(target) = target_range(&text, selection.clone(), &lex) else {
-            window.push_notification("There is no SQL to format", cx);
+            window.push_notification(t!("editor.there_is_no_sql_to_format"), cx);
             return;
         };
         let context = self.format_context(tab_id);
@@ -127,11 +127,11 @@ impl AppRoot {
         let done = match outcome {
             Ok(done) => done,
             Err(FormatError::Empty) => {
-                window.push_notification("There is no SQL to format", cx);
+                window.push_notification(t!("editor.there_is_no_sql_to_format"), cx);
                 return;
             }
             Err(error @ FormatError::Refused(_)) => {
-                window.push_notification(format!("Format SQL left the text unchanged: {error}."), cx);
+                window.push_notification(t!("editor.format_left_unchanged", error = error).into_owned(), cx);
                 return;
             }
             // A newer format or the closing editor stopped it: nothing to say.
@@ -143,7 +143,7 @@ impl AppRoot {
             }
             Err(error) => {
                 self.report_warning(Area::App, None, format!("Format SQL: {error}"));
-                window.push_notification(format!("Format SQL failed: {}.", shortened(&error.to_string())), cx);
+                window.push_notification(t!("editor.format_failed", error = shortened(&error.to_string())).into_owned(), cx);
                 return;
             }
         };
@@ -157,11 +157,11 @@ impl AppRoot {
             return;
         };
         if editor.read(cx).value().as_ref() != text.as_str() {
-            window.push_notification("The text changed while it was being formatted; nothing was applied", cx);
+            window.push_notification(t!("editor.the_text_changed_while_it_was_being_formatted_no"), cx);
             return;
         }
         if text[target.clone()] == done.text {
-            window.push_notification("Already formatted", cx);
+            window.push_notification(t!("editor.already_formatted"), cx);
             return;
         }
         let selecting = !selection.is_empty();
@@ -216,7 +216,7 @@ impl AppRoot {
                         .gap(px(6.0))
                         .child(format!("Its text is not the same statement as yours: {}.", disagreement.violation))
                         .children(first_difference)
-                        .child("Apply it anyway, or keep your text?"),
+                        .child(t!("editor.apply_it_anyway_or_keep_your_text")),
                 )
                 .confirm()
                 .footer(
@@ -224,10 +224,10 @@ impl AppRoot {
                         .child(
                             div()
                                 .debug_selector(|| "format-disagree-cancel".into())
-                                .child(gpui_component::dialog::DialogClose::new().trigger(|button| button.label("Cancel").primary())),
+                                .child(gpui_component::dialog::DialogClose::new().trigger(|button| button.label(t!("common.cancel")).primary())),
                         )
                         .child(div().debug_selector(|| "format-disagree-apply".into()).child(
-                            Button::new("format-disagree-apply").label("Apply anyway").danger().on_click(
+                            Button::new("format-disagree-apply").label(t!("editor.apply_anyway")).danger().on_click(
                                 move |_, window, cx| {
                                     window.close_dialog(cx);
                                     let (job, disagreement) = &*apply;
@@ -258,7 +258,7 @@ impl AppRoot {
                 Ok(Ok(None)) => None,
                 _ => {
                     let _ = this.update_in(cx, |_, window, cx| {
-                        window.push_notification("Could not open the file picker", cx);
+                        window.push_notification(t!("editor.could_not_open_the_file_picker"), cx);
                     });
                     None
                 }
@@ -404,7 +404,7 @@ impl AppRoot {
                 Ok(Ok(None)) => return,
                 _ => {
                     let _ = this.update_in(cx, |_, window, cx| {
-                        window.push_notification("Could not open the save dialog", cx);
+                        window.push_notification(t!("editor.could_not_open_the_save_dialog"), cx);
                     });
                     return;
                 }
@@ -474,7 +474,7 @@ impl AppRoot {
                 .child(
                     div()
                         .debug_selector(|| "unsaved-file-body".into())
-                        .child("Your changes will be lost if you do not save them."),
+                        .child(t!("editor.your_changes_will_be_lost_if_you_do_not_save_the")),
                 )
                 .confirm()
                 .footer(
@@ -482,10 +482,10 @@ impl AppRoot {
                         .child(
                             div()
                                 .debug_selector(|| "unsaved-file-cancel".into())
-                                .child(gpui_component::dialog::DialogClose::new().trigger(|button| button.label("Cancel"))),
+                                .child(gpui_component::dialog::DialogClose::new().trigger(|button| button.label(t!("common.cancel")))),
                         )
                         .child(div().debug_selector(|| "unsaved-file-discard".into()).child(
-                            Button::new("unsaved-file-discard").label("Don't Save").on_click(
+                            Button::new("unsaved-file-discard").label(t!("editor.don_t_save")).on_click(
                                 move |_, window, cx| {
                                     window.close_dialog(cx);
                                     let _ = root_discard.update(cx, |this, cx| {
@@ -497,7 +497,7 @@ impl AppRoot {
                         ))
                         .child(div().debug_selector(|| "unsaved-file-save".into()).child(
                             gpui_component::dialog::DialogAction::new()
-                                .child(Button::new("unsaved-file-save").label("Save").primary()),
+                                .child(Button::new("unsaved-file-save").label(t!("editor.save")).primary()),
                         )),
                 )
                 .on_ok(move |_, window, cx| {

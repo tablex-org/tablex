@@ -1,0 +1,191 @@
+_version: 2
+editor:
+  redis_console:
+    en: Redis Console
+    vi: Bảng điều khiển Redis
+  sql_editor:
+    en: SQL Editor
+    vi: Trình soạn thảo SQL
+  save_sql_script:
+    en: Save SQL script
+    vi: Lưu script SQL
+  drop_to_open_this_sql_file:
+    en: Drop to open this SQL file
+    vi: Thả vào để mở tệp SQL này
+  run:
+    en: Run
+    vi: Chạy
+  run_the_statement:
+    en: Run the statement
+    vi: Chạy câu lệnh
+  cancel_the_running_query:
+    en: Cancel the running query
+    vi: Huỷ truy vấn đang chạy
+  show_the_execution_plan:
+    en: Show the execution plan of the statement
+    vi: Hiện kế hoạch thực thi của câu lệnh
+  nothing_to_run:
+    en: "Nothing to run: select text or put the cursor in a statement."
+    vi: "Không có gì để chạy: hãy chọn văn bản hoặc đặt con trỏ vào một câu lệnh."
+  formatted:
+    en: Formatted
+    vi: Đã định dạng
+  cannot_format:
+    en: "Cannot format: %{error}"
+    vi: "Không thể định dạng: %{error}"
+  select_a_database_first:
+    en: Select a database first.
+    vi: Hãy chọn cơ sở dữ liệu trước.
+  format_left_unchanged:
+    en: "Format SQL left the text unchanged: %{error}."
+    vi: "Định dạng SQL giữ nguyên văn bản: %{error}."
+  format_failed:
+    en: "Format SQL failed: %{error}."
+    vi: "Định dạng SQL thất bại: %{error}."
+  run_selected:
+    en: Run Selected
+    vi: Chạy phần đã chọn
+  run_the_selection_or_the_statement_at_the_cursor:
+    en: "Run the selection, or the statement at the cursor"
+    vi: "Chạy phần đã chọn, hoặc câu lệnh tại con trỏ"
+  format:
+    en: Format
+    vi: Định dạng
+  open_a_js_file:
+    en: Open a .js file
+    vi: Mở tệp .js
+  save_the_script_as_a_js_file:
+    en: Save the script as a .js file
+    vi: Lưu script thành tệp .js
+  export:
+    en: Export
+    vi: Xuất
+  save:
+    en: Save
+    vi: Lưu
+  save_mongo_script_to_the_library:
+    en: Save Mongo script to the library
+    vi: Lưu script Mongo vào thư viện
+  default_database_for_this_connection_click_to_cl:
+    en: Default database for this connection (click to clear)
+    vi: Cơ sở dữ liệu mặc định của kết nối này (bấm để bỏ)
+  set_as_default_database_for_this_connection:
+    en: Set as default database for this connection
+    vi: Đặt làm cơ sở dữ liệu mặc định của kết nối này
+  connection:
+    en: Connection
+    vi: Kết nối
+  search_connections:
+    en: Search connections
+    vi: Tìm kết nối
+  database:
+    en: Database
+    vi: Cơ sở dữ liệu
+  search_databases:
+    en: Search databases
+    vi: Tìm cơ sở dữ liệu
+  there_is_no_sql_to_format:
+    en: There is no SQL to format
+    vi: Không có SQL để định dạng
+  the_text_changed_while_it_was_being_formatted_no:
+    en: The text changed while it was being formatted; nothing was applied
+    vi: Văn bản đã thay đổi trong lúc định dạng; không có gì được áp dụng
+  already_formatted:
+    en: Already formatted
+    vi: Đã được định dạng sẵn
+  apply_it_anyway_or_keep_your_text:
+    en: "Apply it anyway, or keep your text?"
+    vi: "Vẫn áp dụng, hay giữ văn bản của bạn?"
+  apply_anyway:
+    en: Apply anyway
+    vi: Vẫn áp dụng
+  could_not_open_the_file_picker:
+    en: Could not open the file picker
+    vi: Không mở được hộp chọn tệp
+  could_not_open_the_save_dialog:
+    en: Could not open the save dialog
+    vi: Không mở được hộp thoại lưu
+  your_changes_will_be_lost_if_you_do_not_save_the:
+    en: Your changes will be lost if you do not save them.
+    vi: Các thay đổi của bạn sẽ mất nếu không lưu.
+  don_t_save:
+    en: "Don't Save"
+    vi: Không lưu
+  run_sql_file:
+    en: Run SQL File
+    vi: Chạy tệp SQL
+  run_a_sql_file_of_any_size_on_this_connection:
+    en: Run a .sql file of any size on this connection
+    vi: Chạy tệp .sql có kích thước bất kỳ trên kết nối này
+  open_a_second_tab_in_this_pane_to_split_it:
+    en: Open a second tab in this pane to split it
+    vi: Hãy mở tab thứ hai trong ngăn này để chia nó
+  history:
+    en: History
+    vi: Lịch sử
+  explain:
+    en: Explain
+    vi: Giải thích
+  explain_analyze:
+    en: Explain Analyze
+    vi: Giải thích và phân tích
+  filter:
+    en: FILTER
+    vi: BỘ LỌC
+  build_filter:
+    en: Build filter
+    vi: Tạo bộ lọc
+  query:
+    en: Query
+    vi: Truy vấn
+  show_generated_mongo_query:
+    en: Show generated Mongo query
+    vi: Hiện truy vấn Mongo đã tạo
+  columns:
+    en: Columns
+    vi: Cột
+  expand_find_query:
+    en: Expand Find Query
+    vi: Mở rộng truy vấn Find
+  clear_find_query:
+    en: Clear Find Query
+    vi: Xoá truy vấn Find
+  expand_sort_query:
+    en: Expand Sort Query
+    vi: Mở rộng truy vấn sắp xếp
+  clear_sort_query:
+    en: Clear Sort Query
+    vi: Xoá truy vấn sắp xếp
+  sort:
+    en: SORT
+    vi: SẮP XẾP
+  execute_query:
+    en: Execute query
+    vi: Thực thi truy vấn
+  wait_for_the_running_statement_to_finish_or_canc:
+    en: "Wait for the running statement to finish, or cancel it."
+    vi: "Hãy chờ câu lệnh đang chạy kết thúc, hoặc huỷ nó."
+  pending_transactions:
+    en: Pending transactions…
+    vi: Giao dịch đang chờ…
+  roll_back:
+    en: Roll Back
+    vi: Roll back
+  commit:
+    en: Commit
+    vi: Commit
+  auto_commit:
+    en: Auto-commit
+    vi: Tự động commit
+  manual:
+    en: Manual
+    vi: Thủ công
+  run_this_script:
+    en: "Run this script?"
+    vi: "Chạy script này?"
+  run_anyway:
+    en: Run anyway
+    vi: Vẫn chạy
+  statistics:
+    en: Statistics
+    vi: Thống kê

@@ -324,9 +324,9 @@ impl AppRoot {
                             .text_size(px(11.0))
                             .text_color(theme::text_muted())
                             .child(div().flex_1().child(if is_redis_console {
-                                "Redis Console"
+                                t!("editor.redis_console")
                             } else {
-                                "SQL Editor"
+                                t!("editor.sql_editor")
                             }))
                             .children(self.render_transaction_controls(tab_id, cx))
                             .child(self.render_editor_run_controls(tab_id, cx))
@@ -336,17 +336,17 @@ impl AppRoot {
                                     .icon(Icon::empty().path("icons/file-play.svg").size(px(12.0)))
                                     .compact()
                                     .ghost()
-                                    .accessibility_label("Run SQL File")
-                                    .tooltip("Run a .sql file of any size on this connection")
+                                    .accessibility_label(t!("editor.run_sql_file"))
+                                    .tooltip(t!("editor.run_a_sql_file_of_any_size_on_this_connection"))
                                     .on_click(cx.listener(move |this, _, window, cx| this.run_sql_file_from_tab(Some(tab_id), window, cx))),
                             ).child(
                                 Button::new("save-sql-script")
                                     .debug_selector(|| "save-sql-script".into())
-                                    .label("Save")
+                                    .label(t!("editor.save"))
                                     .compact()
                                     .ghost()
                                     .tooltip(shortcuts::with_label(
-                                        "Save SQL script",
+                                        &t!("editor.save_sql_script"),
                                         &self.settings.shortcuts,
                                         "editor.save_script",
                                     ))
@@ -422,7 +422,7 @@ impl AppRoot {
             div().into_any_element()
         };
         // A `.sql` file dragged in from the OS: the container listens, not the editor or its rows.
-        let drop_highlight = (self.file_drop_tab == Some(tab_id)).then(|| file_run::file_drop::highlight("Drop to open this SQL file", cx));
+        let drop_highlight = (self.file_drop_tab == Some(tab_id)).then(|| file_run::file_drop::highlight(t!("editor.drop_to_open_this_sql_file"), cx));
         div()
             .flex()
             .flex_col()
@@ -471,7 +471,7 @@ impl AppRoot {
             .focused_pane()
             .is_some_and(|pane| pane.tabs().len() > 1);
         if !can_split {
-            window.push_notification("Open a second tab in this pane to split it", cx);
+            window.push_notification(t!("editor.open_a_second_tab_in_this_pane_to_split_it"), cx);
             return;
         }
         self.split_tab_ui(tab_id, edge, cx);
@@ -502,10 +502,10 @@ impl AppRoot {
                 Button::new(("run-query", tab_id))
                     .debug_selector(|| "run-query".into())
                     .icon(Icon::empty().path("icons/play.svg").size(px(12.0)))
-                    .label(if can_run { "Run" } else { "Cancel" })
+                    .label(if can_run { t!("editor.run") } else { t!("common.cancel") })
                     .compact()
                     .ghost()
-                    .tooltip(if can_run { "Run the statement" } else { "Cancel the running query" })
+                    .tooltip(if can_run { t!("editor.run_the_statement") } else { t!("editor.cancel_the_running_query") })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if can_run {
                             this.run_tab_query_explicit(tab_id, cx);
@@ -519,7 +519,7 @@ impl AppRoot {
             .child(
                 Button::new(("history", tab_id))
                     .debug_selector(|| "query-history".into())
-                    .label("History")
+                    .label(t!("editor.history"))
                     .compact()
                     .ghost()
                     .on_click(cx.listener(move |this, _, _, cx| this.toggle_history(tab_id, cx))),

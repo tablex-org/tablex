@@ -26,10 +26,6 @@ pub trait Choice: Copy + PartialEq + 'static {
     /// `(stored id, label)` in display order. Ids equal the serde names.
     const OPTIONS: &'static [(&'static str, &'static str)];
     fn id(self) -> &'static str;
-    /// The label the option has in a Select.
-    fn label(self) -> &'static str {
-        Self::OPTIONS.iter().find(|(id, _)| *id == self.id()).map_or("", |(_, label)| label)
-    }
     fn from_id(id: &str) -> Option<Self>;
 }
 
@@ -270,11 +266,22 @@ choice_enum!(
     }
 );
 
+choice_enum!(
+    /// The interface language; `System` follows the OS preferred language (Vietnamese or English).
+    LanguageChoice {
+        System => ("system", "System (follow the OS)"),
+        En => ("en", "English"),
+        Vi => ("vi", "Tiếng Việt"),
+    }
+);
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Appearance {
     /// Dark, Light, or follow the OS.
     pub theme: ThemeChoice,
+    /// Interface language (a file without it follows the OS).
+    pub language: LanguageChoice,
     /// Whole-UI zoom factor (needs the layout to stop using fixed pixels).
     pub ui_scale: f32,
     /// Interface font family; empty = the system UI font.
@@ -299,6 +306,7 @@ impl Default for Appearance {
     fn default() -> Self {
         Self {
             theme: ThemeChoice::Dark,
+            language: LanguageChoice::System,
             ui_scale: 1.0,
             interface_font: String::new(),
             grid_font: String::new(),

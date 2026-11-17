@@ -138,7 +138,7 @@ impl AppRoot {
             }
             dialog
                 .width(px(560.0))
-                .title("Run this script?")
+                .title(t!("editor.run_this_script"))
                 .child(
                     div()
                         .flex()
@@ -160,19 +160,19 @@ impl AppRoot {
                                 .when(more > 0, |list| list.child(format!("and {more} more"))),
                         ),
                 )
-                .button_props(gpui_component::dialog::DialogButtonProps::default().ok_text("Run anyway"))
+                .button_props(gpui_component::dialog::DialogButtonProps::default().ok_text(t!("editor.run_anyway")))
                 .confirm()
                 .footer(
                     gpui_component::dialog::DialogFooter::new()
                         .child(
                             div().debug_selector(|| "script-confirm-cancel".into()).child(
-                                gpui_component::dialog::DialogClose::new().trigger(|button| button.label("Cancel")),
+                                gpui_component::dialog::DialogClose::new().trigger(|button| button.label(t!("common.cancel"))),
                             ),
                         )
                         .child(
                             div().debug_selector(|| "script-confirm-run".into()).child(
                                 gpui_component::dialog::DialogAction::new()
-                                    .child(Button::new("script-confirm-run").label("Run anyway").danger()),
+                                    .child(Button::new("script-confirm-run").label(t!("editor.run_anyway")).danger()),
                             ),
                         ),
                 )
@@ -631,7 +631,7 @@ impl AppRoot {
         // Statistics is pinned beside the summary, outside the scrolling result tabs, so it stays in
         // reach however many results the run has.
         let statistics = Button::new(("script-statistics", tab_id))
-            .label("Statistics")
+            .label(t!("editor.statistics"))
             .small()
             .ghost()
             .selected(shown == ScriptTab::Statistics)

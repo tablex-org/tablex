@@ -1,0 +1,200 @@
+_version: 2
+sidebar:
+  delete_selected_one:
+    en: Delete 1 selected connection
+    vi: Xoá 1 kết nối đã chọn
+  delete_selected_other:
+    en: "Delete %{count} selected connections"
+    vi: "Xoá %{count} kết nối đã chọn"
+  regex_tip:
+    en: "Match sidebar names, comments, and aliases with regular expressions."
+    vi: "Khớp tên, ghi chú và bí danh trên thanh bên bằng biểu thức chính quy."
+  local_search_regex_tip:
+    en: Local search is unavailable in regular expression mode.
+    vi: Không dùng được tìm cục bộ ở chế độ biểu thức chính quy.
+  local_search_tip:
+    en: Search only currently loaded sidebar objects without remote requests.
+    vi: "Chỉ tìm trong các đối tượng thanh bên đã tải, không gửi yêu cầu đến máy chủ."
+  sort_manual:
+    en: Manual
+    vi: Thủ công
+  sort_ascending:
+    en: Ascending
+    vi: Tăng dần
+  sort_descending:
+    en: Descending
+    vi: Giảm dần
+  scope_all:
+    en: All
+    vi: Tất cả
+  scope_databases:
+    en: Databases
+    vi: Cơ sở dữ liệu
+  scope_objects:
+    en: Objects
+    vi: Đối tượng
+  connection_failed:
+    en: Connection failed
+    vi: Kết nối thất bại
+  could_not_load:
+    en: Could not load
+    vi: Không tải được
+  clear:
+    en: Clear
+    vi: Xoá
+  copy:
+    en: Copy
+    vi: Sao chép
+  retry:
+    en: Retry
+    vi: Thử lại
+  delete_group_confirm:
+    en: "Delete %{name}? Its subgroups and connections will move to the parent group."
+    vi: "Xoá %{name}? Các nhóm con và kết nối của nó sẽ được chuyển lên nhóm cha."
+  load_more:
+    en: Load More
+    vi: Tải thêm
+  pin:
+    en: Pin
+    vi: Ghim
+  unpin:
+    en: Unpin
+    vi: Bỏ ghim
+  new_group:
+    en: New Group
+    vi: Nhóm mới
+  rename_group:
+    en: Rename Group
+    vi: Đổi tên nhóm
+  rename:
+    en: Rename
+    vi: Đổi tên
+  import_export:
+    en: Import / Export
+    vi: Nhập / Xuất
+  import_or_export_connection_configurations:
+    en: Import or export connection configurations
+    vi: Nhập hoặc xuất cấu hình kết nối
+  export_connections:
+    en: Export Connections
+    vi: Xuất kết nối
+  import_tablex_file:
+    en: Import TableX file…
+    vi: Nhập tệp TableX…
+  collapse_all:
+    en: Collapse all
+    vi: Thu gọn tất cả
+  new_group_2:
+    en: New group
+    vi: Nhóm mới
+  refresh_connections:
+    en: Refresh connections
+    vi: Làm mới kết nối
+  hide_sidebar:
+    en: Hide sidebar
+    vi: Ẩn thanh bên
+  connections:
+    en: Connections
+    vi: Kết nối
+  group_selected_connections:
+    en: Group selected connections
+    vi: Gom nhóm các kết nối đã chọn
+  move_selected_to_group:
+    en: Move selected to group
+    vi: Chuyển mục đã chọn vào nhóm
+  ungrouped:
+    en: Ungrouped
+    vi: Chưa phân nhóm
+  select_all_visible_connections:
+    en: Select all visible connections
+    vi: Chọn tất cả kết nối đang hiện
+  exit_selection:
+    en: Exit selection
+    vi: Thoát chế độ chọn
+  regular_expression_search:
+    en: Regular expression search
+    vi: Tìm bằng biểu thức chính quy
+  local_search:
+    en: Local search
+    vi: Tìm cục bộ
+  locate_in_sidebar:
+    en: Locate in sidebar
+    vi: Định vị trên thanh bên
+  sort_connections_filter_by_type:
+    en: Sort connections / Filter by type
+    vi: Sắp xếp kết nối / Lọc theo loại
+  sort_connections:
+    en: Sort connections
+    vi: Sắp xếp kết nối
+  filter_by_type:
+    en: Filter by type
+    vi: Lọc theo loại
+  show_hidden_connections:
+    en: Show hidden connections
+    vi: Hiện kết nối đã ẩn
+  clear_filter:
+    en: Clear filter
+    vi: Xoá bộ lọc
+  selected_connection:
+    en: Selected connection
+    vi: Kết nối đã chọn
+  toggle_pin:
+    en: Toggle Pin
+    vi: Ghim / Bỏ ghim
+  hide_unhide:
+    en: Hide / Unhide
+    vi: Ẩn / Hiện
+  copy_connection_config:
+    en: Copy Connection Config
+    vi: Sao chép cấu hình kết nối
+  export_connection_config:
+    en: Export Connection Config…
+    vi: Xuất cấu hình kết nối…
+  paste_connection_config:
+    en: Paste Connection Config
+    vi: Dán cấu hình kết nối
+  show_active_connections_only:
+    en: Show active connections only
+    vi: Chỉ hiện kết nối đang hoạt động
+  new_subgroup:
+    en: New Subgroup
+    vi: Nhóm con mới
+  select_group_connections:
+    en: Select group connections
+    vi: Chọn các kết nối trong nhóm
+  move_to_group:
+    en: Move to Group
+    vi: Chuyển vào nhóm
+  delete_group:
+    en: Delete Group
+    vi: Xoá nhóm
+  view_source:
+    en: View Source
+    vi: Xem mã nguồn
+  open:
+    en: Open
+    vi: Mở
+  copy_sql:
+    en: Copy SQL
+    vi: Sao chép SQL
+  view_diagram:
+    en: View Diagram
+    vi: Xem sơ đồ
+  connect_as_another_user:
+    en: Connect as Another User…
+    vi: Kết nối bằng người dùng khác…
+  delete:
+    en: Delete
+    vi: Xoá
+  search:
+    en: Search...
+    vi: Tìm kiếm...
+  create_group:
+    en: Create Group
+    vi: Tạo nhóm
+  group_selected:
+    en: Group selected…
+    vi: Gom nhóm mục đã chọn…
+  hide_selected_connections:
+    en: Hide selected connections
+    vi: Ẩn các kết nối đã chọn

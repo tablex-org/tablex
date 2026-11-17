@@ -36,6 +36,8 @@ impl PickerCategory {
         ]
     }
 
+    /// The English name (scenario telemetry and tests); the dialog draws the interface-language one.
+    #[cfg(any(test, feature = "ui-scenarios"))]
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Relational => "Relational",

@@ -202,7 +202,7 @@ impl AppRoot {
                 };
                 let editor_tab = !is_mongo && !is_table && !is_redis_key;
                 let header = if editor_tab {
-                    ui::section_header("Results")
+                    ui::section_header(t!("grid.results"))
                         .debug_selector(|| "results-header".into())
                         .into_any_element()
                 } else {

@@ -204,7 +204,7 @@ impl NewTableForm {
                             .icon(IconName::ChevronDown)
                             .ghost()
                             .compact()
-                            .tooltip("Common types")
+                            .tooltip(t!("menu.common_types"))
                             .dropdown_menu(move |menu, _, _| {
                                 types.iter().fold(menu, |menu, &data_type| {
                                     let type_input = type_input.clone();
@@ -247,7 +247,7 @@ impl NewTableForm {
                     .icon(IconName::Close)
                     .ghost()
                     .compact()
-                    .tooltip("Remove the column")
+                    .tooltip(t!("menu.remove_the_column"))
                     .on_click(cx.listener(move |this, _, _, cx| this.remove_column(key, cx))),
             )
     }
@@ -319,7 +319,7 @@ impl Render for NewTableForm {
                 div().flex().child(
                     Button::new("object-table-add-column")
                         .debug_selector(|| "object-table-add-column".into())
-                        .label("Add column")
+                        .label(t!("menu.add_column"))
                         .icon(IconName::Plus)
                         .compact()
                         .ghost()
@@ -352,8 +352,8 @@ impl AppRoot {
         let root = cx.entity().downgrade();
         let namespace = if origin.schema.is_empty() { origin.database.clone() } else { origin.schema.clone() };
         let view = cx.new(|cx| {
-            let name = cx.new(|cx| InputState::new(window, cx).placeholder("Table name"));
-            let comment = cx.new(|cx| InputState::new(window, cx).placeholder("Table comment (optional)"));
+            let name = cx.new(|cx| InputState::new(window, cx).placeholder(t!("menu.table_name")));
+            let comment = cx.new(|cx| InputState::new(window, cx).placeholder(t!("menu.table_comment_optional")));
             let mut form = NewTableForm {
                 root,
                 origin,
@@ -397,7 +397,7 @@ impl AppRoot {
                     DialogFooter::new()
                         .child(
                             Button::new("object-table-cancel")
-                                .label("Cancel")
+                                .label(t!("common.cancel"))
                                 .compact()
                                 .ghost()
                                 .debug_selector(|| "object-table-cancel".into())
@@ -405,7 +405,7 @@ impl AppRoot {
                         )
                         .child(
                             Button::new("object-table-submit")
-                                .label("Review SQL")
+                                .label(t!("menu.review_sql"))
                                 .compact()
                                 .primary()
                                 .debug_selector(|| "object-table-submit".into())

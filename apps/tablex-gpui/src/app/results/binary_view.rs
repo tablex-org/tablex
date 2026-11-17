@@ -754,7 +754,7 @@ pub(in crate::app) fn binary_icon_button(
     id: &'static str,
     tab_id: u64,
     path: &'static str,
-    tooltip: &'static str,
+    tooltip: std::borrow::Cow<'static, str>,
     variant: ButtonCustomVariant,
 ) -> Button {
     Button::new((id, tab_id))

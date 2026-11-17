@@ -167,52 +167,52 @@ fn register_actions(cx: &mut App) {
 pub(super) fn build() -> Vec<Menu> {
     vec![
         Menu::new(APP_NAME).items([
-            MenuItem::action(format!("About {APP_NAME}"), About),
-            MenuItem::action("Check for Updates…", CheckForUpdates),
+            MenuItem::action(t!("menu.about", name = APP_NAME).into_owned(), About),
+            MenuItem::action(t!("menu.check_for_updates"), CheckForUpdates),
             MenuItem::separator(),
-            MenuItem::action("Settings…", OpenSettings),
-            MenuItem::action("Driver Manager…", DriverManager),
+            MenuItem::action(t!("menu.settings"), OpenSettings),
+            MenuItem::action(t!("menu.driver_manager"), DriverManager),
             MenuItem::separator(),
-            MenuItem::action(format!("Hide {APP_NAME}"), Hide),
-            MenuItem::action("Hide Others", HideOtherApps),
-            MenuItem::action("Show All", ShowAll),
+            MenuItem::action(t!("menu.hide", name = APP_NAME).into_owned(), Hide),
+            MenuItem::action(t!("menu.hide_others"), HideOtherApps),
+            MenuItem::action(t!("menu.show_all"), ShowAll),
             MenuItem::separator(),
-            MenuItem::action(format!("Quit {APP_NAME}"), Quit),
+            MenuItem::action(t!("menu.quit", name = APP_NAME).into_owned(), Quit),
         ]),
-        Menu::new("File").items([
-            MenuItem::action("New Connection", NewConnection),
-            MenuItem::action("New Query", NewQuery),
-            MenuItem::action("Run SQL File…", RunSqlFile),
-            MenuItem::action("Backup…", BackupDatabase),
-            MenuItem::action("Restore…", RestoreDatabase),
-            MenuItem::action("Pending Transactions…", PendingTransactions),
+        Menu::new(t!("menu.file")).items([
+            MenuItem::action(t!("menu.new_connection"), NewConnection),
+            MenuItem::action(t!("menu.new_query"), NewQuery),
+            MenuItem::action(t!("menu.run_sql_file"), RunSqlFile),
+            MenuItem::action(t!("menu.backup"), BackupDatabase),
+            MenuItem::action(t!("menu.restore"), RestoreDatabase),
+            MenuItem::action(t!("menu.pending_transactions"), PendingTransactions),
             MenuItem::separator(),
-            MenuItem::action("Close Tab", CloseActiveTab),
+            MenuItem::action(t!("menu.close_tab"), CloseActiveTab),
         ]),
-        Menu::new("Edit").items([
-            MenuItem::os_action("Undo", Undo, OsAction::Undo),
-            MenuItem::os_action("Redo", Redo, OsAction::Redo),
+        Menu::new(t!("menu.edit")).items([
+            MenuItem::os_action(t!("menu.undo"), Undo, OsAction::Undo),
+            MenuItem::os_action(t!("menu.redo"), Redo, OsAction::Redo),
             MenuItem::separator(),
-            MenuItem::os_action("Cut", Cut, OsAction::Cut),
-            MenuItem::os_action("Copy", Copy, OsAction::Copy),
-            MenuItem::os_action("Paste", Paste, OsAction::Paste),
-            MenuItem::os_action("Select All", SelectAll, OsAction::SelectAll),
+            MenuItem::os_action(t!("menu.cut"), Cut, OsAction::Cut),
+            MenuItem::os_action(t!("menu.copy"), Copy, OsAction::Copy),
+            MenuItem::os_action(t!("menu.paste"), Paste, OsAction::Paste),
+            MenuItem::os_action(t!("menu.select_all_2"), SelectAll, OsAction::SelectAll),
         ]),
-        Menu::new("View").items([
-            MenuItem::action("Toggle Sidebar", ToggleSidebar),
-            MenuItem::action("Error Log", ToggleErrorLog),
-            MenuItem::action("AI Assistant", ToggleAssistant),
+        Menu::new(t!("menu.view")).items([
+            MenuItem::action(t!("menu.toggle_sidebar"), ToggleSidebar),
+            MenuItem::action(t!("menu.error_log"), ToggleErrorLog),
+            MenuItem::action(t!("menu.ai_assistant"), ToggleAssistant),
             MenuItem::separator(),
-            MenuItem::action("Split Right", SplitRight),
-            MenuItem::action("Split Down", SplitDown),
+            MenuItem::action(t!("menu.split_right"), SplitRight),
+            MenuItem::action(t!("menu.split_down"), SplitDown),
             MenuItem::separator(),
-            MenuItem::action("Command Palette", OpenCommandPalette),
+            MenuItem::action(t!("menu.command_palette"), OpenCommandPalette),
         ]),
-        Menu::new("Window").items([
-            MenuItem::action("Minimize", Minimize),
-            MenuItem::action("Zoom", Zoom),
+        Menu::new(t!("menu.window")).items([
+            MenuItem::action(t!("menu.minimize"), Minimize),
+            MenuItem::action(t!("menu.zoom"), Zoom),
         ]),
-        Menu::new("Help").items([MenuItem::action("Command Palette", OpenCommandPalette)]),
+        Menu::new(t!("menu.help")).items([MenuItem::action(t!("menu.command_palette"), OpenCommandPalette)]),
     ]
 }
 
@@ -222,7 +222,7 @@ impl AppRoot {
         use gpui_component::WindowExt as _;
         window.open_alert_dialog(cx, |dialog, _, _| {
             dialog
-                .title(format!("About {APP_NAME}"))
+                .title(t!("menu.about", name = APP_NAME).into_owned())
                 .child(format!("{APP_NAME} {}", env!("CARGO_PKG_VERSION")))
         });
     }

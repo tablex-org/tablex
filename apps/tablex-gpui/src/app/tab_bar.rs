@@ -255,7 +255,13 @@ pub(super) fn tab_label_parts(tab: &Tab, compact: bool) -> (std::borrow::Cow<'_,
     if tab.has_unsaved_file() {
         return (Cow::Owned(format!("{} \u{2022}", tab.title)), None);
     }
-    let title = Cow::Borrowed(tab.title.as_str());
+    // The tabs of the app's own pages are named in the interface language when they are drawn.
+    let title = match tab.kind {
+        TabKind::Welcome => t!("welcome.title"),
+        TabKind::Settings => t!("titlebar.settings"),
+        TabKind::DriverManager => t!("titlebar.driver_manager"),
+        _ => Cow::Borrowed(tab.title.as_str()),
+    };
     // A Redis key tab is already named `key@dbN`.
     if compact
         || tab.kind != TabKind::Query
@@ -2487,6 +2493,13 @@ fn group_by_entries(current: TabGroupBy) -> Vec<TabMenuEntry> {
     .collect()
 }
 
+/// A text of the tab and tab-group menus. Their entries carry the English label (the declarative menu
+/// is what the tests read); the label is drawn in the interface language when `menu.tab.<label>` has one.
+fn tab_menu_text(label: &str) -> std::borrow::Cow<'static, str> {
+    let key = format!("menu.tab.{}", crate::settings::registry::group_slug(label));
+    crate::i18n::lookup_or(&key, label)
+}
+
 fn menu_item(
     root: &gpui::WeakEntity<AppRoot>,
     tab_id: u64,
@@ -2503,7 +2516,7 @@ fn menu_item(
         return None;
     };
     let (root, command, tab_id) = (root.clone(), *command, tab_id);
-    let mut item = PopupMenuItem::new(*label)
+    let mut item = PopupMenuItem::new(tab_menu_text(label))
         .disabled(*disabled)
         .checked(*checked)
         .on_click(move |_, window, app| {
@@ -2538,7 +2551,7 @@ fn append_entries(
             TabMenuEntry::Separator => menu = menu.separator(),
             TabMenuEntry::GroupBySubmenu => {
                 let root = root.clone();
-                menu = menu.submenu("Group Tabs By", window, cx, move |sub, _, _| {
+                menu = menu.submenu(tab_menu_text("Group Tabs By"), window, cx, move |sub, _, _| {
                     group_by_entries(group_by)
                         .iter()
                         .filter_map(|entry| menu_item(&root, tab_id, entry))
@@ -2590,7 +2603,7 @@ fn group_chip_menu(
     };
     let item = |label: &'static str, icon: IconName, command: GroupChipCommand, disabled: bool| {
         let (root, group) = (root.clone(), group.clone());
-        PopupMenuItem::new(label)
+        PopupMenuItem::new(tab_menu_text(label))
             .icon(Icon::new(icon))
             .disabled(disabled)
             .on_click(move |_, window, app| {
@@ -2655,7 +2668,7 @@ fn bar_menu(
     else {
         return menu;
     };
-    let menu = menu.item(PopupMenuItem::label("Group tabs by"));
+    let menu = menu.item(PopupMenuItem::label(tab_menu_text("Group tabs by")));
     let entries = bar_menu_entries(group_by, compact);
     append_entries(menu, &root, tab_id, group_by, &entries, window, cx)
 }

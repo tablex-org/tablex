@@ -827,11 +827,11 @@ impl AppRoot {
             let target = target.clone();
             let error = error.clone();
             let message = error.borrow().clone();
-            dialog.title("Snowflake Worker ID")
-                .child("Enter 0–1023. Use a unique worker ID across machines and users that do not share this state folder. Processes sharing this folder coordinate through a lock. Keep the state file; deleting or restoring it can reuse IDs.")
+            dialog.title(t!("grid.snowflake_worker_id"))
+                .child(t!("grid.enter_0_1023_use_a_unique_worker_id_across_machi"))
                 .child(div().debug_selector(|| "snowflake-worker-input".into()).child(Input::new(&input)))
                 .when_some(message, |dialog, message| dialog.child(div().text_color(theme::danger()).child(message)))
-                .button_props(gpui_component::dialog::DialogButtonProps::default().ok_text("Stage Snowflake IDs"))
+                .button_props(gpui_component::dialog::DialogButtonProps::default().ok_text(t!("grid.stage_snowflake_ids")))
                 .confirm()
                 .on_ok(move |_, window, cx| {
                     let text = input.read(cx).value().to_string();
@@ -949,8 +949,8 @@ impl AppRoot {
         {
             window.open_alert_dialog(cx, |dialog, _, _| {
                 dialog
-                    .title("Refresh unavailable")
-                    .child("Wait for the current operation to finish.")
+                    .title(t!("grid.refresh_unavailable"))
+                    .child(t!("grid.wait_for_the_current_operation_to_finish"))
             });
             return;
         }
@@ -966,11 +966,11 @@ impl AppRoot {
         window.open_alert_dialog(cx, move |dialog, _, _| {
             let root = root.clone();
             dialog
-                .title("Discard staged changes and refresh?")
-                .child("Cancel preserves all edits, inserts and deletions in this tab.")
+                .title(t!("grid.discard_staged_changes_and_refresh"))
+                .child(t!("grid.cancel_preserves_all_edits_inserts_and_deletions"))
                 .button_props(
                     gpui_component::dialog::DialogButtonProps::default()
-                        .ok_text("Discard and Refresh"),
+                        .ok_text(t!("grid.discard_and_refresh")),
                 )
                 .confirm()
                 .on_ok(move |_, _, cx| {
@@ -1363,13 +1363,13 @@ impl AppRoot {
             let error = error.clone();
             let message = error.borrow().clone();
             dialog
-                .title("Increment from")
+                .title(t!("grid.increment_from"))
                 .child(Input::new(&input))
                 .when_some(message, |dialog, message| {
                     dialog.child(div().text_color(theme::danger()).child(message))
                 })
                 .button_props(
-                    gpui_component::dialog::DialogButtonProps::default().ok_text("Stage values"),
+                    gpui_component::dialog::DialogButtonProps::default().ok_text(t!("grid.stage_values")),
                 )
                 .confirm()
                 .on_ok(move |_, window, cx| {
@@ -1405,13 +1405,13 @@ impl AppRoot {
             Ok(edits) => {
                 if let Err(message) = self.stage_context_edits(tab_id, edits, None, cx) {
                     window.open_alert_dialog(cx, move |dialog, _, _| {
-                        dialog.title("Cannot set NULL").child(message.clone())
+                        dialog.title(t!("grid.cannot_set_null")).child(message.clone())
                     });
                 }
             }
             Err(message) => {
                 window.open_alert_dialog(cx, move |dialog, _, _| {
-                    dialog.title("Cannot set NULL").child(message.clone())
+                    dialog.title(t!("grid.cannot_set_null")).child(message.clone())
                 });
             }
         }
@@ -1432,13 +1432,13 @@ impl AppRoot {
             let error = error.clone();
             let message = error.borrow().clone();
             dialog
-                .title("Bulk edit selected cells")
+                .title(t!("grid.bulk_edit_selected_cells"))
                 .child(Input::new(&input))
                 .when_some(message, |dialog, message| {
                     dialog.child(div().text_color(theme::danger()).child(message))
                 })
                 .button_props(
-                    gpui_component::dialog::DialogButtonProps::default().ok_text("Stage changes"),
+                    gpui_component::dialog::DialogButtonProps::default().ok_text(t!("grid.stage_changes")),
                 )
                 .confirm()
                 .on_ok(move |_, window, cx| {
@@ -1489,7 +1489,7 @@ impl AppRoot {
         };
         if self.context_sort_blocked(tab_id) {
             window.open_alert_dialog(cx, |dialog, _, _| {
-                dialog.title("Sort unavailable").child(
+                dialog.title(t!("grid.sort_unavailable")).child(
                     "Wait for the query and finish pending changes before reordering this page.",
                 )
             });
@@ -1511,7 +1511,7 @@ impl AppRoot {
         let mut grid = self.grid(tab_id).clone();
         if let Err(message) = grid.sort_page(column, kind, descending) {
             window.open_alert_dialog(cx, move |dialog, _, _| {
-                dialog.title("Sort failed").child(message.clone())
+                dialog.title(t!("grid.sort_failed")).child(message.clone())
             });
             return;
         }
@@ -1557,8 +1557,8 @@ impl AppRoot {
         if sql_table && !self.sql_sort_available(tab_id) {
             window.open_alert_dialog(cx, |dialog, _, _| {
                 dialog
-                    .title("Database sort unavailable")
-                    .child("This SQL connection cannot run a table sort.")
+                    .title(t!("grid.database_sort_unavailable"))
+                    .child(t!("grid.this_sql_connection_cannot_run_a_table_sort"))
             });
             return;
         }
@@ -1570,7 +1570,7 @@ impl AppRoot {
         };
         if self.context_sort_blocked(tab.id) {
             window.open_alert_dialog(cx, |dialog, _, _| {
-                dialog.title("Sort unavailable").child(
+                dialog.title(t!("grid.sort_unavailable")).child(
                     "Wait for the query and finish pending changes before sorting the database.",
                 )
             });
@@ -1628,7 +1628,7 @@ impl AppRoot {
                     let error = error.to_string();
                     window.open_alert_dialog(cx, move |dialog, _, _| {
                         dialog
-                            .title("Database sort unavailable")
+                            .title(t!("grid.database_sort_unavailable"))
                             .child(error.clone())
                     });
                 }
@@ -1657,7 +1657,7 @@ impl AppRoot {
     ) {
         if self.context_sort_blocked(tab_id) {
             window.open_alert_dialog(cx, |dialog, _, _| {
-                dialog.title("Sort unavailable").child(
+                dialog.title(t!("grid.sort_unavailable")).child(
                     "Wait for the query and finish pending changes before restoring page order.",
                 )
             });
@@ -1723,8 +1723,8 @@ impl AppRoot {
         if self.context_sort_blocked(tab.id) {
             window.open_alert_dialog(cx, |dialog, _, _| {
                 dialog
-                    .title("Sort unavailable")
-                    .child("Wait for the query and finish pending changes before clearing sort.")
+                    .title(t!("grid.sort_unavailable"))
+                    .child(t!("grid.wait_for_the_query_and_finish_pending_changes_be"))
             });
             return;
         }
@@ -1780,7 +1780,7 @@ impl AppRoot {
             }
             Err(error) => {
                 window.open_alert_dialog(cx, move |dialog, _, _| {
-                    dialog.title("Cannot clone SQL row").child(error.clone())
+                    dialog.title(t!("grid.cannot_clone_sql_row")).child(error.clone())
                 });
             }
         }
