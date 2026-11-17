@@ -5,6 +5,11 @@ use std::path::PathBuf;
 
 pub(super) struct SidebarState {
     pub(super) path: Option<PathBuf>,
+    /// The app database that keeps the pinned rows; none for a scenario (it never touches the
+    /// user's data), so its pins last for the run.
+    pub(super) pins_db: Option<PathBuf>,
+    /// The last pin write (each waits for the one before it).
+    pub(super) pin_writes: Option<gpui::Task<()>>,
     pub(super) error: Option<String>,
     writes_blocked: bool,
     pub(super) search_error: Option<String>,
@@ -27,6 +32,8 @@ impl SidebarState {
     ) -> Self {
         let mut state = Self {
             path: None,
+            pins_db: None,
+            pin_writes: None,
             error: None,
             writes_blocked: false,
             search_error: None,
@@ -79,6 +86,7 @@ impl SidebarState {
             }
             return state;
         }
+        state.pins_db = Some(engine_storage::app_db::default_path());
         match SidebarPreferences::default_path() {
             Ok(path) => {
                 state.path = Some(path.clone());

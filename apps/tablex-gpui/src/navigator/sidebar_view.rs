@@ -610,6 +610,8 @@ impl NavigatorState {
                     bucket.sort_by_cached_key(|conn| std::cmp::Reverse(conn.name.to_lowercase()))
                 }
             }
+            // Pinned connections first, the chosen order within each part (the sort is stable).
+            bucket.sort_by_key(|conn| !conn.is_pinned);
         }
         let mut groups: HashMap<Option<&str>, Vec<&ConnectionGroup>> = HashMap::new();
         for group in &self.preferences.groups {
@@ -794,7 +796,12 @@ impl NavigatorState {
             return;
         }
         if let Some(Some(children)) = self.children.get(parent) {
-            for child in children {
+            // The pinned children first, in the order they were pinned, then the others as listed.
+            let pinned = self.pinned_children(parent, children);
+            let others = children
+                .iter()
+                .filter(|child| pinned.is_empty() || !self.node_pins.contains_key(*child));
+            for child in pinned.iter().copied().chain(others) {
                 if !self.visible_filter_allows(child) {
                     continue;
                 }

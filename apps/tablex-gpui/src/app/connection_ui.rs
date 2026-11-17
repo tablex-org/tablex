@@ -1427,7 +1427,18 @@ impl AppRoot {
     }
 
     pub(super) fn toggle_connection_pin(&mut self, connection_id: &str, cx: &mut Context<Self>) {
+        // A scenario never writes the user's store: its pin lasts for the run.
         if self.scenario_ui.service.is_some() {
+            if let Some(connection) = self
+                .saved_connections
+                .iter_mut()
+                .find(|connection| connection.matches_id(connection_id))
+            {
+                connection.is_pinned = !connection.is_pinned;
+                self.navigator.set_connections(self.saved_connections.clone());
+                self.navigator_ui.generation = self.navigator.generation();
+                cx.notify();
+            }
             return;
         }
         let Some(connection) = self

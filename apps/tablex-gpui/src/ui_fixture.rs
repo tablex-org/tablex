@@ -1441,7 +1441,7 @@ fn connection(id: &str, name: &str, kind: ConnectionKind, uri: &str) -> SavedCon
         uri: uri.into(),
         kind,
         save_password: false,
-        is_pinned: kind == ConnectionKind::Postgres,
+        is_pinned: false,
         disabled: false,
         ssh_tunnel: false,
     }

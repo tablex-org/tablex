@@ -100,6 +100,7 @@ mod sidebar_batch;
 mod sidebar_batch_ui;
 mod sidebar_config;
 mod sidebar_import;
+mod sidebar_pins;
 mod smart_commit;
 mod source_tab;
 mod sql_editor;
@@ -587,6 +588,9 @@ impl AppRoot {
         }
         app.apply_tab_bar_preferences(cx);
         app.init_workspace_session(scenario_enabled, cx);
+        // Tests that need the stored pins call `load_node_pins` themselves, on a database of their own.
+        #[cfg(not(test))]
+        app.load_node_pins(cx);
         if matches!(
             scenario.as_ref().map(|scenario| scenario.kind),
             Some(
@@ -727,6 +731,7 @@ mod tests {
     include!("tests/connection_overview.rs");
     include!("tests/navigator.rs");
     include!("tests/sidebar.rs");
+    include!("tests/sidebar_pins.rs");
     include!("tests/navigator_status.rs");
     include!("tests/sidebar_batch.rs");
     include!("tests/sidebar_import.rs");

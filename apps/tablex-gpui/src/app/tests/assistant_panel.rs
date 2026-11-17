@@ -5940,8 +5940,8 @@ mod assistant_panel_tests {
         visual.simulate_mouse_down(row.center(), gpui::MouseButton::Right, Default::default());
         visual.simulate_mouse_up(row.center(), gpui::MouseButton::Right, Default::default());
         visual.run_until_parked();
-        // Open, Copy SQL, New Query, then the assistant.
-        visual.simulate_keystrokes("down down down down enter");
+        // Pin, Open, Copy SQL, New Query, then the assistant.
+        visual.simulate_keystrokes("down down down down down enter");
         settle(visual);
     }
 

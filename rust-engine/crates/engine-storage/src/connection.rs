@@ -282,14 +282,30 @@ pub fn delete_connection(id: &str) -> Result<()> {
         params![id],
     )?;
     tx.execute("DELETE FROM saved_connections WHERE id = ?1", params![id])?;
-    tx.commit()
+    tx.commit()?;
+    drop(db);
+    forget_node_pins(&[id.to_owned()]);
+    Ok(())
+}
+
+/// The sidebar pins of deleted connections go with them. They are in the app database, which the
+/// store may not be (a run on the old file after a failed import has no such table), so this is a
+/// step of its own: a pin left behind names a connection that is gone and is never listed.
+fn forget_node_pins(ids: &[String]) {
+    let db = app_db::default_path();
+    for id in ids {
+        let _ = crate::pinned_nodes::remove_connection(&db, id);
+    }
 }
 
 pub fn delete_connections_batch(ids: &[String]) -> Result<()> {
     ensure_db()?;
     let mut db = CONNECTION_DB.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let conn = db.as_mut().expect("connection db initialized");
-    delete_connections_batch_impl(conn, ids)
+    delete_connections_batch_impl(conn, ids)?;
+    drop(db);
+    forget_node_pins(ids);
+    Ok(())
 }
 
 pub fn list_project_connection_ids(project_id: &str) -> Result<Vec<String>> {
@@ -641,8 +657,17 @@ mod tests {
         assert_eq!(loaded.name, "Beta");
         assert_eq!(loaded.last_connected, None);
 
+        // The sidebar pins of a connection go with it, those of the others stay.
+        let db = app_db::default_path();
+        crate::pinned_nodes::pin(&db, "conn-1", "orders").unwrap();
+        crate::pinned_nodes::pin(&db, "conn-2", "orders").unwrap();
         delete_connection("conn-1").expect("delete connection");
         assert!(get_connection("conn-1").expect("get deleted").is_none());
+        assert!(crate::pinned_nodes::list(&db, "conn-1").unwrap().is_empty());
+        assert_eq!(crate::pinned_nodes::list(&db, "conn-2").unwrap(), ["orders"]);
+        crate::pinned_nodes::pin(&db, "conn-2", "users").unwrap();
+        delete_connections_batch(&["conn-2".to_string()]).expect("delete batch");
+        assert!(crate::pinned_nodes::list(&db, "conn-2").unwrap().is_empty());
     }
 
     #[test]

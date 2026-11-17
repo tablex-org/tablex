@@ -1133,6 +1133,15 @@ pub(super) fn build_connection_menu(
         .unwrap_or_default();
     let (can_create, history_loading, history_entries, history_error, can_backup, can_accounts, can_process_list) = snapshot;
 
+    // Pin / Unpin leads the menu.
+    let menu = super::sidebar_pins::pin_menu_head(
+        menu,
+        &menu_root,
+        &NavigatorNodeId::Connection {
+            connection: connection_id.clone(),
+        },
+        cx,
+    );
     // First action reflects live state: Cancel while connecting, Close when
     // connected, Connect otherwise. Plain on_click with the captured id: menu
     // clicks never dispatch through row listeners, so exactly one connection

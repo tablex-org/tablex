@@ -34,6 +34,7 @@
 //! | `query_history` | [`crate::history`] |
 //! | `saved_aggregates` | [`crate::aggregate`] |
 //! | `connection_view_state` | [`crate::view_state`] |
+//! | `pinned_nodes` | the sidebar rows pinned to the top of their siblings ([`crate::pinned_nodes`]) |
 //! | `documents` | JSON documents of the app: workspace session, update check, diagram layouts ([`crate::documents`]) |
 //! | `assistant_conversations` | the assistant's kept conversations ([`crate::documents`]) |
 //! | `imports` | one row per store whose old file was moved in ([`crate::legacy`]) |
@@ -175,6 +176,14 @@ const MIGRATIONS: &[&str] = &[
         value TEXT NOT NULL
     ) WITHOUT ROWID;
     INSERT INTO meta (key, value) VALUES ('min_reader_version', '5')",
+    // 6: the rows the sidebar keeps at the top of their siblings (see `crate::pinned_nodes`).
+    // Additive: `min_reader_version` stays at 5, an older build ignores the table.
+    "CREATE TABLE pinned_nodes (
+        connection_id TEXT NOT NULL,
+        node TEXT NOT NULL,
+        position INTEGER NOT NULL,
+        PRIMARY KEY (connection_id, node)
+    ) WITHOUT ROWID",
 ];
 
 /// The `user_version` this build writes and understands.
@@ -459,9 +468,37 @@ mod tests {
         let kept: i64 = conn.query_row("SELECT updated_at FROM secrets WHERE name = 'a'", [], |r| r.get(0)).unwrap();
         assert_eq!(kept, 7);
         for table in ["imports", "saved_connections", "projects", "project_connection_memberships", "query_history",
-                      "saved_aggregates", "connection_view_state", "documents", "assistant_conversations"] {
+                      "saved_aggregates", "connection_view_state", "documents", "assistant_conversations",
+                      "meta", "pinned_nodes"] {
             conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get::<_, i64>(0)).unwrap();
         }
+    }
+
+    #[test]
+    fn a_version_5_database_gets_the_pins_table_and_keeps_everything() {
+        let (_dir, path) = temp_db();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // How the build before the pins left it: five steps applied.
+        let old = Connection::open(&path).unwrap();
+        for step in &MIGRATIONS[..5] {
+            old.execute_batch(step).unwrap();
+        }
+        old.execute("INSERT INTO secrets VALUES ('a', x'00', x'01', 7)", []).unwrap();
+        old.execute("INSERT INTO documents VALUES ('session', 'workspace', '{}', 3)", []).unwrap();
+        old.pragma_update(None, "user_version", 5).unwrap();
+        drop(old);
+        let conn = open(&path).unwrap();
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
+        let kept: i64 = conn.query_row("SELECT updated_at FROM secrets WHERE name = 'a'", [], |r| r.get(0)).unwrap();
+        assert_eq!(kept, 7);
+        let document: String = conn.query_row("SELECT json FROM documents", [], |r| r.get(0)).unwrap();
+        assert_eq!(document, "{}");
+        let pins: i64 = conn.query_row("SELECT COUNT(*) FROM pinned_nodes", [], |r| r.get(0)).unwrap();
+        assert_eq!(pins, 0);
+        // An older build still opens it: the minimum reader did not move.
+        let minimum: String =
+            conn.query_row("SELECT value FROM meta WHERE key = 'min_reader_version'", [], |r| r.get(0)).unwrap();
+        assert_eq!(minimum, "5");
     }
 
     #[test]

@@ -842,8 +842,8 @@ fn sidebar_view_diagram_opens_one_schema_tab_that_loads_and_opens_tables(cx: &mu
     visual.simulate_mouse_down(row.center(), gpui::MouseButton::Right, Default::default());
     visual.simulate_mouse_up(row.center(), gpui::MouseButton::Right, Default::default());
     visual.run_until_parked();
-    // Schema menu: New Query, View Diagram.
-    for _ in 0..2 {
+    // Schema menu: Pin, New Query, View Diagram.
+    for _ in 0..3 {
         visual.simulate_keystrokes("down");
     }
     visual.simulate_keystrokes("enter");

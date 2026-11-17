@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use crate::connections::{ConnectionKind, SavedConnection};
 use crate::sidebar_preferences::SidebarPreferences;
 pub use engine_driver_api::sql::{SchemaObjectKind, SchemaObjectRef};
+mod pins;
 mod sidebar_view;
 pub mod redis_tree;
 pub mod sql_driver;
@@ -318,6 +319,12 @@ pub struct NavigatorState {
     /// provider nodes) changes; lets the command palette rebuild its index
     /// only when the catalog actually changed (expansion/search do not).
     catalog_revision: u64,
+    /// Rows pinned to the top of their siblings, with the order they were pinned in (see
+    /// [`pins`]); connections pin through their saved record instead.
+    node_pins: HashMap<NavigatorNodeId, u64>,
+    /// The connections that have a pinned row.
+    pinned_connections: HashSet<String>,
+    next_pin: u64,
     /// Settings: system databases are hidden for connections without a
     /// visible-objects filter of their own.
     pub(crate) hide_system_by_default: bool,
@@ -4197,5 +4204,92 @@ mod tests {
         state.fail_load(&reports, "permission denied for database reports".into());
         let row = state.visible_rows().into_iter().find(|row| row.id == reports).unwrap();
         assert_eq!(row.load, Some(NodeLoadState::Failed("permission denied for database reports".into())), "the row carries it at once");
+    }
+
+    #[test]
+    fn pinned_connections_lead_whatever_the_sort_and_keep_the_sort_among_themselves() {
+        let ids = [
+            "11111111-1111-1111-1111-111111111111",
+            "22222222-2222-2222-2222-222222222222",
+            "33333333-3333-3333-3333-333333333333",
+            "44444444-4444-4444-4444-444444444444",
+        ];
+        let mut connections: Vec<_> = ["delta", "alpha", "charlie", "bravo"]
+            .iter()
+            .zip(ids)
+            .map(|(name, id)| sqlite_conn(id, name))
+            .collect();
+        connections[0].is_pinned = true; // delta
+        connections[3].is_pinned = true; // bravo
+        let mut state = NavigatorState::new(connections);
+        let labels = |state: &NavigatorState| -> Vec<String> {
+            state.visible_rows().into_iter().map(|row| row.label).collect()
+        };
+        // Manual: the stored order within each part.
+        assert_eq!(labels(&state), ["delta", "bravo", "alpha", "charlie"]);
+        let mut prefs = SidebarPreferences {
+            sort: ConnectionSort::Ascending,
+            ..Default::default()
+        };
+        state.set_preferences(prefs.clone()).unwrap();
+        assert_eq!(labels(&state), ["bravo", "delta", "alpha", "charlie"]);
+        prefs.sort = ConnectionSort::Descending;
+        state.set_preferences(prefs).unwrap();
+        assert_eq!(labels(&state), ["delta", "bravo", "charlie", "alpha"]);
+    }
+
+    #[test]
+    fn pinned_children_lead_in_pin_order_per_place_and_unpin_restores_the_listing() {
+        let mut state = NavigatorState::new(vec![sqlite_conn(CONN, "Workspace")]);
+        let root = NavigatorNodeId::Connection { connection: CONN.into() };
+        let request = state.toggle_expansion(&root).request.unwrap();
+        state.apply_load(
+            &request,
+            state.generation(),
+            Ok(["a", "b", "c", "d"].map(|name| database_child(CONN, name)).to_vec()),
+        );
+        let labels = |state: &NavigatorState| -> Vec<String> {
+            state.visible_rows().into_iter().skip(1).map(|row| row.label).collect()
+        };
+        let database = |name: &str| NavigatorNodeId::Database { connection: CONN.into(), database: name.into() };
+        assert_eq!(labels(&state), ["a", "b", "c", "d"]);
+        assert!(state.set_node_pinned(&database("c"), true));
+        assert!(state.set_node_pinned(&database("b"), true));
+        assert!(!state.set_node_pinned(&database("b"), true), "pinned already: it keeps its place");
+        assert_eq!(labels(&state), ["c", "b", "a", "d"]);
+        assert!(state.is_pinned(&database("c")) && !state.is_pinned(&database("a")));
+        // The same name on another connection is another row.
+        let other = NavigatorNodeId::Database { connection: "other".into(), database: "c".into() };
+        assert!(!state.is_pinned(&other));
+        assert!(state.set_node_pinned(&database("c"), false));
+        assert_eq!(labels(&state), ["b", "a", "c", "d"]);
+        assert!(!state.set_node_pinned(&database("c"), false), "nothing to unpin");
+        assert!(state.set_node_pinned(&database("b"), false));
+        assert_eq!(labels(&state), ["a", "b", "c", "d"]);
+        // Stored pins come back in their order; a pin of a row that is not listed changes nothing.
+        state.set_node_pins([database("d"), database("gone"), database("a")]);
+        assert_eq!(labels(&state), ["d", "a", "b", "c"]);
+    }
+
+    #[test]
+    fn a_pin_key_names_the_exact_place_and_reads_back() {
+        let object = NavigatorNodeId::Object {
+            connection: CONN.into(),
+            database: "app".into(),
+            schema: "public".into(),
+            object: "orders".into(),
+        };
+        let key = object.pin_key().unwrap();
+        assert_eq!(NavigatorNodeId::from_pin_key(CONN, &key), Some(object.clone()));
+        // Another connection reads the same key as its own row.
+        assert_ne!(NavigatorNodeId::from_pin_key("other", &key), Some(object));
+        for id in [
+            NavigatorNodeId::Database { connection: CONN.into(), database: "a/b".into() },
+            NavigatorNodeId::Schema { connection: CONN.into(), database: "d".into(), schema: "s\"q".into() },
+            NavigatorNodeId::Provider { connection: CONN.into(), node: "collection:d:c".into() },
+        ] {
+            assert_eq!(NavigatorNodeId::from_pin_key(CONN, &id.pin_key().unwrap()), Some(id));
+        }
+        assert_eq!(NavigatorNodeId::Connection { connection: CONN.into() }.pin_key(), None);
     }
 }

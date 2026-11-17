@@ -110,10 +110,11 @@ fn connection_menu_copy_name_writes_display_name_through_real_menu(cx: &mut Test
     });
     visual.update(|window, _| window.refresh());
     visual.run_until_parked();
-    // Disconnected Mongo menu: Connect(0), Copy Name(1) — first down lands on
-    // index 0, second on the first clickable past the separator.
+    // Disconnected Mongo menu: Pin(0), Connect(1), Copy Name(2) — first down lands on
+    // index 0, the third on the first clickable past the separator.
     let index = connection_row_index(&app, visual, "Mongo fixture");
     right_click_row(visual, index);
+    visual.simulate_keystrokes("down");
     visual.simulate_keystrokes("down");
     visual.simulate_keystrokes("down");
     visual.simulate_keystrokes("enter");
@@ -140,11 +141,11 @@ fn connection_menu_new_query_opens_scoped_tab_through_real_menu(cx: &mut TestApp
     });
     visual.update(|window, _| window.refresh());
     visual.run_until_parked();
-    // Disconnected Postgres menu: Connect, Copy Name, Copy Info, New Query.
+    // Disconnected Postgres menu: Pin, Connect, Copy Name, Copy Info, New Query.
     let tabs_before = app.read_with(visual, |this, _| this.workspace.tabs().len());
     let index = connection_row_index(&app, visual, "Postgres fixture");
     right_click_row(visual, index);
-    for _ in 0..4 {
+    for _ in 0..5 {
         visual.simulate_keystrokes("down");
     }
     visual.simulate_keystrokes("enter");
@@ -173,7 +174,7 @@ fn disconnected_mongo_menu_new_query_opens_idle_script_editor(cx: &mut TestAppCo
     visual.run_until_parked();
     let index = connection_row_index(&app, visual, "Mongo fixture");
     right_click_row(visual, index);
-    for _ in 0..4 {
+    for _ in 0..5 {
         visual.simulate_keystrokes("down");
     }
     visual.simulate_keystrokes("enter");
@@ -507,7 +508,7 @@ fn mongo_menu_history_opens_saved_js_from_same_menu_without_running(cx: &mut Tes
                 .is_some_and(|entries| entries.len() == 1)
         })
     });
-    for _ in 0..5 {
+    for _ in 0..6 {
         visual.simulate_keystrokes("down");
     }
     visual.simulate_keystrokes("right");
@@ -554,7 +555,7 @@ fn open_menu_history_populates_and_opens_file_without_reopening_menu(cx: &mut Te
                 .is_some_and(|entries| entries.len() == 1)
         })
     });
-    for _ in 0..5 {
+    for _ in 0..6 {
         visual.simulate_keystrokes("down");
     }
     visual.simulate_keystrokes("right");

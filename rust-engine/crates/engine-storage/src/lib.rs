@@ -6,6 +6,7 @@ pub mod documents;
 pub mod history;
 pub mod legacy;
 pub mod paths;
+pub mod pinned_nodes;
 pub mod view_state;
 
 #[cfg(test)]

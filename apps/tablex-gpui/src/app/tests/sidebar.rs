@@ -1059,8 +1059,8 @@ fn sidebar_menu_new_query_opens_scoped_tab_through_real_menu(cx: &mut TestAppCon
     visual.simulate_mouse_down(row.center(), gpui::MouseButton::Right, Default::default());
     visual.simulate_mouse_up(row.center(), gpui::MouseButton::Right, Default::default());
     visual.run_until_parked();
-    // Object menu: Open, Copy SQL, New Query.
-    for _ in 0..3 {
+    // Object menu: Pin, Open, Copy SQL, New Query.
+    for _ in 0..4 {
         visual.simulate_keystrokes("down");
     }
     visual.simulate_keystrokes("enter");

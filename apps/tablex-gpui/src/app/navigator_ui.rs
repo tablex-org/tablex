@@ -1763,6 +1763,21 @@ impl AppRoot {
                                     .text_ellipsis()
                                     .child(row.label.clone()),
                             );
+                        // A pinned row carries a small pin after its name.
+                        if this.navigator.is_pinned(&row.id) {
+                            element = element.child(
+                                div()
+                                    .debug_selector(move || format!("sidebar-pin-{index}"))
+                                    .flex_shrink_0()
+                                    .px(px(4.0))
+                                    .child(
+                                        Icon::empty()
+                                            .path("icons/pin.svg")
+                                            .size(px(10.0))
+                                            .text_color(theme::text_faint()),
+                                    ),
+                            );
+                        }
                         element = element.hover(move |style| style.bg(row_hover));
                         // A Redis key shows its type at the right edge.
                         if provider_kind == Some(crate::navigator::redis_tree::KEY) {
@@ -2147,6 +2162,9 @@ impl AppRoot {
                                     ))
                                     .context_menu(move |menu, window, cx| {
                                         let (ask_root, ask_id) = (ask_root.clone(), ask_id.clone());
+                                        let menu = super::sidebar_pins::pin_menu_head(
+                                            menu, &ask_root, &ask_id, cx,
+                                        );
                                         let menu = menu
                                             .menu("Open", Box::new(OpenNavigatorNode))
                                             .menu("Copy SQL", Box::new(CopyNavigatorSql));
@@ -2192,8 +2210,12 @@ impl AppRoot {
                                 // Redis database / namespace / key rows.
                                 if let Some(target) = this.redis_node_target(&row_id) {
                                     let target_root = menu_root.clone();
+                                    let pin_id = row_id.clone();
                                     return base
-                                        .context_menu(move |menu, _, _| {
+                                        .context_menu(move |menu, _, cx| {
+                                            let menu = super::sidebar_pins::pin_menu_head(
+                                                menu, &target_root, &pin_id, cx,
+                                            );
                                             super::redis::build_redis_node_menu(
                                                 menu,
                                                 target_root.clone(),
@@ -2222,8 +2244,12 @@ impl AppRoot {
                                 }
                                 if let Some(target) = this.mongo_node_target(&row_id) {
                                     let target_root = menu_root.clone();
+                                    let pin_id = row_id.clone();
                                     return base
                                         .context_menu(move |menu, _, cx| {
+                                            let menu = super::sidebar_pins::pin_menu_head(
+                                                menu, &target_root, &pin_id, cx,
+                                            );
                                             super::mongo_admin_view::build_mongo_node_menu(
                                                 menu,
                                                 target_root.clone(),
@@ -2239,10 +2265,11 @@ impl AppRoot {
                                 let open_id = row_id.clone();
                                 let open_root = menu_root.clone();
                                 return base
-                                    .context_menu(move |menu, _, _| {
+                                    .context_menu(move |menu, _, cx| {
                                         let open_id = open_id.clone();
                                         let open_root = open_root.clone();
-                                        let mut built = menu;
+                                        let mut built =
+                                            super::sidebar_pins::pin_menu_head(menu, &open_root, &open_id, cx);
                                         if can_open {
                                             built =
                                                 built.item(PopupMenuItem::new("Open").on_click(
@@ -2288,6 +2315,9 @@ impl AppRoot {
                             };
                             return base
                                 .context_menu(move |menu, window, cx| {
+                                    let menu = super::sidebar_pins::pin_menu_head(
+                                        menu, &diagram_root, &object_id, cx,
+                                    );
                                     let menu = menu.item(new_query_item());
                                     let menu = match diagram_id.clone() {
                                         Some(id) => {
