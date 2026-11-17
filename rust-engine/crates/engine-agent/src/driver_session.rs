@@ -31,8 +31,10 @@ use engine_driver_api::{
 };
 use engine_driver_host::{DriverHandle, DriverSession, LoaderError, SharedDriverSession};
 use engine_driver_kit::sql::SqlLexOptions;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Rows rendered per `render_cell_batch` call.
 const READ_CHUNK_ROWS: u64 = 64;
@@ -502,6 +504,69 @@ impl Session for DriverSessionAdapter {
         Ok(result)
     }
 
+    /// One raw command through the driver's `mongo.command` op, always `read_only`: the driver
+    /// refuses every command that can write (and a pipeline with `$out` / `$merge`) before it
+    /// sends anything. A lock-free runner per command, so a cancel reaches it from any thread and
+    /// a command after a cancel (closing a cursor) gets an operation of its own.
+    fn mongo_command(
+        &self,
+        database: &str,
+        command: &Value,
+        max_time: Duration,
+        cancel: &CancelToken,
+    ) -> Result<Value, AgentError> {
+        if !self.handle.capabilities().has(Capability::MongoCommand) {
+            return Err(AgentError::Unsupported(
+                "this MongoDB driver is too old to be queried by agents; update it in Driver Manager"
+                    .into(),
+            ));
+        }
+        if cancel.is_cancelled() {
+            return Err(AgentError::Cancelled);
+        }
+        let runner = self.session.query_runner().map_err(map_error)?;
+        let operation_id = runner.operation_id();
+        let _hook = {
+            let handle = Arc::clone(&self.handle);
+            let connection_id = self.connection_id;
+            cancel.on_cancel(move || {
+                let _ = handle.cancel_operation(connection_id, &CancelRequest { operation_id });
+            })
+        };
+        let request = json!({
+            "operation_id": operation_id.0,
+            "database": database,
+            "command": command,
+            "read_only": true,
+            "max_time_ms": u64::try_from(max_time.as_millis()).unwrap_or(u64::MAX),
+        });
+        let response = runner
+            .mongo_command(&request.to_string())
+            .map_err(map_error)?;
+        let envelope: CommandEnvelope = serde_json::from_str(&response).map_err(|error| {
+            AgentError::driver("query.malformed", format!("bad driver reply: {error}"), false)
+        })?;
+        match envelope {
+            CommandEnvelope {
+                ok: true,
+                value: Some(body),
+                ..
+            } => Ok(body.reply),
+            CommandEnvelope {
+                error: Some(error), ..
+            } => Err(map_error(LoaderError::DriverRejected {
+                code: error.code,
+                message: error.message,
+                retryable: error.retryable,
+            })),
+            _ => Err(AgentError::driver(
+                "query.malformed",
+                "the driver's reply has neither a value nor an error",
+                false,
+            )),
+        }
+    }
+
     /// `BEGIN` / `COMMIT` / `ROLLBACK` as a plain driver query, not read-only and not through
     /// the agent policy (which refuses statements that change transaction state). Only for the
     /// engines whose transaction lives on one session: PostgreSQL and SQLite.
@@ -535,6 +600,29 @@ impl Session for DriverSessionAdapter {
     fn secrets(&self) -> Vec<SecretText> {
         self.secrets.clone()
     }
+}
+
+/// The driver's response envelope of `mongo.command`.
+#[derive(Deserialize)]
+struct CommandEnvelope {
+    ok: bool,
+    #[serde(default)]
+    value: Option<CommandReply>,
+    #[serde(default)]
+    error: Option<CommandErrorBody>,
+}
+
+#[derive(Deserialize)]
+struct CommandReply {
+    reply: Value,
+}
+
+#[derive(Deserialize)]
+struct CommandErrorBody {
+    code: String,
+    message: String,
+    #[serde(default)]
+    retryable: bool,
 }
 
 fn page_columns(page: &engine_driver_api::QueryPage) -> Vec<ResultColumn> {

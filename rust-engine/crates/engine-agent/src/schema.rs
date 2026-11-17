@@ -35,6 +35,13 @@ fn integer(description: &str) -> Value {
     json!({"type": "integer", "description": description})
 }
 
+/// A JSON document whose keys are not known beforehand (a MongoDB filter, sort or stage). It has
+/// no `properties`, so it is outside the strict tool use subset: a tool that takes one is never
+/// sent as a strict tool.
+fn document(description: &str) -> Value {
+    json!({"type": "object", "description": description})
+}
+
 fn boolean(description: &str) -> Value {
     json!({"type": "boolean", "description": description})
 }
@@ -162,6 +169,33 @@ fn statement_output() -> Value {
     )
 }
 
+fn documents_output() -> Value {
+    object(
+        vec![
+            (
+                "documents",
+                array(
+                    document("One document as relaxed Extended JSON. A document too large to show is replaced by {\"$truncated\": \"the start of its text\"}."),
+                    "The documents, in the order the server returned them. Strings over the cell limit end with a [truncated, N bytes in total] marker.",
+                ),
+            ),
+            ("document_count", integer("Documents returned.")),
+            ("truncated", boolean("More documents exist than were returned.")),
+            (
+                "truncation",
+                string_enum(&["row_limit", "byte_limit"], "Why the result was cut."),
+            ),
+            ("cells_truncated", integer("Strings that were cut, and documents too large to show.")),
+            ("limit", integer("The document limit that applied.")),
+            ("elapsed_ms", integer("Time the query took.")),
+        ],
+        &["documents", "document_count", "truncated", "cells_truncated", "limit", "elapsed_ms"],
+    )
+}
+
+const MONGO_JSON: &str = "JSON as MongoDB takes it; typed values use Extended JSON, e.g. \
+    {\"$oid\": \"...\"}, {\"$date\": \"2024-01-31T00:00:00Z\"}, {\"$numberLong\": \"123\"}.";
+
 /// Every tool, in a stable order, with the transaction tools and `execute_query`'s
 /// `transaction_id`.
 pub fn tool_specs() -> Vec<ToolSpec> {
@@ -241,7 +275,7 @@ fn spec_for(tool: ToolName, transactions: bool) -> ToolSpec {
                     connection.clone(),
                     ("kind", string_enum(&KINDS, "Database engine.")),
                     ("access", string_enum(&ACCESS_LEVELS, "What you may do now.")),
-                    ("language", string_enum(&["sql", "redis", "other"], "Statement language; `other` is browse only.")),
+                    ("language", string_enum(&["sql", "redis", "mongo", "other"], "Statement language: `sql` runs with execute_query, `redis` with execute_redis_command, `mongo` with mongo_find, mongo_aggregate and mongo_count; `other` is browse only.")),
                     ("supports_schemas", boolean("Tables live in schemas inside databases.")),
                     ("already_open", boolean("The session was already open.")),
                     ("statement_timeout_secs", integer("Statements are cancelled after this many seconds.")),
@@ -589,6 +623,75 @@ fn spec_for(tool: ToolName, transactions: bool) -> ToolSpec {
             output_schema: statement_output(),
             example: json!({"connection_id": "c2", "command": "SCAN 0 MATCH user:* COUNT 100", "database": "0"}),
         },
+        ToolName::MongoFind => ToolSpec {
+            name: tool.as_str(),
+            description: "Query a collection of a MongoDB connection (find). Read-only: it never changes data. \
+                Needs access `read` or more. `database` and `collection` are required (list_namespaces and \
+                list_tables name them). `filter`, `projection` and `sort` are JSON documents as in the MongoDB \
+                shell; typed values use Extended JSON, e.g. {\"_id\": {\"$oid\": \"...\"}} or \
+                {\"created\": {\"$gte\": {\"$date\": \"2024-01-31T00:00:00Z\"}}}. The key order of `sort` is \
+                kept. Documents come back as relaxed Extended JSON. At most 1000 documents (default 200) and a \
+                total size limit are returned; check `truncated`, and narrow the filter or the projection rather \
+                than reading everything.",
+            input_schema: object(
+                vec![
+                    connection,
+                    database("Database name."),
+                    ("collection", string("Collection name.")),
+                    ("filter", document(MONGO_JSON)),
+                    ("projection", document("Fields to return, e.g. {\"name\": 1, \"_id\": 0}.")),
+                    ("sort", document("Sort order, e.g. {\"created_at\": -1}.")),
+                    ("skip", integer("Documents to skip (default 0).")),
+                    ("limit", integer("Documents to return (at least 1; default 200, at most 1000).")),
+                ],
+                &["connection_id", "database", "collection"],
+            ),
+            output_schema: documents_output(),
+            example: json!({"connection_id": "c3", "database": "shop", "collection": "orders", "filter": {"status": "paid"}, "projection": {"customer": 1, "total": 1}, "sort": {"created_at": -1}, "skip": 0, "limit": 20}),
+        },
+        ToolName::MongoAggregate => ToolSpec {
+            name: tool.as_str(),
+            description: "Run an aggregation pipeline on a collection of a MongoDB connection. Read-only: a \
+                pipeline with a $out or $merge stage is refused, and nothing is ever written. Needs access \
+                `read` or more. `pipeline` is the stages in order, as JSON documents (typed values use \
+                Extended JSON, as in mongo_find). A final $limit is added, so at most 1000 documents (default \
+                200) and a total size limit are returned; check `truncated`.",
+            input_schema: object(
+                vec![
+                    connection,
+                    database("Database name."),
+                    ("collection", string("Collection name.")),
+                    ("pipeline", array(document("One stage, e.g. {\"$match\": {\"status\": \"paid\"}}."), "The pipeline stages, in order.")),
+                    ("limit", integer("Documents to return (at least 1; default 200, at most 1000).")),
+                ],
+                &["connection_id", "database", "collection", "pipeline"],
+            ),
+            output_schema: documents_output(),
+            example: json!({"connection_id": "c3", "database": "shop", "collection": "orders", "pipeline": [{"$match": {"status": "paid"}}, {"$group": {"_id": "$customer", "total": {"$sum": "$total"}}}, {"$sort": {"total": -1}}], "limit": 10}),
+        },
+        ToolName::MongoCount => ToolSpec {
+            name: tool.as_str(),
+            description: "Count the documents of a collection of a MongoDB connection that match `filter` (all of \
+                them when it is omitted). Read-only. Needs access `read` or more. The filter is a JSON \
+                document, as in mongo_find.",
+            input_schema: object(
+                vec![
+                    connection,
+                    database("Database name."),
+                    ("collection", string("Collection name.")),
+                    ("filter", document(MONGO_JSON)),
+                ],
+                &["connection_id", "database", "collection"],
+            ),
+            output_schema: object(
+                vec![
+                    ("count", integer("Documents that match.")),
+                    ("elapsed_ms", integer("Time the query took.")),
+                ],
+                &["count", "elapsed_ms"],
+            ),
+            example: json!({"connection_id": "c3", "database": "shop", "collection": "orders", "filter": {"status": "paid"}}),
+        },
     }
 }
 
@@ -767,7 +870,14 @@ mod tests {
                             spec.name
                         );
                     }
-                    if node["type"] == "object" {
+                    // A MongoDB document has no fixed keys: only the MongoDB tools take or return
+                    // one, and they are never sent as strict tools (see `strict_tools`).
+                    let free_form = node["type"] == "object"
+                        && node.get("properties").is_none()
+                        && spec.name.starts_with("mongo_");
+                    if free_form {
+                        assert!(node.get("additionalProperties").is_none(), "{} {label} {path}", spec.name);
+                    } else if node["type"] == "object" {
                         assert_eq!(
                             node["additionalProperties"], false,
                             "{} {label} {path}",
@@ -806,6 +916,9 @@ mod tests {
                 "execute_query",
                 "explain_query",
                 "execute_redis_command",
+                "mongo_find",
+                "mongo_aggregate",
+                "mongo_count",
                 "list_routines",
                 "get_routine_source",
                 "begin_transaction",
@@ -815,7 +928,7 @@ mod tests {
         );
         // Off by default: neither the tools nor `transaction_id` exist for the model.
         let plain = tool_specs_for(false);
-        assert_eq!(plain.len(), 12);
+        assert_eq!(plain.len(), 15);
         let execute = plain.iter().find(|spec| spec.name == "execute_query").unwrap();
         assert!(execute.input_schema["properties"].get("transaction_id").is_none());
         assert!(!execute.description.contains("transaction"));
@@ -850,6 +963,9 @@ mod tests {
                 ToolName::ExecuteQuery => parses::<ExecuteQueryRequest>(example),
                 ToolName::ExplainQuery => parses::<ExplainQueryRequest>(example),
                 ToolName::ExecuteRedisCommand => parses::<ExecuteRedisCommandRequest>(example),
+                ToolName::MongoFind => parses::<MongoFindRequest>(example),
+                ToolName::MongoAggregate => parses::<MongoAggregateRequest>(example),
+                ToolName::MongoCount => parses::<MongoCountRequest>(example),
                 ToolName::ListRoutines => parses::<ListRoutinesRequest>(example),
                 ToolName::GetRoutineSource => parses::<GetRoutineSourceRequest>(example),
                 ToolName::BeginTransaction => parses::<ConnectionRequest>(example),
@@ -1045,6 +1161,41 @@ mod tests {
                     database: Some("0".into()),
                     row_limit: Some(1),
                     dangerous: Some(true),
+                })
+                .unwrap(),
+            ),
+            (
+                ToolName::MongoFind,
+                serde_json::to_value(MongoFindRequest {
+                    connection_id: "c".into(),
+                    database: "shop".into(),
+                    collection: "orders".into(),
+                    filter: Some(Map::new()),
+                    projection: Some(Map::new()),
+                    sort: Some(Map::new()),
+                    skip: Some(1),
+                    limit: Some(1),
+                })
+                .unwrap(),
+            ),
+            (
+                ToolName::MongoAggregate,
+                serde_json::to_value(MongoAggregateRequest {
+                    connection_id: "c".into(),
+                    database: "shop".into(),
+                    collection: "orders".into(),
+                    pipeline: vec![Map::new()],
+                    limit: Some(1),
+                })
+                .unwrap(),
+            ),
+            (
+                ToolName::MongoCount,
+                serde_json::to_value(MongoCountRequest {
+                    connection_id: "c".into(),
+                    database: "shop".into(),
+                    collection: "orders".into(),
+                    filter: Some(Map::new()),
                 })
                 .unwrap(),
             ),

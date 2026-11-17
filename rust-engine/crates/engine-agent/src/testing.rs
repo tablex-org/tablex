@@ -15,6 +15,7 @@ use crate::result::{QueryResult, ResultColumn};
 use crate::secret::SecretText;
 use crate::table::TableDescription;
 use engine_driver_api::sql::SchemaObjectRef;
+use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -158,6 +159,11 @@ impl SessionProvider for FakeProvider {
 type RunScript =
     dyn Fn(&RunRequest<'_>, &CancelToken) -> Result<QueryResult, AgentError> + Send + Sync;
 
+/// What the fake answers to a MongoDB command: `(database, command, cancel)` to the reply
+/// document as canonical Extended JSON.
+pub type MongoScript =
+    dyn Fn(&str, &Value, &CancelToken) -> Result<Value, AgentError> + Send + Sync;
+
 /// What the fake does when a statement runs.
 pub enum Behavior {
     /// Returns one `n` column with rows `1..=count` (honouring the limits).
@@ -198,6 +204,12 @@ pub struct FakeSession {
     pub control_error: Mutex<Option<AgentError>>,
     /// `control` waits until its token is cancelled (a server that does not answer).
     pub control_hangs: AtomicBool,
+    /// What `mongo_command` answers (`agent.unsupported` while none is set).
+    pub mongo_script: Mutex<Option<Arc<MongoScript>>>,
+    /// Every MongoDB command that reached the session, in order, with its database.
+    pub mongo_commands: Mutex<Vec<(String, Value)>>,
+    /// The time limit each of `mongo_commands` came with.
+    pub mongo_max_times: Mutex<Vec<Duration>>,
 }
 
 impl FakeSession {
@@ -224,7 +236,22 @@ impl FakeSession {
             controls: Mutex::new(Vec::new()),
             control_error: Mutex::new(None),
             control_hangs: AtomicBool::new(false),
+            mongo_script: Mutex::new(None),
+            mongo_commands: Mutex::new(Vec::new()),
+            mongo_max_times: Mutex::new(Vec::new()),
         }
+    }
+
+    pub fn set_mongo(
+        &self,
+        script: impl Fn(&str, &Value, &CancelToken) -> Result<Value, AgentError> + Send + Sync + 'static,
+    ) {
+        *lock(&self.mongo_script) = Some(Arc::new(script));
+    }
+
+    /// The MongoDB commands so far.
+    pub fn mongo_calls(&self) -> Vec<(String, Value)> {
+        lock(&self.mongo_commands).clone()
     }
 
     /// The `control` calls so far.
@@ -398,6 +425,26 @@ impl Session for FakeSession {
                 enforced(collector.finish(false, None))
             }
             Behavior::Script(script) => script(request, cancel).and_then(enforced),
+        }
+    }
+
+    fn mongo_command(
+        &self,
+        database: &str,
+        command: &Value,
+        max_time: Duration,
+        cancel: &CancelToken,
+    ) -> Result<Value, AgentError> {
+        lock(&self.mongo_commands).push((database.to_owned(), command.clone()));
+        lock(&self.mongo_max_times).push(max_time);
+        // Called without the lock: a script may wait for a cancel while another command (closing
+        // a cursor) comes in.
+        let script = lock(&self.mongo_script).clone();
+        match script {
+            Some(script) => script(database, command, cancel),
+            None => Err(AgentError::Unsupported(
+                "this session cannot run MongoDB commands".into(),
+            )),
         }
     }
 

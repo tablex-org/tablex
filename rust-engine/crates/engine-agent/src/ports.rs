@@ -60,7 +60,7 @@ impl ConnectionKind {
                 Language::Sql
             }
             Self::Redis => Language::Redis,
-            Self::MongoDb => Language::Other,
+            Self::MongoDb => Language::Mongo,
         }
     }
 
@@ -83,7 +83,9 @@ impl ConnectionKind {
 pub enum Language {
     Sql,
     Redis,
-    /// Browse only (no execute tool): MongoDB.
+    /// MongoDB: read-only `mongo_find`, `mongo_aggregate` and `mongo_count`.
+    Mongo,
+    /// Browse only (no execute tool). No engine has it today.
     Other,
 }
 
@@ -384,6 +386,25 @@ pub trait Session: Send + Sync {
         request: &RunRequest<'_>,
         cancel: &CancelToken,
     ) -> Result<QueryResult, AgentError>;
+
+    /// Runs one MongoDB command (a document whose first key is the command name, as canonical or
+    /// relaxed Extended JSON) in `database` and returns the server's reply document as canonical
+    /// Extended JSON, in the server's key order (`agent.unsupported` by default). A command the
+    /// server rejects is still a reply (`ok: 0`, `errmsg`, `codeName`); only a transport failure,
+    /// a cancel or a refused request is an error. Read-only: an implementation refuses every
+    /// command that can write (the driver's own guard does, before it sends anything). Stops
+    /// promptly once `cancel` fires, and gives the server `max_time` to answer.
+    fn mongo_command(
+        &self,
+        _database: &str,
+        _command: &serde_json::Value,
+        _max_time: Duration,
+        _cancel: &CancelToken,
+    ) -> Result<serde_json::Value, AgentError> {
+        Err(AgentError::Unsupported(
+            "this session cannot run MongoDB commands".into(),
+        ))
+    }
 
     /// Begins, commits or rolls back a transaction on this session (`agent.unsupported` by
     /// default). Internal to the tool layer: the text goes to the driver as it is, NOT through

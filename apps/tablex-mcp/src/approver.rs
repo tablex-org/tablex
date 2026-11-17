@@ -260,7 +260,7 @@ impl ElicitingApprover {
         }
         let noun = match request.language {
             Language::Redis => "command",
-            Language::Sql | Language::Other => "statement",
+            Language::Sql | Language::Mongo | Language::Other => "statement",
         };
         let label = |text: &str| code_span(&spell_out(text, false).0);
         let connection_type = if request.connection_type.trim().is_empty() {

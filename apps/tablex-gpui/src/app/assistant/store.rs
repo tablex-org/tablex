@@ -315,7 +315,7 @@ pub fn level_from_u8(number: u8) -> AgentAccess {
 /// What a stored tool result shows about the statement that made it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ran {
-    /// A statement that returned rows (or a Redis reply, or something else).
+    /// A statement that returned rows (or a Redis reply, MongoDB documents or something else).
     Read,
     /// A statement that changed something: it reports affected rows, or returned no result set at
     /// all (DDL).
@@ -326,7 +326,14 @@ pub enum Ran {
 pub fn ran(name: &str, content: &str) -> Option<Ran> {
     use engine_agent::ToolName;
     let tool = ToolName::parse(name)?;
-    if !matches!(tool, ToolName::ExecuteQuery | ToolName::ExecuteRedisCommand) {
+    if !matches!(
+        tool,
+        ToolName::ExecuteQuery
+            | ToolName::ExecuteRedisCommand
+            | ToolName::MongoFind
+            | ToolName::MongoAggregate
+            | ToolName::MongoCount
+    ) {
         return None;
     }
     let json: serde_json::Value = serde_json::from_str(content).ok()?;
@@ -1140,6 +1147,22 @@ mod tests {
             access_floor(&redis("{\"affected_rows\":1}")),
             AgentAccess::ReadWrite
         );
+        // The MongoDB tools only read: a result of one is a read.
+        for tool in ["mongo_find", "mongo_aggregate", "mongo_count"] {
+            let mongo = serde_json::from_value::<Conversation>(json!({
+                "scope": {"connection_id": CONNECTION}, "context": null,
+                "messages": [
+                    {"role": "user", "content": [{"type": "text", "text": "q"}]},
+                    {"role": "assistant", "content": [{"type": "tool_use", "id": "t",
+                        "name": tool, "input": {}}]},
+                    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t",
+                        "content": "{\"count\":3}"}]},
+                    {"role": "assistant", "content": [{"type": "text", "text": "Done."}]}
+                ]
+            }))
+            .unwrap();
+            assert_eq!(access_floor(&mongo), AgentAccess::Read, "{tool}");
+        }
     }
 
     #[test]

@@ -15,6 +15,9 @@ async fn tools_list_is_exactly_what_the_layer_says() {
     let specs = harness.fixture.layer.tools();
     assert_eq!(listed.len(), specs.len());
     for name in [
+        "mongo_find",
+        "mongo_aggregate",
+        "mongo_count",
         "list_routines",
         "get_routine_source",
         "begin_transaction",
@@ -51,6 +54,7 @@ async fn the_server_identifies_itself_and_says_where_access_is_set() {
     assert_eq!(info.server_info.version, env!("CARGO_PKG_VERSION"));
     let instructions = info.instructions.clone().expect("instructions");
     assert!(instructions.contains("Agent access"), "{instructions}");
+    assert!(instructions.contains("mongo_find"), "{instructions}");
     assert!(info.capabilities.tools.is_some());
 }
 

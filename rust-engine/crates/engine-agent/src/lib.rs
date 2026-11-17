@@ -1,11 +1,12 @@
 //! The agent tool layer: what an AI agent may do with a TableX connection,
 //! behind one policy, shared by the MCP server and the in-app assistant.
 //!
-//! * **Tools** (twelve, names stable; three more with [`ToolLayer::with_transactions`]: `begin_transaction`,
+//! * **Tools** (fifteen, names stable; three more with [`ToolLayer::with_transactions`]: `begin_transaction`,
 //!   `commit_transaction`, `rollback_transaction`): `list_connections`, `open_session`,
 //!   `close_session`, `list_namespaces`, `list_tables`, `describe_table`,
 //!   `get_schema_context`, `execute_query`, `explain_query`,
-//!   `execute_redis_command`, `list_routines`, `get_routine_source`. Typed requests and results live in [`tools`],
+//!   `execute_redis_command`, `mongo_find`, `mongo_aggregate`, `mongo_count` (read-only MongoDB),
+//!   `list_routines`, `get_routine_source`. Typed requests and results live in [`tools`],
 //!   their JSON Schemas in [`schema`].
 //! * **One entry**: [`ToolLayer::call`] takes a tool name and JSON arguments
 //!   and returns a [`ToolOutcome`] (a result, or a typed error whose
@@ -35,6 +36,7 @@ pub mod error;
 pub mod functions;
 mod layer;
 pub mod limits;
+mod mongo;
 pub mod policy;
 pub mod ports;
 pub mod redact;

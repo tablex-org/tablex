@@ -165,9 +165,22 @@ pub(crate) fn schema_cost(schema: &serde_json::Value) -> (usize, usize) {
     cost
 }
 
+/// Whether every object in `schema` lists its properties, as a strict schema must. A tool that
+/// takes a free-form document (a MongoDB filter) cannot be strict.
+fn strict_compatible(schema: &serde_json::Value) -> bool {
+    let free_form = schema["type"] == "object" && schema.get("properties").is_none();
+    !free_form
+        && schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .is_none_or(|properties| properties.values().all(strict_compatible))
+        && schema.get("items").is_none_or(strict_compatible)
+}
+
 /// Which of `specs` (same order) go out with `strict: true`: the [`STRICT_FIRST`] tools, then the
-/// others in list order, each one only while the request stays inside the limits. Depends on the
-/// specs alone, so the cached tools block stays byte-identical between requests.
+/// others in list order, each one only while the request stays inside the limits (a tool whose
+/// schema is not strict-compatible never is). Depends on the specs alone, so the cached tools
+/// block stays byte-identical between requests.
 pub(crate) fn strict_tools(specs: &[ToolSpec]) -> Vec<bool> {
     let mut strict = vec![false; specs.len()];
     let (mut tools, mut optional, mut unions) = (0, 0, 0);
@@ -175,7 +188,7 @@ pub(crate) fn strict_tools(specs: &[ToolSpec]) -> Vec<bool> {
     let order = (0..specs.len())
         .filter(|&i| first(&specs[i]))
         .chain((0..specs.len()).filter(|&i| !first(&specs[i])));
-    for index in order {
+    for index in order.filter(|&i| strict_compatible(&specs[i].input_schema)) {
         let (o, u) = schema_cost(&specs[index].input_schema);
         if tools < MAX_STRICT_TOOLS
             && optional + o <= MAX_STRICT_OPTIONAL

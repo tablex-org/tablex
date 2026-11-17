@@ -25,7 +25,8 @@ use crate::approver::Caller;
 const INSTRUCTIONS: &str = "TableX database access for AI agents. Tools list the user's saved \
 connections and open sessions on them; access is off by default; the user sets a default for all connections in TableX (Settings \u{2192} AI \u{2192} \
 Default agent access) and can set it per connection (connection > Overrides > Agent access). Start with \
-list_connections. A statement that changes data may be put to the user for approval, through \
+list_connections. Query with execute_query on a SQL connection, execute_redis_command on Redis, and \
+mongo_find, mongo_aggregate or mongo_count (read-only) on MongoDB. A statement that changes data may be put to the user for approval, through \
 your client, when the connection's access is read_write and the user has allowed changes through \
 MCP in TableX (Settings → AI); it is never allowed on a connection of a production type. A refusal or a \
 decline is final for that request: do not retry the statement or reword it to get around it, \

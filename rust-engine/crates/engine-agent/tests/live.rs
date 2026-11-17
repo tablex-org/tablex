@@ -5,11 +5,13 @@
 //! TABLEX_TEST_PG_URI=postgres://tablex:tablex@127.0.0.1:55432/tablex \
 //! TABLEX_TEST_MYSQL_URI=mysql://tablex:tablex@127.0.0.1:53306/tablex \
 //! TABLEX_TEST_REDIS_URI=redis://127.0.0.1:56379 \
+//! TABLEX_TEST_MONGO_URI=mongodb://127.0.0.1:57017 \
 //! cargo test --manifest-path rust-engine/Cargo.toml -p engine-agent --test live -- --ignored
 //! ```
 //!
 //! Only uniquely named scratch tables / prefixed keys are created, and they
-//! are dropped / deleted even when a test fails.
+//! are dropped / deleted even when a test fails. The MongoDB test only reads
+//! (`admin.system.version` and documents the server generates itself).
 
 mod common;
 
@@ -936,6 +938,130 @@ fn redis_tools_and_policy() {
         )),
         "ok"
     );
+}
+
+#[test]
+#[ignore = "needs TABLEX_TEST_MONGO_URI"]
+fn mongodb_read_only_tools() {
+    let Ok(uri) = std::env::var("TABLEX_TEST_MONGO_URI") else {
+        return;
+    };
+    let live = Live::new(ConnectionKind::MongoDb, "dbengine-mongo", &uri, AgentAccess::Read);
+    // `admin.system.version` holds the server's featureCompatibilityVersion document: no data of
+    // ours is needed, and nothing is written.
+    let target = |extra: Value| {
+        let mut args = json!({"connection_id": ID, "database": "admin", "collection": "system.version"});
+        for (key, value) in extra.as_object().into_iter().flatten() {
+            args[key] = value.clone();
+        }
+        args
+    };
+    let opened = live.ok("open_session", json!({"connection_id": ID}));
+    assert_eq!(opened["language"], "mongo");
+    let databases = live.ok("list_namespaces", json!({"connection_id": ID}));
+    assert!(
+        databases["namespaces"].as_array().unwrap().iter().any(|d| d["name"] == "admin"),
+        "{databases}"
+    );
+
+    let counted = live.ok("mongo_count", target(json!({})));
+    assert!(counted["count"].as_u64().unwrap() >= 1, "{counted}");
+    let found = live.ok(
+        "mongo_find",
+        target(json!({"filter": {"_id": "featureCompatibilityVersion"}, "projection": {"version": 1}})),
+    );
+    assert_eq!(found["document_count"], 1, "{found}");
+    assert_eq!(found["truncated"], false);
+    assert_eq!(found["documents"][0]["_id"], "featureCompatibilityVersion");
+    assert!(found["documents"][0]["version"].is_string(), "{found}");
+    // A typed value in the filter (Extended JSON) reaches the server as a date.
+    let typed = live.ok(
+        "mongo_count",
+        target(json!({"filter": {
+            "_id": "featureCompatibilityVersion",
+            "$expr": {"$lt": [{"$toDate": {"$numberLong": "0"}}, {"$date": "2030-01-01T00:00:00Z"}]},
+        }})),
+    );
+    assert_eq!(typed["count"], 1);
+    let none = live.ok(
+        "mongo_find",
+        target(json!({"filter": {"_id": {"$oid": "65b9f0a1c2d3e4f506172839"}}})),
+    );
+    assert_eq!(none["document_count"], 0);
+    assert_eq!(none["truncated"], false);
+
+    // 2500 documents the server makes up: the limits cut them, as relaxed Extended JSON.
+    let numbers = json!([
+        {"$limit": 1},
+        {"$project": {"_id": 0, "n": {"$range": [0, 2500]}}},
+        {"$unwind": "$n"},
+    ]);
+    let few = live.ok("mongo_aggregate", target(json!({"pipeline": numbers, "limit": 5})));
+    assert_eq!(few["documents"], json!([{"n": 0}, {"n": 1}, {"n": 2}, {"n": 3}, {"n": 4}]));
+    assert_eq!(few["truncated"], true);
+    assert_eq!(few["truncation"], "row_limit");
+    let default = live.ok("mongo_aggregate", target(json!({"pipeline": numbers})));
+    assert_eq!(default["document_count"], 200);
+    assert_eq!(default["limit"], 200);
+    assert_eq!(default["truncated"], true);
+    let capped = live.ok("mongo_aggregate", target(json!({"pipeline": numbers, "limit": 50000})));
+    assert_eq!(capped["limit"], 1000);
+    assert!(capped["document_count"].as_u64().unwrap() <= 1000);
+    assert_eq!(capped["truncated"], true);
+    let exact = live.ok("mongo_aggregate", target(json!({"pipeline": [numbers[0], numbers[1], numbers[2], {"$match": {"n": {"$lt": 3}}}]})));
+    assert_eq!(exact["document_count"], 3);
+    assert_eq!(exact["truncated"], false);
+
+    // The server's own refusal is an error with its name.
+    let bad = live.call("mongo_find", target(json!({"filter": {"$nope": 1}})));
+    assert_eq!(code(&bad), "query.failed", "{bad:?}");
+    assert!(bad.to_text().contains("unknown top level operator"), "{}", bad.to_text());
+
+    // Nothing writes: a pipeline that would is refused before it is sent.
+    let scratch = unique("tablex_agent_out");
+    for stage in [
+        json!({"$out": scratch}),
+        json!({"$merge": {"into": scratch}}),
+    ] {
+        let refused = live.call("mongo_aggregate", target(json!({"pipeline": [stage]})));
+        assert_eq!(code(&refused), "agent.write_refused", "{refused:?}");
+    }
+    let collections = live.ok("list_tables", json!({"connection_id": ID, "database": "admin"}));
+    assert!(
+        !collections["tables"].as_array().unwrap().iter().any(|t| t["name"] == scratch.as_str()),
+        "{collections}"
+    );
+
+    // The SQL tools point to the MongoDB ones.
+    let sql = live.sql("SELECT 1", json!({}));
+    assert_eq!(code(&sql), "agent.unsupported");
+    assert!(sql.to_text().contains("mongo_find"), "{}", sql.to_text());
+
+    // A command the server is still working on stops when the call is cancelled.
+    let token = CancelToken::new();
+    let stopper = {
+        let token = token.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            token.cancel();
+        })
+    };
+    let started = std::time::Instant::now();
+    let slow = live.layer.call_cancellable(
+        "mongo_count",
+        target(json!({"filter": {"$where": "sleep(20000) || true"}})),
+        &token,
+    );
+    stopper.join().unwrap();
+    assert_eq!(code(&slow), "agent.cancelled", "{slow:?}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(15), "{:?}", started.elapsed());
+    // The session still works.
+    live.ok("mongo_count", target(json!({})));
+
+    // Below `read` the tools are refused.
+    live.catalog
+        .update(ID, |info| info.agent_access = Some(AgentAccess::SchemaOnly));
+    assert_eq!(code(&live.call("mongo_count", target(json!({})))), "agent.access_denied");
 }
 
 fn tx_sql(live: &Live, tx: &str, statement: &str) -> ToolOutcome {

@@ -1027,6 +1027,12 @@ fn the_tool_schemas_stay_inside_the_strict_tool_limits() {
         let index = tools.iter().position(|tool| tool.name == name).unwrap();
         assert!(strict[index], "{name} is strict");
     }
+    // The MongoDB tools take free-form documents, which a strict schema cannot describe: they
+    // are never strict, and they use none of the strict budget.
+    for name in ["mongo_find", "mongo_aggregate", "mongo_count"] {
+        let index = tools.iter().position(|tool| tool.name == name).unwrap();
+        assert!(!strict[index], "{name} is not strict");
+    }
 }
 
 #[test]
@@ -1054,4 +1060,22 @@ fn strict_is_given_while_the_budget_lasts_and_never_past_it() {
     // At most 20 strict tools.
     let many: Vec<ToolSpec> = (0..25).map(|_| spec("x", 0)).collect();
     assert_eq!(strict_tools(&many).iter().filter(|s| **s).count(), MAX_STRICT_TOOLS);
+    // A tool with a free-form object (no `properties`) in its input, at any depth, is never
+    // strict and takes nothing from the budget; a tool with only fixed objects is.
+    let free = |input_schema: Value| ToolSpec {
+        name: "free",
+        description: "",
+        input_schema,
+        output_schema: Value::Null,
+        example: Value::Null,
+    };
+    let fixed = serde_json::json!({"type": "object", "properties": {"a": {"type": "string"}}, "required": ["a"]});
+    let nested_free = serde_json::json!({"type": "object", "properties": {
+        "filter": {"type": "object"},
+    }, "required": []});
+    let in_items = serde_json::json!({"type": "object", "properties": {
+        "stages": {"type": "array", "items": {"type": "object"}},
+    }, "required": []});
+    let specs = [free(nested_free), free(in_items), free(fixed)];
+    assert_eq!(strict_tools(&specs), [false, false, true]);
 }

@@ -165,7 +165,7 @@ fn the_tools_do_not_exist_unless_the_front_end_turns_them_on() {
         ..Options::default()
     });
     let names: Vec<&str> = off.layer.tools().iter().map(|tool| tool.name).collect();
-    assert_eq!(names.len(), 12);
+    assert_eq!(names.len(), 15);
     for tool in ["begin_transaction", "commit_transaction", "rollback_transaction"] {
         assert!(!names.contains(&tool), "{tool}");
         assert_eq!(
@@ -189,7 +189,7 @@ fn the_tools_do_not_exist_unless_the_front_end_turns_them_on() {
 
     let on = fixture(Options::default());
     let names: Vec<&str> = on.layer.tools().iter().map(|tool| tool.name).collect();
-    assert_eq!(names.len(), 15);
+    assert_eq!(names.len(), 18);
     for tool in ["begin_transaction", "commit_transaction", "rollback_transaction"] {
         assert!(names.contains(&tool), "{tool}");
     }

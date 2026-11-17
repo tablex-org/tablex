@@ -1,4 +1,4 @@
-//! Typed requests and results of the tools (twelve, and three transaction tools a front end may
+//! Typed requests and results of the tools (fifteen, and three transaction tools a front end may
 //! switch on).
 //!
 //! Requests reject unknown fields. Their JSON Schemas (see [`crate::schema`])
@@ -7,10 +7,11 @@
 use crate::access::AgentAccess;
 use crate::context::SchemaContext;
 use crate::ports::{ConnectionKind, Language};
-use crate::result::QueryResult;
+use crate::result::{QueryResult, Truncation};
 use crate::table::TableDescription;
 use engine_driver_api::sql::{SchemaObjectKind, SchemaObjectRef};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 /// The stable tool names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -25,6 +26,9 @@ pub enum ToolName {
     ExecuteQuery,
     ExplainQuery,
     ExecuteRedisCommand,
+    MongoFind,
+    MongoAggregate,
+    MongoCount,
     ListRoutines,
     GetRoutineSource,
     BeginTransaction,
@@ -33,7 +37,7 @@ pub enum ToolName {
 }
 
 impl ToolName {
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 18] = [
         Self::ListConnections,
         Self::OpenSession,
         Self::CloseSession,
@@ -44,6 +48,9 @@ impl ToolName {
         Self::ExecuteQuery,
         Self::ExplainQuery,
         Self::ExecuteRedisCommand,
+        Self::MongoFind,
+        Self::MongoAggregate,
+        Self::MongoCount,
         Self::ListRoutines,
         Self::GetRoutineSource,
         Self::BeginTransaction,
@@ -71,6 +78,9 @@ impl ToolName {
             Self::ExecuteQuery => "execute_query",
             Self::ExplainQuery => "explain_query",
             Self::ExecuteRedisCommand => "execute_redis_command",
+            Self::MongoFind => "mongo_find",
+            Self::MongoAggregate => "mongo_aggregate",
+            Self::MongoCount => "mongo_count",
             Self::ListRoutines => "list_routines",
             Self::GetRoutineSource => "get_routine_source",
             Self::BeginTransaction => "begin_transaction",
@@ -94,9 +104,12 @@ impl ToolName {
             | Self::GetSchemaContext
             | Self::ListRoutines
             | Self::GetRoutineSource => AgentAccess::SchemaOnly,
-            Self::ExecuteQuery | Self::ExplainQuery | Self::ExecuteRedisCommand => {
-                AgentAccess::Read
-            }
+            Self::ExecuteQuery
+            | Self::ExplainQuery
+            | Self::ExecuteRedisCommand
+            | Self::MongoFind
+            | Self::MongoAggregate
+            | Self::MongoCount => AgentAccess::Read,
             Self::BeginTransaction => AgentAccess::ReadWrite,
             // They name a transaction, not a connection: the layer checks the transaction's
             // connection itself (commit needs `read_write` again; rollback is always allowed).
@@ -248,6 +261,48 @@ pub struct ExecuteRedisCommandRequest {
     pub dangerous: Option<bool>,
 }
 
+/// `mongo_find`. `filter`, `projection` and `sort` are MongoDB documents in relaxed or canonical
+/// Extended JSON; their key order is kept (a sort is its keys in order).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MongoFindRequest {
+    pub connection_id: String,
+    pub database: String,
+    pub collection: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<Map<String, Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection: Option<Map<String, Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort: Option<Map<String, Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+/// `mongo_aggregate`: `pipeline` is the stage documents in order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MongoAggregateRequest {
+    pub connection_id: String,
+    pub database: String,
+    pub collection: String,
+    pub pipeline: Vec<Map<String, Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MongoCountRequest {
+    pub connection_id: String,
+    pub database: String,
+    pub collection: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<Map<String, Value>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ListRoutinesRequest {
@@ -331,7 +386,7 @@ pub struct OpenSessionResult {
     pub connection_id: String,
     pub kind: ConnectionKind,
     pub access: AgentAccess,
-    /// `sql`, `redis` or `other` (browse only).
+    /// `sql`, `redis`, `mongo` or `other` (browse only).
     pub language: Language,
     pub supports_schemas: bool,
     pub already_open: bool,
@@ -418,6 +473,29 @@ pub struct RollbackTransactionResult {
     pub rolled_back: bool,
     /// Write statements that were sent in the transaction (all undone).
     pub changes: usize,
+}
+
+/// Result of `mongo_find` and `mongo_aggregate`: the documents as relaxed Extended JSON.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MongoDocumentsResult {
+    pub documents: Vec<Value>,
+    pub document_count: usize,
+    /// More documents exist than were returned.
+    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncation: Option<Truncation>,
+    /// Strings that were cut to the cell limit, and documents too large to show (each is replaced
+    /// by `{"$truncated": "..."}`).
+    pub cells_truncated: usize,
+    /// The document limit that applied.
+    pub limit: usize,
+    pub elapsed_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MongoCountResult {
+    pub count: u64,
+    pub elapsed_ms: u64,
 }
 
 pub type DescribeTableResult = TableDescription;

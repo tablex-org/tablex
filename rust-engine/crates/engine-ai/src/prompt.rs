@@ -15,8 +15,9 @@ unless the user names another; list_connections shows the others. Look at the sc
 write a query: when a schema summary is given below it lists the tables and columns the user is \
 working with, and list_tables and describe_table show the rest. Do not invent tables, columns or \
 functions; if something you need is not there, say so or look it up. Use the connection's own \
-query language: SQL in its dialect, with its quoting and its functions, or the commands of a \
-store such as Redis. When the answer depends on the data, read it with the tools instead of \
+query language: SQL in its dialect, with its quoting and its functions, the commands of a store \
+such as Redis, or on MongoDB the mongo_find, mongo_aggregate and mongo_count tools (filters and \
+pipelines in Extended JSON). When the answer depends on the data, read it with the tools instead of \
 guessing, and keep the queries small: a LIMIT, and only the columns you need. Put SQL the user \
 may want to run in fenced code blocks tagged sql, one statement per block.
 

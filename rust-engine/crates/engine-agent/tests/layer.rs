@@ -2376,7 +2376,8 @@ fn routine_tools_refuse_mongodb() {
     ] {
         let outcome = layer.call(tool, args);
         assert_eq!(code(&outcome), "agent.unsupported", "{tool}");
-        assert!(outcome.to_text().contains("mongodb"), "{}", outcome.to_text());
+        // The message points to the MongoDB tools.
+        assert!(outcome.to_text().contains("this is MongoDB, use mongo_find"), "{}", outcome.to_text());
     }
 }
 

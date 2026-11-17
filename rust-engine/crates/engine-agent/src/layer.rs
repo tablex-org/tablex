@@ -9,6 +9,7 @@ use crate::context::{
 };
 use crate::error::{self, AgentError, ToolError};
 use crate::limits::Limits;
+use crate::mongo;
 use crate::policy::{check_statement, Need};
 use crate::ports::{
     ApprovalDecision, ConnectionCatalog, ConnectionInfo, ConnectionKind, Language, NodeLevel,
@@ -343,6 +344,16 @@ impl Drop for Beginning<'_> {
     fn drop(&mut self) {
         lock(&self.layer.txs).beginning.remove(&self.connection_id);
     }
+}
+
+/// What [`ToolLayer::run_mongo`] needs to know about a MongoDB tool call.
+struct MongoCall<'a> {
+    tool: ToolName,
+    connection_id: &'a str,
+    database: &'a str,
+    collection: &'a str,
+    /// The command the call sends first (for the audit line and the size check).
+    command: &'a Value,
 }
 
 /// What a call learned that the audit line and the redaction need.
@@ -773,6 +784,18 @@ impl ToolLayer {
                 let request: ExecuteRedisCommandRequest = self.parse(tool, arguments)?;
                 to_value(self.execute_redis(request, cancel, trace)?)
             }
+            ToolName::MongoFind => {
+                let request: MongoFindRequest = self.parse(tool, arguments)?;
+                to_value(self.mongo_find(request, cancel, trace)?)
+            }
+            ToolName::MongoAggregate => {
+                let request: MongoAggregateRequest = self.parse(tool, arguments)?;
+                to_value(self.mongo_aggregate(request, cancel, trace)?)
+            }
+            ToolName::MongoCount => {
+                let request: MongoCountRequest = self.parse(tool, arguments)?;
+                to_value(self.mongo_count(request, cancel, trace)?)
+            }
             ToolName::ListRoutines => {
                 let request: ListRoutinesRequest = self.parse(tool, arguments)?;
                 to_value(self.list_routines(request, cancel, trace)?)
@@ -1202,12 +1225,31 @@ impl ToolLayer {
                 "`{}` is for SQL databases; this is Redis, use execute_redis_command (e.g. SCAN)",
                 tool.as_str()
             ))),
+            Language::Mongo => Err(AgentError::Unsupported(format!(
+                "`{}` is for SQL databases; this is MongoDB, use mongo_find, mongo_aggregate or mongo_count to read documents (list_tables lists the collections)",
+                tool.as_str()
+            ))),
             Language::Other => Err(AgentError::Unsupported(format!(
                 "`{}` is not available for {} connections",
                 tool.as_str(),
                 slot.info.kind.driver_id()
             ))),
         }
+    }
+
+    /// The MongoDB twin of [`require_sql`](Self::require_sql).
+    fn require_mongo(slot: &OpenSession, tool: ToolName) -> Result<(), AgentError> {
+        let hint = match slot.info.language {
+            Language::Mongo => return Ok(()),
+            Language::Sql => "use execute_query",
+            Language::Redis => "use execute_redis_command",
+            Language::Other => "it has no query tool",
+        };
+        Err(AgentError::Unsupported(format!(
+            "`{}` is for MongoDB connections; this is {}, {hint}",
+            tool.as_str(),
+            slot.info.kind.driver_id()
+        )))
     }
 
     fn list_tables(
@@ -1629,6 +1671,121 @@ impl ToolLayer {
             cancel,
             trace,
         )
+    }
+
+    fn mongo_find(
+        &self,
+        request: MongoFindRequest,
+        cancel: &CancelToken,
+        trace: &mut Trace,
+    ) -> Result<MongoDocumentsResult, AgentError> {
+        mongo::check_limit(request.limit)?;
+        let rows = self.limits.rows_for(request.limit);
+        let command = mongo::find_command(&request, rows);
+        let call = MongoCall {
+            tool: ToolName::MongoFind,
+            connection_id: &request.connection_id,
+            database: &request.database,
+            collection: &request.collection,
+            command: &command,
+        };
+        let result = self.run_mongo(&call, cancel, trace, |target| {
+            mongo::documents(target, &command, rows)
+        })?;
+        trace.rows = Some(result.document_count as u64);
+        Ok(result)
+    }
+
+    fn mongo_aggregate(
+        &self,
+        request: MongoAggregateRequest,
+        cancel: &CancelToken,
+        trace: &mut Trace,
+    ) -> Result<MongoDocumentsResult, AgentError> {
+        mongo::check_limit(request.limit)?;
+        let rows = self.limits.rows_for(request.limit);
+        let command = mongo::aggregate_command(&request, rows);
+        let call = MongoCall {
+            tool: ToolName::MongoAggregate,
+            connection_id: &request.connection_id,
+            database: &request.database,
+            collection: &request.collection,
+            command: &command,
+        };
+        let result = self.run_mongo(&call, cancel, trace, |target| {
+            mongo::documents(target, &command, rows)
+        })?;
+        trace.rows = Some(result.document_count as u64);
+        Ok(result)
+    }
+
+    fn mongo_count(
+        &self,
+        request: MongoCountRequest,
+        cancel: &CancelToken,
+        trace: &mut Trace,
+    ) -> Result<MongoCountResult, AgentError> {
+        let command = mongo::count_command(&request);
+        let call = MongoCall {
+            tool: ToolName::MongoCount,
+            connection_id: &request.connection_id,
+            database: &request.database,
+            collection: &request.collection,
+            command: &command,
+        };
+        let result = self.run_mongo(&call, cancel, trace, |target| mongo::count(target, &command))?;
+        trace.rows = Some(result.count);
+        Ok(result)
+    }
+
+    /// Access, session, busy flag, cancel and statement timeout around one MongoDB tool. A read
+    /// only, so there is no policy and no approval: the access the tool needs (`read`) is checked
+    /// by [`authorize`](Self::authorize), and the driver refuses every writing command.
+    fn run_mongo<T>(
+        &self,
+        call: &MongoCall<'_>,
+        cancel: &CancelToken,
+        trace: &mut Trace,
+        run: impl FnOnce(&mongo::Target<'_>) -> Result<T, AgentError>,
+    ) -> Result<T, AgentError> {
+        Self::check_not_cancelled(cancel)?;
+        let (info, _) = self.authorize(call.tool, call.connection_id)?;
+        if call.database.is_empty() || call.collection.is_empty() {
+            return Err(AgentError::invalid(
+                "`database` and `collection` must not be empty; call list_namespaces and list_tables for the names",
+            ));
+        }
+        Self::check_database(Some(call.database))?;
+        let slot = self.open_slot(&info, trace)?;
+        Self::require_mongo(&slot, call.tool)?;
+        let text = call.command.to_string();
+        self.check_length(&text)?;
+        trace.statement = Some(format!("{} {text}", call.database));
+        let Some(_busy) = BusyGuard::acquire(&slot.busy) else {
+            return Err(AgentError::Limit(
+                "another statement is still running on this connection; wait for it or cancel it"
+                    .into(),
+            ));
+        };
+        let _active = ActiveStatement::begin(&slot, cancel)?;
+        let timeout = info.statement_timeout(&self.limits);
+        let watchdog = Watchdog::arm(cancel, timeout);
+        let outcome = run(&mongo::Target {
+            session: slot.session.as_ref(),
+            database: call.database,
+            collection: call.collection,
+            limits: &self.limits,
+            timeout,
+            cancel,
+        });
+        drop(watchdog);
+        outcome.map_err(|error| match error {
+            AgentError::Cancelled if cancel.timed_out() => AgentError::Limit(format!(
+                "the statement was cancelled after the {} s statement timeout",
+                timeout.as_secs()
+            )),
+            error => error,
+        })
     }
 
     /// The database a write will run in: the request's, else the connection's
