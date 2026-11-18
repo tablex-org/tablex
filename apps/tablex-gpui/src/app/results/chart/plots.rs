@@ -33,6 +33,8 @@ const TOP: f32 = 10.0;
 const RIGHT: f32 = 12.0;
 /// The least room kept left of the plot for the value labels (the official charts' gutter).
 const MIN_GUTTER: f32 = 32.0;
+/// The room kept between two category labels on an axis.
+const LABEL_GAP: f32 = 8.0;
 /// How near the cursor has to be to a scatter point to pick it.
 const PICK_RADIUS: f32 = 14.0;
 const DOT: f32 = 7.0;
@@ -137,6 +139,7 @@ impl std::ops::Deref for LineAxis {
 pub(super) struct LineLayout {
     size: Size<Pixels>,
     gutter: f32,
+    label_width: f32,
     pieces: Pieces,
     baseline: f32,
     /// `(pixel y, label)` of each value tick.
@@ -150,7 +153,8 @@ pub(super) struct LineLayout {
 #[derive(Default)]
 pub(super) struct LineCache {
     axis: Option<Rc<LineAxis>>,
-    gutter: Option<(Font, f32)>,
+    /// The gutter and the width of the widest category label, in the font they were measured in.
+    gutter: Option<(Font, f32, f32)>,
     layout: Option<Rc<LineLayout>>,
 }
 
@@ -389,6 +393,8 @@ pub(super) struct LinePlot {
     y: Rc<LineAxis>,
     area: bool,
     gutter: f32,
+    /// How wide the widest category label is drawn.
+    label_width: f32,
 }
 
 /// The pieces of a drawn series in pixels relative to the element: series, then stretch, then point.
@@ -401,7 +407,7 @@ impl LinePlot {
         }
         let area = scene.model.kind == chart_data::ChartKind::Area;
         let y = scene.lines.borrow_mut().axis.get_or_insert_with(|| Rc::new(LineAxis::new(scene.extent.0, scene.extent.1))).clone();
-        Some(Self { y, colors, id: id.into(), area, gutter: MIN_GUTTER, scene })
+        Some(Self { y, colors, id: id.into(), area, gutter: MIN_GUTTER, label_width: 0.0, scene })
     }
 
     fn count(&self) -> usize {
@@ -451,7 +457,7 @@ impl LinePlot {
     /// The layout at `size`: the one kept with the scene while the size stays, else worked out and kept. A repaint that moves
     /// nothing (a hover) takes this path and allocates nothing for geometry.
     pub(super) fn layout(&self, size: Size<Pixels>) -> Rc<LineLayout> {
-        let kept = self.scene.lines.borrow().layout.clone().filter(|layout| layout.size == size && layout.gutter == self.gutter);
+        let kept = self.scene.lines.borrow().layout.clone().filter(|layout| layout.size == size && layout.gutter == self.gutter && layout.label_width == self.label_width);
         kept.unwrap_or_else(|| {
             let layout = Rc::new(self.work_out(size));
             self.scene.lines.borrow_mut().layout = Some(layout.clone());
@@ -467,20 +473,27 @@ impl LinePlot {
         let y_ticks = self.y.ticks.iter().zip(&self.y.labels).filter_map(|(t, label)| Some((y_scale.tick(t)?, label.clone()))).collect();
         let n = self.count();
         let x_ticks = self
-            .x_labels()
+            .x_labels_within(frame.width())
             .into_iter()
             .filter_map(|i| {
                 let align = if n < 2 { TextAlign::Center } else if i == 0 { TextAlign::Left } else if i == n - 1 { TextAlign::Right } else { TextAlign::Center };
                 Some((self.scene.axis_labels.get(i)?.clone(), self.x_at(frame, i) - frame.left, align))
             })
             .collect();
-        LineLayout { size, gutter: self.gutter, pieces: self.pieces(frame), baseline: self.baseline(frame), y_ticks, x_ticks }
+        LineLayout { size, gutter: self.gutter, label_width: self.label_width, pieces: self.pieces(frame), baseline: self.baseline(frame), y_ticks, x_ticks }
     }
 
-    /// About six categories carry an axis label, first and last included.
+    /// About six categories carry an axis label, first and last included (on a plot wide enough).
+    #[cfg(test)]
     fn x_labels(&self) -> Vec<usize> {
+        self.x_labels_within(f32::INFINITY)
+    }
+
+    /// The categories that carry an axis label on a plot `width` wide: about six, fewer when the widest
+    /// label leaves no room for six (none overlaps another), first and last included when two or more fit.
+    fn x_labels_within(&self, width: f32) -> Vec<usize> {
         let n = self.count();
-        let shown = n.min(6);
+        let shown = labels_that_fit(n, width, self.label_width).min(6);
         let mut at: Vec<usize> = (0..shown).map(|j| if shown < 2 { 0 } else { (j * (n - 1) + (shown - 1) / 2) / (shown - 1) }).collect();
         at.dedup();
         at
@@ -508,11 +521,11 @@ impl Plot for LinePlot {
     fn prepaint(&mut self, _bounds: Bounds<Pixels>, window: &mut Window, _cx: &mut App) -> Vec<AnyElement> {
         // The labels are the scene's: measured again only when the font changes.
         let font = window.text_style().font();
-        let kept = self.scene.lines.borrow().gutter.as_ref().filter(|(measured_in, _)| *measured_in == font).map(|(_, gutter)| *gutter);
-        self.gutter = kept.unwrap_or_else(|| {
-            let gutter = gutter_for(&self.y.labels, window);
-            self.scene.lines.borrow_mut().gutter = Some((font, gutter));
-            gutter
+        let kept = self.scene.lines.borrow().gutter.as_ref().filter(|(measured_in, ..)| *measured_in == font).map(|(_, gutter, label)| (*gutter, *label));
+        (self.gutter, self.label_width) = kept.unwrap_or_else(|| {
+            let measured = (gutter_for(&self.y.labels, window), widest_label_width(&self.scene, window));
+            self.scene.lines.borrow_mut().gutter = Some((font, measured.0, measured.1));
+            measured
         });
         vec![]
     }
@@ -614,6 +627,8 @@ pub(super) struct GroupedBars {
     id: ElementId,
     y: NiceAxis,
     gutter: f32,
+    /// How wide the widest category label is drawn.
+    label_width: f32,
 }
 
 impl GroupedBars {
@@ -626,7 +641,7 @@ impl GroupedBars {
             .iter()
             .flat_map(|s| s.values.iter().flatten())
             .fold((0.0f64, 0.0f64), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
-        Some(Self { y: NiceAxis::new(lo, hi, 5), colors, id: id.into(), gutter: MIN_GUTTER, scene })
+        Some(Self { y: NiceAxis::new(lo, hi, 5), colors, id: id.into(), gutter: MIN_GUTTER, label_width: 0.0, scene })
     }
 
     fn categories(&self) -> &chart_data::Categories {
@@ -654,6 +669,7 @@ impl IntoElement for GroupedBars {
 impl Plot for GroupedBars {
     fn prepaint(&mut self, _bounds: Bounds<Pixels>, window: &mut Window, _cx: &mut App) -> Vec<AnyElement> {
         self.gutter = gutter_for(&self.y.labels(false), window);
+        self.label_width = widest_label_width(&self.scene, window);
         vec![]
     }
 
@@ -665,7 +681,7 @@ impl Plot for GroupedBars {
         let band = self.band(frame);
         let width = band.band_width();
         let n = self.categories().labels.len();
-        let labeled = label_stride(n);
+        let labeled = label_stride(n, frame.width(), self.label_width);
         let x_labels: Vec<AxisText> = (0..n)
             .filter(|i| i % labeled == 0)
             .filter_map(|i| Some(AxisText::new(self.scene.axis_labels.get(i)?.clone(), band.tick(&i)? + width / 2.0, self.colors.muted).align(TextAlign::Center)))
@@ -730,9 +746,34 @@ impl Plot for GroupedBars {
     }
 }
 
-/// Every how-many-th category carries an axis label so about twelve fit.
-pub(super) fn label_stride(count: usize) -> usize {
-    count.div_ceil(12).max(1)
+/// How many of `categories` labels, each `label` pixels wide, an axis `width` pixels wide carries without two
+/// touching (a gap is kept between them): at least one when there is any category, at most all of them.
+pub(super) fn labels_that_fit(categories: usize, width: f32, label: f32) -> usize {
+    if categories == 0 {
+        return 0;
+    }
+    let fit = ((width + LABEL_GAP) / (label + LABEL_GAP)).floor();
+    // `as` saturates: an infinite width carries them all.
+    (fit.max(1.0) as usize).min(categories)
+}
+
+/// Every how-many-th category carries an axis label: about twelve at most, fewer when the widest label
+/// (`label` pixels) leaves no room for twelve in `width`.
+pub(super) fn label_stride(count: usize, width: f32, label: f32) -> usize {
+    count.div_ceil(labels_that_fit(count, width, label).clamp(1, 12)).max(1)
+}
+
+/// How wide the widest category label of `scene` is drawn (the one with the most characters stands for
+/// it: a scan of the labels is not repeated, the scene keeps which one it is). The scene keeps the width
+/// too, measured again only when the font changes: every paint of a bar chart asks.
+pub(super) fn widest_label_width(scene: &ChartScene, window: &mut Window) -> f32 {
+    let font = window.text_style().font();
+    let kept = scene.label_width.borrow().as_ref().filter(|(measured_in, _)| *measured_in == font).map(|(_, width)| *width);
+    kept.unwrap_or_else(|| {
+        let width = scene.widest_label.as_ref().map_or(0.0, |label| measure_text_width(label, px(TEXT_SIZE), window));
+        *scene.label_width.borrow_mut() = Some((font, width));
+        width
+    })
 }
 
 #[cfg(test)]
@@ -821,7 +862,7 @@ mod tests {
         let (second, b) = counted(&plot, first_size);
         assert_eq!(second, 0, "a repaint at the same size allocates nothing for geometry");
         assert!(Rc::ptr_eq(&a, &b));
-        let next_render = LinePlot { y: plot.y.clone(), colors: plot.colors.clone(), id: plot.id.clone(), scene: plot.scene.clone(), area: plot.area, gutter: plot.gutter };
+        let next_render = LinePlot { y: plot.y.clone(), colors: plot.colors.clone(), id: plot.id.clone(), scene: plot.scene.clone(), area: plot.area, gutter: plot.gutter, label_width: plot.label_width };
         let (third, c) = counted(&next_render, first_size);
         assert_eq!((third, Rc::ptr_eq(&a, &c)), (0, true));
         assert_eq!(ChartScene::line_layouts_worked_out() - worked_out, 1, "one layout for three paints");
@@ -829,9 +870,28 @@ mod tests {
         let (resized, d) = counted(&plot, second_size);
         assert!(resized >= 12, "{resized} allocations");
         assert!(!Rc::ptr_eq(&a, &d) && d.pieces[0][0][2][0] > a.pieces[0][0][2][0], "the last category is further right in a wider plot");
-        let wider_gutter = LinePlot { gutter: plot.gutter + 10.0, y: plot.y.clone(), colors: plot.colors.clone(), id: plot.id.clone(), scene: plot.scene.clone(), area: plot.area };
+        let wider_gutter = LinePlot { gutter: plot.gutter + 10.0, y: plot.y.clone(), colors: plot.colors.clone(), id: plot.id.clone(), scene: plot.scene.clone(), area: plot.area, label_width: plot.label_width };
         assert!(!Rc::ptr_eq(&d, &counted(&wider_gutter, second_size).1));
         assert_eq!(ChartScene::line_layouts_worked_out() - worked_out, 3);
+    }
+
+    #[gpui::test]
+    fn the_widest_label_is_measured_once_per_font(cx: &mut gpui::TestAppContext) {
+        let plot = line_plot(cx, ChartKind::Line, Aggregation::Avg);
+        let scene = plot.scene.clone();
+        let visual = cx.add_empty_window();
+        visual.update(|window, _| {
+            assert!(scene.label_width.borrow().is_none());
+            let measured = widest_label_width(&scene, window);
+            let font = window.text_style().font();
+            assert_eq!(scene.label_width.borrow().as_ref().map(|(f, w)| (f.clone(), *w)), Some((font.clone(), measured)), "kept with its font");
+            // A later paint reads it back: a value that no measuring could give is returned as it is.
+            *scene.label_width.borrow_mut() = Some((font, 4321.0));
+            assert_eq!(widest_label_width(&scene, window), 4321.0, "a repaint measures nothing");
+            // Another font is another measure.
+            *scene.label_width.borrow_mut() = Some((gpui::font("Some Other Family"), 4321.0));
+            assert_ne!(widest_label_width(&scene, window), 4321.0, "measured again in the new font");
+        });
     }
 
     #[gpui::test]
@@ -855,8 +915,45 @@ mod tests {
         assert_eq!(many(2), [0, 1]);
     }
 
+    #[test]
+    fn labels_that_do_not_fit_are_thinned_out_and_one_always_stays() {
+        // A 24-character id cut to 15 characters is about 100px wide; twelve of them need over 1250px.
+        assert_eq!(labels_that_fit(0, 500.0, 100.0), 0, "no category, no label");
+        assert_eq!(labels_that_fit(40, 540.0, 100.0), 5, "(540 + 8) / (100 + 8)");
+        assert_eq!(labels_that_fit(40, 100.0, 100.0), 1);
+        assert_eq!(labels_that_fit(3, 20.0, 300.0), 1, "a label wider than the axis still shows once");
+        assert_eq!(labels_that_fit(3, 2000.0, 100.0), 3, "never more than there are");
+        assert_eq!(labels_that_fit(500, f32::INFINITY, 100.0), 500, "an unlimited axis carries them all");
+        // Bars: every how-many-th category.
+        assert_eq!(label_stride(40, 540.0, 100.0), 8, "five of forty");
+        assert_eq!(label_stride(40, 5000.0, 20.0), 4, "roomy: about twelve, as before");
+        assert_eq!(label_stride(10, 5000.0, 20.0), 1, "few categories: all of them");
+        assert_eq!(label_stride(0, 100.0, 20.0), 1);
+        // However the labels are strided, two shown ones are at least a label and a gap apart.
+        for (count, width, label) in [(40usize, 540.0f32, 100.0f32), (200, 700.0, 95.0), (13, 300.0, 60.0)] {
+            let pitch = width / count as f32;
+            let stride = label_stride(count, width, label);
+            assert!(stride as f32 * pitch + 0.01 >= label + LABEL_GAP || stride >= count, "{count} labels of {label} in {width}: stride {stride}");
+        }
+    }
+
+    #[gpui::test]
+    fn a_line_axis_with_long_labels_carries_fewer_of_them_in_a_narrow_plot(cx: &mut gpui::TestAppContext) {
+        let plot = line_plot(cx, ChartKind::Line, Aggregation::Avg);
+        let many = |count: usize, label_width: f32, width: f32| {
+            let labels = (0..count).map(|i| format!("{i:024x}").into()).collect();
+            let plot = LinePlot { scene: Rc::new(ChartScene { axis_labels: labels, ..ChartScene::new(plot.scene.model.clone()) }), label_width, ..line_plot_like(&plot) };
+            plot.x_labels_within(width)
+        };
+        assert_eq!(many(100, 100.0, 4000.0), [0, 20, 40, 59, 79, 99], "room for the usual six");
+        assert_eq!(many(100, 100.0, 440.0), [0, 33, 66, 99], "four fit in 440 (100 + 8 each); six would overlap");
+        assert_eq!(many(100, 100.0, 300.0), [0, 99], "two");
+        assert_eq!(many(100, 100.0, 60.0), [0], "a plot narrower than one label still names its first category");
+        assert_eq!(many(3, 100.0, 4000.0), [0, 1, 2]);
+    }
+
     fn line_plot_like(plot: &LinePlot) -> LinePlot {
-        LinePlot { scene: plot.scene.clone(), colors: plot.colors.clone(), id: plot.id.clone(), y: Rc::new(LineAxis::new(0.0, 1.0)), area: plot.area, gutter: MIN_GUTTER }
+        LinePlot { scene: plot.scene.clone(), colors: plot.colors.clone(), id: plot.id.clone(), y: Rc::new(LineAxis::new(0.0, 1.0)), area: plot.area, gutter: MIN_GUTTER, label_width: 0.0 }
     }
 
     #[gpui::test]

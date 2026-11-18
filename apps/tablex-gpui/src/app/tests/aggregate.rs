@@ -1185,3 +1185,100 @@ fn a_failed_store_open_is_reported_once_and_retried_only_by_an_explicit_action(c
     app.read_with(visual, |this, _| assert!(this.aggregate_store.get().is_some_and(Result::is_ok)));
     assert_eq!(saved_rows(&app, visual).len(), 1);
 }
+
+// ---- where the output shows (`results::placement`) ---------------------------------------------
+
+/// Opens an aggregate tab at a size that fits both layouts, runs a pipeline; its id.
+fn agg_ran_tab(cx: &mut TestAppContext) -> (gpui::Entity<AppRoot>, &mut gpui::VisualTestContext, u64) {
+    let (app, visual) = agg_open_tab(cx);
+    visual.update(|_, cx| actions::bind_keys(cx));
+    visual.simulate_resize(gpui::size(gpui::px(1400.0), gpui::px(900.0)));
+    settle(visual);
+    agg_flush(visual);
+    agg_type_pipeline(visual, "[{ $match: { active: true } }]");
+    agg_flush(visual);
+    agg_click(visual, "agg-run");
+    assert!(visual.debug_bounds("agg-results").is_some(), "the output is open");
+    let tab = active_tab(&app, visual);
+    (app, visual, tab)
+}
+
+#[gpui::test]
+fn the_aggregate_output_goes_right_below_to_a_tab_and_to_a_window(cx: &mut TestAppContext) {
+    use crate::app::results::placement::ResultsPlace;
+    let (app, visual, query) = agg_ran_tab(cx);
+    let windows = |visual: &mut gpui::VisualTestContext| visual.cx.update(|cx| cx.windows().len());
+
+    // Below (the setting's default): the Results header sits under the pipeline editor.
+    let editor = visual.debug_bounds("agg-tab").expect("editor");
+    let header = visual.debug_bounds("results-header").expect("Results header");
+    assert!(header.top() >= editor.bottom() - gpui::px(1.0), "below: {editor:?} {header:?}");
+
+    // Right: side by side, the editor over the whole height.
+    pick_results_place(visual, "right");
+    let editor = visual.debug_bounds("agg-tab").expect("editor");
+    let header = visual.debug_bounds("results-header").expect("Results header");
+    assert!(header.left() >= editor.right() - gpui::px(1.0), "right: {editor:?} {header:?}");
+    assert!(editor.size.height > gpui::px(600.0), "the editor has the full height: {editor:?}");
+    assert!(visual.debug_bounds("agg-results").is_some());
+    pick_results_place(visual, "below");
+    let editor = visual.debug_bounds("agg-tab").expect("editor");
+    assert!(visual.debug_bounds("results-header").unwrap().top() >= editor.bottom() - gpui::px(1.0));
+
+    // A tab of its own: the output only (no second pipeline editor); a note in the query tab.
+    pick_results_place(visual, "tab");
+    let host = active_tab(&app, visual);
+    assert_ne!(host, query);
+    app.read_with(visual, |this, _| assert_eq!(this.results_source(host), Some(query)));
+    assert!(visual.debug_bounds("agg-results").is_some(), "the output is in the Results tab");
+    assert!(visual.debug_bounds("results-header").is_some());
+    assert!(visual.debug_bounds("agg-header").is_none() && visual.debug_bounds("agg-tab").is_none(), "no pipeline editor there");
+    activate_tab_by_click(visual, query);
+    assert!(visual.debug_bounds("agg-results").is_none(), "shown in one place only");
+    assert!(visual.debug_bounds("results-moved-note").is_some(), "the note");
+    let editor = visual.debug_bounds("agg-tab").expect("the editor has the panel");
+    assert!(editor.size.height > gpui::px(600.0), "{editor:?}");
+    click_debug_button(visual, "results-moved-back");
+    settle(visual);
+    app.read_with(visual, |this, _| assert!(this.workspace.tab(host).is_none()));
+    assert!(visual.debug_bounds("agg-results").is_some(), "brought back");
+
+    // A window of its own.
+    pick_results_place(visual, "window");
+    assert_eq!(windows(visual), 2);
+    assert!(visual.debug_bounds("agg-results").is_none() && visual.debug_bounds("results-moved-note").is_some());
+    let handle = app.read_with(visual, |this, _| this.results_window(query)).expect("the window");
+    let mut other = gpui::VisualTestContext::from_window(handle, &visual.cx);
+    settle(&mut other);
+    assert!(other.debug_bounds("agg-results").is_some(), "the output renders in the window");
+    assert!(other.debug_bounds("agg-header").is_none(), "without a pipeline editor");
+    // Closing the window brings the output back below.
+    assert!(other.simulate_close());
+    other.update(|window, _| window.remove_window());
+    settle(visual);
+    assert_eq!(windows(visual), 1);
+    app.read_with(visual, |this, _| assert_eq!(this.results_place(query), ResultsPlace::Below));
+    assert!(visual.debug_bounds("agg-results").is_some(), "back in the tab");
+}
+
+#[gpui::test]
+fn the_toggle_results_key_hides_the_aggregate_output_and_shows_it_again(cx: &mut TestAppContext) {
+    let (app, visual, query) = agg_ran_tab(cx);
+    visual.simulate_keystrokes("secondary-6");
+    settle(visual);
+    assert!(visual.debug_bounds("agg-results").is_none(), "hidden");
+    let editor = visual.debug_bounds("agg-tab").expect("editor");
+    assert!(editor.size.height > gpui::px(700.0), "the pipeline editor has the panel: {editor:?}");
+    app.read_with(visual, |this, _| assert!(this.results_hidden(query)));
+    visual.simulate_keystrokes("secondary-6");
+    settle(visual);
+    assert!(visual.debug_bounds("agg-results").is_some(), "shown again");
+    let editor = visual.debug_bounds("agg-tab").expect("editor");
+    assert!(visual.debug_bounds("results-header").unwrap().top() >= editor.bottom() - gpui::px(1.0));
+    // Before the first run there is nothing to hide, and nothing sticks: a run shows the output.
+    app.update(visual, |this, cx| this.toggle_results(query, cx));
+    settle(visual);
+    assert!(visual.debug_bounds("agg-results").is_none());
+    agg_click(visual, "agg-run");
+    assert!(visual.debug_bounds("agg-results").is_some(), "a run shows the output");
+}

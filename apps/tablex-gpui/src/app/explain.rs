@@ -172,7 +172,8 @@ impl AppRoot {
 
     /// Explain (or Explain Analyze) the editor's statement on the active tab.
     pub(super) fn explain_active_tab(&mut self, mode: ExplainMode, cx: &mut Context<Self>) {
-        if let Some(tab_id) = self.workspace.active_tab().map(|tab| tab.id) {
+        // A Results tab explains the statement of the query tab it shows.
+        if let Some(tab_id) = self.active_results_tab() {
             self.explain_tab_query(tab_id, mode, cx);
         }
     }

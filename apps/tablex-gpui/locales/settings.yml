@@ -368,6 +368,13 @@ settings:
         description:
           en: Type an opening bracket or quote and get the closing one.
           vi: Gõ ngoặc hoặc dấu nháy mở thì tự thêm dấu đóng.
+      vim_mode:
+        title:
+          en: Vim keys
+          vi: Phím Vim
+        description:
+          en: "Use basic Vim keys (Normal, Insert and Visual modes) in the query editors. Each editor also has its own switch in its status line."
+          vi: "Dùng các phím Vim cơ bản (chế độ Normal, Insert và Visual) trong trình soạn truy vấn. Mỗi trình soạn cũng có công tắc riêng ở thanh trạng thái."
       autocomplete_auto_trigger:
         title:
           en: Open suggestions while typing
@@ -503,6 +510,20 @@ settings:
         description:
           en: Seconds SQL Formatter (sqruff) or an external command may take before it is stopped.
           vi: Số giây tối đa SQL Formatter (sqruff) hoặc lệnh ngoài được chạy trước khi bị dừng.
+      results_position:
+        title:
+          en: Results position
+          vi: Vị trí kết quả
+        description:
+          en: "Where a query tab shows its results: below the editor or right of it. Each tab can also move them to a tab or a window of their own from the Results header."
+          vi: "Nơi tab truy vấn hiện kết quả: dưới hoặc bên phải trình soạn thảo. Mỗi tab cũng có thể chuyển kết quả sang một tab hoặc một cửa sổ riêng từ tiêu đề Kết quả."
+        options:
+          below:
+            en: Below the editor
+            vi: Dưới trình soạn thảo
+          right:
+            en: Right of the editor
+            vi: Bên phải trình soạn thảo
       on_script_error:
         title:
           en: On error in a script

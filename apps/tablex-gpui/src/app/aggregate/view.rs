@@ -65,8 +65,9 @@ fn muted(text: impl Into<gpui::SharedString>) -> gpui::Div {
 }
 
 impl AppRoot {
-    /// Everything below the tab bar for an Aggregate tab.
-    pub(in crate::app) fn render_aggregate_tab(
+    /// The editor part of an Aggregate tab: header and Text / Stages body. Its output is the tab's
+    /// result view (`render_aggregate_output`), placed by `results::placement`.
+    pub(in crate::app) fn render_aggregate_editor(
         &mut self,
         tab_id: u64,
         window: &mut Window,
@@ -83,35 +84,6 @@ impl AppRoot {
             Some(EditorMode::Stages) => self.render_aggregate_stages(tab_id, window, cx),
             _ => self.render_aggregate_text(tab_id, window, cx),
         };
-        let ran = self
-            .workspace
-            .runtime(tab_id)
-            .is_some_and(|runtime| !matches!(runtime.query.status(), crate::query::QueryStatus::Idle));
-        let editor_area = div()
-            .flex()
-            .flex_col()
-            .size_full()
-            .min_h_0()
-            .child(header)
-            .child(div().flex_1().min_h_0().child(body));
-        let content = if ran {
-            let results = self.render_aggregate_results(tab_id, window, cx);
-            gpui_component::resizable::v_resizable(("agg-split", tab_id))
-                .child(
-                    gpui_component::resizable::resizable_panel()
-                        .size(px(430.0))
-                        .size_range(px(260.0)..gpui::Pixels::MAX)
-                        .child(editor_area),
-                )
-                .child(
-                    gpui_component::resizable::resizable_panel()
-                        .size_range(px(120.0)..gpui::Pixels::MAX)
-                        .child(results),
-                )
-                .into_any_element()
-        } else {
-            editor_area.into_any_element()
-        };
         div()
             .debug_selector(|| "agg-tab".into())
             .flex()
@@ -120,8 +92,16 @@ impl AppRoot {
             .min_h_0()
             .min_w_0()
             .bg(theme::background())
-            .child(content)
+            .child(header)
+            .child(div().flex_1().min_h_0().child(body))
             .into_any_element()
+    }
+
+    /// Whether the tab has anything to show below its pipeline: the first run opens the output.
+    pub(in crate::app) fn aggregate_ran(&self, tab_id: u64) -> bool {
+        self.workspace
+            .runtime(tab_id)
+            .is_some_and(|runtime| !matches!(runtime.query.status(), crate::query::QueryStatus::Idle))
     }
 
     // ---- header -------------------------------------------------------------------
@@ -649,12 +629,20 @@ impl AppRoot {
             .child(
                 div()
                     .debug_selector(|| "agg-text-editor".into())
+                    .bg(crate::app::editor_status::editor_background(cx))
                     .flex_1()
                     .min_h_0()
                     .font_family("Menlo")
                     .text_size(px(12.0))
                     .child(Editor::new(&editor).appearance(false).bordered(false).h_full()),
             )
+            .child(self.render_editor_status(
+                tab_id,
+                &editor,
+                crate::app::editor_status::EditorLanguage::Aggregation,
+                false,
+                cx,
+            ))
             .when(disabled > 0, |this| {
                 this.child(
                     div()
@@ -1293,12 +1281,21 @@ impl AppRoot {
 
     // ---- run output ---------------------------------------------------------------------
 
-    fn render_aggregate_results(
+    /// The output of an Aggregate tab: a Results header (with the control that places it), the
+    /// editability note, the grid and its footer.
+    pub(in crate::app) fn render_aggregate_output(
         &mut self,
         tab_id: u64,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // The output may show in a Results tab or window while the pipeline's tab is not drawn.
+        self.ensure_aggregate_derived(tab_id);
+        let header = ui::section_header(t!("grid.results"))
+            .debug_selector(|| "results-header".into())
+            .justify_between()
+            .pr(px(4.0))
+            .child(self.render_results_place_menu(tab_id, cx));
         // The pipeline's edit-safety is cached per draft revision; only the
         // "result has _id" part depends on the grid and is a column scan.
         let grid = self.grid(tab_id);
@@ -1333,6 +1330,7 @@ impl AppRoot {
             .flex_col()
             .size_full()
             .min_h_0()
+            .child(header)
             .children(badge)
             .child(self.render_results(tab_id, window, cx))
             .child(self.render_result_footer(tab_id, window, cx))

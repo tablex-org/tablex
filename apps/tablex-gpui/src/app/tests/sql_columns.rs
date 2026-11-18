@@ -277,7 +277,7 @@ fn selection_stats_follow_the_visible_columns(cx: &mut TestAppContext) {
                 .selection
                 .borrow_mut()
                 .extend_to(crate::grid::CellPosition { row: 3, column });
-            this.selection_stats(tab_id).map(|stats| stats.label())
+            this.selection_stats(tab_id).map(|stats| stats.sums_label().unwrap_or_default())
         })
     };
     // Display column 4 is `created` (dates: nothing numeric) with all columns shown.

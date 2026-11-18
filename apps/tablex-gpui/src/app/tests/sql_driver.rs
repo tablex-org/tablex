@@ -156,6 +156,27 @@ impl Drop for DriverCopy {
 }
 
 /// A fixture app whose one tab runs SQL on a live driver session.
+/// Clicks `selector`; the commit modes are items of the mode button's menu: opens it first (a disabled button, as while
+/// the tab is busy, opens nothing, and nothing is picked), and closes it again if the pick (a disabled item) left it open.
+fn click_selector_or_commit_mode(visual: &mut gpui::VisualTestContext, selector: &'static str) {
+    if !matches!(selector, "tx-mode-auto" | "tx-mode-manual") {
+        click_debug_button(visual, selector);
+        settle(visual);
+        return;
+    }
+    click_debug_button(visual, "tx-mode");
+    settle(visual);
+    if visual.debug_bounds(selector).is_none() {
+        return;
+    }
+    click_debug_button(visual, selector);
+    settle(visual);
+    if visual.debug_bounds(selector).is_some() {
+        visual.simulate_keystrokes("escape");
+        settle(visual);
+    }
+}
+
 struct SqlRig<'a> {
     app: gpui::Entity<AppRoot>,
     visual: &'a mut gpui::VisualTestContext,
@@ -322,8 +343,7 @@ impl<'a> SqlRig<'a> {
     }
 
     fn click(&mut self, selector: &'static str) {
-        click_debug_button(self.visual, selector);
-        settle(self.visual);
+        click_selector_or_commit_mode(self.visual, selector);
     }
 
     fn wait_rendered(&mut self, selector: &'static str) {

@@ -567,6 +567,8 @@ pub(in crate::app) struct MongoTabUi {
     pub(in crate::app) filter_sort_drag: Option<FilterSortDragState>,
     pub(in crate::app) filter_trigger_bounds:
         std::rc::Rc<std::cell::RefCell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    /// The filter builder's panel: it takes the keyboard focus when it opens, so Escape reaches it.
+    pub(in crate::app) filter_focus: Option<gpui::FocusHandle>,
     /// Shell-syntax / canonical Extended JSON in the document view's JSON mode.
     pub(in crate::app) document_json_mode: crate::cell_value::EjsonMode,
     /// The open document editor of the Document view (see `document_edit`).
@@ -874,21 +876,6 @@ impl AppRoot {
     ) -> AnyElement {
         let command =
             crate::mongo_result::mongo_query_preview(&collection, &filter, &sort, &project);
-        let command_for_copy = command.clone();
-        let command_text = command
-            .clone()
-            .unwrap_or_else(|| "No collection selected".into());
-        let copy = Button::new(("mongo-query-preview-copy", tab_id))
-            .icon(Icon::new(IconName::Copy).size(px(14.0)))
-            .compact()
-            .ghost()
-            .disabled(command.is_none())
-            .tooltip("Copy query")
-            .on_click(cx.listener(move |_, _, _, cx| {
-                if let Some(command) = command_for_copy.clone() {
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(command));
-                }
-            }));
         let close = Button::new(("mongo-query-preview-close", tab_id))
             .icon(Icon::new(IconName::Close).size(px(14.0)))
             .compact()
@@ -920,50 +907,14 @@ impl AppRoot {
                             .child(close),
                     ),
             )
-            .child(
-                div()
-                    .relative()
-                    .flex_1()
-                    .min_h(px(0.0))
-                    .p(px(8.0))
-                    .bg(theme::background())
-                    .border_1()
-                    .border_color(theme::border())
-                    .rounded(px(4.0))
-                    .child(
-                        div()
-                            .debug_selector(|| "mongo-query-preview-copy".into())
-                            .absolute()
-                            .top(px(4.0))
-                            .right(px(4.0))
-                            .child(copy),
-                    )
-                    .child(
-                        div()
-                            .debug_selector(|| "mongo-query-command".into())
-                            .id(("mongo-query-code", tab_id))
-                            .size_full()
-                            .pt(px(30.0))
-                            .overflow_x_scroll()
-                            .overflow_y_scroll()
-                            .font_family("Menlo")
-                            .text_size(px(12.0))
-                            .line_height(px(18.0))
-                            .text_color(theme::text())
-                            .whitespace_nowrap()
-                            .child(match &command {
-                                // Highlighted like the pipeline editors, and selectable so part of
-                                // it (the sort, say) can be copied.
-                                Some(command) => gpui_component::text::TextView::markdown(
-                                    ("mongo-query-code-text", tab_id),
-                                    crate::app::assistant::ask::fenced("javascript", command),
-                                )
-                                .selectable(true)
-                                .into_any_element(),
-                                None => command_text.into_any_element(),
-                            }),
-                    ),
-            );
+            .child(super::query_preview_body(
+                "mongo",
+                tab_id,
+                "javascript",
+                command,
+                t!("grid.no_collection_selected").into(),
+                t!("grid.copy_query").into(),
+            ));
         let root = cx.entity().downgrade();
         Popover::new(("mongo-query-preview-popover", tab_id))
             .trigger(trigger)

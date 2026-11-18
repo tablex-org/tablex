@@ -242,7 +242,7 @@ fn manual_mode_runs_on_a_session_of_the_tab_and_hides_its_changes_until_commit(c
 
     // Auto-commit: the toggle is there, nothing ends a transaction yet, no session of its own.
     assert_eq!(rig.mode(a), CommitMode::Auto);
-    assert!(rig.rendered_now("tx-mode-auto") && rig.rendered_now("tx-mode-manual"));
+    assert!(rig.rendered_now("tx-mode"));
     assert!(!rig.rendered_now("tx-commit") && !rig.rendered_now("tx-status"));
     rig.run_on(a, COUNT_ITEMS);
     assert_eq!(rig.own_sessions(), 0, "an auto-commit tab opens no extra connection");
@@ -612,7 +612,7 @@ fn kinds_without_transactions_offer_the_toggle_disabled_with_the_reason(cx: &mut
         let tab = rig.tab(kind, "SELECT 1");
         let reason = rig.app.read_with(rig.visual, |this, _| this.manual_unavailable_reason(tab));
         assert!(reason.is_some_and(|reason| reason.contains("no transactions")), "{kind:?}");
-        assert!(rig.rendered("tx-mode-manual"), "{kind:?}: the toggle is drawn");
+        assert!(rig.rendered("tx-mode"), "{kind:?}: the mode button is drawn");
         rig.click("tx-mode-manual");
         let mode = rig.app.read_with(rig.visual, |this, _| this.commit_mode(tab));
         assert_eq!(mode, CommitMode::Auto, "{kind:?}: it does nothing");
@@ -838,7 +838,7 @@ fn table_data_tabs_have_no_commit_mode_and_never_open_a_transaction(cx: &mut Tes
     });
     rig.open_table("items");
     rig.wait_structure();
-    assert!(!rig.rendered_now("tx-mode-manual") && !rig.rendered_now("tx-mode-auto"), "no toggle on a table-data tab");
+    assert!(!rig.rendered_now("tx-mode"), "no mode button on a table-data tab");
     assert_eq!(rig.mode(tab), CommitMode::Auto);
     assert_eq!(rig.own_sessions(), 0, "browsing opened no session of its own, and no transaction");
     assert!(rig.tx(tab).is_none());
@@ -963,6 +963,72 @@ fn a_commit_or_rollback_asked_for_while_the_same_one_is_on_its_way_is_absorbed_s
     assert_eq!(rig.logged_times("was not run"), 1, "only the Roll Back list, which was refused: {:?}", rig.log_messages());
     assert!(!refused.get(), "what waited for the Roll Back did not go on");
     assert!(rig.log_messages().iter().all(|message| !message.contains("Wait for the running statement")), "{:?}", rig.log_messages());
+}
+
+/// The keyboard focus on the grid of `tab`'s results, as a click on it leaves it.
+fn focus_grid(rig: &mut SqlRig<'_>, tab: u64) {
+    let focus = rig.app.update(rig.visual, |this, cx| this.view_mut(tab).grid_focus(cx));
+    rig.visual.update(|window, cx| window.focus(&focus, cx));
+    settle(rig.visual);
+}
+
+/// The Commit, Roll Back and Auto-commit shortcuts belong to the query tab whose results are in front: in a
+/// Results tab of the app's window, and in the results window of their own.
+#[gpui::test]
+fn commit_and_roll_back_shortcuts_reach_the_query_tab_from_a_results_tab_and_a_results_window(cx: &mut TestAppContext) {
+    use super::results::placement::ResultsPlace;
+    let db = SqliteDb::new(ITEMS_SEED);
+    let mut rig = SqlRig::sqlite(cx, &db);
+    let a = rig.tab;
+    rig.click("tx-mode-manual");
+    rig.run_on(a, "INSERT INTO items(name) VALUES ('from a results tab')");
+    // The last statement shows a grid, which the keyboard focus can be on.
+    rig.run_on(a, "SELECT name FROM items");
+    assert_eq!(rig.pending(a), 2);
+
+    // A Results tab is the active tab: Commit goes to its query tab.
+    rig.app.update(rig.visual, |this, cx| this.set_results_place(a, ResultsPlace::Tab, cx));
+    settle(rig.visual);
+    assert_ne!(rig.app.read_with(rig.visual, |this, _| this.active_id()), a, "the Results tab is active");
+    focus_grid(&mut rig, a);
+    rig.visual.dispatch_action(actions::CommitTransaction);
+    rig.wait_tx("the Commit from the Results tab", a, |tx| tx.statements == 0);
+    assert_eq!(db.sql("SELECT count(*) FROM items WHERE name = 'from a results tab'"), "1", "committed");
+
+    // The same for Roll Back.
+    rig.app.update(rig.visual, |this, cx| this.bring_results_back(a, cx));
+    settle(rig.visual);
+    rig.run_on(a, "INSERT INTO items(name) VALUES ('rolled back in a tab')");
+    rig.run_on(a, "SELECT name FROM items");
+    rig.app.update(rig.visual, |this, cx| this.set_results_place(a, ResultsPlace::Tab, cx));
+    settle(rig.visual);
+    focus_grid(&mut rig, a);
+    rig.visual.dispatch_action(actions::RollbackTransaction);
+    rig.wait_tx("the Roll Back from the Results tab", a, |tx| tx.statements == 0);
+    assert_eq!(db.sql("SELECT count(*) FROM items WHERE name = 'rolled back in a tab'"), "0", "rolled back");
+
+    // And the mode toggle: Manual -> Auto from the Results tab.
+    focus_grid(&mut rig, a);
+    rig.visual.dispatch_action(actions::ToggleAutoCommit);
+    settle(rig.visual);
+    assert_eq!(rig.mode(a), CommitMode::Auto, "the toggle reached the query tab");
+
+    // A results window: its own window handles them.
+    rig.app.update(rig.visual, |this, cx| this.bring_results_back(a, cx));
+    settle(rig.visual);
+    rig.activate(a);
+    rig.click("tx-mode-manual");
+    rig.run_on(a, "INSERT INTO items(name) VALUES ('from a results window')");
+    rig.run_on(a, "SELECT name FROM items");
+    assert_eq!(rig.pending(a), 2);
+    rig.app.update(rig.visual, |this, cx| this.set_results_place(a, ResultsPlace::Window, cx));
+    settle(rig.visual);
+    let handle = rig.app.read_with(rig.visual, |this, _| this.results_window(a)).expect("the results window");
+    let mut window = gpui::VisualTestContext::from_window(handle, &rig.visual.cx);
+    settle(&mut window);
+    window.dispatch_action(actions::CommitTransaction);
+    rig.wait_tx("the Commit from the results window", a, |tx| tx.statements == 0);
+    assert_eq!(db.sql("SELECT count(*) FROM items WHERE name = 'from a results window'"), "1", "committed");
 }
 
 /// A real Commit / Roll Back started with `spawn_end` is finished the way the end flow finishes it, once the

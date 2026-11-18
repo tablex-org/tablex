@@ -931,19 +931,16 @@ fn mongo_toolbar_controls_fit_inside_toolbar(cx: &mut TestAppContext) {
     assert_eq!(action_strip.size.height, px(32.0));
     assert_eq!(status_row.size.height, px(22.0));
     assert_eq!(status_row.top(), action_strip.bottom());
-    for selector in [
-        "result-refresh",
-        "result-status-summary",
-        "result-status-auto",
-    ] {
+    for selector in ["result-status-summary", "result-status-auto"] {
         assert!(
             cx.debug_bounds(selector).is_some(),
             "{selector} should render in the unified result footer"
         );
     }
+    // Refresh is in the strip, or (a short strip) in the "..." menu: one of the two.
     assert!(
-        cx.debug_bounds("result-more").is_none(),
-        "the result footer must not contain a More control"
+        cx.debug_bounds("result-refresh").is_some() || cx.debug_bounds("result-more").is_some(),
+        "Refresh is in the strip or in the menu"
     );
     assert!(
         cx.debug_bounds("mongo-commit").is_some(),
@@ -971,6 +968,9 @@ fn mongo_toolbar_controls_fit_inside_toolbar(cx: &mut TestAppContext) {
     cx.simulate_resize(gpui::size(gpui::px(1400.0), gpui::px(800.0)));
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("result-more").is_none(), "a wide strip needs no menu");
     for selector in [
         "result-limit",
         "result-export",
@@ -1048,13 +1048,10 @@ fn mongo_toolbar_controls_fit_inside_toolbar(cx: &mut TestAppContext) {
     let compact_footer = cx
         .debug_bounds("result-action-footer")
         .expect("compact footer should render");
-    let compact_limit = cx
-        .debug_bounds("result-limit")
-        .expect("compact Limit control should render");
-    assert!(
-        compact_limit.right() > compact_footer.right(),
-        "compact output controls should extend into the scrollable action strip"
-    );
+    assert!(cx.debug_bounds("result-limit").is_none(), "Limit goes to the menu first when the strip is short");
+    let compact_more = cx.debug_bounds("result-more").expect("the menu button replaces it");
+    assert!(compact_more.right() <= compact_footer.right(), "inside the footer: {compact_more:?} {compact_footer:?}");
+    assert!(cx.debug_bounds("result-export").is_some(), "Export stays");
 
     app.update(cx, |this, _| {
         let tab_id = this.workspace.active_tab().expect("active tab").id;
@@ -1091,55 +1088,41 @@ fn mongo_toolbar_controls_fit_inside_toolbar(cx: &mut TestAppContext) {
     cx.simulate_resize(gpui::size(gpui::px(500.0), gpui::px(600.0)));
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
-    let tiny_footer = cx
-        .debug_bounds("result-action-footer")
-        .expect("tiny footer should render");
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
     let tiny_strip = cx
         .debug_bounds("result-action-strip")
         .expect("tiny action strip should render");
-    let action_content = cx
-        .debug_bounds("result-action-content")
-        .expect("action content should render");
-    let max_offset = app.update(cx, |this, _| this.av().result_action_scroll.max_offset());
-    assert!(
-        f32::from(max_offset.x) > 0.0,
-        "narrow action strip should expose horizontal scrolling"
-    );
-    assert!(
-        action_content.right() > tiny_strip.right(),
-        "narrow action content should not hide controls"
-    );
-    assert_eq!(
-        app.update(cx, |this, _| this.av().result_action_scroll.offset().x),
-        px(0.0)
-    );
-    cx.simulate_event(ScrollEvent {
-        position: tiny_strip.center(),
-        delta: ScrollDelta::Pixels(Point::new(gpui::px(-1000.0), gpui::px(0.0))),
-        touch_phase: gpui::TouchPhase::Moved,
-        modifiers: Default::default(),
-        source: gpui::ScrollSource::Pointer,
-    });
-    cx.update(|window, _| window.refresh());
-    cx.run_until_parked();
-    let scrolled_offset = app.update(cx, |this, _| this.av().result_action_scroll.offset().x);
-    assert!(
-        f32::from(scrolled_offset) < 0.0,
-        "narrow action strip should move horizontally when scrolled"
-    );
-    for selector in ["result-export", "result-limit"] {
+    // The strip does not scroll or clip any more: what does not fit is in the "..." menu, and what stays
+    // (Commit / Roll Back, Export, the menu's button) is whole inside the strip.
+    for selector in ["mongo-commit", "mongo-rollback", "result-export", "result-more"] {
         let bounds = cx
             .debug_bounds(selector)
-            .unwrap_or_else(|| panic!("{selector} should remain reachable by scrolling"));
+            .unwrap_or_else(|| panic!("{selector} stays in a narrow strip"));
         assert!(
             bounds.left() >= tiny_strip.left() && bounds.right() <= tiny_strip.right(),
-            "{selector} should be fully reachable after scrolling: {bounds:?}, strip {tiny_strip:?}, offset {scrolled_offset:?}, max {max_offset:?}"
+            "{selector} is inside the strip: {bounds:?} vs {tiny_strip:?}"
         );
     }
-    assert!(
-        tiny_footer.bottom() >= cx.debug_bounds("result-status-row").unwrap().bottom(),
-        "status row should remain below the scrolling action strip"
-    );
+    for gone in ["result-limit", "mongo-add-row", "mongo-undo", "page-next"] {
+        assert!(cx.debug_bounds(gone).is_none(), "{gone} moved into the menu");
+    }
+    let more = cx.debug_bounds("result-more").expect("the menu button");
+    cx.simulate_click(more.center(), Default::default());
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    for item in ["more-refresh", "more-new-document", "more-edit", "more-delete", "more-undo", "more-redo", "more-previous", "more-next", "more-record", "more-limit-100", "more-limit-50"] {
+        assert!(cx.debug_bounds(item).is_some(), "{item} is in the menu");
+    }
+    // Each entry works from the menu: Limit 50 sets the limit and closes it.
+    let limit_item = cx.debug_bounds("more-limit-50").expect("Limit 50");
+    cx.simulate_click(limit_item.center(), Default::default());
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let mut limit = 0;
+    app.update(cx, |this, _| limit = this.workspace.active_tab().expect("active tab").output_limit);
+    assert_eq!(limit, 50, "Limit from the menu sets the output limit");
+    assert!(cx.debug_bounds("more-limit-50").is_none(), "the menu closed");
     cx.simulate_resize(gpui::size(gpui::px(900.0), gpui::px(600.0)));
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
@@ -2288,4 +2271,75 @@ fn mongo_clear_filter_keeps_the_builder_open_on_a_fresh_rule(cx: &mut TestAppCon
         assert_eq!(mongo.filter_rules.len(), 1, "one fresh rule");
         assert_eq!(mongo.filter_rules[0].value, "");
     });
+}
+
+/// Escape closes the filter builder (it used to stay open), so the next click on "Query" is not spent
+/// on dismissing it: it opens the preview at once.
+#[gpui::test]
+fn escape_closes_the_filter_builder_and_the_next_click_on_query_opens_the_preview(cx: &mut TestAppContext) {
+    cx.update(gpui_component::init);
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        let view = cx.new(AppRoot::new_for_test);
+        gpui_component::Root::new(view, window, cx)
+    });
+    let app = cx.cx.read(|app| root.read(app).view().clone().downcast::<AppRoot>().unwrap());
+    app.update(cx, |this, cx| {
+        let tab_id = this.workspace.open_query_tab("order-items");
+        this.workspace.active_tab_mut().unwrap().query_mode = Some(QueryMode::MongoFind);
+        this.workspace.active_tab_mut().unwrap().collection = "order-items".into();
+        let runtime = this.workspace.runtime_mut(tab_id).unwrap();
+        runtime.query.begin();
+        runtime.mongo.filter = r#"{"status":"open"}"#.into();
+        runtime.mongo.known_columns = vec!["_id".into(), "name".into()];
+        runtime.mongo.add_filter_rule("name");
+        runtime.mongo.filter_rules[0].mode = crate::mongo_result::MongoFilterMode::NotEquals;
+        cx.notify();
+    });
+    cx.simulate_resize(gpui::size(gpui::px(900.0), gpui::px(600.0)));
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let state = |app: &gpui::Entity<AppRoot>, cx: &mut gpui::VisualTestContext| {
+        app.read_with(cx, |this, _| {
+            let tab = this.workspace.active_tab().unwrap().id;
+            let mongo = &this.workspace.runtime(tab).unwrap().mongo;
+            (mongo.filter_open, mongo.query_preview_open)
+        })
+    };
+    let settle = |cx: &mut gpui::VisualTestContext| {
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+    };
+    let funnel = cx.debug_bounds("mongo-filter-label").expect("the funnel");
+    for from_a_field in [false, true] {
+        cx.simulate_click(funnel.center(), Default::default());
+        settle(cx);
+        assert_eq!(state(&app, cx), (true, false), "the funnel opens the builder");
+        assert!(cx.debug_bounds("mongo-filter-panel").is_some());
+        if from_a_field {
+            // With the cursor in a field of the builder, Escape closes it all the same.
+            let field = cx.debug_bounds("mongo-filter-value-control-1").expect("the first rule's value field");
+            cx.simulate_click(field.center(), Default::default());
+            settle(cx);
+            assert_eq!(state(&app, cx), (true, false), "a click inside keeps it open");
+        }
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+        assert_eq!(state(&app, cx), (false, false), "Escape closed the builder (from a field: {from_a_field})");
+        assert!(cx.debug_bounds("mongo-filter-panel").is_none());
+        // The focus did not stay on the removed panel: the grid has it, so the keyboard works right away.
+        let grid_focus = app.update(cx, |this, cx| {
+            let tab = this.workspace.active_tab().unwrap().id;
+            this.view_mut(tab).grid_focus(cx)
+        });
+        assert!(cx.update(|window, _| grid_focus.is_focused(window)), "Escape moved the focus to the grid (from a field: {from_a_field})");
+
+        let query = cx.debug_bounds("mongo-query-preview").expect("the Query control");
+        cx.simulate_click(query.center(), Default::default());
+        settle(cx);
+        assert_eq!(state(&app, cx), (false, true), "the first click on Query opens the preview");
+        assert!(cx.debug_bounds("mongo-query-panel").is_some());
+        cx.simulate_click(query.center(), Default::default());
+        settle(cx);
+        assert_eq!(state(&app, cx), (false, false), "and the next one closes it");
+    }
 }

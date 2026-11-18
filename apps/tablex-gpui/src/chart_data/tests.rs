@@ -468,14 +468,14 @@ fn type_names_say_which_text_is_a_number_or_a_date() {
     use ColumnClass::{Numeric, Temporal};
     for name in [
         "numeric", "NUMERIC(10,2)", "decimal", "decimal(10, 2)", "DECIMAL(10,2) UNSIGNED", "bigint", "bigint unsigned", "int", "integer",
-        "smallint", "double", "double precision", "float", "real", "tinyint", "mediumint", "Nullable(Decimal(18, 4))", "Int64", "Float64",
+        "smallint", "double", "double precision", "float", "real", "tinyint", "mediumint", "int32", "decimal128", "Nullable(Decimal(18, 4))", "Int64", "Float64",
         "LowCardinality(Nullable(UInt8))", "NUMBER", "serial",
     ] {
         assert_eq!(class_of_type_name(name), Some(Numeric), "{name}");
     }
     for name in [
         "date", "DATE", "datetime", "datetime(6)", "timestamp", "timestamp(3) with time zone", "timestamp without time zone",
-        "timestamp with time zone", "timestamptz", "DateTime64(3, 'UTC')", "Nullable(Date32)", "datetime2", "smalldatetime",
+        "timestamp with time zone", "timestamptz", "DateTime64(3, 'UTC')", "date_time", "Nullable(Date32)", "datetime2", "smalldatetime",
     ] {
         assert_eq!(class_of_type_name(name), Some(Temporal), "{name}");
     }
@@ -510,6 +510,11 @@ fn numbers_and_dates_are_parsed_strictly() {
     assert_eq!(parse_time("1970-01-01 05:30:00+0530"), Some(hours(5) + 1_800_000_000));
     assert_eq!(parse_time("1969-12-31 19:00:00-05"), Some(-hours(5)));
     assert_eq!(parse_time("1970-01-01T00:00:00Z"), Some(0));
+    // A MongoDB date as the grid shows it: ISO with `T`, milliseconds and an offset or `Z`.
+    let want = parse_time("2025-07-09 04:58:19.523");
+    assert_eq!(want, Some(1_752_037_099_523_000));
+    assert_eq!(parse_time("2025-07-09T04:58:19.523+00:00"), want);
+    assert_eq!(parse_time("2025-07-09T04:58:19.523Z"), want);
     assert_eq!(parse_time("2024-01-05 00:00:00+07"), parse_time("2024-01-05"), "a day-truncated value in a +07 session is that day");
     for text in ["", "0000-00-00", "0000-00-00 00:00:00", "infinity", "-infinity", "yesterday", "2024-13-01", "2024-02-30", "12:30:00", "2024/01/05"] {
         assert_eq!(parse_time(text), None, "{text:?}");

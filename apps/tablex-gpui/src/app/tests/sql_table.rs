@@ -122,6 +122,22 @@ fn sidebar_table_opens_a_table_data_tab_with_where_order_by_bar_and_no_editor(
     visual.simulate_click(rail_grid.center(), Default::default());
     settle(visual);
     assert!(visual.debug_bounds("columns-view").is_none(), "Grid returns to the grid");
+    // Query opens the preview with the generated SQL (highlighted text view).
+    let preview = visual.debug_bounds("sql-query-preview").unwrap();
+    visual.simulate_click(preview.center(), Default::default());
+    settle(visual);
+    assert!(visual.debug_bounds("sql-query-panel").is_some(), "Query opens the preview");
+    assert!(visual.debug_bounds("sql-query-command").is_some(), "the SQL is shown");
+    let copy = visual.debug_bounds("sql-query-preview-copy").expect("copy in the code block");
+    visual.simulate_click(copy.center(), Default::default());
+    settle(visual);
+    assert_eq!(
+        visual.read_from_clipboard().and_then(|item| item.text()),
+        Some("SELECT * FROM \"public\".\"orders\"".into())
+    );
+    let close = visual.debug_bounds("sql-query-preview").unwrap();
+    visual.simulate_click(close.center(), Default::default());
+    settle(visual);
     // No SQL editor / Save / Results header / Mongo bar.
     assert!(visual.debug_bounds("save-sql-script").is_none(), "no SQL editor");
     assert!(visual.debug_bounds("run-query").is_none(), "no title-bar Run");

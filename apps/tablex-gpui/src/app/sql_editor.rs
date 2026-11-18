@@ -47,10 +47,10 @@ fn suggested_file_name(title: &str) -> String {
 }
 
 impl AppRoot {
-    /// The active tab when it is a SQL editor.
+    /// The active tab when it is a SQL editor; a Results tab stands for its query tab.
     fn active_sql_tab(&self) -> Option<u64> {
         self.workspace
-            .active_tab()
+            .tab(self.active_results_tab()?)
             .filter(|tab| is_sql_editor(tab))
             .map(|tab| tab.id)
     }

@@ -234,6 +234,8 @@ struct GridRowActions {
     pin_locked: bool,
     can_stage_row: bool,
     can_sql_database_sort: bool,
+    /// A database sort can run: it reopens a closed or lost connection first.
+    can_sql_sort: bool,
     can_sql_clone: bool,
 }
 
@@ -286,6 +288,20 @@ impl AppRoot {
         if row % 2 == 1 {
             result = result.bg(theme::grid_alt_row());
         }
+        // The row of a selection that stays within one row (a clicked cell, or a run of cells
+        // along it) is tinted across the grid, so its other values are easy to follow. A
+        // selection over several rows (select all, a column, a drag) tints none. Pending-delete
+        // and refresh marks still win.
+        let current_row = selection.range.is_some_and(|range| {
+            let range = range.normalized();
+            range.start.row == range.end.row && range.end.row == row
+        });
+        if current_row {
+            result = result.bg(gpui::Rgba {
+                a: 0.15,
+                ..theme::accent()
+            });
+        }
         if pending_delete {
             result = result.bg(gpui::Rgba {
                 a: 0.12,
@@ -327,6 +343,7 @@ impl AppRoot {
                     .when(unknown, |this| this.child("?"))
                     .when(applied && !unknown && !pending_delete, |this| this.child("↻")),
             )
+            .when(current_row, |this| this.text_color(theme::accent()))
             .when(display.show_row_numbers, |this| {
                 this.child((row + 1).to_string())
             });
@@ -513,6 +530,8 @@ impl AppRoot {
                 Some(gpui::Rgba { a: 0.12, ..theme::warning() })
             } else if pending_delete {
                 Some(gpui::Rgba { a: 0.12, ..theme::danger() })
+            } else if current_row {
+                Some(gpui::Rgba { a: 0.15, ..theme::accent() })
             } else if row % 2 == 1 {
                 Some(theme::grid_alt_row())
             } else {
@@ -659,9 +678,10 @@ impl AppRoot {
             pin_locked,
             can_stage_row,
             can_sql_database_sort,
+            can_sql_sort,
             can_sql_clone,
         } = actions;
-        let can_database_sort = can_stage_row || can_sql_database_sort;
+        let can_database_sort = can_stage_row || can_sql_sort;
         let menu_root = cx.entity().downgrade();
         let copy_default = self.grid_prefs.copy_default;
         let copy_root = menu_root.clone();
@@ -1184,7 +1204,7 @@ impl AppRoot {
             })
     }
 
-    fn render_result_empty_state(&self, tab_id: u64) -> AnyElement {
+    fn render_result_empty_state(&self, tab_id: u64, cx: &mut Context<Self>) -> AnyElement {
         // (see `failed_query_text` for a failure that lost the connection)
         use crate::query::QueryStatus;
         let status = self
@@ -1203,6 +1223,25 @@ impl AppRoot {
             Some(QueryStatus::Cancelled) => t!("grid.query_cancelled").into_owned(),
             _ => t!("grid.run_a_query_to_see_results").into_owned(),
         };
+        // Nothing run yet (an editor tab whose run was withdrawn, or whose result is gone): the
+        // editor's Run, for the tab this area belongs to (it may show in a Results tab or window).
+        let run_button = (!shell_failed
+            && matches!(status, None | Some(QueryStatus::Idle))
+            && self.results_movable(tab_id))
+        .then(|| {
+            Button::new(("empty-run-query", tab_id))
+                .debug_selector(|| "empty-run-query".into())
+                .icon(Icon::empty().path("icons/play.svg").size(px(12.0)))
+                .label(t!("editor.run"))
+                .compact()
+                .primary()
+                .tooltip(shortcuts::with_label(
+                    &t!("editor.run_the_statement"),
+                    &self.settings.shortcuts,
+                    "editor.run",
+                ))
+                .on_click(cx.listener(move |this, _, window, cx| this.run_tab_as_its_run_button(tab_id, window, cx)))
+        });
         div()
             .debug_selector(|| "result-empty-state".into())
             .flex_1()
@@ -1218,9 +1257,12 @@ impl AppRoot {
             .child(
                 div()
                     .w_full()
-                    .text_center()
-                    .whitespace_normal()
-                    .child(message),
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(div().w_full().text_center().whitespace_normal().child(message))
+                    .children(run_button),
             )
             .into_any_element()
     }
@@ -1282,6 +1324,7 @@ impl AppRoot {
         let layout = &view.grid_ui.layout;
         let content_width = layout.content_width();
         let can_sql_database_sort = self.sql_sort_available(tab_id);
+        let can_sql_sort = self.sql_table_sortable(tab_id);
         let can_sql_clone = self.sql_clone_available(tab_id);
         let can_stage_row = self
             .workspace
@@ -1312,7 +1355,7 @@ impl AppRoot {
             .tab(tab_id)
             .is_some_and(|tab| tab.query_mode.is_table_data());
         let header_sort = self.header_sort(tab_id);
-        let can_database_sort = can_stage_row || can_sql_database_sort;
+        let can_database_sort = can_stage_row || can_sql_sort;
         let pinned_segment = crate::grid::ColumnSegment {
             columns: 0..frozen,
             spacer: 0.0,
@@ -1593,6 +1636,7 @@ impl AppRoot {
                 pin_locked: self.pinning_locked(tab_id),
                 can_stage_row,
                 can_sql_database_sort,
+                can_sql_sort,
                 can_sql_clone,
             },
             cx,
@@ -1725,7 +1769,7 @@ impl AppRoot {
                                 .bottom_0()
                                 .left_0()
                                 .right_0()
-                                .child(self.render_result_empty_state(tab_id)),
+                                .child(self.render_result_empty_state(tab_id, cx)),
                         )
                     }),
             )
@@ -1806,7 +1850,7 @@ impl AppRoot {
         }
         let grid = self.grid(tab_id);
         if grid.row_count() == 0 && grid.column_count() == 0 {
-            return self.render_result_empty_state(tab_id);
+            return self.render_result_empty_state(tab_id, cx);
         }
         if !self.columns_presentation_active(tab_id) && self.mongo_documents_view_active(tab_id) {
             self.view_mut(tab_id).grid_focus(cx);

@@ -117,7 +117,8 @@ button of the title bar's theme picker) are copied verbatim from the pinned
 copied verbatim from the pinned `gpui-kit-assets 0.8.0` Lucide set, ISC licensed like
 the glyphs above.
 
-## Title bar language glyph
+## SQL editor commit-mode glyphs
 
-`languages.svg` (the button of the title bar's language picker, left of the Settings gear) is copied
-verbatim from the pinned `gpui-kit-assets 0.8.0` Lucide set, ISC licensed like the glyphs above.
+`zap.svg` (Auto-commit) and `hand.svg` (Manual commit) on the SQL editor header's commit-mode
+button are copied verbatim from the pinned `gpui-kit-assets 0.10.0` Lucide set, ISC licensed like
+the glyphs above.

@@ -90,7 +90,7 @@ fn place(script: &str, at: usize, message: &str) -> String {
 }
 
 /// Where the `SELECT` of a statement starts, after its leading comments; `None` when it is not one.
-fn sql_start(statement: &str) -> Option<usize> {
+pub(crate) fn sql_start(statement: &str) -> Option<usize> {
     let mut lexer = Lexer::new(statement);
     let token = lexer.next().ok()??;
     matches!(&token.kind, Tok::Word(word) if word.eq_ignore_ascii_case("select")).then_some(token.at)

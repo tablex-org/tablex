@@ -254,7 +254,8 @@ impl AppRoot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(tab_id) = self.workspace.active_tab().map(|tab| tab.id) {
+        // A Results tab finds in the results it shows.
+        if let Some(tab_id) = self.active_results_tab() {
             self.open_grid_find(tab_id, window, cx);
         }
     }

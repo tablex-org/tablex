@@ -87,6 +87,48 @@ grid:
   results:
     en: Results
     vi: Kết quả
+  results_position:
+    en: Where the results show
+    vi: Nơi hiện kết quả
+  results_below:
+    en: Below the editor
+    vi: Dưới trình soạn thảo
+  results_right:
+    en: Right of the editor
+    vi: Bên phải trình soạn thảo
+  results_in_tab:
+    en: In a tab of their own
+    vi: Ở tab riêng
+  results_in_window:
+    en: In a window of their own
+    vi: Ở cửa sổ riêng
+  results_are_in_a_tab:
+    en: The results are in a tab of their own.
+    vi: Kết quả đang mở ở tab riêng.
+  results_are_in_a_window:
+    en: The results are in a window of their own.
+    vi: Kết quả đang mở ở cửa sổ riêng.
+  hide_results:
+    en: Hide results
+    vi: Ẩn kết quả
+  show_results:
+    en: Show
+    vi: Hiện
+  results_are_hidden:
+    en: Results hidden
+    vi: Kết quả đang ẩn
+  show_hidden_results:
+    en: Show results
+    vi: Hiện kết quả
+  bring_results_back:
+    en: Bring back
+    vi: Đưa về
+  could_not_open_results_window:
+    en: "Could not open the results window: %{error}"
+    vi: "Không mở được cửa sổ kết quả: %{error}"
+  limit:
+    en: "Limit %{count}"
+    vi: "Giới hạn %{count}"
   clear_sort:
     en: Clear Sort
     vi: Bỏ sắp xếp
@@ -345,6 +387,9 @@ grid:
   copy_query:
     en: Copy query
     vi: Sao chép truy vấn
+  no_collection_selected:
+    en: No collection selected
+    vi: Chưa chọn collection
   close_preview:
     en: Close preview
     vi: Đóng xem trước
@@ -510,3 +555,21 @@ grid:
   copy_sql_condition:
     en: Copy SQL Condition
     vi: Sao chép điều kiện SQL
+  fetched_one:
+    en: 1 row fetched
+    vi: Đã tải 1 dòng
+  fetched_other:
+    en: "%{count} rows fetched"
+    vi: "Đã tải %{count} dòng"
+  fetched_more:
+    en: "%{count}+ rows fetched"
+    vi: "Đã tải %{count}+ dòng"
+  selected:
+    en: "Selected:"
+    vi: "Đang chọn:"
+  cells_one:
+    en: 1 cell
+    vi: 1 ô
+  cells_other:
+    en: "%{count} cells"
+    vi: "%{count} ô"

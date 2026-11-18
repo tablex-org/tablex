@@ -184,7 +184,7 @@ pub fn class_of_type_name(type_name: &str) -> Option<ColumnClass> {
         | "uint256" | "real" | "float" | "float4" | "float8" | "float32" | "float64" | "double" | "double precision"
         | "numeric" | "decimal" | "dec" | "fixed" | "number" | "smallserial" | "serial" | "bigserial" | "serial2"
         | "serial4" | "serial8" | "decimal32" | "decimal64" | "decimal128" | "decimal256" => Some(ColumnClass::Numeric),
-        "date" | "date32" | "datetime" | "datetime2" | "datetime64" | "smalldatetime" | "timestamp" | "timestamptz"
+        "date" | "date32" | "date_time" | "datetime" | "datetime2" | "datetime64" | "smalldatetime" | "timestamp" | "timestamptz"
         | "timestamp with time zone" | "timestamp without time zone" | "timestamp with local time zone" => {
             Some(ColumnClass::Temporal)
         }

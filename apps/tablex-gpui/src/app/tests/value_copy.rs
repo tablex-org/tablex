@@ -927,24 +927,24 @@ fn value_selection_stats_are_exact_for_integers_and_decimal_text(cx: &mut TestAp
             selection.select(CellPosition { row: 0, column });
             selection.extend_to(CellPosition { row: 1, column });
             drop(selection);
-            this.selection_stats(tab_id).expect("stats").label()
+            this.selection_stats(tab_id).expect("stats").sums_label().unwrap_or_default()
         })
     };
     assert_eq!(
         label(visual, 0),
-        "SUM: 9007199254740994  AVG: 4503599627370497  MIN: 1  MAX: 9007199254740993  2 cells 2 rows"
+        "SUM: 9007199254740994  AVG: 4503599627370497  MIN: 1  MAX: 9007199254740993"
     );
     // Text-typed `numeric` is INCLUDED, digit for digit.
     assert_eq!(
         label(visual, 1),
-        "SUM: 12345678901234567891  AVG: 6172839450617283945.5  MIN: 0.75  MAX: 12345678901234567890.25  2 cells 2 rows"
+        "SUM: 12345678901234567891  AVG: 6172839450617283945.5  MIN: 0.75  MAX: 12345678901234567890.25"
     );
     // A float column is approximate; a varchar of digits never counts.
     assert_eq!(
         label(visual, 2),
-        "SUM: ≈0.3  AVG: ≈0.15  MIN: ≈0.1  MAX: ≈0.2  2 cells 2 rows"
+        "SUM: ≈0.3  AVG: ≈0.15  MIN: ≈0.1  MAX: ≈0.2"
     );
-    assert_eq!(label(visual, 3), "2 cells 2 rows");
+    assert_eq!(label(visual, 3), "", "a varchar of digits has no sums");
 }
 
 #[gpui::test]

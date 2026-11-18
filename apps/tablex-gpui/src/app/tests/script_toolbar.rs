@@ -397,3 +397,148 @@ fn a_failed_database_listing_is_remembered_with_its_error_and_retried_only_on_de
         assert!(this.script_toolbar.has_database_list(SECOND_MONGO));
     });
 }
+
+/// The byte ranges the active Mongo script editor paints as SQL (adjacent runs merged).
+fn sql_painted_ranges(
+    app: &gpui::Entity<AppRoot>,
+    visual: &gpui::VisualTestContext,
+) -> Vec<std::ops::Range<usize>> {
+    app.read_with(visual, |this, cx| {
+        let tab = this.workspace.active_tab().unwrap().id;
+        let mut merged: Vec<std::ops::Range<usize>> = Vec::new();
+        for range in this.query_editors.sql_highlight[&tab].collection.get_ranges(cx) {
+            match merged.last_mut() {
+                Some(last) if last.end == range.start => last.end = range.end,
+                _ => merged.push(range),
+            }
+        }
+        merged
+    })
+}
+
+#[gpui::test]
+fn a_sql_highlight_computed_for_older_text_or_a_closed_tab_is_not_applied(cx: &mut TestAppContext) {
+    let (app, visual) = script_app(cx);
+    script_type(visual, "SELECT 1 FROM a");
+    let tab = app.read_with(visual, |this, _| this.workspace.active_tab().unwrap().id);
+    let paint = |this: &mut AppRoot, generation: u64, cx: &mut Context<AppRoot>| {
+        let style = gpui::HighlightStyle::default();
+        this.apply_sql_highlight(tab, generation, vec![(0..6, style)], cx);
+    };
+    // The result of a run that started before the last edit is dropped...
+    app.update(visual, |this, cx| {
+        let started = this.query_editors.sql_highlight[&tab].generation;
+        this.schedule_sql_highlight(tab, cx);
+        paint(this, started, cx);
+    });
+    assert!(sql_painted_ranges(&app, visual).is_empty(), "stale result painted");
+    // ...the current one is applied...
+    app.update(visual, |this, cx| {
+        let current = this.query_editors.sql_highlight[&tab].generation;
+        paint(this, current, cx);
+    });
+    assert_eq!(sql_painted_ranges(&app, visual), vec![0..6]);
+    // ...and one that lands after the tab closed finds nothing to paint (and does not panic).
+    app.update(visual, |this, cx| {
+        let current = this.query_editors.sql_highlight[&tab].generation;
+        this.query_editors.by_tab.remove(&tab);
+        paint(this, current, cx);
+    });
+}
+
+#[gpui::test]
+fn sql_statements_of_a_mongo_script_are_painted_as_sql_and_follow_edits(cx: &mut TestAppContext) {
+    let (app, visual) = script_app(cx);
+    assert!(sql_painted_ranges(&app, visual).is_empty(), "an empty script has no SQL");
+
+    script_type(visual, "use shop;\nSELECT status FROM orders;\nshow dbs");
+    // Debounced: nothing is recomputed per keystroke.
+    assert!(sql_painted_ranges(&app, visual).is_empty());
+    visual.cx.executor().advance_clock(Duration::from_millis(200));
+    settle(visual);
+    let text = script_text(&app, visual);
+    let sql = text.find("SELECT").unwrap()..text.find("orders").unwrap() + "orders".len();
+    assert_eq!(sql_painted_ranges(&app, visual), vec![sql]);
+
+    // A second SQL statement is picked up after the next edit; the shell lines stay unpainted.
+    script_type(visual, "SELECT 1 FROM shop;\nshow dbs;\n\nselect status from orders");
+    visual.cx.executor().advance_clock(Duration::from_millis(200));
+    settle(visual);
+    let text = script_text(&app, visual);
+    let first = 0.."SELECT 1 FROM shop".len();
+    let second = text.find("select").unwrap()..text.len();
+    assert_eq!(sql_painted_ranges(&app, visual), vec![first, second]);
+
+    // Back to shell only: the paint goes away.
+    script_type(visual, "show dbs");
+    visual.cx.executor().advance_clock(Duration::from_millis(200));
+    settle(visual);
+    assert!(sql_painted_ranges(&app, visual).is_empty());
+}
+
+/// What the picker draws for `text`: the theme's font at 0.875 of the rem size, and its chrome.
+fn picker_text_and_chrome(visual: &mut gpui::VisualTestContext, text: &str) -> (f32, f32) {
+    visual.update(|window, cx| {
+        let run = gpui::TextRun {
+            len: text.len(),
+            font: gpui::font(gpui_component::theme::Theme::global(cx).font_family.clone()),
+            color: gpui::black(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let size = window.rem_size() * 0.875;
+        let width = f32::from(window.text_system().layout_line(text, size, &[run], None).width);
+        (width, 2.0 + 16.0 + 4.0 + f32::from(size))
+    })
+}
+
+#[gpui::test]
+fn a_connection_or_database_name_that_fits_the_picker_is_shown_whole(cx: &mut TestAppContext) {
+    let (app, visual) = script_app(cx);
+    visual.simulate_resize(gpui::size(gpui::px(1400.0), gpui::px(850.0)));
+    settle(visual);
+    let names = [
+        "Mongo fixture",
+        "Mongo analytics replica (eu-west)",
+        // Longer than the picker's most: it is cut there.
+        "A connection name that is far longer than any picker is meant to be wide",
+    ];
+    for name in names {
+        app.update(visual, |this, cx| {
+            let tab = this.workspace.active_tab().unwrap().connection_id.clone();
+            let saved = this.saved_connections.iter_mut().find(|saved| saved.matches_id(&tab)).unwrap();
+            saved.name = name.to_string();
+            cx.notify();
+        });
+        settle(visual);
+        settle(visual);
+        let (text, chrome) = picker_text_and_chrome(visual, name);
+        let picker = visual.debug_bounds("script-connection").expect("connection picker");
+        let expected = (text + chrome).clamp(120.0, 240.0);
+        assert!(
+            (f32::from(picker.size.width) - expected).abs() < 1.0,
+            "{name:?}: the picker is {:?} wide, its name needs {expected} (text {text} + chrome {chrome})",
+            picker.size.width
+        );
+        if text + chrome <= 240.0 {
+            assert!(f32::from(picker.size.width) >= text + chrome - 0.5, "{name:?} fits whole: room for its {text} + {chrome}");
+        }
+        // The two pickers and the Set Default button stay on the row, inside the toolbar.
+        let toolbar = visual.debug_bounds("mongo-script-toolbar").unwrap();
+        for selector in ["script-connection", "script-database", "script-set-default"] {
+            let control = visual.debug_bounds(selector).unwrap();
+            assert!(control.right() <= toolbar.right() + gpui::px(1.0), "{selector} inside the toolbar for {name:?}");
+        }
+    }
+    // The database picker is as wide as its name too (up to 360).
+    let database = "a_database_with_quite_a_long_name";
+    app.update(visual, |this, cx| {
+        let tab = this.workspace.active_tab().unwrap().id;
+        this.choose_script_database(tab, database.to_string(), cx);
+    });
+    settle(visual);
+    let (text, chrome) = picker_text_and_chrome(visual, database);
+    let picker = visual.debug_bounds("script-database").unwrap();
+    assert!(f32::from(picker.size.width) >= (text + chrome).min(360.0) - 0.5, "database name whole: {picker:?} for {text}+{chrome}");
+}

@@ -119,6 +119,7 @@ fn old_binding_table(cx: &gpui::App) -> Vec<gpui::KeyBinding> {
             None,
         ),
         shortcuts::key_binding(cx, "alt-x", RunScript, None),
+        shortcuts::key_binding(cx, "secondary-6", ToggleResults, None),
         shortcuts::key_binding(cx, "alt-p", RunFromCursor, None),
     ];
     if !cfg!(target_os = "macos") {

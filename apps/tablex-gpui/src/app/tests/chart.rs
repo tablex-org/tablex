@@ -516,6 +516,36 @@ fn an_empty_result_and_too_many_series_each_get_their_message(cx: &mut TestAppCo
 }
 
 #[gpui::test]
+fn a_mongodb_find_result_is_charted_from_its_documents_page(cx: &mut TestAppContext) {
+    cx.dispatcher.allow_parking();
+    let (app, visual) = context_test_app(cx, "mongo-grid", "sample");
+    visual.simulate_resize(gpui::size(gpui::px(1200.0), gpui::px(760.0)));
+    settle(visual);
+    let (tab, columns) = app.read_with(visual, |this, _| {
+        let tab = this.active_id();
+        assert!(matches!(this.grid(tab).source(), GridContentSource::Bson(_)), "a documents page");
+        assert_eq!(this.chart_support(tab), Ok(()), "MongoDB results can be charted");
+        (tab, this.grid(tab).column_count())
+    });
+    assert!(columns > 0);
+    // The document view is left for the table when Chart is chosen.
+    app.update(visual, |this, cx| this.set_mongo_view(tab, crate::mongo_result::MongoResultView::Document, cx));
+    settle(visual);
+    assert!(visual.debug_bounds("chart-pane").is_none());
+    click_selector(visual, "chart-rail-button");
+    assert!(visual.debug_bounds("chart-pane").is_some(), "the chart replaces the documents");
+    assert!(!app.read_with(visual, |this, _| this.mongo_documents_view_active(tab)));
+    let spec = spec_of(&app, visual);
+    assert!(!spec.values.is_empty(), "a numeric field is the default value: {spec:?}");
+    assert!(scene_of(&app, visual).model.drawn_points() > 0, "documents are drawn");
+    // The same page drawn again is not charted again.
+    let prepares = chart_state(&app, visual, |s| s.prepares);
+    app.update(visual, |_, cx| cx.notify());
+    settle(visual);
+    assert_eq!(chart_state(&app, visual, |s| s.prepares), prepares);
+}
+
+#[gpui::test]
 fn a_chart_not_offered_for_a_tab_without_a_result(cx: &mut TestAppContext) {
     let (app, visual) = context_test_app(cx, "result-grid", "sample");
     app.update(visual, |this, cx| {
@@ -1693,4 +1723,52 @@ fn chart_live_postgres_labels_timestamptz_as_the_grid_shows_it(cx: &mut TestAppC
         assert_eq!(data.series[0].values, vec![Some(1.0), Some(2.0), Some(3.0)]);
     }
     rig.run_on(tab, "RESET TIME ZONE");
+}
+
+/// Moving the results into a window and back (or closing that window) drops only what belongs to a
+/// window: the column widths, the record view and the chart spec are the user's and stay.
+#[gpui::test]
+fn moving_the_results_to_a_window_and_back_keeps_the_layout_the_record_view_and_the_chart(cx: &mut TestAppContext) {
+    use crate::app::results::placement::ResultsPlace;
+    use crate::chart_data::ChartKind;
+    let (app, visual) = chart_app(cx, sales_batch(30));
+    let query = app.read_with(visual, |this, _| this.active_id());
+    app.update(visual, |this, cx| {
+        this.toggle_chart_presentation(query, cx);
+        this.view_mut(query).grid_ui.layout.set_width(0, 321.0);
+        this.view_mut(query).grid_ui.record = true;
+    });
+    settle(visual);
+    app.update(visual, |this, cx| {
+        assert!(this.chart_presentation_active(query), "the chart is shown");
+        this.view_mut(query).chart.edit_spec_for_test(|spec| spec.kind = ChartKind::Line);
+        cx.notify();
+    });
+    settle(visual);
+    let kept = |app: &gpui::Entity<AppRoot>, visual: &gpui::VisualTestContext, what: &str| {
+        app.read_with(visual, |this, _| {
+            let view = this.view(query);
+            assert_eq!(view.grid_ui.layout.offset(1), 321.0, "{what}: the column width");
+            assert!(view.grid_ui.record, "{what}: the record view");
+            assert_eq!(
+                view.chart.spec_for_test().map(|spec| spec.kind),
+                Some(ChartKind::Line),
+                "{what}: the chart spec"
+            );
+        });
+    };
+    kept(&app, visual, "before");
+    app.update(visual, |this, cx| this.set_results_place(query, ResultsPlace::Window, cx));
+    settle(visual);
+    assert!(app.read_with(visual, |this, _| this.results_window(query).is_some()), "the window opened");
+    kept(&app, visual, "in the window");
+    // The window closes (as its close box does): back beside the editor.
+    app.update(visual, |this, cx| this.bring_results_back(query, cx));
+    settle(visual);
+    kept(&app, visual, "back again");
+    app.update(visual, |this, cx| this.set_results_place(query, ResultsPlace::Window, cx));
+    settle(visual);
+    app.update(visual, |this, cx| this.set_results_place(query, ResultsPlace::Right, cx));
+    settle(visual);
+    kept(&app, visual, "window then right");
 }

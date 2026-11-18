@@ -669,7 +669,8 @@ fn value_section_highlights_json_offers_conversions_and_copies_conditions(
     assert!(cx.debug_bounds("result-status-selection-stats").is_some());
     app.read_with(cx, |this, _| {
         let (_, stats) = this.av().grid_ui.selection_stats.expect("stats are cached");
-        assert_eq!(stats.label(), "SUM: 35  AVG: ≈11.666667  MIN: 5  MAX: 20  3 cells 3 rows");
+        assert_eq!(stats.sums_label().as_deref(), Some("SUM: 35  AVG: ≈11.666667  MIN: 5  MAX: 20"));
+        assert_eq!((stats.cells, stats.rows), (3, 3));
     });
     let cached = app.read_with(cx, |this, _| this.av().grid_ui.selection_stats.map(|(key, _)| key));
     cx.update(|window, _| window.refresh());
@@ -837,7 +838,7 @@ fn footer_stats_follow_the_selected_display_cells(cx: &mut TestAppContext) {
             let (_, stats) = this.av().grid_ui.selection_stats.expect("stats");
             (
                 ((range.start.row, range.start.column), (range.end.row, range.end.column)),
-                stats.label(),
+                stats.sums_label().map(|sums| format!("{sums}  ")).unwrap_or_default() + &format!("{} cells {} rows", stats.cells, stats.rows),
             )
         })
     };

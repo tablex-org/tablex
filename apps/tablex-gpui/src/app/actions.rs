@@ -54,6 +54,8 @@ gpui::actions!(
         BulkEditGridSelection,
         CloneGridRow,
         OpenGridFind,
+        ToggleResults,
+        ToggleVimMode,
         CloseGridFind,
         FocusDiagramSearch,
         ClearDiagramSelection,
@@ -92,107 +94,37 @@ pub(super) fn bind_keys(cx: &mut gpui::App) {
     // handled it) finds the window's `AppRoot` and opens the results find bar.
     // `open_grid_find` ignores tabs that show no grid.
     cx.on_action(|_: &OpenGridFind, cx: &mut gpui::App| {
-        let Some(window) = cx.active_window() else {
-            return;
-        };
-        // The window is leased while its action is dispatched; update it once
-        // the dispatch has finished.
+        // The window is leased while its action is dispatched (it cannot be read then); find
+        // and update it once the dispatch has finished. A results window handles the action
+        // itself (`results::placement`); here, the app's window.
         cx.defer(move |cx| {
-            let _ = window.update(cx, |root, window, cx| {
-                let app = root
-                    .downcast::<gpui_component::Root>()
-                    .ok()
-                    .and_then(|root| {
-                        root.read(cx)
-                            .view()
-                            .clone()
-                            .downcast::<super::AppRoot>()
-                            .ok()
-                    });
-                if let Some(app) = app {
-                    app.update(cx, |app, cx| app.open_active_grid_find(window, cx));
-                }
+            let Some((window, app)) = super::menus::app_window(cx) else {
+                return;
+            };
+            let _ = window.update(cx, |_, window, cx| {
+                app.update(cx, |app, cx| app.open_active_grid_find(window, cx));
             });
         });
     });
     super::command_palette::register_open_action(cx);
-    // Like the palette: nothing may be focused, so the app-level fallback
-    // finds the window's `AppRoot`.
+    // Like the palette: nothing may be focused, so the app-level fallback finds the app's window and
+    // its `AppRoot` (the active window may be a results window, which holds none).
     // The menu's "AI Assistant" and the shortcut with nothing focused: same fallback.
-    cx.on_action(|_: &ToggleAssistant, cx: &mut gpui::App| {
-        let Some(window) = cx.active_window() else {
-            return;
-        };
-        cx.defer(move |cx| {
-            let _ = window.update(cx, |root, window, cx| {
-                let app = root
-                    .downcast::<gpui_component::Root>()
-                    .ok()
-                    .and_then(|root| {
-                        root.read(cx)
-                            .view()
-                            .clone()
-                            .downcast::<super::AppRoot>()
-                            .ok()
-                    });
-                if let Some(app) = app {
-                    app.update(cx, |app, cx| app.toggle_assistant(window, cx));
-                }
-            });
-        });
-    });
-    cx.on_action(|_: &OpenSettings, cx: &mut gpui::App| {
-        let Some(window) = cx.active_window() else {
-            return;
-        };
-        cx.defer(move |cx| {
-            let _ = window.update(cx, |root, window, cx| {
-                let app = root
-                    .downcast::<gpui_component::Root>()
-                    .ok()
-                    .and_then(|root| {
-                        root.read(cx)
-                            .view()
-                            .clone()
-                            .downcast::<super::AppRoot>()
-                            .ok()
-                    });
-                if let Some(app) = app {
-                    app.update(cx, |app, cx| app.open_settings(window, cx));
-                }
-            });
-        });
-    });
+    super::menus::on_app_root::<ToggleAssistant>(cx, |app, window, cx| app.toggle_assistant(window, cx));
+    super::menus::on_app_root::<OpenSettings>(cx, |app, window, cx| app.open_settings(window, cx));
     // The SQL editor's own commands act on the active tab, so they work with nothing focused too.
-    app_action::<SaveActiveSql>(cx, |app, window, cx| app.save_active_sql(window, cx));
-    app_action::<SaveSqlFileAs>(cx, |app, window, cx| app.save_sql_file_as(window, cx));
-    app_action::<OpenSqlFile>(cx, |app, window, cx| app.open_sql_file(window, cx));
-    app_action::<FormatSql>(cx, |app, window, cx| app.format_sql(window, cx));
-    super::shortcuts::bind_defaults(cx);
-}
-
-/// Runs `run` on the window's `AppRoot` when action `A` reaches the app with no focused view
-/// above it that handled it.
-fn app_action<A: gpui::Action>(
-    cx: &mut gpui::App,
-    run: impl Fn(&mut super::AppRoot, &mut gpui::Window, &mut gpui::Context<super::AppRoot>) + Clone + 'static,
-) {
-    cx.on_action(move |_: &A, cx: &mut gpui::App| {
-        let Some(window) = cx.active_window() else {
-            return;
-        };
-        let run = run.clone();
-        // The window is leased while its action is dispatched; update it once the dispatch ends.
+    super::menus::on_app_root::<SaveActiveSql>(cx, |app, window, cx| app.save_active_sql(window, cx));
+    super::menus::on_app_root::<SaveSqlFileAs>(cx, |app, window, cx| app.save_sql_file_as(window, cx));
+    super::menus::on_app_root::<OpenSqlFile>(cx, |app, window, cx| app.open_sql_file(window, cx));
+    super::menus::on_app_root::<FormatSql>(cx, |app, window, cx| app.format_sql(window, cx));
+    // Hide / show the result area of the active tab; a results window handles it itself, so
+    // this is the app's window.
+    cx.on_action(|_: &ToggleResults, cx: &mut gpui::App| {
         cx.defer(move |cx| {
-            let _ = window.update(cx, |root, window, cx| {
-                let app = root
-                    .downcast::<gpui_component::Root>()
-                    .ok()
-                    .and_then(|root| root.read(cx).view().clone().downcast::<super::AppRoot>().ok());
-                if let Some(app) = app {
-                    app.update(cx, |app, cx| run(app, window, cx));
-                }
-            });
+            if let Some((_, app)) = super::menus::app_window(cx) {
+                app.update(cx, |app, cx| app.toggle_active_results(cx));
+            }
         });
     });
+    super::shortcuts::bind_defaults(cx);
 }

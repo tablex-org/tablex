@@ -295,23 +295,21 @@ impl SelectionStats {
         }
     }
 
-    /// `SUM: 12  AVG: 4  MIN: 1  MAX: 7  3 cells 1 rows`. The numbers are
-    /// omitted when the selection has no numeric cells; oversized selections
-    /// (not summed at all) show dashes instead. `≈` marks a result that is
-    /// not exact.
-    pub fn label(&self) -> String {
+    /// `SUM: 12  AVG: 4  MIN: 1  MAX: 7`: nothing when the selection has no numeric
+    /// cells; oversized selections (not summed at all) show dashes instead. `≈`
+    /// marks a result that is not exact. The counts of cells and rows are the
+    /// caller's to word.
+    pub fn sums_label(&self) -> Option<String> {
         if self.numeric.is_some_and(|numeric| numeric.count == 0) {
-            return format!("{} cells {} rows", self.cells, self.rows);
+            return None;
         }
-        format!(
-            "SUM: {}  AVG: {}  MIN: {}  MAX: {}  {} cells {} rows",
+        Some(format!(
+            "SUM: {}  AVG: {}  MIN: {}  MAX: {}",
             self.sum_label(),
             self.avg_label(),
             self.min_label(),
             self.max_label(),
-            self.cells,
-            self.rows
-        )
+        ))
     }
 }
 
@@ -373,8 +371,8 @@ mod tests {
         assert_eq!(stats.min_label(), "-3");
         assert_eq!(stats.max_label(), "100");
         assert_eq!(
-            stats.label(),
-            "SUM: 100.5  AVG: 25.125  MIN: -3  MAX: 100  6 cells 2 rows"
+            stats.sums_label().as_deref(),
+            Some("SUM: 100.5  AVG: 25.125  MIN: -3  MAX: 100")
         );
     }
 
@@ -384,9 +382,9 @@ mod tests {
 
         assert_eq!(stats.sum_label(), "0");
         assert_eq!(stats.avg_label(), "—");
-        assert_eq!(stats.label(), "1 cells 1 rows");
+        assert_eq!(stats.sums_label(), None);
         // NULL-only and empty-text selections are text-only too.
-        assert_eq!(grid(&[&[None, Some("")]]).label(), "2 cells 1 rows");
+        assert_eq!(grid(&[&[None, Some("")]]).sums_label(), None);
     }
 
     #[test]
@@ -416,9 +414,10 @@ mod tests {
         assert_eq!(stats.cells, 101_000);
         assert_eq!(stats.numeric, None);
         assert_eq!(
-            stats.label(),
-            "SUM: —  AVG: —  MIN: —  MAX: —  101000 cells 1000 rows"
+            stats.sums_label().as_deref(),
+            Some("SUM: —  AVG: —  MIN: —  MAX: —")
         );
+        assert_eq!((stats.cells, stats.rows), (101000, 1000));
     }
 
     #[test]
@@ -484,7 +483,7 @@ mod tests {
         let floats = stats_of(&[StatColumn::Float], &[&[Some("0.1")], &[Some("0.2")]]);
         assert_eq!(floats.sum_label(), "≈0.3");
         assert_eq!(floats.min_label(), "≈0.1");
-        assert!(floats.label().starts_with("SUM: ≈0.3  AVG: ≈0.15"));
+        assert!(floats.sums_label().unwrap().starts_with("SUM: ≈0.3  AVG: ≈0.15"));
         // A float column's whole numbers are float values too.
         assert_eq!(
             stats_of(&[StatColumn::Float], &[&[Some("2")], &[Some("3")]]).sum_label(),

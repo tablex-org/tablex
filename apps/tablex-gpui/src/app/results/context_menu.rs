@@ -717,9 +717,7 @@ impl SnowflakeTarget {
         let view = app.view(self.tab_id);
         // The dialog belongs to the tab the user was working in: switching
         // away invalidates it.
-        app.workspace
-            .active_tab()
-            .is_some_and(|tab| tab.id == self.tab_id)
+        (app.active_results_tab() == Some(self.tab_id) || app.results_window(self.tab_id).is_some())
             && app.grid(self.tab_id).same_page(&self.page)
             && *view.grid_ui.selection.borrow() == self.selection
             && view.grid_ui.context_cell == self.context_cell
@@ -995,7 +993,18 @@ impl AppRoot {
                 })
         });
     }
+    /// A SQL table result whose connection is open: edits, clones and exports go through it.
     pub(in crate::app) fn sql_sort_available(&self, tab_id: u64) -> bool {
+        self.sql_table_sortable(tab_id)
+            && (self.scenario_ui.service.is_some()
+                || self.workspace.tab(tab_id).is_some_and(|tab| {
+                    self.sessions.is_connected(&tab.connection_id)
+                }))
+    }
+
+    /// A SQL table result that a database sort can re-read. The connection may be closed or
+    /// lost: the sorted query opens it again first, as Run does.
+    pub(in crate::app) fn sql_table_sortable(&self, tab_id: u64) -> bool {
         let Some(tab) = self.workspace.tab(tab_id) else {
             return false;
         };
@@ -1005,13 +1014,10 @@ impl AppRoot {
         if self.scenario_ui.service.is_some() {
             return true;
         }
-        let kind = self
-            .saved_connections
+        self.saved_connections
             .iter()
             .find(|saved| saved.matches_id(&tab.connection_id))
-            .map(|saved| saved.kind);
-        kind.is_some_and(crate::navigator::sql_driver::is_sql_kind)
-            && self.sessions.is_connected(&tab.connection_id)
+            .is_some_and(|saved| crate::navigator::sql_driver::is_sql_kind(saved.kind))
     }
     pub(in crate::app) fn prepare_context_edits(
         &self,
@@ -1554,7 +1560,7 @@ impl AppRoot {
         if !tab.query_mode.is_mongo_find() && !sql_table {
             return;
         }
-        if sql_table && !self.sql_sort_available(tab_id) {
+        if sql_table && !self.sql_table_sortable(tab_id) {
             window.open_alert_dialog(cx, |dialog, _, _| {
                 dialog
                     .title(t!("grid.database_sort_unavailable"))

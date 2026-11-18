@@ -31,7 +31,7 @@ pub(in crate::app) enum ResultsLayout {
     /// Query tab before its first run: the editor owns the panel and only the
     /// (normally closed) history strip sits below it.
     EditorOnly,
-    /// Aggregate tab: pipeline editor and output.
+    /// Aggregate tab: pipeline editor and output (the result view is the output).
     Aggregate,
     /// Toolbar (Mongo / table data), result grid, footer and history strip.
     Full,
@@ -173,12 +173,8 @@ impl AppRoot {
             ResultsLayout::None => div().into_any_element(),
             ResultsLayout::EditorOnly => self.render_history_panel(tab_id, cx),
             ResultsLayout::Preview => div().size_full().flex().flex_col().child(self.render_results_body(tab_id, window, cx)).into_any_element(),
-            ResultsLayout::Aggregate => div()
-                .size_full()
-                .flex()
-                .flex_col()
-                .child(self.render_aggregate_tab(tab_id, window, cx))
-                .into_any_element(),
+            // The output only: the pipeline editor is the query tab's own (`render_aggregate_editor`).
+            ResultsLayout::Aggregate => self.render_aggregate_output(tab_id, window, cx),
             ResultsLayout::Full => {
                 let (is_mongo, is_table, is_redis_key) = self
                     .workspace
@@ -202,8 +198,14 @@ impl AppRoot {
                 };
                 let editor_tab = !is_mongo && !is_table && !is_redis_key;
                 let header = if editor_tab {
+                    // Right of the title: where these results go (below, right, a tab, a window).
                     ui::section_header(t!("grid.results"))
                         .debug_selector(|| "results-header".into())
+                        .justify_between()
+                        .pr(px(4.0))
+                        .when(self.results_movable(tab_id), |header| {
+                            header.child(self.render_results_place_menu(tab_id, cx))
+                        })
                         .into_any_element()
                 } else {
                     div().into_any_element()

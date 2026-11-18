@@ -720,19 +720,24 @@ impl AppRoot {
         let run_selected = Button::new(("script-run-selected", tab_id))
             .small()
             .debug_selector(|| "script-run-selected".into())
-            .label(t!("editor.run_selected"))
+            // Icon buttons keep the row short, so the pickers have room for whole names.
+            .icon(Icon::empty().path("icons/square-dashed.svg").size(px(12.0)))
             .compact()
             .ghost()
-            .tooltip(t!("editor.run_the_selection_or_the_statement_at_the_cursor"))
+            .tooltip(format!(
+                "{} · {}",
+                t!("editor.run_selected"),
+                t!("editor.run_the_selection_or_the_statement_at_the_cursor")
+            ))
             .disabled(running)
             .on_click(cx.listener(move |this, _, _, cx| this.run_script_selection(tab_id, cx)));
         let format = Button::new(("script-format", tab_id))
             .small()
             .debug_selector(|| "script-format".into())
             .icon(Icon::empty().path("icons/wand-sparkles.svg").size(px(12.0)))
-            .label(t!("editor.format"))
             .compact()
             .ghost()
+            .tooltip(t!("editor.format"))
             .on_click(cx.listener(move |this, _, window, cx| this.format_script_tab(tab_id, window, cx)));
         let open = Button::new(("script-open", tab_id))
             .small()
@@ -786,7 +791,7 @@ impl AppRoot {
         let save = Button::new("save-sql-script")
             .small()
             .debug_selector(|| "save-sql-script".into())
-            .label(t!("editor.save"))
+            .icon(Icon::empty().path("icons/save.svg").size(px(12.0)))
             .compact()
             .ghost()
             .tooltip(shortcuts::with_label(
@@ -810,6 +815,16 @@ impl AppRoot {
             })
             .on_click(cx.listener(move |this, _, _, cx| this.toggle_script_default_database(tab_id, cx)));
         let separator = || div().w(px(1.0)).h(px(16.0)).bg(theme::border());
+        // Each picker is as wide as the name it shows (within limits), so a long database
+        // name is read whole; on a narrow pane both still shrink to their minimum.
+        let connection_name = self
+            .saved_connections
+            .iter()
+            .find(|saved| saved.matches_id(&connection))
+            .map(|saved| saved.name.clone())
+            .unwrap_or_default();
+        let connection_width = picker_width(window, cx, &connection_name, 120.0, 240.0);
+        let database_width = picker_width(window, cx, &database, 120.0, 360.0);
         div()
             .debug_selector(|| "mongo-script-toolbar".into())
             .flex()
@@ -848,7 +863,7 @@ impl AppRoot {
                     .child(
                         div()
                             .debug_selector(|| "script-connection".into())
-                            .w(px(150.0))
+                            .w(connection_width)
                             .min_w(px(96.0))
                             .flex_shrink(1.0)
                             .child(
@@ -863,7 +878,7 @@ impl AppRoot {
                     .child(
                         div()
                             .debug_selector(|| "script-database".into())
-                            .w(px(150.0))
+                            .w(database_width)
                             .min_w(px(96.0))
                             .flex_shrink(1.0)
                             .when_some(retry_connection, |this, connection| {
@@ -899,4 +914,26 @@ impl AppRoot {
             })
             .into_any_element()
     }
+}
+
+/// The width of a small picker that shows `text` whole, between `min` and `max`: the text at the size
+/// and in the font the picker draws it (the theme's font; `text_sm`, which is 0.875 of the rem size),
+/// plus the picker's chrome (border, padding, the gap and the caret).
+fn picker_width(window: &Window, cx: &gpui::App, text: &str, min: f32, max: f32) -> gpui::Pixels {
+    if text.is_empty() {
+        return px(min);
+    }
+    let text_size = window.rem_size() * 0.875;
+    let run = gpui::TextRun {
+        len: text.len(),
+        font: gpui::font(gpui_component::theme::Theme::global(cx).font_family.clone()),
+        color: theme::text().into(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let text_width = window.text_system().layout_line(text, text_size, &[run], None).width;
+    // Border 2 + padding 2 x 8 + gap 4 + the caret (`Size::Small`: 0.875 of the rem size).
+    let chrome = px(2.0 + 16.0 + 4.0) + window.rem_size() * 0.875;
+    (text_width + chrome).clamp(px(min), px(max))
 }

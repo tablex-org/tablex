@@ -137,29 +137,49 @@ fn category_element(scene: &Rc<ChartScene>, id: ElementId, cx: &App) -> AnyEleme
         let plot = GroupedBars::new(scene.clone(), PlotColors::new(colors, cx), id);
         return plot.map_or_else(|| div().into_any_element(), IntoElement::into_any_element);
     }
-    let (titles, labels, values) = (scene.clone(), scene.clone(), scene.clone());
-    let full_title = move |i: &usize| categories(&titles).labels[*i].clone();
     match kind {
         ChartKind::Bar => {
-            let color = colors[0];
-            let name = data.series[0].name.clone();
-            BarChart::new(0..n)
-                .id(id)
-                .appear(false)
-                .band(move |i| Band { index: *i, label: labels.axis_labels[*i].clone() })
-                .value(move |i| categories(&values).series[0].values[*i].unwrap_or(0.0))
-                .fill(move |_, _, _, _| color)
-                .value_axis(true)
-                .value_tick_format(tick)
-                .band_tick_count(n.clamp(1, 12))
-                .name(name)
-                .tooltip_title(full_title)
-                .tooltip_value(|_, v| format_number(v).into())
-                .into_any_element()
+            // The official chart takes the number of band labels when it is built, and what fits is
+            // known only at its size: it is built where that is known, once the layout has given it.
+            let (scene, color, name) = (scene.clone(), colors[0], data.series[0].name.clone());
+            gpui::canvas(
+                move |bounds, window, cx| {
+                    let room = f32::from(bounds.size.width) - BAR_VALUE_AXIS;
+                    let fit = super::plots::labels_that_fit(n, room, super::plots::widest_label_width(&scene, window)).min(12);
+                    let mut chart = single_series_bars(&scene, id, color, name, tick, fit.max(1));
+                    chart.prepaint_as_root(bounds.origin, bounds.size.map(gpui::AvailableSpace::Definite), window, cx);
+                    chart
+                },
+                |_, mut chart, window, cx| chart.paint(window, cx),
+            )
+            .size_full()
+            .into_any_element()
         }
         // Lines and areas: one custom plot (see `plots`), as the export draws them.
         _ => LinePlot::new(scene.clone(), PlotColors::new(colors, cx), id).map_or_else(|| div().into_any_element(), IntoElement::into_any_element),
     }
+}
+
+/// The room the official bar chart keeps left of its bands for the value labels.
+const BAR_VALUE_AXIS: f32 = 56.0;
+
+/// The official chart of one series of bars; `labels` bands carry an axis label.
+fn single_series_bars(scene: &Rc<ChartScene>, id: ElementId, color: Hsla, name: SharedString, tick: impl Fn(f64) -> SharedString + 'static, labels: usize) -> AnyElement {
+    let (titles, bands, values) = (scene.clone(), scene.clone(), scene.clone());
+    let full_title = move |i: &usize| categories(&titles).labels[*i].clone();
+    BarChart::new(0..categories(scene).labels.len())
+        .id(id)
+        .appear(false)
+        .band(move |i| Band { index: *i, label: bands.axis_labels[*i].clone() })
+        .value(move |i| categories(&values).series[0].values[*i].unwrap_or(0.0))
+        .fill(move |_, _, _, _| color)
+        .value_axis(true)
+        .value_tick_format(tick)
+        .band_tick_count(labels)
+        .name(name)
+        .tooltip_title(full_title)
+        .tooltip_value(|_, v| format_number(v).into())
+        .into_any_element()
 }
 
 impl AppRoot {

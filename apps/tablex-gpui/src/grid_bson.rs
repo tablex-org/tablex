@@ -1,6 +1,9 @@
 use crate::grid::{
     CellPosition, CellState, GridSearchScan, GridSearchStatus, GridSource, PreviewCache,
 };
+use arrow_array::builder::{Float64Builder, StringBuilder, TimestampMicrosecondBuilder};
+use arrow_array::{ArrayRef, RecordBatch};
+use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use engine_mongo_script::shell_value;
 use bson::raw::{RawBsonRef, RawDocument};
 use engine_driver_api::PageColumn;
@@ -80,6 +83,129 @@ impl BsonGridSource {
             value,
             matches!(column.data_type.as_str(), "mixed" | "number"),
         ))
+    }
+}
+
+/// One column of [`BsonGridSource::to_record_batch`], by the column's BSON type name.
+enum ChartColumnBuilder {
+    Number(Float64Builder),
+    Time(TimestampMicrosecondBuilder),
+    Text(StringBuilder),
+}
+
+impl ChartColumnBuilder {
+    fn new(data_type: &str, rows: usize) -> Self {
+        match data_type {
+            "int32" | "int64" | "double" | "decimal128" | "number" => Self::Number(Float64Builder::with_capacity(rows)),
+            "date_time" => Self::Time(TimestampMicrosecondBuilder::with_capacity(rows)),
+            _ => Self::Text(StringBuilder::with_capacity(rows, rows * 8)),
+        }
+    }
+
+    /// A value the column cannot hold (a string in a number column, a number in a date column) is
+    /// NULL, and so is a number that is not finite (a NaN or an Infinity, as a Decimal128 or a
+    /// double): it would break the chart's scales.
+    fn push(&mut self, value: RawBsonRef<'_>, scratch: &mut String) {
+        match self {
+            Self::Number(builder) => builder.append_option(
+                match value {
+                    RawBsonRef::Int32(value) => Some(f64::from(value)),
+                    RawBsonRef::Int64(value) => Some(value as f64),
+                    RawBsonRef::Double(value) => Some(value),
+                    RawBsonRef::Decimal128(value) => {
+                        scratch.clear();
+                        let _ = write!(scratch, "{value}");
+                        scratch.parse::<f64>().ok()
+                    }
+                    _ => None,
+                }
+                .filter(|number| number.is_finite()),
+            ),
+            Self::Time(builder) => builder.append_option(match value {
+                RawBsonRef::DateTime(value) => value.timestamp_millis().checked_mul(1000),
+                _ => None,
+            }),
+            Self::Text(builder) => match value {
+                RawBsonRef::Null => builder.append_null(),
+                RawBsonRef::String(text) => builder.append_value(text),
+                other => {
+                    scratch.clear();
+                    let _ = other.write_display(scratch);
+                    builder.append_value(scratch.as_str());
+                }
+            },
+        }
+    }
+
+    fn push_missing(&mut self) {
+        match self {
+            Self::Number(builder) => builder.append_null(),
+            Self::Time(builder) => builder.append_null(),
+            Self::Text(builder) => builder.append_null(),
+        }
+    }
+
+    fn finish(&mut self) -> ArrayRef {
+        match self {
+            Self::Number(builder) => Arc::new(builder.finish()),
+            Self::Time(builder) => Arc::new(builder.finish()),
+            Self::Text(builder) => Arc::new(builder.finish()),
+        }
+    }
+}
+
+impl BsonGridSource {
+    /// The page as one Arrow batch for the chart: a column per grid column, numbers as Float64,
+    /// dates as timestamps, everything else as its display text; a missing field or a BSON null is
+    /// NULL. Each document is walked once (not once per column) and each value is copied once; it
+    /// is built when the chart is shown or the page changes, never per frame. `None` only when the
+    /// page has no columns.
+    pub fn to_record_batch(&self) -> Option<RecordBatch> {
+        let mut by_field: HashMap<&str, usize> = HashMap::with_capacity(self.columns.len());
+        for (index, column) in self.columns.iter().enumerate() {
+            by_field.entry(column.name.as_str()).or_insert(index);
+        }
+        let mut builders: Vec<ChartColumnBuilder> = self
+            .columns
+            .iter()
+            .map(|column| ChartColumnBuilder::new(&column.data_type, self.row_count))
+            .collect();
+        let mut seen = vec![false; builders.len()];
+        let mut scratch = String::new();
+        for row in 0..self.row_count {
+            seen.fill(false);
+            let slice = self.raw_slice(row);
+            if let Some(document) = slice.as_ref().and_then(|slice| RawDocument::from_bytes(slice.as_bytes()).ok()) {
+                for (key, value) in document.iter().map_while(Result::ok) {
+                    if let Some(&index) = by_field.get(key) {
+                        if !seen[index] {
+                            seen[index] = true;
+                            builders[index].push(value, &mut scratch);
+                        }
+                    }
+                }
+            }
+            for (builder, seen) in builders.iter_mut().zip(&seen) {
+                if !seen {
+                    builder.push_missing();
+                }
+            }
+        }
+        let fields: Vec<Field> = self
+            .columns
+            .iter()
+            .zip(&builders)
+            .map(|(column, builder)| {
+                let data_type = match builder {
+                    ChartColumnBuilder::Number(_) => DataType::Float64,
+                    ChartColumnBuilder::Time(_) => DataType::Timestamp(TimeUnit::Microsecond, None),
+                    ChartColumnBuilder::Text(_) => DataType::Utf8,
+                };
+                Field::new(column.name.as_str(), data_type, true)
+            })
+            .collect();
+        let arrays: Vec<ArrayRef> = builders.iter_mut().map(ChartColumnBuilder::finish).collect();
+        RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).ok()
     }
 }
 
@@ -509,6 +635,64 @@ mod tests {
             source.full_cell_text(CellPosition { row: 0, column: 1 }),
             Some("Ada".into())
         );
+    }
+
+    #[test]
+    fn the_chart_batch_types_each_column_by_its_bson_type() {
+        use arrow_array::cast::AsArray;
+        use arrow_array::types::{Float64Type, TimestampMicrosecondType};
+        let date = bson::DateTime::from_millis(1_752_037_099_523);
+        let source = test_source(
+            vec![
+                bson::doc! { "n": 1, "big": 5_i64, "x": 2.5, "d": date, "s": "a", "b": true, "o": bson::doc! { "k": 1 } },
+                bson::doc! { "n": bson::Bson::Null, "x": "text", "s": bson::Bson::Null },
+            ],
+            &[
+                ("n", "int32"),
+                ("big", "int64"),
+                ("x", "double"),
+                ("d", "date_time"),
+                ("s", "string"),
+                ("b", "boolean"),
+                ("o", "document"),
+                ("missing", "string"),
+            ],
+        );
+        let batch = source.to_record_batch().expect("a batch");
+        assert_eq!((batch.num_rows(), batch.num_columns()), (2, 8));
+        let numbers = |column: usize| batch.column(column).as_primitive::<Float64Type>().iter().collect::<Vec<_>>();
+        assert_eq!(numbers(0), [Some(1.0), None], "a null is NULL");
+        assert_eq!(numbers(1), [Some(5.0), None], "a missing field is NULL");
+        assert_eq!(numbers(2), [Some(2.5), None], "text in a number column is NULL");
+        assert_eq!(
+            batch.column(3).as_primitive::<TimestampMicrosecondType>().iter().collect::<Vec<_>>(),
+            [Some(1_752_037_099_523_000), None]
+        );
+        let texts = |column: usize| batch.column(column).as_string::<i32>().iter().map(|v| v.map(str::to_owned)).collect::<Vec<_>>();
+        assert_eq!(texts(4), [Some("a".to_owned()), None]);
+        assert_eq!(texts(5), [Some("true".to_owned()), None]);
+        assert_eq!(texts(6), [Some("<object>".to_owned()), None]);
+        assert_eq!(texts(7), [None, None]);
+    }
+
+    #[test]
+    fn the_chart_batch_turns_non_finite_numbers_into_null() {
+        use arrow_array::cast::AsArray;
+        use arrow_array::types::Float64Type;
+        let decimal = |text: &str| bson::Bson::Decimal128(text.parse::<bson::Decimal128>().unwrap());
+        let source = test_source(
+            vec![
+                bson::doc! { "dec": decimal("NaN"), "dbl": f64::NAN },
+                bson::doc! { "dec": decimal("Infinity"), "dbl": f64::INFINITY },
+                bson::doc! { "dec": decimal("-Infinity"), "dbl": f64::NEG_INFINITY },
+                bson::doc! { "dec": decimal("2.5"), "dbl": 1.5 },
+            ],
+            &[("dec", "decimal128"), ("dbl", "double")],
+        );
+        let batch = source.to_record_batch().expect("a batch");
+        let numbers = |column: usize| batch.column(column).as_primitive::<Float64Type>().iter().collect::<Vec<_>>();
+        assert_eq!(numbers(0), [None, None, None, Some(2.5)]);
+        assert_eq!(numbers(1), [None, None, None, Some(1.5)]);
     }
 
     #[test]

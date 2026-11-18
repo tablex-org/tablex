@@ -114,18 +114,17 @@ impl AppRoot {
                 .runtime(tab_id)
                 .map(|runtime| runtime.query.can_run())
                 .unwrap_or(false);
+        // The funnel opens the filter builder, as in a SQL table's bar.
         let filter_label_button = Button::new(("mongo-filter-options", tab_id))
-            .compact()
-            .text()
-            .selected(filter_open || filter_count > 0)
-            .child(
-                div()
-                    .debug_selector(|| "mongo-filter-toolbar-text".into())
-                    .text_size(px(11.0))
-                    .line_height(px(14.0))
-                    .text_color(theme::accent())
-                    .child(t!("editor.filter")),
+            .icon(
+                Icon::empty()
+                    .path("icons/filter.svg")
+                    .size(px(12.0))
+                    .when(filter_count > 0, |icon| icon.text_color(theme::accent())),
             )
+            .compact()
+            .ghost()
+            .selected(filter_open || filter_count > 0)
             .tooltip(t!("editor.build_filter"));
         let grid = self.grid(tab_id);
         let result_columns: Vec<String> = (0..grid.column_count())
@@ -363,6 +362,16 @@ impl AppRoot {
             .gap(px(4.0))
             .child(filter_trigger)
             .child(
+                div()
+                    .debug_selector(|| "mongo-filter-toolbar-text".into())
+                    .flex_shrink_0()
+                    .px(px(4.0))
+                    .text_size(px(11.0))
+                    .line_height(px(14.0))
+                    .text_color(theme::accent())
+                    .child(t!("editor.filter")),
+            )
+            .child(
                 div().flex_1().min_w(px(0.0)).child(
                     Input::new(&filter_input)
                         .appearance(false)
@@ -382,6 +391,7 @@ impl AppRoot {
             .child(
                 div()
                     .flex_shrink_0()
+                    .px(px(4.0))
                     .text_size(px(11.0))
                     .text_color(theme::warning())
                     .child(t!("editor.sort")),

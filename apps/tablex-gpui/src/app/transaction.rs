@@ -50,13 +50,13 @@
 
 use super::structure_edit::apply::sqlite_is_in_memory;
 use super::*;
+use gpui_component::ElementExt as _;
 use super::smart_commit::{commits_by_itself, smart_verdict, Smart};
 use crate::transaction::{
     begin_statement, elapsed_label, manual_unavailable, mentions_autocommit, same_database, session_setup, statements_label,
     CommitMode, LogResult, Outcome, TabTx, Typed,
 };
 use engine_connect::connect::LiveTunnel;
-use gpui_component::button::ButtonGroup;
 use gpui_component::dialog::{DialogClose, DialogFooter};
 use std::cell::RefCell;
 use std::sync::atomic::AtomicU32;
@@ -555,7 +555,7 @@ impl AppRoot {
 
     /// A tab that has a commit mode: an editor tab running SQL. A table-data tab does not (its grid
     /// Apply is a transaction of the driver's own, and browsing a table never opens one).
-    fn is_transactional_tab(&self, tab_id: u64) -> bool {
+    pub(super) fn is_transactional_tab(&self, tab_id: u64) -> bool {
         self.workspace.tab(tab_id).is_some_and(assistant::is_sql_editor)
     }
 
@@ -684,7 +684,7 @@ impl AppRoot {
     }
 
     /// A statement (or an Apply) of the tab runs, or Commit / Rollback is on its way.
-    fn tab_busy(&self, tab_id: u64) -> bool {
+    pub(super) fn tab_busy(&self, tab_id: u64) -> bool {
         self.transactions.ending.contains_key(&tab_id)
             || self
                 .workspace
@@ -1496,11 +1496,15 @@ impl AppRoot {
         self.notify_transaction(tab_id, cx);
     }
 
-    /// Flips the active tab between the two modes (palette).
+    /// Flips the active tab between the two modes (palette); a Results tab flips its query tab.
     pub(super) fn toggle_commit_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(tab_id) = self.workspace.active_tab().map(|tab| tab.id) else {
-            return;
-        };
+        if let Some(tab_id) = self.active_results_tab() {
+            self.toggle_tab_commit_mode(tab_id, window, cx);
+        }
+    }
+
+    /// Flips `tab_id` between the two modes.
+    pub(super) fn toggle_tab_commit_mode(&mut self, tab_id: u64, window: &mut Window, cx: &mut Context<Self>) {
         let next = match self.commit_mode(tab_id) {
             CommitMode::Auto => CommitMode::Manual,
             CommitMode::Manual => CommitMode::Auto,
@@ -1510,9 +1514,10 @@ impl AppRoot {
 
     // ---- ending a transaction ---------------------------------------------------------
 
-    /// Commit or Rollback of the active tab (buttons, shortcuts, palette).
+    /// Commit or Rollback of the active tab (buttons, shortcuts, palette); a Results tab ends the
+    /// transaction of the query tab it shows.
     pub(super) fn end_active_transaction(&mut self, end: TxEnd, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(tab_id) = self.workspace.active_tab().map(|tab| tab.id) else {
+        let Some(tab_id) = self.active_results_tab() else {
             return;
         };
         self.end_tab_transaction(tab_id, end, window, cx);
@@ -2212,59 +2217,92 @@ impl AppRoot {
 
     // ---- the toolbar ----------------------------------------------------------------------
 
-    /// Auto-commit / Manual, and in manual mode the state of the transaction with Commit and
-    /// Rollback. `None` for a tab that has no commit mode.
-    pub(super) fn render_transaction_controls(&self, tab_id: u64, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// The commit-mode button (Auto / Manual, a menu of the two), and in manual mode the state of the transaction with Commit and
+    /// Rollback. Empty for a tab that has no commit mode.
+    pub(super) fn render_transaction_controls(&self, tab_id: u64, collapsed: bool, cx: &mut Context<Self>) -> Vec<AnyElement> {
         if !self.is_transactional_tab(tab_id) {
-            return None;
+            return Vec::new();
         }
         let facts = self.facts(tab_id);
-        facts.kind?;
+        if facts.kind.is_none() {
+            return Vec::new();
+        }
         let mode = self.commit_mode(tab_id);
         let unavailable = facts.unavailable;
         let idle = !self.tab_busy(tab_id);
         let root = cx.entity().downgrade();
-        let auto_button = Button::new(("tx-mode-auto", tab_id))
-            .debug_selector(|| "tx-mode-auto".into())
-            .label(t!("editor.auto_commit"))
-            .selected(mode == CommitMode::Auto)
-            .disabled(!idle)
-            .tooltip(if self.facts(tab_id).smart_commit && self.transactions.shared_ran.contains(&tab_id) {
-                AUTO_TOOLTIP_SHARED
-            } else {
-                "Every statement commits by itself"
-            });
-        let manual_button = Button::new(("tx-mode-manual", tab_id))
-            .debug_selector(|| "tx-mode-manual".into())
-            .label(t!("editor.manual"))
-            .selected(mode == CommitMode::Manual)
-            .disabled(!idle || unavailable.is_some())
-            .tooltip(unavailable.unwrap_or(MANUAL_TOOLTIP));
-        let group = ButtonGroup::new(("tx-mode", tab_id))
-            .outline()
+        let shared = facts.smart_commit && self.transactions.shared_ran.contains(&tab_id);
+        let smart = facts.smart_commit;
+        let (icon, short, name, tip) = match mode {
+            CommitMode::Auto => (
+                "icons/zap.svg",
+                t!("editor.auto_short"),
+                t!("editor.auto_commit"),
+                if shared { t!("editor.tx_auto_tip_shared") } else { t!("editor.tx_auto_tip") },
+            ),
+            CommitMode::Manual => ("icons/hand.svg", t!("editor.manual_short"), t!("editor.manual_commit"), t!("editor.tx_manual_tip")),
+        };
+        let button = Button::new(("tx-mode-button", tab_id))
+            .small()
             .compact()
-            .with_size(Size::XSmall)
-            // `children`, not `child`: the latter overwrites each button's own disabled state.
-            .children([auto_button, manual_button])
-            .on_click(move |selected, window, app| {
-                let next = match selected.first() {
-                    Some(0) => CommitMode::Auto,
-                    Some(1) => CommitMode::Manual,
-                    _ => return,
+            .outline()
+            .dropdown_caret(true)
+            .icon(Icon::empty().path(icon).size(px(12.0)))
+            .label(short)
+            .disabled(!idle)
+            .tooltip(format!("{name}\n{tip}"))
+            .dropdown_menu(move |menu, _, _| {
+                let item = |selector: &'static str, label: String| {
+                    PopupMenuItem::element(move |_, _| div().debug_selector(move || selector.to_string()).child(label.clone()))
                 };
-                let _ = root.update(app, |this, cx| this.set_commit_mode(tab_id, next, window, cx));
+                let pick = |next: CommitMode| {
+                    let root = root.clone();
+                    move |_: &gpui::ClickEvent, window: &mut Window, app: &mut gpui::App| {
+                        let _ = root.update(app, |this, cx| this.set_commit_mode(tab_id, next, window, cx));
+                    }
+                };
+                let menu = menu
+                    .item(
+                        item("tx-mode-auto", t!("editor.auto_commit").into_owned())
+                            .checked(mode == CommitMode::Auto)
+                            .on_click(pick(CommitMode::Auto)),
+                    )
+                    .item(
+                        item("tx-mode-manual", t!("editor.manual_commit").into_owned())
+                            .checked(mode == CommitMode::Manual)
+                            .disabled(unavailable.is_some())
+                            .on_click(pick(CommitMode::Manual)),
+                    );
+                // What the connection type already says; changed in its settings, not here.
+                if smart {
+                    menu.separator().item(PopupMenuItem::new(t!("editor.tx_smart_commit").into_owned()).checked(true).disabled(true))
+                } else {
+                    menu
+                }
             });
-        let mut controls = div()
-            .debug_selector(|| "tx-controls".into())
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .child(div().debug_selector(|| "tx-mode".into()).flex_shrink_0().child(group));
+        let mut controls = vec![div().debug_selector(|| "tx-mode".into()).flex_shrink_0().child(button).into_any_element()];
         if mode == CommitMode::Manual {
-            controls = controls.children(self.render_transaction_state(tab_id, idle, cx));
+            // In a narrow toolbar the state and its buttons give way first (a large shrink factor against its
+            // neighbours' basis): the mode switch, the fields and Run beside it keep their room.
+            // A collapsed header keeps the state text only: Commit and Roll Back are in its menu.
+            let mut state = self.render_transaction_state(tab_id, idle, cx);
+            if collapsed {
+                state.truncate(1);
+            }
+            controls.push(
+                div()
+                    .debug_selector(|| "tx-state".into())
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .flex_shrink(8.0)
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .children(state)
+                    .into_any_element(),
+            );
         }
-        // In a narrow toolbar this gives way first (a large shrink factor against its neighbours' basis): the fields and Run beside it keep their room.
-        Some(controls.flex_shrink(8.0).min_w(px(0.0)).overflow_hidden().into_any_element())
+        controls
     }
 
     /// The Commit and Roll Back tooltips with their shortcuts, built once per settings snapshot (a
@@ -2306,9 +2344,12 @@ impl AppRoot {
             ),
             _ => ("No open transaction".into(), theme::text_faint(), None),
         };
+        // The header gives the state text what its fixed controls leave; what is left of that, its hint.
+        let (room, status_width) = self.query_editors.header_fit.borrow().get(&tab_id).map_or((None, 0.0), |fit| (fit.room(), fit.status_width()));
         let status = div()
             .id(("tx-status", tab_id))
             .debug_selector(|| "tx-status".into())
+            .relative()
             .cursor_pointer()
             .on_click(cx.listener(move |this, _, window, cx| this.open_transaction_log(tab_id, window, cx)))
             // The text is what gives way in a narrow header (cut with an ellipsis), never the buttons beside it.
@@ -2320,23 +2361,29 @@ impl AppRoot {
             .text_color(color)
             .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(tooltip.unwrap_or(LOG_TOOLTIP)).build(window, cx))
             .child(text)
+            .when_some(room, |this, room| this.max_w(px(room)))
+            // What gives way in the editor's header is measured, so the header knows what it needs.
+            .on_prepaint(self.header_probe(tab_id, super::panes_ui::HeaderPart::Status, cx))
             .into_any_element();
         let hint = tx.is_some_and(|tx| tx.aborted_hint).then(|| {
             div()
                 .id(("tx-hint", tab_id))
                 .tooltip(|window, cx| gpui_component::tooltip::Tooltip::new(ABORTED_HINT).build(window, cx))
                 .debug_selector(|| "tx-hint".into())
+                .relative()
                 .min_w(px(0.0))
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_size(px(11.0))
                 .text_color(theme::danger())
                 .child(ABORTED_HINT)
+                .when_some(room, |this, room| this.max_w(px((room - status_width).max(0.0))))
+                .on_prepaint(self.header_probe(tab_id, super::panes_ui::HeaderPart::Hint, cx))
                 .into_any_element()
         });
         let (commit_tip, rollback_tip) = self.end_tooltips();
         let button = |id: &'static str, label: &'static str, tip: gpui::SharedString| {
-            Button::new((id, tab_id)).debug_selector(move || id.into()).label(label).compact().flex_shrink_0().tooltip(tip)
+            Button::new((id, tab_id)).small().debug_selector(move || id.into()).label(label).compact().flex_shrink_0().tooltip(tip)
         };
         let commit = button("tx-commit", "Commit", commit_tip)
         .primary()
@@ -2347,17 +2394,12 @@ impl AppRoot {
         .disabled(!open || !idle)
         .on_click(cx.listener(move |this, _, window, cx| this.end_tab_transaction(tab_id, TxEnd::Rollback, window, cx)));
         // The hint comes last: in a narrow toolbar it is the one that gives way, not the buttons.
+        // The statements the Commit would end, as a small badge on it (none when there is nothing open).
+        let pending = tx.filter(|_| open).map_or(0, |tx| tx.statements as usize);
+        let commit = div().flex_shrink_0().child(gpui_component::badge::Badge::new().count(pending).with_size(Size::Small).child(commit));
         [Some(status), Some(commit.into_any_element()), Some(rollback.into_any_element()), hint].into_iter().flatten().collect()
     }
 }
-
-/// Said when smart commit is on for the connection type but this tab started on the shared session.
-const AUTO_TOOLTIP_SHARED: &str = "Every statement commits by itself. Smart commit is on for this connection type, but this tab was \
-     already running on the shared session: it applies to editors opened after it was turned on.";
-
-/// What "Manual" does, and who does not see it.
-const MANUAL_TOOLTIP: &str = "Commit or roll back yourself: statements run in a transaction on a session of this tab. \
-     The AI assistant and MCP clients use sessions of their own: they do not see this tab's uncommitted changes.";
 
 const PRIVATE_TO_TAB: &str =
     "Changes stay private to this tab until you commit. The AI assistant and MCP clients use sessions of their own and do not see them. Click for the statements of the transaction.";
@@ -2367,8 +2409,8 @@ const LOG_TOOLTIP: &str = "Click for the statements of the transaction";
 /// The long explanations of the toolbar (a test checks that each says who does not see the tab's
 /// uncommitted changes).
 #[cfg(test)]
-pub(super) fn transaction_tooltips() -> [&'static str; 2] {
-    [MANUAL_TOOLTIP, PRIVATE_TO_TAB]
+pub(super) fn transaction_tooltips() -> [String; 2] {
+    [t!("editor.tx_manual_tip").into_owned(), PRIVATE_TO_TAB.to_owned()]
 }
 
 #[cfg(test)]

@@ -81,6 +81,8 @@ mod mongo_result;
 mod mongo_script;
 mod mongo_sql;
 #[cfg(feature = "ui")]
+mod mongo_sql_highlight;
+#[cfg(feature = "ui")]
 mod mongo_shell;
 mod navigator;
 #[cfg(feature = "ui")]
@@ -134,6 +136,8 @@ mod ui_fixture_diagram;
 mod ui_fixture_properties;
 mod ui_fixture_redis;
 mod ui_scenario;
+#[cfg(feature = "ui")]
+mod vim;
 #[cfg(feature = "ui")]
 mod workspace;
 

@@ -713,19 +713,6 @@ impl AppRoot {
                     .child(t!("grid.query")),
             )
             .tooltip(t!("grid.show_generated_sql"));
-        let text = statement.clone().unwrap_or_else(|error| error);
-        let copyable = statement.ok();
-        let copy = Button::new(("sql-query-preview-copy", tab_id))
-            .icon(Icon::new(IconName::Copy).size(px(14.0)))
-            .compact()
-            .ghost()
-            .disabled(copyable.is_none())
-            .tooltip(t!("grid.copy_query"))
-            .on_click(cx.listener(move |_, _, _, cx| {
-                if let Some(sql) = copyable.clone() {
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(sql));
-                }
-            }));
         let close = Button::new(("sql-query-preview-close", tab_id))
             .icon(Icon::new(IconName::Close).size(px(14.0)))
             .compact()
@@ -753,32 +740,14 @@ impl AppRoot {
                     .child(div().text_size(px(13.0)).child(t!("grid.sql_query_preview")))
                     .child(close),
             )
-            .child(
-                div()
-                    .relative()
-                    .flex_1()
-                    .min_h(px(0.0))
-                    .p(px(8.0))
-                    .bg(theme::background())
-                    .border_1()
-                    .border_color(theme::border())
-                    .rounded(px(4.0))
-                    .child(div().absolute().top(px(4.0)).right(px(4.0)).child(copy))
-                    .child(
-                        div()
-                            .debug_selector(|| "sql-query-command".into())
-                            .id(("sql-query-code", tab_id))
-                            .size_full()
-                            .pt(px(30.0))
-                            .overflow_x_scroll()
-                            .overflow_y_scroll()
-                            .font_family("Menlo")
-                            .text_size(px(12.0))
-                            .line_height(px(18.0))
-                            .text_color(theme::text())
-                            .child(text),
-                    ),
-            );
+            .child(super::query_preview_body(
+                "sql",
+                tab_id,
+                "sql",
+                statement.as_ref().ok().cloned(),
+                statement.clone().err().unwrap_or_default(),
+                t!("grid.copy_query").into(),
+            ));
         let root = cx.entity().downgrade();
         Popover::new(("sql-query-preview-popover", tab_id))
             .trigger(button)

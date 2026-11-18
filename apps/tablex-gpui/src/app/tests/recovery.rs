@@ -643,3 +643,49 @@ fn live_a_read_after_a_server_restart_reconnects_without_the_user_and_a_write_do
     rig.run("DROP TABLE tablex_recover_probe");
     rig.wait_status("the cleanup", ready);
 }
+
+#[gpui::test]
+fn a_database_sort_on_a_lost_connection_stays_offered_and_reconnects(cx: &mut TestAppContext) {
+    let db = SqliteDb::new(ITEMS_SEED);
+    let mut rig = recovery_rig(cx, &db);
+    let key = rig.key.clone();
+    // The table is open and loaded while the connection is up.
+    let tab = rig.app.update(rig.visual, |this, cx| {
+        let (tab, _) = this.open_sql_table_tab("items", &key, "", "main", "items");
+        this.reset_active_view();
+        this.run_tab_query(tab, cx);
+        tab
+    });
+    let wait_table = |rig: &mut SqlRig<'_>, label: &'static str| {
+        let app = rig.app.clone();
+        wait_until(rig.visual, label, |visual| {
+            app.read_with(visual, |this, _| ready(this.workspace.runtime(tab).unwrap().query.status()))
+        });
+        settle(rig.visual);
+    };
+    wait_table(&mut rig, "the table's first page");
+    // Then the connection is shown as lost (a write on the dead session says so, nothing
+    // retries it).
+    rig.kill_session();
+    rig.run("DELETE FROM items WHERE id < 0");
+    rig.wait_not_running("the write on a dead session");
+    assert!(matches!(rig.connection_status(), ConnectionStatus::Failed(_)));
+    rig.app.update(rig.visual, |this, cx| {
+        this.activate_tab_ui(tab, cx);
+    });
+    settle(rig.visual);
+    rig.app.read_with(rig.visual, |this, _| {
+        assert!(!this.sql_sort_available(tab), "edits still need the open connection");
+        assert!(this.sql_table_sortable(tab), "a database sort is still offered");
+    });
+    let app = rig.app.clone();
+    rig.visual.update(|window, cx| {
+        app.update(cx, |this, cx| this.sort_column_database(tab, 0, true, window, cx));
+    });
+    rig.wait_connection("the sort's reconnect", |status| *status == ConnectionStatus::Connected);
+    wait_table(&mut rig, "the sorted read");
+    let first = rig.app.read_with(rig.visual, |this, _| {
+        this.grid(tab).full_cell_text(crate::grid::CellPosition { row: 0, column: 0 })
+    });
+    assert_eq!(first.as_deref(), Some("5"), "sorted by id, descending, on the new session");
+}

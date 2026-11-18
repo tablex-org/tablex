@@ -93,8 +93,7 @@ impl<'a> ExplainRig<'a> {
     }
 
     fn click(&mut self, selector: &'static str) {
-        click_debug_button(self.visual, selector);
-        settle(self.visual);
+        click_selector_or_commit_mode(self.visual, selector);
     }
 
     fn rendered(&mut self, selector: &str) -> bool {

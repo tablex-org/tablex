@@ -2251,3 +2251,35 @@ fn session_drops_tabs_whose_connection_was_deleted(cx: &mut TestAppContext) {
     });
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[gpui::test]
+fn tabbar_active_tab_differs_from_inactive_tabs_in_both_themes(cx: &mut TestAppContext) {
+    let (app, visual) = tb_app(cx);
+    let welcome = tb_order(&app, visual)[0];
+    let orders = tb_open(&app, visual, "orders", "", "");
+    let customers = tb_open(&app, visual, "customers", "", "");
+    let indicator = |visual: &mut gpui::VisualTestContext, id: u64| {
+        visual
+            .debug_bounds(Box::leak(format!("tab-active-indicator-{id}").into_boxed_str()))
+            .is_some()
+    };
+    for mode in [gpui_component::ThemeMode::Dark, gpui_component::ThemeMode::Light] {
+        visual.update(|_, cx| theme::apply(mode, cx));
+        for active in [welcome, orders, customers] {
+            app.update(visual, |this, cx| this.activate_tab_ui(active, cx));
+            tb_settle(visual);
+            for id in [welcome, orders, customers] {
+                assert_eq!(
+                    indicator(visual, id),
+                    id == active,
+                    "{mode:?}: only the active tab {active} has the indicator (tab {id})"
+                );
+            }
+        }
+        // The active tab takes the content background, the others the strip's.
+        assert_eq!(tab_bar::tab_background(true), theme::background());
+        assert_eq!(tab_bar::tab_background(false), theme::chrome());
+        assert_ne!(tab_bar::tab_background(true), tab_bar::tab_background(false), "{mode:?}");
+    }
+    visual.update(|_, cx| theme::apply(gpui_component::ThemeMode::Dark, cx));
+}

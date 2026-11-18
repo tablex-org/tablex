@@ -921,7 +921,7 @@ fn the_editor_header_offers_run_sql_file_without_crowding_run_save_history_and_t
     let script = "SELECT 1;\nSELECT 2;\n";
     let path = fr_write(&dir, "toolbar.sql", script);
     fd_activate_editor(&mut rig);
-    let controls = ["tx-mode-auto", "tx-mode-manual", "run-query", "query-history", "run-sql-file", "save-sql-script"];
+    let controls = ["tx-mode", "run-query", "query-history", "run-sql-file", "save-sql-script"];
     let window_width = gpui::px(1100.0);
     fd_assert_header_fits(&mut rig, &controls, window_width);
     // Manual mode adds the transaction's state beside the mode; with a transaction open the Commit and Roll Back buttons are
@@ -934,7 +934,7 @@ fn the_editor_header_offers_run_sql_file_without_crowding_run_save_history_and_t
         cx.notify();
     });
     settle(rig.visual);
-    let open = ["tx-mode-auto", "tx-mode-manual", "tx-status", "tx-commit", "tx-rollback", "run-query", "query-history", "run-sql-file", "save-sql-script"];
+    let open = ["tx-mode", "tx-status", "tx-commit", "tx-rollback", "run-query", "query-history", "run-sql-file", "save-sql-script"];
     fd_assert_header_fits(&mut rig, &open, window_width);
     rig.visual.simulate_resize(gpui::size(gpui::px(980.0), gpui::px(850.0)));
     settle(rig.visual);

@@ -64,25 +64,37 @@ pub(super) fn refresh(cx: &mut App) {
     }
 }
 
-/// Runs `run` on the window's `AppRoot` once the current dispatch finished
+/// The window that holds the app (`AppRoot`) and the app: the active window when it is that one,
+/// else the first that is. A results window (`results::placement`) is not: its menu commands and
+/// Quit go to the app's window.
+///
+/// The handle is untyped on purpose: updating it as `WindowHandle<Root>` would lease the `Root`
+/// entity, and the dialogs the commands open read it.
+pub(super) fn app_window(cx: &App) -> Option<(gpui::AnyWindowHandle, gpui::Entity<AppRoot>)> {
+    let holds = |handle: gpui::AnyWindowHandle| {
+        let root = handle.downcast::<gpui_component::Root>()?;
+        let app = root.read(cx).ok()?.view().clone().downcast::<AppRoot>().ok()?;
+        Some((handle, app))
+    };
+    cx.active_window()
+        .and_then(holds)
+        .or_else(|| cx.windows().into_iter().find_map(holds))
+}
+
+/// Runs `run` on the app's `AppRoot` once the current dispatch finished
 /// (the window is leased while its action is dispatched).
-fn on_app_root<A: Action>(
+pub(super) fn on_app_root<A: Action>(
     cx: &mut App,
     run: fn(&mut AppRoot, &mut gpui::Window, &mut gpui::Context<AppRoot>),
 ) {
     cx.on_action(move |_: &A, cx: &mut App| {
-        let Some(window) = cx.active_window() else {
-            return;
-        };
+        // Looked up after the dispatch: the active window is leased during it and cannot be read.
         cx.defer(move |cx| {
-            let _ = window.update(cx, |root, window, cx| {
-                let app = root
-                    .downcast::<gpui_component::Root>()
-                    .ok()
-                    .and_then(|root| root.read(cx).view().clone().downcast::<AppRoot>().ok());
-                if let Some(app) = app {
-                    app.update(cx, |app, cx| run(app, window, cx));
-                }
+            let Some((window, app)) = app_window(cx) else {
+                return;
+            };
+            let _ = window.update(cx, |_, window, cx| {
+                app.update(cx, |app, cx| run(app, window, cx));
             });
         });
     });
@@ -101,19 +113,15 @@ fn on_active_window<A: Action>(cx: &mut App, run: fn(&mut gpui::Window)) {
 
 fn register_actions(cx: &mut App) {
     cx.on_action(|_: &Quit, cx: &mut App| {
-        let Some(window) = cx.active_window().or_else(|| cx.windows().into_iter().next()) else {
-            return cx.quit();
-        };
+        // The app's window asks, even when a results window is the active one. Looked up after
+        // the dispatch: the active window is leased during it and cannot be read.
         cx.defer(move |cx| {
+            let Some((window, app)) = app_window(cx) else {
+                return cx.quit();
+            };
             // A window with structure changes that were not applied asks first.
             let asked = window
-                .update(cx, |root, window, cx| {
-                    let app = root
-                        .downcast::<gpui_component::Root>()
-                        .ok()
-                        .and_then(|root| root.read(cx).view().clone().downcast::<AppRoot>().ok());
-                    app.is_some_and(|app| app.update(cx, |app, cx| app.request_quit(window, cx)))
-                })
+                .update(cx, |_, window, cx| app.update(cx, |app, cx| app.request_quit(window, cx)))
                 .unwrap_or(false);
             if !asked {
                 cx.quit();

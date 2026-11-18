@@ -75,6 +75,15 @@ choice_enum!(
 );
 
 choice_enum!(
+    /// Where a query tab shows its results beside the editor (a tab can also move them to a tab
+    /// or a window of their own).
+    ResultsPosition {
+        Below => ("below", "Below the editor"),
+        Right => ("right", "Right of the editor"),
+    }
+);
+
+choice_enum!(
     /// What a script run does when a statement fails.
     OnScriptError {
         Stop => ("stop", "Stop at the failing statement"),
@@ -329,11 +338,15 @@ pub struct EditorSettings {
     pub tab_size: u32,
     /// Auto-close brackets and quotes.
     pub auto_close: bool,
+    /// Basic Vim keys in the query editors; a tab's own switch overrides it for that tab.
+    pub vim_mode: bool,
     pub autocomplete_auto_trigger: bool,
     pub autocomplete_insert_space: bool,
     pub autocomplete_max_items: u32,
     pub highlight_current_statement: bool,
     pub run_scope: RunScope,
+    /// Where a query tab's results sit beside its editor, until the tab picks another place.
+    pub results_position: ResultsPosition,
     /// A script of several statements: what a failing statement does to the rest.
     pub on_script_error: OnScriptError,
     /// Ask for the value of `:name` / `${name}` parameters before running.
@@ -402,6 +415,7 @@ impl Default for EditorSettings {
             soft_wrap: false,
             tab_size: 2,
             auto_close: true,
+            vim_mode: false,
             autocomplete_auto_trigger: true,
             autocomplete_insert_space: false,
             autocomplete_max_items: 50,
@@ -409,6 +423,7 @@ impl Default for EditorSettings {
             // Run / Ctrl+Enter runs the statement at the cursor (or the selection); Run Script
             // (Option+X) runs everything.
             run_scope: RunScope::Current,
+            results_position: ResultsPosition::Below,
             on_script_error: OnScriptError::Stop,
             parameters: true,
             max_result_tabs: 20,
@@ -841,6 +856,7 @@ mod tests {
         assert_serde_names_match::<TabGroupBy>();
         assert_serde_names_match::<RunScope>();
         assert_serde_names_match::<OnScriptError>();
+        assert_serde_names_match::<ResultsPosition>();
         assert_serde_names_match::<KeywordCase>();
         assert_serde_names_match::<FormatterChoice>();
         assert_serde_names_match::<BooleanDisplay>();

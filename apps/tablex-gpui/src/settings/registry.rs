@@ -676,6 +676,12 @@ fn build_registry() -> Vec<SettingDescriptor> {
             d,
         ),
         toggle(
+            place!("editor.vim_mode", Editor, "Typing", "Vim keys", "Use basic Vim keys (Normal, Insert and Visual modes) in the query editors. Each editor also has its own switch in its status line."),
+            |s| s.editor.vim_mode,
+            |s, v| s.editor.vim_mode = v,
+            d,
+        ),
+        toggle(
             place!("editor.autocomplete_auto_trigger", Editor, "Autocomplete", "Open suggestions while typing", "Show the suggestion list while typing. Off disables the list."),
             |s| s.editor.autocomplete_auto_trigger,
             |s, v| s.editor.autocomplete_auto_trigger = v,
@@ -705,6 +711,12 @@ fn build_registry() -> Vec<SettingDescriptor> {
             place!("editor.run_scope", Editor, "Running", "Run executes", "What the Run button and the run shortcut execute. A selection is always preferred except for the whole-script choice."),
             |s| s.editor.run_scope,
             |s, v| s.editor.run_scope = v,
+            d,
+        ),
+        choice(
+            place!("editor.results_position", Editor, "Running", "Results position", "Where a query tab shows its results: below the editor or right of it. Each tab can also move them to a tab or a window of their own from the Results header."),
+            |s| s.editor.results_position,
+            |s, v| s.editor.results_position = v,
             d,
         ),
         toggle(

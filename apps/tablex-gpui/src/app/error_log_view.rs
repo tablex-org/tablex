@@ -735,7 +735,8 @@ impl AppRoot {
             .items_center()
             .gap(px(4.0))
             .cursor_pointer()
-            .when(open, |this| this.bg(theme::selected()))
+            // The status bar is the `selected` tone itself: an open log is the accent tint.
+            .when(open, |this| this.bg(theme::accent_surface()))
             .hover(|style| style.bg(theme::hover()))
             .tooltip(|window, cx| {
                 gpui_component::tooltip::Tooltip::new("Error Log").build(window, cx)

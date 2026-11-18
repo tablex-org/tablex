@@ -68,6 +68,7 @@ mod file_run;
 mod data_transfer;
 mod driver_manager;
 mod drivers;
+mod editor_status;
 mod error_log_view;
 mod explain;
 mod menus;
@@ -87,6 +88,7 @@ mod remote_search;
 mod reset_passwords;
 mod results;
 mod scenario;
+mod script_highlight;
 mod script_run;
 mod script_toolbar;
 mod session_persist;
@@ -113,6 +115,7 @@ mod transaction;
 mod transaction_dialogs;
 mod tunnel_ui;
 mod updates;
+mod vim;
 mod workspace;
 
 use actions::*;
@@ -177,6 +180,8 @@ pub struct AppRoot {
     /// The window's `Root`, notified for chrome-only changes (see
     /// `results::surface`). Captured on the first render.
     window_root: Option<gpui::WeakEntity<gpui_component::Root>>,
+    /// Where each query tab shows its results (see `results::placement`).
+    results_placement: results::placement::ResultsPlacement,
     workspace: WorkspaceState,
     query_tasks: workspace::QueryTaskState,
     auto_refresh: workspace::AutoRefreshState,
@@ -403,8 +408,10 @@ impl AppRoot {
         let workspace = WorkspaceState::default();
         // A 0.1.0 store is moved into the app folder here, before anything opens the store.
         let driver_data_dir = if scenario_enabled {
+            // A scenario installs no driver: the store only has to be somewhere that is not the
+            // working directory (it creates a `Drivers` folder in it).
             crate::drivers::DriverDataDir {
-                path: std::path::PathBuf::from("__tablex_ui_scenario_driver_store_disabled__"),
+                path: std::env::temp_dir().join("tablex-ui-scenario-driver-store-disabled"),
                 moved: None,
                 warning: None,
             }
@@ -443,6 +450,7 @@ impl AppRoot {
             empty_grid: GridState::new(GridContentSource::Arrow(ArrowGridSource::new(Vec::new()))),
             grid_prefs: results::GridPrefs::new(scenario_root.as_deref()),
             window_root: None,
+            results_placement: Default::default(),
             workspace,
             query_tasks: workspace::QueryTaskState::default(),
             auto_refresh: workspace::AutoRefreshState::default(),
@@ -537,6 +545,9 @@ impl AppRoot {
         // Every tab's cached results view is stale after a plain notification
         // of the root unless it was announced as chrome-only.
         cx.observe_self(|this, cx| this.on_root_notified(cx))
+            .detach();
+        // The SQL colors of Mongo script tabs come from the theme.
+        cx.observe_global::<gpui_component::theme::Theme>(|this, cx| this.refresh_all_sql_highlights(cx))
             .detach();
         app.tunnel_ui._quit = Some(tunnel_ui::listen_for_prompts(tunnel_prompts, cx));
         app.driver_runtime._quit = Some(cx.on_app_quit(|this, _| this.disconnect_sessions_for_quit()));
@@ -731,6 +742,8 @@ mod tests {
     include!("tests/grid_find.rs");
     include!("tests/tab_views.rs");
     include!("tests/script_toolbar.rs");
+    include!("tests/vim.rs");
+    include!("tests/editor_status.rs");
     include!("tests/mongo_shell.rs");
     include!("tests/connections.rs");
     include!("tests/connection_state.rs");

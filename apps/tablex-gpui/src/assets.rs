@@ -110,6 +110,9 @@ impl AssetSource for Assets {
                 "square-dashed.svg",
                 "arrow-left-right.svg",
                 "pin.svg",
+                "save.svg",
+                "zap.svg",
+                "hand.svg",
                 "minimize-2.svg",
                 "maximize-2.svg",
                 "crosshair.svg",
@@ -124,7 +127,6 @@ impl AssetSource for Assets {
                 "moon.svg",
                 "monitor.svg",
                 "cloud-download.svg",
-                "languages.svg",
             ]
             .into_iter()
             .map(SharedString::from)
@@ -251,6 +253,9 @@ pub fn asset(path: &str) -> Option<&'static [u8]> {
             Some(include_bytes!("../assets/icons/arrow-left-right.svg"))
         }
         "icons/pin.svg" => Some(include_bytes!("../assets/icons/pin.svg")),
+        "icons/save.svg" => Some(include_bytes!("../assets/icons/save.svg")),
+        "icons/zap.svg" => Some(include_bytes!("../assets/icons/zap.svg")),
+        "icons/hand.svg" => Some(include_bytes!("../assets/icons/hand.svg")),
         "icons/minimize-2.svg" => Some(include_bytes!("../assets/icons/minimize-2.svg")),
         "icons/maximize-2.svg" => Some(include_bytes!("../assets/icons/maximize-2.svg")),
         "icons/crosshair.svg" => Some(include_bytes!("../assets/icons/crosshair.svg")),
@@ -260,7 +265,6 @@ pub fn asset(path: &str) -> Option<&'static [u8]> {
         "icons/moon.svg" => Some(include_bytes!("../assets/icons/moon.svg")),
         "icons/monitor.svg" => Some(include_bytes!("../assets/icons/monitor.svg")),
         "icons/cloud-download.svg" => Some(include_bytes!("../assets/icons/cloud-download.svg")),
-        "icons/languages.svg" => Some(include_bytes!("../assets/icons/languages.svg")),
         _ => None,
     }
 }
@@ -274,7 +278,6 @@ mod tests {
         assert!(super::asset("icons/moon.svg").is_some());
         assert!(super::asset("icons/monitor.svg").is_some());
         assert!(super::asset("icons/cloud-download.svg").is_some());
-        assert!(super::asset("icons/languages.svg").is_some());
         assert!(super::asset("icons/building-2.svg").is_some());
         assert!(super::asset("icons/chart-column-big.svg").is_some());
         assert!(super::asset("icons/filter.svg").is_some());
@@ -346,6 +349,7 @@ mod tests {
         assert!(super::asset("icons/camera.svg").is_some());
         assert!(super::asset("icons/circle-plus.svg").is_some());
         assert!(super::asset("icons/square-dashed.svg").is_some());
+        assert!(super::asset("icons/save.svg").is_some());
         assert!(super::asset("icons/arrow-left-right.svg").is_some());
         assert!(super::asset("icons/network.svg").is_some());
     }
@@ -483,6 +487,11 @@ mod tests {
         assert!(names.iter().any(|name| name == "camera.svg"));
         assert!(names.iter().any(|name| name == "circle-plus.svg"));
         assert!(names.iter().any(|name| name == "square-dashed.svg"));
+        assert!(names.iter().any(|name| name == "save.svg"));
+        for icon in ["zap", "hand"] {
+            assert!(names.iter().any(|name| *name == format!("{icon}.svg")));
+            assert!(super::asset(&format!("icons/{icon}.svg")).is_some());
+        }
         assert!(names.iter().any(|name| name == "arrow-left-right.svg"));
         for icon in ["triangle-alert", "info"] {
             assert!(names.iter().any(|name| *name == format!("{icon}.svg")));

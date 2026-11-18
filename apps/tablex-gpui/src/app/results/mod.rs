@@ -20,6 +20,7 @@ pub(super) mod json_view;
 pub(super) mod mongo;
 pub(super) mod mutations;
 pub(super) mod pinning;
+pub(super) mod placement;
 pub(super) mod plan;
 pub(super) mod properties;
 pub(super) mod properties_edit;
@@ -45,6 +46,63 @@ pub(super) fn window_overlay(window: &Window, content: impl IntoElement) -> AnyE
         gpui::anchored()
             .position(gpui::point(px(0.0), px(0.0)))
             .child(div().w(viewport.width).h(viewport.height).child(content)),
+    )
+    .into_any_element()
+}
+
+/// The body of a SQL (`prefix` "sql") or MongoDB ("mongo") query preview. A query shows as the
+/// text view's highlighted code block, filling the panel, with the copy button in the corner
+/// where the block would name its language; without one, `fallback` (why there is none) shows
+/// as plain text.
+pub(super) fn query_preview_body(
+    prefix: &'static str,
+    tab_id: u64,
+    lang: &'static str,
+    code: Option<String>,
+    fallback: String,
+    copy_tooltip: gpui::SharedString,
+) -> AnyElement {
+    let id = |name: &str| gpui::ElementId::NamedInteger(format!("{prefix}-{name}").into(), tab_id);
+    let body = div()
+        .debug_selector(move || format!("{prefix}-query-command"))
+        .id(id("query-code"))
+        .flex_1()
+        .min_h(px(0.0))
+        .p(px(8.0))
+        .overflow_y_scroll()
+        .text_size(px(12.0))
+        .line_height(px(18.0))
+        .text_color(theme::text());
+    let Some(code) = code else {
+        return body
+            .child(div().font_family("Menlo").child(fallback))
+            .into_any_element();
+    };
+    let copy_id = id("query-preview-copy");
+    body.child(
+        gpui_component::text::TextView::markdown(
+            id("query-code-text"),
+            crate::app::assistant::ask::fenced(lang, &code),
+        )
+        .selectable(true)
+        .style(gpui_component::text::TextViewStyle::default().code_block(
+            // The panel's height less its header and this body's padding.
+            gpui::StyleRefinement::default()
+                .min_h(px(124.0))
+                .rounded(px(4.0)),
+        ))
+        .code_block_actions(move |block, _, _| {
+            let code = block.code();
+            Button::new(copy_id.clone())
+                .debug_selector(move || format!("{prefix}-query-preview-copy"))
+                .icon(Icon::new(IconName::Copy).size(px(14.0)))
+                .compact()
+                .ghost()
+                .tooltip(copy_tooltip.clone())
+                .on_click(move |_, _, cx| {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(code.to_string()));
+                })
+        }),
     )
     .into_any_element()
 }
@@ -158,7 +216,8 @@ pub(super) struct TabView {
     /// The record view's field list.
     pub(super) record_scroll: UniformListScrollHandle,
     pub(super) grid_horizontal_scroll: ScrollHandle,
-    pub(super) result_action_scroll: ScrollHandle,
+    /// The painted widths of the result footer's action strip.
+    pub(super) footer_fit: footer::SharedFooterFit,
     pub(super) mongo_document_scroll: UniformListScrollHandle,
     pub(super) mongo_detail_scroll: UniformListScrollHandle,
     pub(super) cell_detail_row_scroll: UniformListScrollHandle,
@@ -197,7 +256,7 @@ impl Default for TabView {
             grid_scroll: UniformListScrollHandle::new(),
             record_scroll: UniformListScrollHandle::new(),
             grid_horizontal_scroll: ScrollHandle::new(),
-            result_action_scroll: ScrollHandle::new(),
+            footer_fit: Default::default(),
             mongo_document_scroll: UniformListScrollHandle::new(),
             mongo_detail_scroll: UniformListScrollHandle::new(),
             cell_detail_row_scroll: UniformListScrollHandle::new(),
@@ -219,6 +278,31 @@ impl Default for TabView {
 }
 
 impl TabView {
+    /// Drops what was made for the window that showed the results (entities, focus handles, a drag,
+    /// the cached view) and keeps what the user set (column layout, selection, record view, chart
+    /// spec, scroll, ...): the next render makes the dropped ones in the window that shows them.
+    pub(super) fn forget_window_bound(&mut self) {
+        let grid = &mut self.grid_ui;
+        grid.find = find::FindState::default();
+        grid.inline_edit = None;
+        grid.column_resize = None;
+        grid.context_cell = None;
+        grid.context_header = None;
+        grid.sort_menu = None;
+        self.detail_ui.edit = None;
+        self.chart.forget_controls();
+        self.json_views.cell_value = None;
+        self.json_views.cell_json = None;
+        self.json_views.mongo_doc = None;
+        self.mongo.filter_focus = None;
+        self.plan_raw = None;
+        self.plan_focus = None;
+        self.grid_focus = None;
+        self.columns_focus = None;
+        self.script_stats = None;
+        self.surface = None;
+    }
+
     /// Focus target of the grid (created on first use: a handle needs `App`).
     pub(super) fn grid_focus(&mut self, cx: &gpui::App) -> FocusHandle {
         self.grid_focus.get_or_insert_with(|| cx.focus_handle()).clone()

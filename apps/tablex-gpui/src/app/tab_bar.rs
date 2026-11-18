@@ -403,6 +403,7 @@ impl AppRoot {
             TabKind::Restore => TabIcon::Plain("icons/upload.svg"),
             TabKind::Accounts => TabIcon::Plain("icons/key-round.svg"),
             TabKind::ProcessList => TabIcon::Plain("icons/list-checks.svg"),
+            TabKind::Results => TabIcon::Plain("icons/rows-3.svg"),
             // The sidebar's glyph of the kind of object it shows.
             TabKind::Source => TabIcon::Plain(
                 match tab.source.as_ref().map(|source| source.kind) {
@@ -460,7 +461,7 @@ fn tab_width(tab: &Tab, compact: bool) -> f32 {
         TabKind::Settings => 140.0,
         TabKind::Diagram => 200.0,
         TabKind::Source => 220.0,
-        TabKind::Import | TabKind::Transfer | TabKind::SqlFile | TabKind::Backup | TabKind::Restore | TabKind::Accounts | TabKind::ProcessList => 220.0,
+        TabKind::Import | TabKind::Transfer | TabKind::SqlFile | TabKind::Backup | TabKind::Restore | TabKind::Accounts | TabKind::ProcessList | TabKind::Results => 220.0,
     };
     if compact {
         (full - 40.0f32).max(120.0)
@@ -478,6 +479,19 @@ pub(super) fn tab_can_rename(tab: &Tab) -> bool {
         && !tab.query_mode.is_redis_key()
         // An Aggregate tab is named by its saved pipeline (Save / Save As).
         && !tab.query_mode.is_mongo_aggregate()
+}
+
+/// Height of the accent line on the active tab's top edge.
+const ACTIVE_INDICATOR_HEIGHT: f32 = 2.0;
+
+/// Background of a tab: the content background for the active one, the
+/// strip's own chrome for the rest.
+pub(super) fn tab_background(active: bool) -> Rgba {
+    if active {
+        theme::background()
+    } else {
+        theme::chrome()
+    }
 }
 
 fn indicator(left: bool) -> gpui::Div {
@@ -964,7 +978,7 @@ impl AppRoot {
         let tab = self.workspace.tab(tab_id)?;
         let has_pinned = self.workspace.tabs().iter().any(|other| other.is_pinned);
         let pinned = tab.is_pinned;
-        let disabled = |scope| self.workspace.close_targets(tab_id, scope).is_empty();
+        let disabled = |scope| self.tab_close_targets(tab_id, scope).is_empty();
         Some(TabMenuState {
             pinned,
             can_rename: tab_can_rename(tab),
@@ -1060,7 +1074,7 @@ impl AppRoot {
                 }
             }
             TabCommand::Close(scope) => {
-                let ids = self.workspace.close_targets(tab_id, scope);
+                let ids = self.tab_close_targets(tab_id, scope);
                 self.close_tabs_confirmed(ids, Some(tab_id), window, cx);
             }
             TabCommand::CloseTab => self.confirm_close_tab(tab_id, window, cx),
@@ -1167,7 +1181,9 @@ impl AppRoot {
         if missing.is_empty() {
             return;
         }
-        let font = gpui::font(cx.theme().font_family.clone());
+        // The active title is medium weight; measure with it so it never ellipsizes.
+        let mut font = gpui::font(cx.theme().font_family.clone());
+        font.weight = gpui::FontWeight::MEDIUM;
         let system = window.text_system().clone();
         for text in missing {
             let run = gpui::TextRun {
@@ -1486,8 +1502,17 @@ impl AppRoot {
             .flex()
             .items_center()
             .bg(theme::chrome())
-            .border_b_1()
-            .border_color(theme::border())
+            // The bottom border is a line under the strip (not a border) so the
+            // active tab can cover it and open into the content below.
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .h(px(1.0))
+                    .bg(theme::border()),
+            )
             .child(strip)
             .children(rows_toggle)
             .children(open_tabs)
@@ -1905,18 +1930,22 @@ impl AppRoot {
                         })),
                 )
             })
-            .when_some(group_color, |tab, color| {
+            // The active tab: a 2px accent on its top edge, in the connection's
+            // colour when the tab belongs to a group, else the theme accent.
+            .when(active, |tab| {
                 tab.child(
                     div()
+                        .debug_selector(move || format!("tab-active-indicator-{tab_id}"))
                         .absolute()
                         .left_0()
                         .right_0()
-                        .bottom_0()
-                        .h(px(2.0))
-                        .bg(color),
+                        .top_0()
+                        .h(px(ACTIVE_INDICATOR_HEIGHT))
+                        .bg(group_color.unwrap_or_else(theme::accent)),
                 )
             })
-            // The connection type colours the top edge (Production stands out).
+            // The connection type colours the top edge (Production stands out);
+            // under the active tab's indicator, so both stay visible.
             .when_some(self.connection_type_of(&tab.connection_id), |tab, ty| {
                 tab.child(
                     div()
@@ -1924,7 +1953,7 @@ impl AppRoot {
                         .absolute()
                         .left_0()
                         .right_0()
-                        .top_0()
+                        .top(px(if active { ACTIVE_INDICATOR_HEIGHT } else { 0.0 }))
                         .h(px(if ty.is_production() { 3.0 } else { 2.0 }))
                         .bg(connection_policy::type_color(ty)),
                 )
@@ -1987,10 +2016,19 @@ impl AppRoot {
             .on_drop(cx.listener(move |this, drag: &TabDrag, _, cx| {
                 this.drop_on_tab(drag.id, tab_id, cx);
             }));
+        // The active tab shares the content background and has no bottom
+        // border, so it opens into the pane below; the others are recessed
+        // into the strip, keep the strip's bottom border and lighten on hover.
+        let element = element.bg(tab_background(active));
         let element = if active {
-            element.bg(theme::background()).text_color(theme::text())
+            element
+                .pb(px(1.0))
+                .text_color(theme::text())
+                .font_weight(gpui::FontWeight::MEDIUM)
         } else {
             element
+                .border_b_1()
+                .border_color(theme::border())
                 .text_color(theme::text_muted())
                 .hover(|style| style.bg(theme::hover()).text_color(theme::text()))
         };

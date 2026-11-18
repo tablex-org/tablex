@@ -1284,14 +1284,12 @@ fn the_title_bar_theme_menu_switches_the_theme_like_the_settings_page(cx: &mut T
     visual.update(|window, cx| AppRoot::follow_system_appearance(&app, window, cx));
     assert_eq!(theme::mode(), gpui_component::theme::ThemeMode::Dark);
 
-    // The button sits left of the gear and of the language button that is next to the gear, in the same bar.
+    // The button sits left of the gear, next to it, in the same bar.
     let button = visual.debug_bounds("title-theme-button").expect("theme button");
-    let language = visual.debug_bounds("title-language-button").expect("language button");
     let gear = visual.debug_bounds("open-settings").expect("gear");
     let title = visual.debug_bounds("window-title").expect("title");
-    assert!(button.right() <= language.left(), "left of the language button");
-    assert!(language.left() - button.right() < gpui::px(16.0), "next to the language button");
-    assert!(language.right() <= gear.left(), "the language button is left of the gear");
+    assert!(button.right() <= gear.left(), "left of the gear");
+    assert!(gear.left() - button.right() < gpui::px(16.0), "next to the gear");
     assert!(title.right() <= button.left(), "the title stays left of both");
     assert_eq!(button.center().y, gear.center().y, "same bar");
     assert_eq!(button.size.height, gear.size.height, "same height");

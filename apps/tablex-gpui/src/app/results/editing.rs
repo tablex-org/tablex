@@ -958,12 +958,10 @@ impl AppRoot {
         window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
-        if self
-            .workspace
-            .active_tab()
-            .is_some_and(|tab| tab.id == tab_id)
-        {
-            if let Some(window) = window.filter(|window| window.is_window_active()) {
+        // Only where the results are shown: the active tab (or its Results tab) of this window,
+        // or the results' own window.
+        if let Some(window) = window.filter(|window| window.is_window_active()) {
+            if self.results_in_view(tab_id, window) {
                 self.view_mut(tab_id).grid_focus(cx).focus(window, cx);
             }
         }

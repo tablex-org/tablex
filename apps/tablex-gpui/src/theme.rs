@@ -11,6 +11,8 @@ pub const TAB_HEIGHT: f32 = 36.0;
 /// Group-chip row above the tabs in the grouped-rows strip (chips are 22px).
 pub const GROUP_ROW_HEIGHT: f32 = 28.0;
 pub const STATUS_HEIGHT: f32 = 22.0;
+/// The status line inside a query editor: lighter and denser than a panel header.
+pub const EDITOR_STATUS_HEIGHT: f32 = 20.0;
 pub const ROW_HEIGHT: f32 = 26.0;
 pub const SIDEBAR_ROW_HEIGHT: f32 = 28.0;
 pub const SIDEBAR_INDENT: f32 = 16.0;

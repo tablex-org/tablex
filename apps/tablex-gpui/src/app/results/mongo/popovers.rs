@@ -484,9 +484,23 @@ impl AppRoot {
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.apply_mongo_filter_rules(tab_id, cx);
             }));
+        let focus = self.view_mut(tab_id).mongo.filter_focus.get_or_insert_with(|| cx.focus_handle()).clone();
         let panel = div()
             .id("mongo-filter-panel")
             .debug_selector(|| "mongo-filter-panel".into())
+            // Escape closes the builder: with the panel itself focused (a key press) or from a field
+            // inside it that does not use the key (the action).
+            .track_focus(&focus)
+            .key_context("MongoFilterBuilder")
+            .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" {
+                    this.close_mongo_filter_builder(tab_id, window, cx);
+                    cx.stop_propagation();
+                }
+            }))
+            .on_action(cx.listener(move |this, _: &gpui_component::input::Escape, window, cx| {
+                this.close_mongo_filter_builder(tab_id, window, cx);
+            }))
             .w(px(468.0))
             .p(px(12.0))
             .flex()
@@ -534,15 +548,21 @@ impl AppRoot {
             .occlude()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .into_any_element();
-        let trigger = trigger.on_click(cx.listener(move |this, _, _, cx| {
+        let trigger_focus = focus.clone();
+        let trigger = trigger.on_click(cx.listener(move |this, _, window, cx| {
             let field = this.grid(tab_id).column_name(0).unwrap_or("").to_string();
+            let mut opened = false;
             if let Some(runtime) = this.workspace.runtime_mut(tab_id) {
                 runtime.mongo.filter_open = !runtime.mongo.filter_open;
+                opened = runtime.mongo.filter_open;
                 if runtime.mongo.filter_open {
                     runtime.mongo.ensure_filter_rule(field);
                 } else {
                     runtime.mongo.close_filter_menu();
                 }
+            }
+            if opened {
+                window.focus(&trigger_focus, cx);
             }
             this.notify_tab(tab_id, cx);
         }));
@@ -589,5 +609,24 @@ impl AppRoot {
                 )
             });
         div().child(trigger).children(overlay).into_any_element()
+    }
+}
+
+impl AppRoot {
+    /// Closes the filter builder (Escape); the rules stay as they are. The keyboard focus was in its panel,
+    /// which is gone now: it goes to the grid, so the keys keep working.
+    pub(in crate::app) fn close_mongo_filter_builder(&mut self, tab_id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(runtime) = self.workspace.runtime_mut(tab_id) {
+            if !runtime.mongo.filter_open {
+                return;
+            }
+            runtime.mongo.filter_open = false;
+            runtime.mongo.close_filter_menu();
+        }
+        let in_panel = self.view(tab_id).mongo.filter_focus.as_ref().is_some_and(|panel| panel.contains_focused(window, cx));
+        if in_panel {
+            self.view_mut(tab_id).grid_focus(cx).focus(window, cx);
+        }
+        self.notify_tab(tab_id, cx);
     }
 }

@@ -498,6 +498,16 @@ static DEFS: &[ShortcutDef] = &[
         &["secondary-f"],
         bind!(OpenGridFind),
     ),
+    // Cmd+6 on macOS, Ctrl+6 elsewhere. Global: with the editor
+    // focused or nothing focused it acts on the active tab's results.
+    ShortcutDef::new(
+        "results.toggle",
+        "Results",
+        "Toggle Results",
+        ANY,
+        &["secondary-6"],
+        bind!(ToggleResults),
+    ),
     ShortcutDef::new(
         "results.close_find",
         "Results",
@@ -686,6 +696,16 @@ static DEFS: &[ShortcutDef] = &[
         ANY,
         &[],
         bind!(ToggleAutoCommit),
+    ),
+    // Unbound by default: bind your own in Settings > Shortcuts. Flips Vim keys in the active editor, like the switch
+    // in its status line.
+    ShortcutDef::new(
+        "editor.toggle_vim",
+        "Editor",
+        "Toggle Vim Mode",
+        ANY,
+        &[],
+        bind!(ToggleVimMode),
     ),
 ];
 
@@ -1141,8 +1161,8 @@ mod tests {
         let none = Overrides::new();
         // Bound by the user only: a chord with Alt would be AltGr on some Windows layouts.
         // `editor.run` has none off macOS: there the code editor's own Ctrl+Enter runs the query.
-        const UNBOUND_BY_DEFAULT: [&str; 5] =
-            ["editor.explain_analyze", "editor.commit", "editor.rollback", "editor.toggle_auto_commit", "editor.run"];
+        const UNBOUND_BY_DEFAULT: [&str; 6] =
+            ["editor.explain_analyze", "editor.commit", "editor.rollback", "editor.toggle_auto_commit", "editor.run", "editor.toggle_vim"];
         for def in all() {
             assert!(
                 !def.default_chords().is_empty() || UNBOUND_BY_DEFAULT.contains(&def.id),

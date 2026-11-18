@@ -76,28 +76,6 @@ impl AppRoot {
     }
 }
 
-impl AppRoot {
-    /// The title bar's language picker: a ghost icon button opening System / English / Tiếng Việt
-    /// with the current choice checked (the Settings > Appearance > Language setting).
-    fn render_language_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let current = self.settings.appearance.language;
-        let root = cx.entity().downgrade();
-        Button::new("title-language")
-            .debug_selector(|| "title-language-button".into())
-            .icon(Icon::empty().path("icons/languages.svg").size(px(14.0)))
-            .compact()
-            .ghost()
-            .tooltip(t!("titlebar.language"))
-            .dropdown_menu_with_anchor(gpui::Anchor::TopRight, move |menu, _, _| {
-                language_menu_items(current, &root)
-                    .into_iter()
-                    .fold(menu.check_side(gpui_component::Side::Right), |menu, item| {
-                        menu.item(item)
-                    })
-            })
-    }
-}
-
 /// The language picker's entries; `current` is the checked one.
 pub(super) fn language_menu_items(
     current: crate::settings::LanguageChoice,
@@ -237,7 +215,6 @@ impl Render for AppRoot {
                     .pr(px(8.0))
                     .child(self.render_updates_button(cx))
                     .child(self.render_theme_button(cx))
-                    .child(self.render_language_button(cx))
                     .child(
                         Button::new("open-settings")
                             .debug_selector(|| "open-settings".into())
@@ -423,6 +400,30 @@ impl Render for AppRoot {
             .and_then(|tab| self.via_ssh(&tab.connection_id));
         let status_left = self.render_status_text(status_text, cx);
         let error_log_icon = self.render_error_log_icon(cx);
+        // The active tab's connection and database, when it has them.
+        let status_target = self.workspace.active_tab().and_then(|tab| {
+            let name = self.connection_name(&tab.connection_id)?;
+            Some(if tab.database.is_empty() { name.to_owned() } else { format!("{name} \u{b7} {}", tab.database) })
+        });
+        let language = {
+            let current = self.settings.appearance.language;
+            let root = cx.entity().downgrade();
+            Button::new("status-language")
+                .debug_selector(|| "status-language".into())
+                .xsmall()
+                .compact()
+                .ghost()
+                .label(crate::i18n::code().to_uppercase())
+                .text_color(theme::text_muted())
+                .tooltip(t!("titlebar.language"))
+                .dropdown_menu_with_anchor(gpui::Anchor::BottomRight, move |menu, _, _| {
+                    language_menu_items(current, &root)
+                        .into_iter()
+                        .fold(menu.check_side(gpui_component::Side::Right), |menu, item| menu.item(item))
+                })
+        };
+        // A thin vertical divider in front of each right-hand segment.
+        let divider = || div().flex_shrink_0().w(px(1.0)).h(px(12.0)).mx(px(4.0)).bg(theme::border_strong());
         let main_panel = div()
             .flex()
             .flex_col()
@@ -433,14 +434,16 @@ impl Render for AppRoot {
             .bg(theme::background())
             .child(upper)
             .child(
+                // A footer block of its own: a different tone from the panels above, a border on top
+                // and the right-hand items cut into segments by dividers.
                 div()
                     .h(px(theme::STATUS_HEIGHT))
                     .debug_selector(|| "status-bar".into())
-                    .bg(theme::chrome())
+                    .bg(theme::selected())
                     .border_t_1()
-                    .border_color(theme::border())
+                    .border_color(theme::border_strong())
                     .pl(px(12.0))
-                    .pr(px(8.0))
+                    .pr(px(4.0))
                     .flex()
                     .items_center()
                     .text_size(px(11.0))
@@ -449,13 +452,13 @@ impl Render for AppRoot {
                     .children(status_ssh.map(|via| {
                         div()
                             .debug_selector(|| "status-ssh".into())
-                            .mr(px(8.0))
+                            .mx(px(4.0))
                             .child(via)
                     }))
                     .children(status_type.map(|(label, color)| {
                         div()
                             .debug_selector(|| "status-connection-type".into())
-                            .mr(px(8.0))
+                            .mx(px(4.0))
                             .px(px(6.0))
                             .rounded(px(3.0))
                             .border_1()
@@ -464,15 +467,33 @@ impl Render for AppRoot {
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .child(label)
                     }))
-                    .child(error_log_icon)
                     .when(show_fps, |this| {
-                        this.child(
+                        this.child(divider()).child(
                             div()
                                 .debug_selector(|| "status-fps".into())
+                                .mx(px(4.0))
                                 .text_color(theme::text_faint())
                                 .child(format!("{} fps", self.shell.fps_display)),
                         )
-                    }),
+                    })
+                    .when_some(status_target, |this, target| {
+                        this.child(divider()).child(
+                            div()
+                                .debug_selector(|| "status-target".into())
+                                .flex()
+                                .items_center()
+                                .gap(px(4.0))
+                                .mx(px(4.0))
+                                .min_w_0()
+                                .max_w(px(260.0))
+                                .child(Icon::empty().path("icons/database.svg").size(px(11.0)).text_color(theme::text_muted()))
+                                .child(div().min_w_0().truncate().child(target)),
+                        )
+                    })
+                    .child(divider())
+                    .child(language)
+                    .child(divider())
+                    .child(error_log_icon),
             );
         // The assistant dock sits beside the main panel in a split group that is always there
         // (one panel while the dock is closed), so opening or closing the dock does not change
@@ -590,9 +611,10 @@ impl Render for AppRoot {
             .on_action(cx.listener(|this, _: &FormatSql, window, cx| {
                 this.format_sql(window, cx);
             }))
-            .on_action(cx.listener(|this, _: &RunActiveQuery, _, cx| {
-                if let Some(tab_id) = this.workspace.active_tab().map(|tab| tab.id) {
-                    this.run_tab_query_explicit(tab_id, cx);
+            .on_action(cx.listener(|this, _: &RunActiveQuery, window, cx| {
+                // A Results tab runs the query tab it shows.
+                if let Some(tab_id) = this.active_results_tab() {
+                    this.run_tab_as_its_run_button(tab_id, window, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &RunScript, _, cx| {
@@ -615,6 +637,9 @@ impl Render for AppRoot {
             }))
             .on_action(cx.listener(|this, _: &ToggleAutoCommit, window, cx| {
                 this.toggle_commit_mode(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleVimMode, window, cx| {
+                this.toggle_active_vim(window, cx);
             }))
             .on_action(cx.listener(|this, _: &CloseActiveTab, window, cx| {
                 this.close_active_tab_action(window, cx);

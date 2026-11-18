@@ -7,6 +7,12 @@ const CLOSED_TABS_KEPT: usize = 20;
 pub(super) struct WorkspaceEditors {
     /// Inactive editors stay alive with their cursor and undo history.
     pub(super) by_tab: HashMap<u64, gpui::Entity<EditorState>>,
+    /// SQL colors of the Mongo script tabs' editors.
+    pub(super) sql_highlight: HashMap<u64, super::script_highlight::SqlHighlight>,
+    /// Vim keys: each tab's switch and mode, and the register all tabs share.
+    pub(super) vim: super::vim::VimState,
+    /// How much of each SQL editor header fits its panel, as last painted.
+    pub(super) header_fit: super::panes_ui::HeaderFits,
 }
 
 #[cfg(test)]
@@ -360,6 +366,7 @@ impl AppRoot {
                                 runtime.context_sql_sort = None;
                             }
                         }
+                        this.schedule_sql_highlight(tab_id_for_events, cx);
                     }
                     // Cmd+Enter arrives as the secondary enter binding.
                     gpui_component::input::InputEvent::PressEnter {
@@ -389,6 +396,9 @@ impl AppRoot {
         })
         .detach();
         self.query_editors.by_tab.insert(tab_id, editor.clone());
+        if language == "javascript" {
+            self.start_sql_highlight(tab_id, &editor, cx);
+        }
         editor
     }
 
@@ -396,6 +406,9 @@ impl AppRoot {
     pub(super) fn editor_for_tab_removed(&mut self, tab_id: u64) {
         self.cancel_format_of(tab_id);
         self.query_editors.by_tab.remove(&tab_id);
+        self.query_editors.sql_highlight.remove(&tab_id);
+        self.query_editors.vim.tab_removed(tab_id);
+        self.query_editors.header_fit.borrow_mut().remove(&tab_id);
         self.script_toolbar.remove_tab(tab_id);
         self.sql_table_ui.remove_tab(tab_id);
         self.redis_ui.tab_removed(tab_id);
@@ -702,6 +715,8 @@ impl AppRoot {
     /// The app closes a tab the user did not (its object was dropped, its connection deleted, the
     /// start-up restore keeps only pinned ones): "Reopen Closed Tab" does not bring it back.
     pub(super) fn close_tab_unremembered(&mut self, tab_id: u64, cx: &mut Context<Self>) {
+        // A Results tab gives the results back; a query tab takes its Results tab or window along.
+        self.results_tab_closing(tab_id, cx);
         self.auto_refresh.tasks.remove(&tab_id);
         self.query_tasks.started_at.remove(&tab_id);
         if self
@@ -956,7 +971,8 @@ impl AppRoot {
 
     /// Cancels the active tab's in-flight run without affecting other tabs.
     pub(super) fn cancel_active_tab_query(&mut self, cx: &mut Context<Self>) {
-        let Some(tab_id) = self.workspace.active_tab().map(|tab| tab.id) else {
+        // A Results tab cancels the run of the query tab it shows.
+        let Some(tab_id) = self.active_results_tab() else {
             return;
         };
         self.cancel_tab_query(tab_id, cx);
@@ -1120,8 +1136,9 @@ impl AppRoot {
     }
 
     /// Runs the active tab's SQL (Run button, palette, Cmd+Enter).
+    /// A Results tab runs the query tab whose results it shows.
     pub(super) fn run_active_tab_query(&mut self, cx: &mut Context<Self>) {
-        if let Some(tab_id) = self.workspace.active_tab().map(|tab| tab.id) {
+        if let Some(tab_id) = self.active_results_tab() {
             self.run_tab_query_explicit(tab_id, cx);
         }
     }
@@ -1132,12 +1149,23 @@ impl AppRoot {
         self.run_tab_query_as(tab_id, true, None, cx);
     }
 
+    /// Runs `tab_id` as its own Run button does: an aggregate tab validates its pipeline and asks
+    /// before a write (`$out` / `$merge`); every other tab runs its editor text. For the places
+    /// that run a tab without its editor header: the empty result state, a results window, Cmd+Enter.
+    pub(super) fn run_tab_as_its_run_button(&mut self, tab_id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if self.workspace.tab(tab_id).is_some_and(|tab| tab.query_mode.is_mongo_aggregate()) {
+            self.run_aggregate(tab_id, window, cx);
+        } else {
+            self.run_tab_query_explicit(tab_id, cx);
+        }
+    }
+
     /// Run Script / Run From Cursor on the active tab when it is an SQL or Mongo script editor:
     /// the Run path with `span` instead of the "Run executes" setting. Elsewhere it does nothing.
     pub(super) fn run_active_tab_span(&mut self, span: RunSpan, cx: &mut Context<Self>) {
         let Some(tab_id) = self
-            .workspace
-            .active_tab()
+            .active_results_tab()
+            .and_then(|id| self.workspace.tab(id))
             .filter(|tab| super::assistant::is_sql_editor(tab) || tab.query_mode.is_mongo_script())
             .map(|tab| tab.id)
         else {

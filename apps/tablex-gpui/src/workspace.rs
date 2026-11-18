@@ -54,6 +54,10 @@ pub enum TabKind {
     /// The sessions running on a connection's server (one tab per connection): the connection is in the tab's identity fields; the
     /// list is a `ProcessListView` entity of the app. Never persisted: it is a live read of the server.
     ProcessList,
+    /// The result area of a query tab, shown in a tab of its own (the query tab shows a note in
+    /// its place): the source tab is kept by the app. Never persisted: it is a view of another
+    /// tab's result.
+    Results,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -597,7 +601,7 @@ fn session_tab(tab: &Tab) -> Option<crate::gpui_session::SessionTab> {
         // Singleton utility tab; reopened on demand.
         TabKind::DriverManager | TabKind::Settings => return None,
         // A wizard over a file and a load in flight: nothing to restore.
-        TabKind::Import | TabKind::Transfer | TabKind::SqlFile | TabKind::Backup | TabKind::Restore | TabKind::Accounts | TabKind::ProcessList => return None,
+        TabKind::Import | TabKind::Transfer | TabKind::SqlFile | TabKind::Backup | TabKind::Restore | TabKind::Accounts | TabKind::ProcessList | TabKind::Results => return None,
     };
     Some(SessionTab {
         kind: kind.into(),
@@ -1225,6 +1229,31 @@ impl WorkspaceState {
         let id = self.open_tab_with_kind(TabKind::Accounts, title.to_string());
         if let Some(tab) = self.active_tab_mut() {
             tab.connection_id = connection_id.to_string();
+        }
+        self.normalize();
+        id
+    }
+
+    /// Opens a tab that shows the result of the query tab `source` (the app keeps which one), right
+    /// after it in its pane.
+    pub fn open_results_tab(&mut self, source: u64, title: &str) -> u64 {
+        let (connection_id, database) = self
+            .tab(source)
+            .map(|tab| (tab.connection_id.clone(), tab.database.clone()))
+            .unwrap_or_default();
+        let id = self.open_tab_with_kind(TabKind::Results, title.to_string());
+        if let Some(tab) = self.active_tab_mut() {
+            tab.connection_id = connection_id;
+            tab.database = database;
+        }
+        // Next to its query tab when they share the pane (the pane's order follows the tab list),
+        // else at the end of the focused pane.
+        if self.panes.pane_of(source).is_some() && self.panes.pane_of(source) == self.panes.pane_of(id) {
+            if let Some(from) = self.tabs.iter().position(|tab| tab.id == id) {
+                let tab = self.tabs.remove(from);
+                let at = self.tabs.iter().position(|tab| tab.id == source).map_or(self.tabs.len(), |at| at + 1);
+                self.tabs.insert(at, tab);
+            }
         }
         self.normalize();
         id

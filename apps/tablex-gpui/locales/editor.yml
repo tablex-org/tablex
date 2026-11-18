@@ -6,6 +6,51 @@ editor:
   sql_editor:
     en: SQL Editor
     vi: Trình soạn thảo SQL
+  vim:
+    en: Vim
+    vi: Vim
+  vim_toggle_tip:
+    en: Vim mode (on/off)
+    vi: Chế độ Vim (bật/tắt)
+  vim_normal:
+    en: NORMAL
+    vi: NORMAL
+  vim_insert:
+    en: INSERT
+    vi: INSERT
+  vim_visual:
+    en: VISUAL
+    vi: VISUAL
+  vim_visual_line:
+    en: V-LINE
+    vi: V-LINE
+  language_sql:
+    en: SQL
+    vi: SQL
+  language_mongo_script:
+    en: MongoDB Script
+    vi: Script MongoDB
+  language_redis:
+    en: Redis
+    vi: Redis
+  language_aggregation:
+    en: Aggregation
+    vi: Aggregation
+  status_position:
+    en: "Ln %{line}, Col %{column}"
+    vi: "Dòng %{line}, Cột %{column}"
+  status_selected_one:
+    en: "Selected: 1 char"
+    vi: "Đang chọn: 1 ký tự"
+  status_selected:
+    en: "Selected: %{chars} chars"
+    vi: "Đang chọn: %{chars} ký tự"
+  status_selected_lines:
+    en: "Selected: %{lines} lines, %{chars} chars"
+    vi: "Đang chọn: %{lines} dòng, %{chars} ký tự"
+  more_actions:
+    en: More actions
+    vi: Thêm thao tác
   save_sql_script:
     en: Save SQL script
     vi: Lưu script SQL
@@ -177,9 +222,27 @@ editor:
   auto_commit:
     en: Auto-commit
     vi: Tự động commit
-  manual:
+  auto_short:
+    en: Auto
+    vi: Tự động
+  manual_short:
     en: Manual
     vi: Thủ công
+  manual_commit:
+    en: Manual commit
+    vi: Commit thủ công
+  tx_auto_tip:
+    en: Every statement commits by itself
+    vi: Mỗi câu lệnh tự commit
+  tx_auto_tip_shared:
+    en: "Every statement commits by itself. Smart commit is on for this connection type, but this tab was already running on the shared session: it applies to editors opened after it was turned on."
+    vi: "Mỗi câu lệnh tự commit. Smart commit đang bật cho loại kết nối này, nhưng tab này đã chạy trên phiên dùng chung: nó chỉ áp dụng cho các trình soạn thảo mở sau khi bật."
+  tx_manual_tip:
+    en: "Commit or roll back yourself: statements run in a transaction on a session of this tab. The AI assistant and MCP clients use sessions of their own: they do not see this tab's uncommitted changes."
+    vi: "Tự commit hoặc roll back: các câu lệnh chạy trong một giao dịch trên phiên riêng của tab này. Trợ lý AI và MCP client dùng phiên riêng của chúng nên không thấy thay đổi chưa commit của tab này."
+  tx_smart_commit:
+    en: Smart commit
+    vi: Smart commit
   run_this_script:
     en: "Run this script?"
     vi: "Chạy script này?"

@@ -57,7 +57,7 @@ fn language_menu_checked(current: LanguageChoice) -> Vec<bool> {
 
 fn open_language_menu(visual: &mut gpui::VisualTestContext) {
     assert!(!rendered(visual, "title-language-vi".into()), "closed");
-    click(visual, "title-language-button".into());
+    click(visual, "status-language".into());
     for entry in ["system", "en", "vi"] {
         assert!(
             rendered(visual, format!("title-language-{entry}")),
@@ -81,6 +81,16 @@ fn a_text_with_a_count_has_a_form_for_one_and_for_other() {
     i18n::set(Locale::Vi);
     assert_eq!(t!("grid.rows_one"), "1 dòng");
     assert_eq!(t!("grid.rows_other", count = 1234), "1234 dòng");
+    i18n::set(Locale::En);
+}
+
+#[test]
+fn the_limit_and_the_results_window_error_have_both_languages() {
+    assert_eq!(t!("grid.limit", count = 500), "Limit 500");
+    assert_eq!(t!("grid.could_not_open_results_window", error = "boom"), "Could not open the results window: boom");
+    i18n::set(Locale::Vi);
+    assert_eq!(t!("grid.limit", count = 500), "Giới hạn 500");
+    assert_eq!(t!("grid.could_not_open_results_window", error = "boom"), "Không mở được cửa sổ kết quả: boom");
     i18n::set(Locale::En);
 }
 
@@ -117,15 +127,11 @@ fn the_title_bar_language_menu_switches_the_language_without_a_restart(cx: &mut 
         Some("System (follow the OS)")
     );
 
-    // The button sits next to the gear, left of it, in the same bar (as the theme button does).
-    let button = visual.debug_bounds("title-language-button").expect("language button");
-    let theme_button = visual.debug_bounds("title-theme-button").expect("theme button");
-    let gear = visual.debug_bounds("open-settings").expect("gear");
-    assert!(theme_button.right() <= button.left(), "right of the theme button");
-    assert!(button.right() <= gear.left(), "left of the gear");
-    assert!(gear.left() - button.right() < gpui::px(16.0), "next to the gear");
-    assert_eq!(button.center().y, gear.center().y, "same bar");
-    assert_eq!(button.size.height, gear.size.height, "same height");
+    // The quick switch is the status bar's language code, and only there: not in the title bar.
+    assert!(visual.debug_bounds("title-language-button").is_none(), "no language button in the title bar");
+    let button = visual.debug_bounds("status-language").expect("language segment");
+    let bar = visual.debug_bounds("status-bar").expect("status bar");
+    assert!(bar.contains(&button.center()), "the segment is in the status bar");
 
     // Opens with the three entries; Escape dismisses without a change.
     open_language_menu(visual);

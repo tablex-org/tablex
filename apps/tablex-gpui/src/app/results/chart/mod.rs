@@ -33,7 +33,6 @@ use std::rc::Rc;
 mod plots;
 mod view;
 
-pub(in crate::app) const CHART_UNAVAILABLE_MONGO: &str = "Charts are not available for MongoDB results";
 pub(in crate::app) const CHART_UNAVAILABLE_REDIS: &str = "Charts are not available for Redis results";
 const CHART_UNAVAILABLE_EMPTY: &str = "No result to chart";
 
@@ -86,6 +85,11 @@ pub(in crate::app) struct ChartScene {
     pub(in crate::app) extent: (f64, f64),
     /// What a line or an area works out once for this scene (see [`plots::LineCache`]).
     lines: std::cell::RefCell<plots::LineCache>,
+    /// The axis label with the most characters (the widest, give or take a glyph): what the labels are
+    /// thinned out for, found once.
+    widest_label: Option<SharedString>,
+    /// How wide that label is drawn, in the font it was measured in: a repaint (a hover is one) measures nothing.
+    label_width: std::cell::RefCell<Option<(gpui::Font, f32)>>,
 }
 
 impl ChartScene {
@@ -98,7 +102,8 @@ impl ChartScene {
             _ => (Vec::new(), Vec::new()),
         };
         let extent = drawn.iter().flatten().flatten().fold((0.0f64, 0.0f64), |(lo, hi), v: &f64| (lo.min(*v), hi.max(*v)));
-        Self { model, axis_labels, drawn, extent, lines: Default::default() }
+        let widest_label = axis_labels.iter().max_by_key(|label: &&SharedString| label.chars().count()).cloned();
+        Self { model, axis_labels, drawn, extent, lines: Default::default(), widest_label, label_width: Default::default() }
     }
 }
 
@@ -171,6 +176,11 @@ pub(in crate::app) struct ChartTabState {
 impl ChartTabState {
     fn cancel_pending(&mut self) {
         self.pending = None;
+    }
+
+    /// The controls are made again, from the spec, when the chart is next drawn (they belong to a window).
+    pub(in crate::app) fn forget_controls(&mut self) {
+        self.controls = None;
     }
 
     /// Leaving Chart: the settings stay, the data does not.
@@ -387,9 +397,6 @@ impl AppRoot {
         let Some(tab) = self.workspace.tab(tab_id) else {
             return Err(CHART_UNAVAILABLE_EMPTY);
         };
-        if tab.query_mode.is_mongo() {
-            return Err(CHART_UNAVAILABLE_MONGO);
-        }
         if tab.query_mode.is_redis() {
             return Err(CHART_UNAVAILABLE_REDIS);
         }
@@ -397,10 +404,7 @@ impl AppRoot {
         if grid.column_count() == 0 {
             return Err(CHART_UNAVAILABLE_EMPTY);
         }
-        match grid.source() {
-            GridContentSource::Arrow(_) => Ok(()),
-            GridContentSource::Bson(_) => Err(CHART_UNAVAILABLE_MONGO),
-        }
+        Ok(())
     }
 
     /// True while the tab's grid area shows the chart.
@@ -423,6 +427,13 @@ impl AppRoot {
         }
         if self.chart_support(tab_id).is_err() {
             return;
+        }
+        // The chart draws the table: a Mongo find tab leaves its document view first.
+        if self.mongo_documents_view_active(tab_id) {
+            self.set_mongo_view(tab_id, crate::mongo_result::MongoResultView::Table, cx);
+            if self.mongo_documents_view_active(tab_id) {
+                return;
+            }
         }
         // A cell editor open in the grid belongs to the view being left.
         self.commit_inline_edit(tab_id, InlineEditExit::FocusLoss, None, cx);
@@ -493,23 +504,30 @@ impl AppRoot {
 
     /// A new page, or a catalog that arrived late: shares the batches, and starts the spec over when the columns changed.
     fn chart_take_source(&mut self, tab_id: u64, grid: GridState<GridContentSource>) {
-        let GridContentSource::Arrow(arrow) = grid.source() else {
-            return;
-        };
-        // The database's type name of each column: what says that text is a number or a date.
-        let hints: Vec<Option<String>> = (0..grid.column_count())
-            .map(|column| {
-                grid.native_type(column)
-                    .or_else(|| arrow.driver_type(column))
-                    .map(str::to_owned)
-                    .or_else(|| self.resolved_column_type(tab_id, column))
-            })
-            .collect();
         let partial = self
             .workspace
             .runtime(tab_id)
             .is_some_and(|runtime| runtime.pagination.has_next() || runtime.pagination.has_previous());
-        let source = ChartSource::with_types(arrow.batches(), &hints).partial(partial);
+        let source = match grid.source() {
+            GridContentSource::Arrow(arrow) => {
+                // The database's type name of each column: what says that text is a number or a date.
+                let hints: Vec<Option<String>> = (0..grid.column_count())
+                    .map(|column| {
+                        grid.native_type(column)
+                            .or_else(|| arrow.driver_type(column))
+                            .map(str::to_owned)
+                            .or_else(|| self.resolved_column_type(tab_id, column))
+                    })
+                    .collect();
+                ChartSource::with_types(arrow.batches(), &hints)
+            }
+            // The documents' page as one typed batch (once per page: this runs only when the page changes).
+            GridContentSource::Bson(bson) => {
+                let batches: Vec<Arc<arrow_array::RecordBatch>> = bson.to_record_batch().map(Arc::new).into_iter().collect();
+                ChartSource::with_types(&batches, &[])
+            }
+        }
+        .partial(partial);
         let catalog = self.chart_catalog(tab_id);
         let state = &mut self.view_mut(tab_id).chart;
         state.cancel_pending();

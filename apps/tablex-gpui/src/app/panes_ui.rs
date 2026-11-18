@@ -7,9 +7,12 @@
 
 use super::*;
 use crate::panes::{Edge, PaneId};
+use super::transaction::TxEnd;
+use crate::transaction::CommitMode;
 use crate::panes_view::{
     drop_overlay, drop_zone_at, neighbor_in_direction, render_tree, DropHover, ResizeFn,
 };
+use engine_plan::ExplainMode;
 use gpui_component::ElementExt as _;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -23,6 +26,8 @@ thread_local! {
     /// How many times each pane view rendered (tests only).
     pub(super) static PANE_RENDERS: RefCell<std::collections::HashMap<u64, u64>> =
         RefCell::new(std::collections::HashMap::new());
+    /// How many times a SQL editor header was built (a test checks that an idle window builds none).
+    pub(super) static HEADER_RENDERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// One pane as a cached view: a notification of another pane (drag overlay,
@@ -282,11 +287,38 @@ impl AppRoot {
         let process_list = (tab.kind == TabKind::ProcessList).then(|| self.process_lists.get(&tab_id).cloned()).flatten();
         let connection_tab = (tab.kind == TabKind::Connection).then(|| tab.clone());
         let layout = self.results_layout(tab_id);
-        let editor_only = layout == results::surface::ResultsLayout::EditorOnly;
+        // An aggregate tab has no output before its first run; any tab can hide its results.
+        let hidden = self.results_hidden(tab_id);
+        let editor_only = layout == results::surface::ResultsLayout::EditorOnly
+            || hidden
+            || (is_aggregate && !self.aggregate_ran(tab_id));
 
+        // Where the results go (see `results::placement`): beside the editor, or moved to a
+        // Results tab / window, in which case this tab shows a note in their place.
+        let place = if self.results_movable(tab_id) {
+            self.results_place(tab_id)
+        } else {
+            results::placement::ResultsPlace::Below
+        };
+        // Whatever the layout: the results (and the history strip under them) show in one place only.
+        let moved = !place.is_beside();
         let result_content = match layout {
+            // A Results tab shows the results of its query tab.
+            _ if tab.kind == TabKind::Results => match self.results_source(tab_id) {
+                Some(source) => self.embed_tab_results(source, cx),
+                None => div().into_any_element(),
+            },
             // An import tab draws its own preview grid inside the wizard.
             results::surface::ResultsLayout::None | results::surface::ResultsLayout::Preview => div().into_any_element(),
+            _ if moved => self.render_moved_results_note(tab_id, place, cx),
+            // Hidden beside the editor: a strip says so and brings them back (the history panel stays).
+            _ if hidden => div()
+                .flex()
+                .flex_col()
+                .child(self.render_hidden_results_note(tab_id, cx))
+                .child(self.render_history_panel(tab_id, cx))
+                .into_any_element(),
+            _ if is_aggregate && editor_only => div().into_any_element(),
             // Only the (normally closed) history panel; no Results header,
             // body or footer before the first run.
             results::surface::ResultsLayout::EditorOnly => self.render_history_panel(tab_id, cx),
@@ -300,69 +332,48 @@ impl AppRoot {
         let has_editor = is_query && !is_mongo && !is_sql_table && !is_aggregate && !is_redis_key;
         let is_sql_editor_tab = has_editor && !is_mongo_script && !is_redis_console;
         let editor = has_editor.then(|| self.editor_for_tab(tab_id, window, cx));
+        if has_editor {
+            self.vim_sync(tab_id);
+        }
         let mut script_toolbar = (is_mongo_script && editor.is_some())
             .then(|| self.render_mongo_script_toolbar(tab_id, window, cx));
+        let mut header = (editor.is_some() && !is_mongo_script).then(|| self.render_sql_editor_header(tab_id, is_redis_console, cx));
+        let status_language = editor_status::EditorLanguage::of(self.workspace.tab(tab_id).and_then(|tab| tab.query_mode.as_ref()));
+        // Outside Insert mode a Vim editor refuses text that does not come as key presses (IME, dead keys).
+        let read_only = self.vim_readonly(tab_id);
+        if has_editor {
+            self.vim_rendered(tab_id);
+        }
         let editor_area = editor.map(|editor| {
             div()
                 .flex()
                 .flex_col()
                 .bg(theme::background())
                 .debug_selector(|| "query-editor-area".into())
-                .when(editor_only, |this| this.flex_1().min_h_0())
+                .flex_1()
+                .min_h_0()
                 .children(script_toolbar.take())
-                .when(!is_mongo_script, |this| {
-                    this.child(
-                        div()
-                            .h(px(theme::HEADER_HEIGHT))
-                            .px(px(12.0))
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .bg(theme::chrome())
-                            .border_b_1()
-                            .border_color(theme::border())
-                            .text_size(px(11.0))
-                            .text_color(theme::text_muted())
-                            .child(div().flex_1().child(if is_redis_console {
-                                t!("editor.redis_console")
-                            } else {
-                                t!("editor.sql_editor")
-                            }))
-                            .children(self.render_transaction_controls(tab_id, cx))
-                            .child(self.render_editor_run_controls(tab_id, cx))
-                            .when(!is_redis_console, |this| this.child(
-                                Button::new(("run-sql-file", tab_id))
-                                    .debug_selector(|| "run-sql-file".into())
-                                    .icon(Icon::empty().path("icons/file-play.svg").size(px(12.0)))
-                                    .compact()
-                                    .ghost()
-                                    .accessibility_label(t!("editor.run_sql_file"))
-                                    .tooltip(t!("editor.run_a_sql_file_of_any_size_on_this_connection"))
-                                    .on_click(cx.listener(move |this, _, window, cx| this.run_sql_file_from_tab(Some(tab_id), window, cx))),
-                            ).child(
-                                Button::new("save-sql-script")
-                                    .debug_selector(|| "save-sql-script".into())
-                                    .label(t!("editor.save"))
-                                    .compact()
-                                    .ghost()
-                                    .tooltip(shortcuts::with_label(
-                                        &t!("editor.save_sql_script"),
-                                        &self.settings.shortcuts,
-                                        "editor.save_script",
-                                    ))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.save_active_sql(window, cx);
-                                    })),
-                            )),
-                    )
-                })
+                .when(!is_mongo_script, |this| this.child(header.take().expect("built for a SQL editor")))
                 .child(
-                    // 160px beside the results; fills the panel until the
-                    // first run. The same entity either way.
-                    gpui_component::input::Editor::new(&editor)
-                        .when(editor_only, |this| this.flex_1().min_h_0())
-                        .when(!editor_only, |this| this.h(px(160.0)))
-                        .appearance(true)
+                    // The editor box: the code and, inside the same frame, its status line.
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_hidden()
+                        .bg(editor_status::editor_background(cx))
+                        .rounded(gpui_component::theme::Theme::global(cx).radius)
+                        .border_1()
+                        .border_color(theme::border())
+                        .child(
+                    // Fills its area: the whole panel until the first run, then the upper part
+                    // of the editor / results split. The same entity either way.
+                    self.vim_wrap(tab_id, gpui_component::input::Editor::new(&editor)
+                        .flex_1()
+                        .min_h_0()
+                        .appearance(false)
+                        .readonly(read_only)
                         // The right-click menu of a SQL editor carries the assistant's actions
                         // (a native menu, built when it is opened: what the tab offers then).
                         .when(is_sql_editor_tab, |this| {
@@ -382,10 +393,15 @@ impl AppRoot {
                                 };
                                 assistant::native_menu(assistant::editor_menu_rows(editing, asks))
                             })
-                        }),
+                        })
+                        .into_any_element(), cx),
+                )
+                        .child(self.render_editor_status(tab_id, &editor, status_language, true, cx)),
                 )
                 .into_any_element()
         });
+        // The aggregate tab's editor is its pipeline; its output is the result view.
+        let editor_area = editor_area.or_else(|| is_aggregate.then(|| self.render_aggregate_editor(tab_id, window, cx)));
         let connection = match connection_tab {
             Some(tab) => {
                 self.sync_connection_overview(&tab, window, cx);
@@ -421,6 +437,58 @@ impl AppRoot {
         } else {
             div().into_any_element()
         };
+        // Beside the results, the editor and the results share the height through a splitter
+        // (as the aggregate tab's do): the editor starts at its old 160px, and a short result
+        // can give the editor the room it does not need.
+        // Results moved to a tab or a window leave the editor the whole panel, with the note under
+        // it. Results to the right of the editor split the panel side by side.
+        let (editor_area, split, result_content) = match editor_area {
+            Some(editor_area) if !editor_only && !moved => {
+                let fill = |content: AnyElement| div().size_full().flex().flex_col().child(content);
+                // The aggregate editor (header + pipeline) starts taller than a SQL editor.
+                let (below_id, right_id, start, least) = if is_aggregate {
+                    ("agg-split", "agg-split-right", 430.0, 260.0)
+                } else {
+                    ("editor-results-split", "editor-results-split-right", theme::HEADER_HEIGHT + 160.0, theme::HEADER_HEIGHT + 60.0)
+                };
+                let split = if place == results::placement::ResultsPlace::Right {
+                    gpui_component::resizable::h_resizable((right_id, tab_id))
+                        .child(
+                            // Neither side sized: they start at half the width each.
+                            gpui_component::resizable::resizable_panel()
+                                .size_range(px(280.0)..gpui::Pixels::MAX)
+                                .child(fill(editor_area)),
+                        )
+                        .child(
+                            gpui_component::resizable::resizable_panel()
+                                .size_range(px(320.0)..gpui::Pixels::MAX)
+                                .child(fill(result_content)),
+                        )
+                } else {
+                    gpui_component::resizable::v_resizable((below_id, tab_id))
+                        .child(
+                            gpui_component::resizable::resizable_panel()
+                                .size(px(start))
+                                .size_range(px(least)..gpui::Pixels::MAX)
+                                .child(fill(editor_area)),
+                        )
+                        .child(
+                            gpui_component::resizable::resizable_panel()
+                                .size_range(px(120.0)..gpui::Pixels::MAX)
+                                .child(fill(result_content)),
+                        )
+                };
+                let split = div()
+                    .debug_selector(|| "editor-results-split".into())
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .child(split)
+                    .into_any_element();
+                (None, Some(split), None)
+            }
+            editor_area => (editor_area, None, Some(result_content)),
+        };
         // A `.sql` file dragged in from the OS: the container listens, not the editor or its rows.
         let drop_highlight = (self.file_drop_tab == Some(tab_id)).then(|| file_run::file_drop::highlight(t!("editor.drop_to_open_this_sql_file"), cx));
         div()
@@ -436,6 +504,7 @@ impl AppRoot {
                     .on_drop(cx.listener(move |this, paths: &gpui::ExternalPaths, window, cx| this.drop_files_on_tab(tab_id, paths, window, cx)))
             })
             .children(editor_area)
+            .children(split)
             .child(connection)
             .child(driver_manager)
             .child(settings_page)
@@ -447,7 +516,7 @@ impl AppRoot {
             .children(backup)
             .children(accounts)
             .children(process_list)
-            .child(result_content)
+            .children(result_content)
             .children(drop_highlight)
             .into_any_element()
     }
@@ -486,20 +555,310 @@ impl AppRoot {
     }
 }
 
+/// How much of a SQL editor's header fits in the width its panel has: the controls are drawn in
+/// full while they fit; below that the secondary ones move into a "..." menu (Run stays). It is
+/// worked out from what was painted: the header's width, and what its controls need in full (it
+/// depends on the language, the commit mode and the Run / Cancel label, so it is measured, not guessed). The transaction's
+/// state text gives way before anything moves: it is not counted in what the controls need, and
+/// is given the room that is left (`HeaderFit::room`). Shared with the paint callbacks of the header,
+/// which draw the panes again, in a frame of their own, when the fit changes (`AppRoot::header_probe`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(super) struct HeaderFit {
+    /// The header's painted width.
+    width: f32,
+    /// The controls row's painted width, and the parts of it that give way (the state text of a
+    /// transaction and its hint): what is left is what the controls need.
+    row: f32,
+    status: f32,
+    hint: f32,
+    /// What the controls need drawn in full (the row without the parts that give way).
+    natural: Option<f32>,
+    /// The same for a header drawn collapsed (the controls that stay): the state text is given what is left of it.
+    natural_collapsed: Option<f32>,
+    /// What `natural` was measured for (language, commit mode, whether a statement runs): a change measures again.
+    key: u64,
+    /// Whether the header was last built with the secondary controls in the menu.
+    drawn_collapsed: bool,
+    pub(super) collapsed: bool,
+}
+
+pub(super) type HeaderFits = std::rc::Rc<RefCell<HashMap<u64, HeaderFit>>>;
+
+impl HeaderFit {
+    /// The room the transaction's state text and its hint have in a header drawn in full, when it is
+    /// known: what the fixed controls leave of the width. (A collapsed header has the state text only.)
+    pub(super) fn status_width(&self) -> f32 {
+        self.status
+    }
+
+    pub(super) fn room(&self) -> Option<f32> {
+        if self.width <= 0.0 {
+            return None;
+        }
+        let natural = if self.collapsed { self.natural_collapsed? } else { self.natural? };
+        Some((self.width - Self::ROOM - Self::TITLE - natural).max(0.0))
+    }
+}
+
+/// What a paint callback of the header measures.
+#[derive(Clone, Copy)]
+pub(super) enum HeaderPart {
+    Header,
+    Row,
+    Status,
+    Hint,
+}
+
+impl HeaderFit {
+    /// The header's padding and the gap between its title and its controls.
+    const ROOM: f32 = 12.0 + 12.0 + 8.0;
+    /// What the title is given before the controls collapse or the state text is cut (a few characters and an ellipsis:
+    /// "Trình s…" beside the commit-mode button at 800 px).
+    const TITLE: f32 = 48.0;
+    /// The least it keeps: nothing. In a header too tight for it the controls (the commit mode, Run and the
+    /// "..." menu) are whole and the title goes.
+    const TITLE_MIN: f32 = 0.0;
+
+    /// Records a measure; whether the header has to be drawn again: when what is collapsed changed, or the
+    /// room the state text is given did (by more than half a pixel: steady state asks for nothing).
+    fn measured(fits: &HeaderFits, tab_id: u64, part: HeaderPart, value: f32) -> bool {
+        let mut fits = fits.borrow_mut();
+        let fit = fits.entry(tab_id).or_default();
+        let (before, room_before) = (fit.collapsed, fit.room());
+        match part {
+            // The state text is painted before the row that holds it: these only note their width.
+            HeaderPart::Status => {
+                fit.status = value;
+                return false;
+            }
+            HeaderPart::Hint => {
+                fit.hint = value;
+                return false;
+            }
+            HeaderPart::Row => {
+                fit.row = value;
+                // Only a row drawn in full says what the full controls need.
+                let needs = Some((fit.row - fit.status - fit.hint).max(0.0));
+                if fit.drawn_collapsed {
+                    fit.natural_collapsed = needs;
+                } else {
+                    fit.natural = needs;
+                }
+            }
+            HeaderPart::Header => fit.width = value,
+        }
+        fit.collapsed = fit.natural.is_some_and(|natural| fit.width > 0.0 && fit.width < natural + Self::ROOM + Self::TITLE);
+        // Only a header that draws the state text has a use for its room.
+        let room_changed = fit.status > 0.0
+            && match (room_before, fit.room()) {
+                (Some(before), Some(now)) => (before - now).abs() > 0.5,
+                (before, now) => before.is_some() != now.is_some(),
+            };
+        fit.collapsed != before || room_changed
+    }
+}
+
 impl AppRoot {
-    /// Run / Cancel and History of a plain SQL editor tab, in its own header
-    /// (they used to live in the window title bar and act on the active tab).
-    fn render_editor_run_controls(&self, tab_id: u64, cx: &mut Context<Self>) -> impl IntoElement {
+    /// A paint callback that records `part` of the header of `tab_id` and draws the panes again
+    /// when that changes how much of the header fits. A notification made while painting is not a
+    /// request for a frame (the window is not dirty afterwards, so a real window waits for the next
+    /// input), so the panes are notified from a next-frame callback, which does ask for one.
+    pub(super) fn header_probe(&self, tab_id: u64, part: HeaderPart, cx: &mut Context<Self>) -> impl FnOnce(gpui::Bounds<gpui::Pixels>, &mut Window, &mut gpui::App) + 'static {
+        let (fits, root) = (self.query_editors.header_fit.clone(), cx.entity().downgrade());
+        move |bounds, window, _| {
+            if HeaderFit::measured(&fits, tab_id, part, f32::from(bounds.size.width)) {
+                window.on_next_frame(move |_, app| {
+                    let _ = root.update(app, |this, cx| this.notify_pane_views(cx));
+                });
+            }
+        }
+    }
+
+    /// The header of a SQL editor / Redis console: title, commit mode, Run and the secondary
+    /// buttons. It never draws outside its panel: the title gives way first (it is cut), then the
+    /// secondary buttons move into a "..." menu.
+    pub(super) fn render_sql_editor_header(&mut self, tab_id: u64, redis: bool, cx: &mut Context<Self>) -> AnyElement {
+        #[cfg(test)]
+        HEADER_RENDERS.with(|renders| renders.set(renders.get() + 1));
+        // The Run button reads "Cancel" while a statement runs: another width, so another measure.
+        let running = !self.workspace.runtime(tab_id).is_some_and(|runtime| runtime.query.can_run());
+        let key = u64::from(self.is_transactional_tab(tab_id) && self.commit_mode(tab_id) == CommitMode::Manual)
+            | (u64::from(crate::i18n::current() == crate::i18n::Locale::Vi) << 1)
+            | (u64::from(running) << 2);
+        let collapsed = {
+            let mut fits = self.query_editors.header_fit.borrow_mut();
+            let fit = fits.entry(tab_id).or_default();
+            if fit.key != key {
+                *fit = HeaderFit { key, width: fit.width, ..HeaderFit::default() };
+            }
+            // What is painted this frame is measured against this layout; the state text is measured again.
+            fit.drawn_collapsed = fit.collapsed;
+            (fit.status, fit.hint) = (0.0, 0.0);
+            fit.collapsed
+        };
+        let title = if redis { t!("editor.redis_console") } else { t!("editor.sql_editor") };
+        div()
+            .debug_selector(|| "editor-header".into())
+            .relative()
+            .h(px(theme::HEADER_HEIGHT))
+            .w_full()
+            .flex_shrink_0()
+            .px(px(12.0))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .overflow_hidden()
+            .bg(theme::chrome())
+            .border_b_1()
+            .border_color(theme::border())
+            .text_size(px(11.0))
+            .text_color(theme::text_muted())
+            // The title gives way first when the header is tight; the spacer keeps the controls right.
+            .child(
+                div()
+                    .debug_selector(|| "editor-header-title".into())
+                    .flex_1()
+                    .min_w(px(HeaderFit::TITLE_MIN))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(title),
+            )
+            .child(
+                // Drawn in full the controls keep their size (that is what is measured) and the
+                // transaction's state text is given the room that is left.
+                div()
+                    .debug_selector(|| "editor-header-controls".into())
+                    .relative()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    // Collapsed, the row is clipped to the header and the state text gives way in it (its
+                    // Commit and Roll Back are in the menu too).
+                    .map(|row| if collapsed { row.flex_shrink(1.0).min_w_0().overflow_hidden() } else { row.flex_shrink_0() })
+                    .children(self.render_transaction_controls(tab_id, collapsed, cx))
+                    .child(self.render_editor_run_controls(tab_id, collapsed, cx))
+                    .when(!redis && !collapsed, |this| {
+                        this.child(
+                            Button::new(("run-sql-file", tab_id))
+                                .small()
+                                .flex_shrink_0()
+                                .debug_selector(|| "run-sql-file".into())
+                                .icon(Icon::empty().path("icons/file-play.svg").size(px(12.0)))
+                                .compact()
+                                .ghost()
+                                .accessibility_label(t!("editor.run_sql_file"))
+                                .tooltip(t!("editor.run_a_sql_file_of_any_size_on_this_connection"))
+                                .on_click(cx.listener(move |this, _, window, cx| this.run_sql_file_from_tab(Some(tab_id), window, cx))),
+                        )
+                        .child(
+                            Button::new("save-sql-script")
+                                .small()
+                                .flex_shrink_0()
+                                .debug_selector(|| "save-sql-script".into())
+                                .label(t!("editor.save"))
+                                .compact()
+                                .ghost()
+                                .tooltip(shortcuts::with_label(
+                                    &t!("editor.save_sql_script"),
+                                    &self.settings.shortcuts,
+                                    "editor.save_script",
+                                ))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.save_active_sql(window, cx);
+                                })),
+                        )
+                    })
+                    .when(collapsed, |this| this.child(self.render_editor_more_menu(tab_id, redis, cx)))
+                    // Last of the row's children: painted after the state text it counts.
+                    .on_prepaint(self.header_probe(tab_id, HeaderPart::Row, cx)),
+            )
+            // Last of the header's children: painted after the row.
+            .on_prepaint(self.header_probe(tab_id, HeaderPart::Header, cx))
+            .into_any_element()
+    }
+
+    /// The "..." menu of a collapsed header: what the buttons that no longer fit do.
+    fn render_editor_more_menu(&self, tab_id: u64, redis: bool, cx: &mut Context<Self>) -> AnyElement {
+        let can_run = self.workspace.runtime(tab_id).is_some_and(|runtime| runtime.query.can_run());
+        let explain = self.explain_dialect_of(tab_id).is_some();
+        // In the commit mode: whether a transaction is open, and the tab can end it now.
+        let manual = (self.is_transactional_tab(tab_id) && self.commit_mode(tab_id) == CommitMode::Manual)
+            .then(|| (self.tab_tx(tab_id).is_some_and(|tx| tx.is_open()), !self.tab_busy(tab_id)));
+        let root = cx.entity().downgrade();
+        Button::new(("editor-more", tab_id))
+            .small()
+            .debug_selector(|| "editor-more".into())
+            .icon(Icon::new(IconName::Ellipsis).size(px(12.0)))
+            .compact()
+            .ghost()
+            .tooltip(t!("editor.more_actions"))
+            .dropdown_menu(move |menu, _, cx| {
+                let item = |selector: &'static str, label: String| {
+                    PopupMenuItem::element(move |_, _| div().id(selector).debug_selector(move || selector.to_string()).child(label.clone()))
+                };
+                let mut menu = menu;
+                if explain {
+                    let block = root.read_with(&*cx, |this, cx| this.explain_analyze_block(tab_id, cx)).ok().flatten();
+                    let (estimate, analyze) = (root.clone(), root.clone());
+                    menu = menu
+                        .item(item("more-explain", t!("editor.explain").into_owned()).disabled(!can_run).on_click(move |_, _, app| {
+                            let _ = estimate.update(app, |this, cx| this.explain_tab_query(tab_id, ExplainMode::Estimate, cx));
+                        }))
+                        .item(
+                            item("more-explain-analyze", t!("editor.explain_analyze").into_owned())
+                                .disabled(!can_run || block.is_some())
+                                .on_click(move |_, _, app| {
+                                    let _ = analyze.update(app, |this, cx| this.explain_tab_query(tab_id, ExplainMode::Analyze, cx));
+                                }),
+                        );
+                }
+                // The Commit and Roll Back buttons of the commit mode may be clipped in a narrow header.
+                if let Some((open, idle)) = manual {
+                    for (selector, label, end) in [
+                        ("more-commit", t!("editor.commit").into_owned(), TxEnd::Commit),
+                        ("more-rollback", t!("editor.roll_back").into_owned(), TxEnd::Rollback),
+                    ] {
+                        let root = root.clone();
+                        menu = menu.item(item(selector, label).disabled(!open || !idle).on_click(move |_, window, app| {
+                            let _ = root.update(app, |this, cx| this.end_tab_transaction(tab_id, end, window, cx));
+                        }));
+                    }
+                }
+                let history = root.clone();
+                menu = menu.item(item("more-history", t!("editor.history").into_owned()).on_click(move |_, _, app| {
+                    let _ = history.update(app, |this, cx| this.toggle_history(tab_id, cx));
+                }));
+                if !redis {
+                    let (file, save) = (root.clone(), root.clone());
+                    menu = menu
+                        .item(item("more-run-sql-file", t!("editor.run_sql_file").into_owned()).on_click(move |_, window, app| {
+                            let _ = file.update(app, |this, cx| this.run_sql_file_from_tab(Some(tab_id), window, cx));
+                        }))
+                        .item(item("more-save", t!("editor.save").into_owned()).on_click(move |_, window, app| {
+                            let _ = save.update(app, |this, cx| this.save_active_sql(window, cx));
+                        }));
+                }
+                menu
+            })
+            .into_any_element()
+    }
+
+    /// Run / Cancel (and, when the header has the room, Explain and History) of a plain SQL
+    /// editor tab, in its own header.
+    fn render_editor_run_controls(&self, tab_id: u64, collapsed: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let can_run = self
             .workspace
             .runtime(tab_id)
             .is_some_and(|runtime| runtime.query.can_run());
         div()
             .flex()
+            .flex_shrink_0()
             .items_center()
             .gap(px(4.0))
             .child(
                 Button::new(("run-query", tab_id))
+                    .small()
                     .debug_selector(|| "run-query".into())
                     .icon(Icon::empty().path("icons/play.svg").size(px(12.0)))
                     .label(if can_run { t!("editor.run") } else { t!("common.cancel") })
@@ -515,14 +874,16 @@ impl AppRoot {
                         }
                     })),
             )
-            .children(self.render_explain_button(tab_id, cx))
-            .child(
-                Button::new(("history", tab_id))
-                    .debug_selector(|| "query-history".into())
-                    .label(t!("editor.history"))
-                    .compact()
-                    .ghost()
-                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_history(tab_id, cx))),
-            )
+            .when(!collapsed, |this| {
+                this.children(self.render_explain_button(tab_id, cx)).child(
+                    Button::new(("history", tab_id))
+                        .small()
+                        .debug_selector(|| "query-history".into())
+                        .label(t!("editor.history"))
+                        .compact()
+                        .ghost()
+                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_history(tab_id, cx))),
+                )
+            })
     }
 }
