@@ -20,7 +20,7 @@ use engine_driver_host::{InstalledDriverRecord, InstalledDriverStore};
 use engine_storage::connection::{upsert_connection, SavedConnectionRecord};
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, CancelledNotificationParam, ClientCapabilities,
-    ClientInfo, ClientRequest, ElicitRequestParams, ElicitResult, ElicitationAction,
+    ClientConfig, ClientRequest, ElicitRequestParams, ElicitResult, ElicitationAction,
     ErrorData as McpError, Implementation, Request, ServerResult,
 };
 use rmcp::service::{
@@ -677,13 +677,13 @@ impl Asker {
 }
 
 impl ClientHandler for Asker {
-    fn get_info(&self) -> ClientInfo {
+    fn get_info(&self) -> ClientConfig {
         let capabilities = if self.capability {
             ClientCapabilities::builder().enable_elicitation().build()
         } else {
             ClientCapabilities::default()
         };
-        ClientInfo::new(capabilities, Implementation::new("test-client", "0"))
+        ClientConfig::new(capabilities, Implementation::new("test-client", "0"))
     }
 
     async fn create_elicitation(

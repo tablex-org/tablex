@@ -9,9 +9,9 @@ use std::time::Duration;
 
 use engine_agent::{CancelToken, ToolError, ToolLayer, ToolOutcome, ToolSpec};
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, ContentBlock, ErrorData, Implementation,
-    InitializeRequestParams, InitializeResult, ListToolsResult, PaginatedRequestParams,
-    ServerCapabilities, ServerInfo, Tool,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ErrorData,
+    Implementation, InitializeRequestParams, InitializeResult, ListToolsResult,
+    PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
 };
 use rmcp::service::{Peer, RequestContext, RoleServer};
 use rmcp::ServerHandler;
@@ -239,8 +239,8 @@ impl McpServer {
 }
 
 impl ServerHandler for McpServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new(crate::NAME, env!("CARGO_PKG_VERSION")))
             .with_instructions(INSTRUCTIONS)
     }
@@ -275,7 +275,7 @@ impl ServerHandler for McpServer {
         &self,
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, ErrorData> {
+    ) -> Result<CallToolResponse, ErrorData> {
         let name = request.name.into_owned();
         let has_output_schema = self
             .tools
@@ -293,6 +293,6 @@ impl ServerHandler for McpServer {
             };
             return Err(ErrorData::invalid_params(message, None));
         }
-        Ok(Self::result_of(&outcome, has_output_schema))
+        Ok(Self::result_of(&outcome, has_output_schema).into())
     }
 }

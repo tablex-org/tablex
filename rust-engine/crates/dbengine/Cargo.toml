@@ -35,7 +35,7 @@ futures = "0.3"
 lazy_static = "1.5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-rusqlite = { version = "0.39", features = ["bundled", "load_extension", "column_decltype"] }
+rusqlite = { version = "0.41", features = ["bundled", "load_extension", "column_decltype"] }
 chrono = { version = "0.4", features = ["serde"] }
 tree-sitter = "=0.26.13"
 tree-sitter-json = "0.24.8"

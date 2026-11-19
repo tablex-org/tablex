@@ -629,7 +629,6 @@ fn query_blocking(
     let mut stmt = conn.prepare(&normalized).map_err(|e| e.to_string())?;
     let names: Vec<String> = stmt
         .column_names()
-        .iter()
         .map(|name| name.to_string())
         .collect();
     let col_count = names.len();
@@ -638,7 +637,6 @@ fn query_blocking(
     // mysql_arrow once MySQL/MariaDB connections are supported.
     let decl_types: Vec<Option<String>> = stmt
         .columns()
-        .iter()
         .map(|column| column.decl_type().map(str::to_string))
         .collect();
     let mut columns: Vec<Vec<SQLiteCell>> = (0..col_count).map(|_| Vec::new()).collect();

@@ -195,7 +195,9 @@ impl TableExporter {
             ExportFormat::Xlsx => {
                 if let ExportTarget::Xlsx { workbook, .. } = &mut self.target {
                     // One row at a time goes to a temporary file: the sheet is never held (rows are written in order).
-                    let worksheet = workbook.add_worksheet_with_constant_memory();
+                    let worksheet = workbook
+                        .add_worksheet_with_constant_memory()
+                        .map_err(|error| error.to_string())?;
                     for (index, column) in self.columns.iter().enumerate() {
                         worksheet
                             .write_string(0, index as u16, column)

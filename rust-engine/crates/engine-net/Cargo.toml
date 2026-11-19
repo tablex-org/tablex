@@ -7,7 +7,7 @@ description = "Pure-Rust network plumbing for TableX: SSH local port-forward tun
 [dependencies]
 # `ring` instead of the default `aws-lc-rs`: ring is already in the lock file and needs no cmake / C++ toolchain.
 # No `flate2`: compression of a tunnel that carries already-compressed or encrypted database traffic buys little.
-russh = { version = "0.64", default-features = false, features = ["ring", "rsa"] }
+russh = { version = "0.65", default-features = false, features = ["ring", "rsa"] }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros"] }
 thiserror = "2"
 zeroize = "1"

@@ -329,7 +329,7 @@ impl DriverBackend for SqliteBackend {
         } else {
             (Connection::open(&path), Some(PathBuf::from(path)))
         };
-        let connection = connection.map_err(|error| BackendError::new(error.to_string()))?;
+        let mut connection = connection.map_err(|error| BackendError::new(error.to_string()))?;
         let cancel = Arc::new(CancelState::new());
         let state = Arc::clone(&cancel);
         connection
@@ -1510,7 +1510,7 @@ mod tests {
         const SQL: &str = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c \
                            WHERE x < 20000000) SELECT count(*) FROM c";
         let plain = rusqlite::Connection::open_in_memory().unwrap();
-        let watched = rusqlite::Connection::open_in_memory().unwrap();
+        let mut watched = rusqlite::Connection::open_in_memory().unwrap();
         let state = Arc::new(CancelState::new());
         let _running = state.run(super::OperationId(7));
         let handler = Arc::clone(&state);

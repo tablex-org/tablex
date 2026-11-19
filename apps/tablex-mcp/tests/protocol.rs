@@ -63,8 +63,9 @@ async fn tools_list_is_exactly_what_the_layer_says() {
 async fn the_server_identifies_itself_and_says_where_access_is_set() {
     let harness = Harness::start(Fixture::new()).await;
     let info = harness.client.peer_info().expect("server info");
-    assert_eq!(info.server_info.name, "tablex-mcp");
-    assert_eq!(info.server_info.version, env!("CARGO_PKG_VERSION"));
+    let server = info.server_info.as_ref().expect("server identity");
+    assert_eq!(server.name, "tablex-mcp");
+    assert_eq!(server.version, env!("CARGO_PKG_VERSION"));
     let instructions = info.instructions.clone().expect("instructions");
     assert!(instructions.contains("Agent access"), "{instructions}");
     for tool in [

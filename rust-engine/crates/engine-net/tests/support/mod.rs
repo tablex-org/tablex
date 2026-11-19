@@ -307,7 +307,7 @@ impl Handler for TestHandler {
     async fn auth_publickey(
         &mut self,
         _user: &str,
-        _key: &russh::keys::PublicKey,
+        _key: server::VerifiedPublicKey<'_>,
     ) -> Result<Auth, Self::Error> {
         self.stats.auth_requests.fetch_add(1, Ordering::SeqCst);
         Ok(match self.options.plan {

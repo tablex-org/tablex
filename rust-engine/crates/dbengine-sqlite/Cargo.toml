@@ -12,5 +12,5 @@ arrow-array = { version = "53", features = ["ffi"] }
 arrow-buffer = "53"
 arrow-schema = "53"
 engine-driver-kit = { path = "../engine-driver-kit" }
-rusqlite = { version = "0.39", features = ["bundled", "hooks", "load_extension"] }
+rusqlite = { version = "0.41", features = ["bundled", "hooks", "load_extension"] }
 serde_json = "1.0"
