@@ -27,9 +27,18 @@ name: CI
 # allowed to fail (continue-on-error) until a first green run flips the flag.
 # macOS (the only fully supported platform) is strict everywhere.
 on:
+  # A change that only touches notes or docs runs no build: nothing it changes is compiled or tested.
   pull_request:
+    paths-ignore:
+      - "release-notes/**"
+      - "docs/**"
+      - "**/*.md"
   push:
     branches: [main]
+    paths-ignore:
+      - "release-notes/**"
+      - "docs/**"
+      - "**/*.md"
 
 permissions:
   contents: read
@@ -164,6 +173,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: stable
+      # Its own cache (the `dist` profile shares nothing with the test jobs' debug builds): the
+      # dependencies come from it, so only the app's crates and the LTO link are built each time.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: size-${{ runner.os }}
+          workspaces: |
+            . -> target
+            rust-engine -> target
       - name: cargo build --profile dist
         run: cargo build --profile dist -p tablex-gpui
       - name: size report
