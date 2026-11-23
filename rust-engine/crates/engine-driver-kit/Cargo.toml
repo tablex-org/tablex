@@ -2,7 +2,7 @@
 name = "engine-driver-kit"
 version = "0.1.0"
 edition = "2021"
-description = "Shared ABI v2 FFI glue for TableX driver dylibs (session/page registries, Arrow leases, cancel, panic safety)"
+description = "Shared ABI v2 FFI glue for tablex driver dylibs (session/page registries, Arrow leases, cancel, panic safety)"
 
 [dependencies]
 arrow-array = { version = "53", features = ["ffi"] }

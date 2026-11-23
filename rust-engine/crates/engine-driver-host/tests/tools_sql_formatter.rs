@@ -123,7 +123,7 @@ fn the_entry_carries_its_licence_and_source_and_needs_no_driver() {
 fn entries_without_the_new_fields_still_parse_and_stay_without_them() {
     // A manifest of an older release: the MCP server has neither field.
     let mcp = serde_json::json!({
-        "id": "tablex-mcp", "kind": "mcpServer", "displayName": "TableX MCP server", "version": "1.0.0",
+        "id": "tablex-mcp", "kind": "mcpServer", "displayName": "tablex MCP server", "version": "1.0.0",
         "artifacts": [{"target": "macos-aarch64", "url": "https://example.com/m", "sha256": hex_sha256(b"m"), "sizeBytes": 1}],
     });
     let manifest: DriverManifest = serde_json::from_slice(&manifest_with(vec![mcp])).unwrap();

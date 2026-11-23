@@ -1,4 +1,4 @@
-//! The UI-free AI assistant core for TableX.
+//! The UI-free AI assistant core for tablex.
 //!
 //! * [`transport`]: the HTTP seam ([`HttpTransport`]); the app brings the client, tests script it.
 //! * [`provider`]: the provider-neutral types and [`ChatProvider`], [`ProviderError`], [`KeySource`].

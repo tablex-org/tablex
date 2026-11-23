@@ -1,4 +1,4 @@
-//! Shared ABI v2 glue for TableX driver dylibs.
+//! Shared ABI v2 glue for tablex driver dylibs.
 //!
 //! A driver implements [`DriverBackend`] with plain Rust types and invokes
 //! [`export_driver!`] once; the kit owns everything else that touches raw

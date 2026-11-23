@@ -51,7 +51,7 @@ pub struct ProjectRecord {
 
 /// The file the connection store was before `tablex.db`: `<data dir>/tablex/connections.db`. It is
 /// read once to move its rows into the app database (see [`crate::legacy`]) and is no longer
-/// written: an older TableX still sees the connections as they were at that moment.
+/// written: an older tablex still sees the connections as they were at that moment.
 pub(crate) fn legacy_path() -> PathBuf {
     crate::paths::data_dir("tablex").join("connections.db")
 }

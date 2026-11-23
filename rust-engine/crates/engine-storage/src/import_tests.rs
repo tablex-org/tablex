@@ -741,7 +741,7 @@ fn an_old_file_written_after_the_import_is_not_imported_again_and_is_said_once()
     let said = |text: &str| legacy::warnings_snapshot().iter().filter(|w| w.contains(&path) && w.contains(text)).count();
     assert_eq!(said("changed after"), 0);
 
-    // An older TableX runs (a downgrade, and a new upgrade after it) and adds a connection.
+    // An older tablex runs (a downgrade, and a new upgrade after it) and adds a connection.
     legacy::forget_process_state();
     Connection::open(&legacy)
         .unwrap()
@@ -1160,7 +1160,7 @@ fn what_another_process_deleted_from_the_database_does_not_come_back_when_a_stor
     let name: String = store.query_row("SELECT name FROM saved_connections WHERE id = 'old'", [], |r| r.get(0)).unwrap();
     assert_eq!(name, "Edited here");
     // The marker's time moved to the switch: the old file this run wrote is not "changed by an
-    // older TableX" at the next start.
+    // older tablex" at the next start.
     legacy::forget_process_state();
     let path = legacy.display().to_string();
     let before = legacy::warnings_snapshot().iter().filter(|w| w.contains(&path) && w.contains("changed after")).count();

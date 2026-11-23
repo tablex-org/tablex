@@ -815,7 +815,7 @@ impl ToolCatalogItem {
         let unavailable = match (tool, &entry) {
             (Some(ManifestTool::Invalid { error, .. }), _) => Some(error.to_string()),
             (_, Some(entry)) => unmet_app(entry)
-                .map(|minimum| format!("Needs TableX \u{2265} {minimum}"))
+                .map(|minimum| format!("Needs tablex \u{2265} {minimum}"))
                 .or_else(|| {
                     entry
                         .artifact_for_target(target)

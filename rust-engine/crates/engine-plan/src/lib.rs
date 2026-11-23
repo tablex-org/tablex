@@ -1,4 +1,4 @@
-//! Per-dialect `EXPLAIN` support for TableX: build the statement to run
+//! Per-dialect `EXPLAIN` support for tablex: build the statement to run
 //! ([`explain_sql`]) and turn the result set into a flat plan tree
 //! ([`Plan::parse`]). Pure computation: no I/O, no async, nothing here talks to a
 //! server.

@@ -48,7 +48,7 @@ fn tool_json(version: &str, bytes: &[u8]) -> serde_json::Value {
     serde_json::json!({
         "id": "tablex-mcp",
         "kind": "mcpServer",
-        "displayName": "TableX MCP server",
+        "displayName": "tablex MCP server",
         "version": version,
         "description": "Lets MCP clients use your saved connections.",
         "minAppVersion": "0.1.0",
@@ -98,7 +98,7 @@ fn a_manifest_with_a_tool_parses_into_a_typed_entry() {
     let entry = known(&manifest.tools[0]);
     assert_eq!(entry.id, MCP_TOOL_ID);
     assert_eq!(entry.kind, ToolKind::McpServer);
-    assert_eq!(entry.display_name, "TableX MCP server");
+    assert_eq!(entry.display_name, "tablex MCP server");
     assert_eq!(entry.version, "1.0.0");
     assert_eq!(entry.min_app_version.as_deref(), Some("0.1.0"));
     assert_eq!(entry.artifacts.len(), 3);
@@ -379,7 +379,7 @@ fn the_catalog_lists_the_tool_in_each_state_and_never_fails_the_drivers() {
     gated["minAppVersion"] = "9.0".into();
     assert!(matches!(
         state(manifest_with(vec![gated]), "1.0.0", &MAC_ARM64),
-        Some(ToolCatalogState::Unavailable { reason }) if reason.contains("Needs TableX")
+        Some(ToolCatalogState::Unavailable { reason }) if reason.contains("Needs tablex")
     ));
     let mut broken = tool_json("1.0.0", v1);
     broken["artifacts"][0]["sha256"] = "zz".into();

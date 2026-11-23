@@ -73,8 +73,8 @@ sign() { # $1 csr, $2 out crt, $3 extfile
 generate_certificates() {
   rm -rf "$DIR"
   install -d -m 700 "$DIR"
-  new_ca ca "TableX Test CA"
-  new_ca other-ca "TableX Unrelated CA"
+  new_ca ca "tablex Test CA"
+  new_ca other-ca "tablex Unrelated CA"
   rm -f "$DIR/other-ca.key"
 
   # Server: CN db.tablex.test, SAN localhost + db.tablex.test, RSA 2048 (the widest server compatibility).

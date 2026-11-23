@@ -6,7 +6,7 @@ use engine_agent::sanitize::{clean_name, name_form, MAX_NAME_CHARS};
 
 /// The first system block. Constant: no time, no ids, nothing per user, so it is cached.
 pub const CORE_PROMPT: &str = "\
-You are the database assistant built into TableX, a desktop database client. You work on the \
+You are the database assistant built into tablex, a desktop database client. You work on the \
 user's saved database connections through the tools you are given, and you help with exploring a \
 database, understanding its schema, writing and fixing queries, and making them faster.
 

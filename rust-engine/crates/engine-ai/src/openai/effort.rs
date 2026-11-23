@@ -110,7 +110,7 @@ fn ollama_capability(model: &str) -> Option<Capability> {
 }
 
 /// The `reasoning_effort` to send for `effort`, if the model takes one. dbx sends the effort the
-/// user chose and rejects one the model does not list; TableX always carries an effort, so a
+/// user chose and rejects one the model does not list; tablex always carries an effort, so a
 /// model that does not list it (or a flavor with no registry: any OpenAI-compatible server)
 /// gets no field, which is dbx's "provider default".
 pub(super) fn reasoning_effort(

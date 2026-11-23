@@ -299,7 +299,7 @@ fn native_signature_policy_is_per_os() {
         Err(DriverVerificationError::InvalidSignature(_))
     ));
     let pinned = SignerConfig {
-        windows_publisher: "TableX Ltd".into(),
+        windows_publisher: "tablex Ltd".into(),
         ..Default::default()
     };
     assert!(matches!(

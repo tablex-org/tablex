@@ -2,7 +2,7 @@
 name = "engine-net"
 version = "0.1.0"
 edition = "2021"
-description = "Pure-Rust network plumbing for TableX: SSH local port-forward tunnels (russh, ring backend)."
+description = "Pure-Rust network plumbing for tablex: SSH local port-forward tunnels (russh, ring backend)."
 
 [dependencies]
 # `ring` instead of the default `aws-lc-rs`: ring is already in the lock file and needs no cmake / C++ toolchain.

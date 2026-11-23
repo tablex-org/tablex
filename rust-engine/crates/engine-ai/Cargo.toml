@@ -2,7 +2,7 @@
 name = "engine-ai"
 version = "0.1.0"
 edition = "2021"
-description = "UI-free AI assistant core for TableX: conversation, provider-neutral chat types, the Anthropic Messages API over an injected HTTP transport, and the tool loop over the agent tool layer"
+description = "UI-free AI assistant core for tablex: conversation, provider-neutral chat types, the Anthropic Messages API over an injected HTTP transport, and the tool loop over the agent tool layer"
 
 [dependencies]
 engine-agent = { path = "../engine-agent" }

@@ -598,7 +598,7 @@ impl Drop for OperationGuard {
 }
 
 #[cfg(feature = "abi-v2")]
-/// A random value per process: two TableX instances (or two driver loads)
+/// A random value per process: two tablex instances (or two driver loads)
 /// sharing a server never produce the same operation tag.
 #[cfg(feature = "abi-v2")]
 fn process_nonce() -> &'static str {

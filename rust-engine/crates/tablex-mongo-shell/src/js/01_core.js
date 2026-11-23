@@ -44,7 +44,7 @@ class MongoServerError extends ShellError {
 function unsupported(what, hint) {
   return new ShellError(
     'unsupported',
-    `${what} is not available in the TableX MongoDB shell` + (hint ? `; ${hint}` : '')
+    `${what} is not available in the tablex MongoDB shell` + (hint ? `; ${hint}` : '')
   );
 }
 

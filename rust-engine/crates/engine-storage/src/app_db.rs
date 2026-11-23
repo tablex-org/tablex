@@ -212,7 +212,7 @@ pub enum AppDbError {
         path: PathBuf,
         source: std::io::Error,
     },
-    /// The database comes from a newer TableX (`found` is above what this build knows).
+    /// The database comes from a newer tablex (`found` is above what this build knows).
     Newer { path: PathBuf, found: u32 },
     Sqlite {
         path: PathBuf,
@@ -236,8 +236,8 @@ impl fmt::Display for AppDbError {
             }
             Self::Newer { path, found } => write!(
                 f,
-                "the app database {} is version {found}, from a newer TableX (this one knows up to \
-                 {SCHEMA_VERSION}); update TableX",
+                "the app database {} is version {found}, from a newer tablex (this one knows up to \
+                 {SCHEMA_VERSION}); update tablex",
                 path.display()
             ),
             Self::OldFile { file, source } => write!(
@@ -255,8 +255,8 @@ impl fmt::Display for AppDbError {
                 Some(ErrorCode::NotADatabase | ErrorCode::DatabaseCorrupt) => write!(
                     f,
                     "the app database {} is not valid and was left untouched; restore it from a \
-                     backup. The data TableX had before this version is still in its old files, \
-                     and TableX starts from them again if you quit it, rename tablex.db (keep it, \
+                     backup. The data tablex had before this version is still in its old files, \
+                     and tablex starts from them again if you quit it, rename tablex.db (keep it, \
                      it may be repairable) and start it again. What was saved with this version \
                      since (connections, history, passwords, tabs) is not in those files and is \
                      lost that way",
@@ -457,7 +457,7 @@ mod tests {
     fn a_database_of_the_first_version_moves_forward_and_keeps_its_secrets() {
         let (_dir, path) = temp_db();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        // How the first TableX that had this database left it: the secrets table, version 1.
+        // How the first tablex that had this database left it: the secrets table, version 1.
         let old = Connection::open(&path).unwrap();
         old.execute_batch(MIGRATIONS[0]).unwrap();
         old.execute("INSERT INTO secrets VALUES ('a', x'00', x'01', 7)", []).unwrap();

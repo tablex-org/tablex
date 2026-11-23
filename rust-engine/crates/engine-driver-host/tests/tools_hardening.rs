@@ -34,7 +34,7 @@ fn hex(bytes: &[u8]) -> String {
 
 fn tool_json(version: &str, bytes: &[u8]) -> serde_json::Value {
     serde_json::json!({
-        "id": "tablex-mcp", "kind": "mcpServer", "displayName": "TableX MCP server",
+        "id": "tablex-mcp", "kind": "mcpServer", "displayName": "tablex MCP server",
         "version": version,
         "artifacts": [{
             "target": "macos-aarch64", "url": "https://example.com/tablex-mcp",

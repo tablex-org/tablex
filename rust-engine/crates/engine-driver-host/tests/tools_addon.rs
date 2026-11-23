@@ -49,7 +49,7 @@ fn mcp_json(bytes: &[u8]) -> serde_json::Value {
     serde_json::json!({
         "id": "tablex-mcp",
         "kind": "mcpServer",
-        "displayName": "TableX MCP server",
+        "displayName": "tablex MCP server",
         "version": "1.0.0",
         "artifacts": [{
             "target": "macos-aarch64",

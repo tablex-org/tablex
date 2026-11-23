@@ -1,4 +1,4 @@
-//! Pure-Rust SSH local port-forward tunnels for TableX: direct, through jump hosts (ProxyJump), and/or through
+//! Pure-Rust SSH local port-forward tunnels for tablex: direct, through jump hosts (ProxyJump), and/or through
 //! a SOCKS5 / HTTP CONNECT proxy; or through a proxy alone.
 //!
 //! ```no_run

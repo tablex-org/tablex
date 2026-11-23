@@ -5,7 +5,7 @@
 //! A user who installs the new version keeps everything and does nothing: the first use of each
 //! store moves its old file in (connections first, before the sidebar reads them), and the old
 //! files stay where they are, unchanged. Only the app moves data in; `tablex-mcp` reads the old
-//! files until the app has ([`set_import_allowed`]). Going back to an older TableX works: it finds
+//! files until the app has ([`set_import_allowed`]). Going back to an older tablex works: it finds
 //! its files as they were at the move; whatever was saved with the new version is not in them
 //! (and what the older version saves is not brought into the database again, see below).
 //! Keychain items of the older version are copied, never deleted, for the same reason.
@@ -39,7 +39,7 @@
 //!   goes on there. The one-file-per-document stores (session, update check, diagrams,
 //!   conversations) skip what cannot be read, say so and try again at the next start
 //!   ([`import_tolerant`]).
-//! * An old file written by an older TableX *after* it was moved in (a downgrade and a new
+//! * An old file written by an older tablex *after* it was moved in (a downgrade and a new
 //!   upgrade, or both versions running) is not imported again: the database is the truth since the
 //!   marker. It is said once per run ([`take_warnings`]) and stays in its file.
 //! * What the user deletes goes from the database, not from the old files, except for the
@@ -185,7 +185,7 @@ static IMPORT_ALLOWED: AtomicBool = AtomicBool::new(true);
 
 /// Whether this process may move old files into the database. The app does (the default);
 /// `tablex-mcp` calls `set_import_allowed(false)` at start: until the app has moved a store in,
-/// its stores read the old file, never import and never write the marker, so an older TableX
+/// its stores read the old file, never import and never write the marker, so an older tablex
 /// that still runs next to it keeps one truth, and the first thing the new app does on an
 /// upgrade is the import.
 pub fn set_import_allowed(allowed: bool) {
@@ -276,11 +276,11 @@ pub(crate) fn forget_process_state() {
 
 /// A store that could not move its old file in and works on that file instead.
 pub(crate) fn fell_back(error: &AppDbError, legacy: &Path) {
-    warn(format!("{error}; TableX uses the old file {} for this run", legacy.display()));
+    warn(format!("{error}; tablex uses the old file {} for this run", legacy.display()));
 }
 
 /// What a downgrade and a new upgrade leaves: the old file was written after its contents were
-/// moved in (an older TableX ran in between, or still runs beside this one). Nothing is imported
+/// moved in (an older tablex ran in between, or still runs beside this one). Nothing is imported
 /// again (the database is the truth since the marker; merging two histories of the same rows
 /// cannot be done safely), nothing of the old file is touched, and this is said once per process.
 fn note_later_changes(name: &str, legacy: &Path, imported_at: i64) {
@@ -291,7 +291,7 @@ fn note_later_changes(name: &str, legacy: &Path, imported_at: i64) {
     if changed > moved_in + std::time::Duration::from_secs(2) {
         warn(format!(
             "{} ({name}) was changed after its contents were moved into the app database, by an \
-             older TableX. Those changes are not imported; they are still in that file",
+             older tablex. Those changes are not imported; they are still in that file",
             legacy.display()
         ));
     }
@@ -504,7 +504,7 @@ impl Store {
             }
             Ok(None) => {}
             Err(error) => warn(format!(
-                "{error}; TableX goes on with the old file {} for now",
+                "{error}; tablex goes on with the old file {} for now",
                 old.legacy.display()
             )),
         }
@@ -528,7 +528,7 @@ impl OnOld {
                 message: error.message,
             })?;
             // The old file was written by this run until now, and is merged: what an older
-            // TableX writes to it from here on is what a later start should say.
+            // tablex writes to it from here on is what a later start should say.
             tx.execute("UPDATE imports SET at = ?2 WHERE name = ?1", params![self.name, now_secs() as i64])
                 .map_err(sqlite)?;
             tx.commit().map_err(sqlite)?;

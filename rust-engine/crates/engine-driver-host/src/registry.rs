@@ -85,7 +85,7 @@ impl<'a, F: ManifestFetcher> RegistryService<'a, F> {
     }
 
     /// Gate entries whose `minAppVersion` is newer than `app_version`
-    /// (`Unavailable("Needs TableX ≥ x")`). Without it nothing is gated.
+    /// (`Unavailable("Needs tablex ≥ x")`). Without it nothing is gated.
     pub fn with_app_version(mut self, app_version: impl Into<String>) -> Self {
         self.app_version = Some(app_version.into());
         self
@@ -152,7 +152,7 @@ impl<'a, F: ManifestFetcher> RegistryService<'a, F> {
             let state =
                 if let Some(minimum) = self.unmet_requirement(entry.min_app_version.as_deref()) {
                     DriverCatalogState::Unavailable {
-                        reason: format!("Needs TableX \u{2265} {minimum}"),
+                        reason: format!("Needs tablex \u{2265} {minimum}"),
                     }
                 } else if entry.app_abi_version != ABI_VERSION {
                     DriverCatalogState::Unavailable {

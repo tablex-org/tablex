@@ -327,7 +327,7 @@ fn min_app_version_gates_the_catalog() {
     assert_eq!(
         state_for(Some("1.5.9")),
         DriverCatalogState::Unavailable {
-            reason: "Needs TableX \u{2265} 1.6.0".into()
+            reason: "Needs tablex \u{2265} 1.6.0".into()
         }
     );
     assert_eq!(state_for(Some("1.6")), DriverCatalogState::Available);

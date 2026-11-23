@@ -178,8 +178,8 @@ it replaces), and per driver `category` (`sql` | `nosql` | `analytics` |
 `key_value`), `description`, `minAppVersion`, `releaseNotesUrl`, `publishedAt`.
 The category and description of each driver live in `DRIVER_META`.
 
-`minAppVersion` (the oldest TableX a build works with; an older app's Driver Manager
-shows "Needs TableX ≥ …" and does not install it) comes from the crate's own
+`minAppVersion` (the oldest tablex a build works with; an older app's Driver Manager
+shows "Needs tablex ≥ …" and does not install it) comes from the crate's own
 `Cargo.toml`, for drivers, tools and add-ons alike:
 
 ```toml
@@ -207,10 +207,10 @@ need a newer app (a new op, a new file format); `driver_manifest.py min-app-vers
 ## macOS app bundle
 
 `scripts/bundle-macos.sh` (repo root) builds `tablex-gpui` in release mode and assembles
-`target/release/bundle/TableX.app` (`Info.plist` with name "TableX", id `org.tablex.TableX`, minimum
+`target/release/bundle/tablex.app` (`Info.plist` with name "tablex", id `org.tablex.TableX`, minimum
 macOS 12, Retina-capable), then ad-hoc codesigns it. Run from anywhere; flags: `--no-build` (reuse the
 existing release binary) and `--binary PATH`; `TABLEX_BUNDLE_ID` overrides the identifier.
-Unbundled runs (`cargo run`) show the executable name in the menu bar; the bundle gives "TableX".
+Unbundled runs (`cargo run`) show the executable name in the menu bar; the bundle gives "tablex".
 
 Open items: the bundle identifier is a placeholder (TODO: the real reverse-DNS id), and no icon
 artwork exists yet. Drop a square PNG (>= 1024 px) at `apps/tablex-gpui/assets/AppIcon.png` and the
