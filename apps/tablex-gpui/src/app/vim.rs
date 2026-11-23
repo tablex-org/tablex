@@ -246,6 +246,8 @@ impl AppRoot {
             .flex_col()
             .flex_1()
             .min_h_0()
+            // The block caret is positioned against this box (it is drawn over the editor).
+            .relative()
             .capture_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
                 this.vim_key_down(tab_id, event, window, cx)
             }))
@@ -288,6 +290,10 @@ impl AppRoot {
                 }))
             })
             .child(content)
+            // Normal and Visual mode: a box over the char, not the editor's bar (see `vim_caret`).
+            .children(self.query_editors.by_tab.get(&tab_id).filter(|_| matches!(self.vim_mode(tab_id), Mode::Normal | Mode::Visual)).map(
+                |editor| vim_caret::BlockCaret::new(editor.clone(), self.vim_mode(tab_id), cx),
+            ))
             .into_any_element()
     }
 

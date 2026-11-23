@@ -492,3 +492,132 @@ fn u_and_ctrl_r_and_cmd_z_undo_and_redo_in_normal_mode(cx: &mut TestAppContext) 
     vim_press(visual, "zz");
     assert_eq!(editor_text(&app, visual, tab), "one\nthree");
 }
+
+/// Layout rounds the box to whole pixels (a 7.5px advance is a 8px box): half a pixel of play.
+const TOLERANCE: gpui::Pixels = gpui::px(1.0);
+
+/// The block caret's bounds in the last drawn frame.
+fn vim_block(visual: &mut gpui::VisualTestContext) -> Option<gpui::Bounds<gpui::Pixels>> {
+    visual.debug_bounds("vim-block-caret")
+}
+
+/// The editor's own caret (the thin bar) of the last drawn frame, scroll applied.
+fn vim_thin_caret(app: &gpui::Entity<AppRoot>, visual: &gpui::VisualTestContext, tab: u64) -> gpui::Bounds<gpui::Pixels> {
+    app.read_with(visual, |this, cx| {
+        let geometry = this.query_editors.by_tab[&tab].read(cx).prepaint_caret_geometry().expect("a drawn caret");
+        let mut caret = geometry.cursor_bounds();
+        caret.origin.y += geometry.scroll_offset().y;
+        caret
+    })
+}
+
+/// The block is one char wide at the editor's caret and as high as a row, centred on it.
+fn assert_block_at_caret(block: gpui::Bounds<gpui::Pixels>, caret: gpui::Bounds<gpui::Pixels>, why: &str) {
+    assert!(block.size.width > gpui::px(2.0), "{why}: a char wide, not a bar: {block:?}");
+    assert!((block.left() - caret.left()).abs() < TOLERANCE, "{why}: at the caret's x: {block:?} vs {caret:?}");
+    assert!((block.center().y - caret.center().y).abs() < TOLERANCE, "{why}: on the caret's row: {block:?} vs {caret:?}");
+    assert!(block.size.height >= caret.size.height, "{why}: a whole row: {block:?} vs {caret:?}");
+}
+
+#[gpui::test]
+fn normal_mode_draws_a_block_caret_that_insert_removes_and_escape_brings_back(cx: &mut TestAppContext) {
+    let (app, visual) = layout_app(cx);
+    let tab = vim_sql_tab(&app, visual, "select 1");
+    assert!(vim_block(visual).is_none(), "Vim off: the editor's own caret only");
+    vim_toggle(visual);
+    vim_cursor(&app, visual, tab, 0);
+    let block = vim_block(visual).expect("Normal mode has a block caret");
+    assert_block_at_caret(block, vim_thin_caret(&app, visual, tab), "Normal");
+    // Insert mode: the thin caret again.
+    vim_press(visual, "i");
+    assert!(vim_block(visual).is_none(), "Insert has no block");
+    visual.simulate_keystrokes("escape");
+    assert_eq!(vim_mode_of(&app, visual, tab), crate::vim::Mode::Normal);
+    let block = vim_block(visual).expect("Escape brings the block back");
+    assert_block_at_caret(block, vim_thin_caret(&app, visual, tab), "after Escape");
+    // Off again: gone.
+    vim_toggle(visual);
+    assert!(vim_block(visual).is_none(), "Vim off: no block");
+}
+
+#[gpui::test]
+fn the_block_caret_follows_the_caret_in_the_same_frame(cx: &mut TestAppContext) {
+    let (app, visual) = layout_app(cx);
+    let tab = vim_sql_tab(&app, visual, "abcd\nefgh\n\nxy");
+    vim_toggle(visual);
+    vim_cursor(&app, visual, tab, 0);
+    let start = vim_block(visual).expect("block");
+    assert_block_at_caret(start, vim_thin_caret(&app, visual, tab), "start");
+    // `l`: one char right, the box moves by its own width.
+    vim_press(visual, "l");
+    let right = vim_block(visual).expect("block");
+    assert_block_at_caret(right, vim_thin_caret(&app, visual, tab), "after l");
+    assert!(((right.left() - start.left()) - start.size.width).abs() < TOLERANCE, "moved one char: {start:?} -> {right:?}");
+    // `j`: one row down, same column.
+    vim_press(visual, "j");
+    let down = vim_block(visual).expect("block");
+    assert_block_at_caret(down, vim_thin_caret(&app, visual, tab), "after j");
+    assert!(down.top() > right.top() + gpui::px(2.0), "moved a row down: {right:?} -> {down:?}");
+    assert!((down.left() - right.left()).abs() < TOLERANCE, "same column");
+    // An empty line: a one-space box.
+    vim_press(visual, "j");
+    let empty = vim_block(visual).expect("block on an empty line");
+    assert_block_at_caret(empty, vim_thin_caret(&app, visual, tab), "empty line");
+    // `$` then the caret is on the last char; `0` goes home.
+    vim_press(visual, "$");
+    let last = vim_block(visual).expect("block");
+    assert_block_at_caret(last, vim_thin_caret(&app, visual, tab), "after $");
+    vim_press(visual, "k0");
+    assert_block_at_caret(vim_block(visual).expect("block"), vim_thin_caret(&app, visual, tab), "after k0");
+}
+
+#[gpui::test]
+fn the_block_caret_covers_the_selected_head_in_visual_mode_and_is_hollow_when_unfocused(cx: &mut TestAppContext) {
+    let (app, visual) = layout_app(cx);
+    let tab = vim_sql_tab(&app, visual, "abcdef");
+    vim_toggle(visual);
+    vim_cursor(&app, visual, tab, 0);
+    let normal = vim_block(visual).expect("block");
+    // `v` selects the char under the caret: the editor's caret is after it, the box on it.
+    vim_press(visual, "v");
+    assert_eq!(vim_mode_of(&app, visual, tab), crate::vim::Mode::Visual);
+    let one = vim_block(visual).expect("Visual has a block caret");
+    assert!((one.left() - normal.left()).abs() < TOLERANCE, "on the first char: {normal:?} vs {one:?}");
+    assert!((one.right() - vim_thin_caret(&app, visual, tab).left()).abs() < TOLERANCE, "ends where the editor's caret is");
+    // `ll`: the box is on the third char, the head. A char is the Normal box's width: a box left of
+    // the caret is wider by the editor's bar it covers.
+    vim_press(visual, "ll");
+    let head = vim_block(visual).expect("block");
+    assert!(((head.left() - one.left()) - normal.size.width * 2.0).abs() < TOLERANCE, "two chars on: {one:?} -> {head:?}");
+    // Visual line: the lines are the feedback.
+    vim_press(visual, "V");
+    assert!(vim_block(visual).is_none(), "no block in Visual line");
+    visual.simulate_keystrokes("escape");
+    assert!(vim_block(visual).is_some());
+    // Focus elsewhere: the box stays as an outline, still at the caret.
+    visual.update(|window, cx| window.blur(cx));
+    settle(visual);
+    let hollow = vim_block(visual).expect("an unfocused editor keeps its caret as an outline");
+    assert!(hollow.size.width > gpui::px(2.0));
+}
+
+#[gpui::test]
+fn the_block_caret_is_not_a_frame_behind_the_editor_caret(cx: &mut TestAppContext) {
+    let (app, visual) = layout_app(cx);
+    let tab = vim_sql_tab(&app, visual, "abcd\nefgh");
+    vim_toggle(visual);
+    vim_cursor(&app, visual, tab, 0);
+    let editor = app.read_with(visual, |this, _| this.query_editors.by_tab[&tab].clone());
+    // The caret moves and exactly ONE frame is drawn behind it (a test window draws by itself after a
+    // key, which would let a box that reads last frame's caret catch up): the box is already there.
+    for (offset, why) in [(2, "two chars right"), (6, "next row"), (1, "back up")] {
+        let previous = vim_block(visual).expect("block");
+        visual.update(|window, cx| {
+            editor.update(cx, |state, cx| state.set_selected_range(offset..offset, cx));
+            window.draw(cx).clear(cx);
+        });
+        let now = vim_block(visual).expect("block");
+        assert_block_at_caret(now, vim_thin_caret(&app, visual, tab), why);
+        assert_ne!(now.origin, previous.origin, "{why}: {previous:?} -> {now:?}");
+    }
+}
