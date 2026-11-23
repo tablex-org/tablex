@@ -1,0 +1,68 @@
+_version: 2
+driver_prompt:
+  title:
+    en: "%{name} driver is not installed"
+    vi: "Driver %{name} chưa được cài"
+  body_connect:
+    en: "%{name} connections open through a driver that is installed on demand. tablex downloads it from %{source} (%{size}, %{signer}), then connects to %{connection}."
+    vi: "Kết nối %{name} dùng một driver được cài khi cần. Tải về ngay? tablex tải driver từ %{source} (%{size}, %{signer}) rồi kết nối tới %{connection}."
+  body_continue:
+    en: "%{name} connections open through a driver that is installed on demand. tablex downloads it from %{source} (%{size}, %{signer}), then continues."
+    vi: "Kết nối %{name} dùng một driver được cài khi cần. Tải về ngay? tablex tải driver từ %{source} (%{size}, %{signer}) rồi tiếp tục."
+  loading_catalog:
+    en: Loading the driver catalog…
+    vi: Đang tải danh sách driver…
+  catalog_failed:
+    en: "Could not load the driver catalog: %{error}"
+    vi: "Không tải được danh sách driver: %{error}"
+  catalog_empty:
+    en: The driver catalog is empty.
+    vi: Danh sách driver trống.
+  source_local:
+    en: a local file (developer mode)
+    vi: một tệp cục bộ (chế độ nhà phát triển)
+  source_host:
+    en: the driver host
+    vi: máy chủ driver
+  signer_team:
+    en: "signed by Team %{team}"
+    vi: "được ký bởi Team %{team}"
+  signer_unsigned:
+    en: an unsigned developer build
+    vi: bản dựng nhà phát triển chưa ký
+  step_downloading:
+    en: Downloading
+    vi: Đang tải
+  step_downloaded:
+    en: "Downloaded %{size}"
+    vi: "Đã tải %{size}"
+  step_verifying:
+    en: Verifying signature
+    vi: Đang xác minh chữ ký
+  step_loading:
+    en: Loading driver
+    vi: Đang nạp driver
+  step_connecting:
+    en: Connecting
+    vi: Đang kết nối
+  open_manager:
+    en: Open Driver Manager
+    vi: Mở Driver Manager
+  cancel:
+    en: Cancel
+    vi: Hủy
+  retry:
+    en: Retry
+    vi: Thử lại
+  install_and_connect:
+    en: Install and connect
+    vi: Tải về và kết nối
+  install:
+    en: Install
+    vi: Tải về
+  error_stale:
+    en: The driver catalog changed. Open the Driver Manager and check for updates, then try again
+    vi: Danh sách driver đã thay đổi. Mở Driver Manager, kiểm tra cập nhật rồi thử lại
+  error_gone:
+    en: The catalog no longer offers this driver for this system
+    vi: Danh sách driver không còn cung cấp driver này cho hệ thống này

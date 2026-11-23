@@ -123,15 +123,19 @@ impl AppRoot {
     /// session lock: the copy cached at connect time, else the loaded handle
     /// of `driver_id` (the same immutable value). `None` when neither exists.
     /// Tells the navigator which object kinds the driver of `connection` lists, so a schema shows
-    /// only the groups the driver can answer.
+    /// only the groups the driver can answer, and whether it describes tables.
     pub(super) fn sync_navigator_kinds(&mut self, connection: &str) {
-        let kinds = self
+        let capabilities = self
             .saved_connections
             .iter()
             .find(|saved| saved.matches_id(connection))
-            .and_then(|saved| self.driver_capabilities(connection, saved.kind.driver_id()))
-            .map(|capabilities| capabilities.navigator_kinds.clone());
+            .and_then(|saved| self.driver_capabilities(connection, saved.kind.driver_id()));
+        let kinds = capabilities.map(|capabilities| capabilities.navigator_kinds.clone());
+        // A driver that cannot describe a table has no Indexes, Constraints, ... to list.
+        let describes = capabilities
+            .is_none_or(|capabilities| capabilities.has(engine_driver_api::Capability::MetadataTableProperties));
         self.navigator.set_driver_kinds(connection, kinds);
+        self.navigator.set_table_describe(connection, describes);
     }
 
     pub(super) fn driver_capabilities(

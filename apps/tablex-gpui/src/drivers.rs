@@ -74,7 +74,7 @@ pub fn temporary_download_path(store: &InstalledDriverStore, id: &str, source: &
 }
 
 fn user_agent() -> String {
-    format!("TableX/{} ({})", env!("CARGO_PKG_VERSION"), current_target().id())
+    format!("tablex/{} ({})", env!("CARGO_PKG_VERSION"), current_target().id())
 }
 
 /// How long a download or a manifest fetch may receive nothing before it fails (a stalled server

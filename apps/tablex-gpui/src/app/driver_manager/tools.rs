@@ -17,7 +17,7 @@ pub(in crate::app) const MCP_CAPABILITY_NOTE: &str = "It reads according to each
 
 /// Under the "Allow Keychain access" button (macOS).
 pub(in crate::app) const KEYCHAIN_NOTE: &str =
-    "macOS asks once per saved password; choose Always Allow. Needed again after an update.";
+    "tablex moves passwords saved by earlier versions into its own store, then lets the MCP server read it. macOS asks once per password; choose Always Allow. Runs by itself after an install or update.";
 
 /// Shown when the manifest does not describe the tool.
 const MCP_FALLBACK_DESCRIPTION: &str =
@@ -61,6 +61,9 @@ impl ToolJob {
     }
 }
 
+/// See [`ToolsUi::keychain_runner`].
+pub(in crate::app) type KeychainRunner = Arc<dyn Fn(&Path) -> String + Send + Sync>;
+
 pub(in crate::app) struct ToolsUi {
     /// `<app data dir>/tools`; `None` when the platform has no data directory.
     pub store: Option<Arc<ToolStore>>,
@@ -74,8 +77,14 @@ pub(in crate::app) struct ToolsUi {
     /// An add-on waits for its driver's install: "Install MongoDB driver first" queued both, and
     /// the add-on installs when the driver is in.
     pub after_driver: Option<String>,
-    /// The "Allow Keychain access" run (`tablex-mcp --authorize-keychain`): one at a time.
+    /// The "Allow Keychain access" run (see [`authorize_keychain`]): one at a time.
     pub keychain_task: Option<Task<()>>,
+    /// What the run does with the installed tool's path; the answer is the text to show. Tests put
+    /// their own here: the real one reaches the Keychain and runs the tool.
+    pub keychain_runner: KeychainRunner,
+    /// A build was installed while a run was in progress (that run authorized the old one): start
+    /// another when it ends.
+    pub keychain_again: bool,
     /// What the last run showed the user (also what tests read; the toast itself is not kept).
     pub keychain_notice: Option<String>,
 }
@@ -91,7 +100,13 @@ impl ToolsUi {
             failure: None,
             after_driver: None,
             keychain_task: None,
+            keychain_runner: if cfg!(test) {
+                Arc::new(|_| "Keychain authorization skipped in a test build".to_string())
+            } else {
+                Arc::new(authorize_keychain)
+            },
             keychain_notice: None,
+            keychain_again: false,
         }
     }
 
@@ -482,9 +497,41 @@ pub(in crate::app) fn code_span(text: &str) -> String {
     format!("{fence} {text} {fence}")
 }
 
+/// "Allow Keychain access", off the UI thread: first the passwords that earlier versions kept as
+/// Keychain items of their own move into tablex's encrypted store (macOS asks for each one, here in
+/// the app, which is when the user expects it), then `tablex-mcp --authorize-keychain` reads the
+/// master key. Afterwards the MCP server reads nothing that macOS would have to ask about.
+fn authorize_keychain(tool: &Path) -> String {
+    let moved = move_legacy_passwords();
+    let ran = run_keychain_authorization(tool);
+    match moved {
+        Some(line) => format!("{line}\n{ran}"),
+        None => ran,
+    }
+}
+
+/// One line about the move, or `None` when there was nothing to say (all in the store already).
+/// No text of any secret is in it.
+fn move_legacy_passwords() -> Option<String> {
+    let plural = |n: usize| if n == 1 { "password" } else { "passwords" };
+    match crate::credentials::default_store().copy_legacy_items() {
+        Ok(done) if done.copied == 0 && done.failed == 0 => None,
+        Ok(done) => {
+            let mut line = format!("Moved {} saved {} into tablex's store", done.copied, plural(done.copied));
+            if done.stopped {
+                line.push_str("; stopped because access was refused (run it again to continue)");
+            } else if done.failed > 0 {
+                line.push_str(&format!("; {} could not be moved", done.failed));
+            }
+            Some(line)
+        }
+        Err(error) => Some(format!("Saved passwords could not be moved: {error}")),
+    }
+}
+
 /// Runs `<tool> --authorize-keychain` and returns the text to show: its output on success, its
 /// error (else its output) on failure. Blocks until the user has answered every macOS prompt.
-fn run_keychain_authorization(tool: &Path) -> String {
+pub(in crate::app) fn run_keychain_authorization(tool: &Path) -> String {
     let output = match std::process::Command::new(tool)
         .arg("--authorize-keychain")
         .stdin(std::process::Stdio::null())
@@ -766,7 +813,7 @@ impl AppRoot {
         }
         let Some(store) = tools.store.clone() else {
             self.driver_ui.catalog_error = Some(
-                "TableX has no data directory on this system, so tools cannot be installed".into(),
+                "tablex has no data directory on this system, so tools cannot be installed".into(),
             );
             return;
         };
@@ -867,6 +914,15 @@ impl AppRoot {
                 // Settings › Editor can choose SQL Formatter (sqruff) the moment it is installed.
                 self.rescan_format_tools_if_seen(cx);
                 self.on_addon_install_ended(&tool_id, Ok(()), cx);
+                // A new build of the MCP server is a new Keychain client: authorise it now, while
+                // the user is here, not when an agent starts it.
+                if cfg!(target_os = "macos") && tool_id == MCP_TOOL_ID {
+                    if self.driver_ui.tools.keychain_running() {
+                        self.driver_ui.tools.keychain_again = true;
+                    } else {
+                        self.start_keychain_authorization(cx);
+                    }
+                }
             }
             Err(JobError::Cancelled) => {
                 tools.job = None;
@@ -947,10 +1003,10 @@ impl AppRoot {
         );
     }
 
-    /// "Allow Keychain access": runs the installed `tablex-mcp --authorize-keychain` off the UI
-    /// thread (macOS asks, once per saved password, while it runs) and shows what it printed.
-    /// One run at a time.
-    pub(super) fn allow_tool_keychain_access(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// "Allow Keychain access": runs [`ToolsUi::keychain_runner`] on the installed `tablex-mcp`
+    /// off the UI thread (macOS asks while it runs) and shows what it came to. One run at a time;
+    /// the button, and an install or update of the tool (macOS), start it.
+    pub(super) fn start_keychain_authorization(&mut self, cx: &mut Context<Self>) {
         if self.driver_ui.tools.keychain_running() {
             return;
         }
@@ -963,15 +1019,20 @@ impl AppRoot {
         else {
             return;
         };
+        let runner = Arc::clone(&self.driver_ui.tools.keychain_runner);
         let work = cx
             .background_executor()
-            .spawn(async move { smol::unblock(move || run_keychain_authorization(&path)).await });
-        self.driver_ui.tools.keychain_task = Some(cx.spawn_in(window, async move |this, cx| {
+            .spawn(async move { smol::unblock(move || runner(&path)).await });
+        self.driver_ui.tools.keychain_task = Some(cx.spawn(async move |this, cx| {
             let notice = work.await;
-            let _ = this.update_in(cx, |this, window, cx| {
+            let _ = this.update(cx, |this, cx| {
                 this.driver_ui.tools.keychain_task = None;
                 this.driver_ui.tools.keychain_notice = Some(notice.clone());
-                window.push_notification(notice, cx);
+                this.with_driver_window(cx, move |window, cx| window.push_notification(notice, cx));
+                // A build arrived meanwhile: the run that just ended authorized the old one.
+                if std::mem::take(&mut this.driver_ui.tools.keychain_again) {
+                    this.start_keychain_authorization(cx);
+                }
                 cx.notify();
             });
         }));
@@ -1013,7 +1074,7 @@ impl AppRoot {
         let entry = ToolManifestEntry {
             id: MCP_TOOL_ID.into(),
             kind: engine_driver_host::ToolKind::McpServer,
-            display_name: "TableX MCP server".into(),
+            display_name: "tablex MCP server".into(),
             version: version.into(),
             description: Some(MCP_FALLBACK_DESCRIPTION.into()),
             min_app_version: None,

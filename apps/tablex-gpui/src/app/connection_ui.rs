@@ -6,6 +6,20 @@ use engine_connect::connect::Connection;
 use engine_connect::records::RuntimeUri;
 use engine_connect::session_passwords::SessionPasswords;
 
+/// "Save" / "Save & Connect" of the dialog's form; `true`: the dialog may close.
+type SaveStep = dyn Fn(&mut Window, &mut gpui::App) -> bool;
+
+/// Whether `kind`'s driver is missing: the dialog for it opens and `run` runs after the install
+/// (`true`: the caller does nothing now). `false`: nothing is missing, run it.
+fn wait_for_driver(
+    root: &gpui::WeakEntity<AppRoot>,
+    kind: ConnectionKind,
+    run: driver_manager::DialogStep,
+    cx: &mut gpui::App,
+) -> bool {
+    root.update(cx, |this, cx| this.prompt_driver_for_action(kind, run, cx)).unwrap_or(false)
+}
+
 pub(super) struct ConnectionUiState {
     pub(super) test_generation: u64,
     pub(super) test_in_flight: std::rc::Rc<std::cell::Cell<bool>>,
@@ -23,6 +37,8 @@ pub(super) struct ConnectionUiState {
     pub(super) session_passwords: SessionPasswords,
     /// A connect nobody asked for (a recovery) is running: it never opens a password prompt.
     pub(super) background_connect: bool,
+    /// The New Connection / Edit dialog is open (its picker shows downloads, so progress repaints).
+    pub(super) dialog_open: bool,
 }
 
 impl Default for ConnectionUiState {
@@ -40,6 +56,7 @@ impl Default for ConnectionUiState {
             credentials: Arc::new(MemoryCredentials::default()),
             session_passwords: SessionPasswords::default(),
             background_connect: false,
+            dialog_open: false,
         }
     }
 }
@@ -555,6 +572,7 @@ impl AppRoot {
                         }
                         this.navigator_ui.generation = this.navigator.generation();
                         this.rerun_tabs_after_reconnect(&connection_key_task, cx);
+                        this.connected_for_create_database(&connection_key_task, cx);
                     }
                     Err(failure) => {
                         this.handle_connect_failure(retry_saved, retry_uri, attempt, failure, cx);
@@ -1276,6 +1294,7 @@ impl AppRoot {
         cx: &mut Context<Self>,
     ) {
         self.process_list_connection_released(connection_id, cx);
+        self.navigator_ui.create_database_after_connect.remove(connection_id);
         if self.scenario_ui.service.is_some() {
             // No driver session to close: the fixture's session and tree go.
             self.tunnel_ui.release(connection_id, keep_secrets);
@@ -1740,6 +1759,7 @@ impl AppRoot {
                 .set(crate::connection_dialog::ConfigTab::Overrides);
         }
         inputs.set_driver_availability(self.driver_availability());
+        self.connection_ui.dialog_open = true;
         #[cfg(test)]
         {
             self.connection_ui.last_inputs = Some(inputs.clone());
@@ -1756,6 +1776,13 @@ impl AppRoot {
         let inputs_for_focus = inputs.clone();
         let another_user_asked = another_user.is_some();
         let root = cx.entity().downgrade();
+        {
+            // The download badge of a tile.
+            let root = root.clone();
+            inputs.set_download_handler(move |driver, _, cx| {
+                let _ = root.update(cx, |this, cx| this.install_driver_from_picker(driver, cx));
+            });
+        }
         {
             // The tab's "Test tunnel" button.
             let (tab_inputs, initial_form, record, root) = (
@@ -1799,7 +1826,174 @@ impl AppRoot {
                 inputs.seed_tls_capture(&seed, window, cx);
             }
         }
+        // "Save" / "Save & Connect" of the form; `true`: the dialog may close.
+        let save: std::rc::Rc<SaveStep> = {
+            let input_state = inputs.clone();
+            let initial_form = form.clone();
+            let original_record = original_record.clone();
+            let root_for_ok = root.clone();
+            // The group the source connection of "Connect as Another User" is in.
+            let place_in_group = another_user.as_ref().and_then(|another| another.group.clone());
+            std::rc::Rc::new(move |window, cx| {
+                let scenario_result = root_for_ok.update(cx, |this, cx| {
+                    this.scenario_ui.service.as_ref()?;
+                    Some(this.save_scenario_form(
+                        &input_state,
+                        initial_form.clone(),
+                        require_password,
+                        if require_password {
+                            "save-and-connect"
+                        } else {
+                            "save"
+                        },
+                        cx,
+                    ))
+                });
+                if scenario_enabled {
+                    match scenario_result {
+                        Ok(Some(Ok(form))) => {
+                            let _ = root_for_ok.update(cx, |this, cx| {
+                                this.invalidate_connection_test();
+                                if let (Some(group), Some(id)) = (&place_in_group, form.id) {
+                                    this.place_connection_in_group(&id.to_string(), group, cx);
+                                }
+                            });
+                            if require_password {
+                                if let Some(connection) = form.id {
+                                    let _ = root_for_ok.update(cx, |this, cx| {
+                                        this.start_scenario_connect(
+                                            connection.to_string(),
+                                            form.name.clone(),
+                                            None,
+                                            cx,
+                                        );
+                                    });
+                                }
+                            }
+                            return true;
+                        }
+                        Ok(Some(Err(error))) => {
+                            window.open_alert_dialog(cx, move |dialog, _, _| {
+                                dialog
+                                    .title(t!("connection_dialog.could_not_save_connection"))
+                                    .child(error.clone())
+                            });
+                        }
+                        _ => {}
+                    }
+                    return false;
+                }
+                let Ok((store, session)) = root_for_ok.update(cx, |this, _| {
+                    (
+                        Arc::clone(&this.connection_ui.credentials),
+                        this.connection_ui.session_passwords.clone(),
+                    )
+                }) else {
+                    return false;
+                };
+                let result = read_and_save_dialog_form(
+                    &input_state,
+                    initial_form.clone(),
+                    original_record.as_ref(),
+                    require_password,
+                    &store,
+                    cx,
+                );
+                match result {
+                    Ok(form) => {
+                        let runtime_uri = if require_password {
+                            match runtime_uri_for_form(&form, original_record.as_ref(), &session) {
+                                Ok(uri) => Some(uri),
+                                Err(error) => {
+                                    let _ = root_for_ok.update(cx, |this, _| {
+                                        this.report_error(Area::Connect, None, &error)
+                                    });
+                                    window.open_alert_dialog(cx, move |dialog, _, _| {
+                                        dialog
+                                            .title(t!("connection_dialog.invalid_connection_uri"))
+                                            .child(error.clone())
+                                    });
+                                    return false;
+                                }
+                            }
+                        } else {
+                            None
+                        };
+                        // What the sessions of its tabs connect with changed: they reconnect.
+                        let reconnect = original_record.as_ref().and_then(|original| {
+                            let saved = form.clone().to_record(current_time(), Some(original)).ok()?;
+                            let typed = !form.password.is_empty() || !form.ssh_secrets.secrets(&form.ssh.clone().unwrap_or_default()).is_empty();
+                            (typed
+                                || saved.uri != original.uri
+                                || saved.db_type != original.db_type
+                                || saved.network_settings_json != original.network_settings_json)
+                                .then_some(())
+                        });
+                        let _ = root_for_ok.update(cx, |this, cx| {
+                            this.refresh_saved_connections(cx);
+                            if let (Some(group), Some(id)) = (&place_in_group, form.id) {
+                                this.place_connection_in_group(&id.to_string(), group, cx);
+                            }
+                            if let (Some(id), false) = (form.id, form.password.is_empty()) {
+                                // A password that is not saved is kept for this run (what is saved
+                                // is read from the credential store), after the refresh: an edit of
+                                // the address forgot the old one.
+                                let key = id.to_string();
+                                if form.save_password {
+                                    this.connection_ui.session_passwords.clear(&key);
+                                } else {
+                                    this.connection_ui.session_passwords.set(&key, &form.password);
+                                }
+                            }
+                            if let (Some(id), Some(())) = (form.id, reconnect) {
+                                this.connection_edited(&id.to_string(), cx);
+                            }
+                            if let Some(id) = form.id {
+                                // An agent session opened on the old settings does not survive the edit.
+                                this.revoke_agent_access(&id.to_string());
+                                // What was typed replaces whatever the old settings held.
+                                let key = id.to_string();
+                                this.tunnel_ui.secrets.remove(&key);
+                                let typed = form.ssh_secrets.secrets(&form.ssh.clone().unwrap_or_default());
+                                if !typed.is_empty() {
+                                    this.tunnel_ui.secrets.insert(key, typed);
+                                }
+                            }
+                            if require_password {
+                                if let (Some(id), Some(runtime_uri)) =
+                                    (form.id, runtime_uri)
+                                {
+                                    this.ensure_connected_with_uri(
+                                        id.to_string(),
+                                        Some(runtime_uri),
+                                        None,
+                                        cx,
+                                    );
+                                }
+                            }
+                            cx.notify();
+                        });
+                        true
+                    }
+                    Err(error) => {
+                        let _ = root_for_ok.update(cx, |this, _| {
+                            this.report_error(Area::Connect, None, &error)
+                        });
+                        window.open_alert_dialog(cx, move |dialog, _, _| {
+                            dialog
+                                .title(t!("connection_dialog.could_not_save_connection"))
+                                .child(form_message(error.clone()))
+                        });
+                        false
+                    }
+                }
+            })
+        };
         window.open_dialog(cx, move |dialog, _window, _cx| {
+            // The tiles follow the downloads (progress, done, failed) of the Driver Manager's queue.
+            if let Some(root) = root.upgrade() {
+                inputs.set_driver_availability(root.read(_cx).driver_availability());
+            }
             #[cfg(feature = "ui-scenarios")]
             let dialog_id = inputs.scenario_id();
             #[cfg(feature = "ui-scenarios")]
@@ -1855,6 +2049,7 @@ impl AppRoot {
                     let buttons = (|window: &mut Window, cx: &mut gpui::App| {
                         if inputs.is_picker() {
                             let inputs_for_next = inputs.clone();
+                            let root_for_next = root.clone();
                             let next = Button::new("connection-picker-next")
                                 .label(t!("connection_dialog.next"))
                                 .debug_selector(|| "connection-picker-next".into())
@@ -1866,11 +2061,15 @@ impl AppRoot {
                                         .size(px(14.0)),
                                 )
                                 .disabled(!inputs.picker_selection_is_visible())
-                                .on_click(move |_, _, cx| {
-                                    inputs_for_next.set_step(
-                                        crate::connection_dialog::ConnectionDialogStep::Config,
-                                        cx,
-                                    );
+                                .on_click(move |_, window, cx| {
+                                    let kind = inputs_for_next.selected_kind();
+                                    let inputs = inputs_for_next.clone();
+                                    let go: driver_manager::DialogStep = std::rc::Rc::new(move |_, cx| {
+                                        inputs.set_step(crate::connection_dialog::ConnectionDialogStep::Config, cx)
+                                    });
+                                    if !wait_for_driver(&root_for_next, kind, go.clone(), cx) {
+                                        go(window, cx);
+                                    }
                                 });
                             #[cfg(feature = "ui-scenarios")]
                             let next = {
@@ -1929,15 +2128,22 @@ impl AppRoot {
                                     Ok(()) => {
                                         let window_handle = window.window_handle();
                                         let status = inputs_for_test.test_status.clone();
-                                        let _ = root_for_test.update(cx, |this, cx| {
-                                            this.start_connection_test(
-                                                form,
-                                                original_record_for_test.clone(),
-                                                window_handle,
-                                                status,
-                                                cx,
-                                            );
+                                        let kind = form.kind;
+                                        let (root, original) = (root_for_test.clone(), original_record_for_test.clone());
+                                        let test: driver_manager::DialogStep = std::rc::Rc::new(move |_, cx| {
+                                            let _ = root.update(cx, |this, cx| {
+                                                this.start_connection_test(
+                                                    form.clone(),
+                                                    original.clone(),
+                                                    window_handle,
+                                                    status.clone(),
+                                                    cx,
+                                                );
+                                            });
                                         });
+                                        if !wait_for_driver(&root_for_test, kind, test.clone(), cx) {
+                                            test(window, cx);
+                                        }
                                     }
                                     Err(error) => {
                                         *inputs_for_test.test_status.borrow_mut() =
@@ -2006,181 +2212,40 @@ impl AppRoot {
                         }
                         let _ = root_for_close.update(cx, |this, cx| {
                             this.invalidate_connection_test();
+                            this.connection_ui.dialog_open = false;
                             cx.notify();
                         });
                     }
                 })
                 .on_ok({
-                    let input_state = inputs.clone();
-                    let initial_form = form.clone();
-                    let original_record = original_record.clone();
-                    let root_for_ok = root.clone();
-                    let scenario_enabled = scenario_enabled;
-                    // The group the source connection of "Connect as Another User" is in.
-                    let place_in_group = another_user.as_ref().and_then(|another| another.group.clone());
+                    let (input_state, save, root_for_ok) = (inputs.clone(), save.clone(), root.clone());
                     move |_, window, cx| {
                         if input_state.is_picker() {
                             if !input_state.picker_selection_is_visible() {
                                 return false;
                             }
-                            input_state.set_step(
-                                crate::connection_dialog::ConnectionDialogStep::Config,
-                                cx,
-                            );
+                            let next = input_state.clone();
+                            let go: driver_manager::DialogStep = std::rc::Rc::new(move |_, cx| {
+                                next.set_step(crate::connection_dialog::ConnectionDialogStep::Config, cx)
+                            });
+                            if !wait_for_driver(&root_for_ok, input_state.selected_kind(), go.clone(), cx) {
+                                go(window, cx);
+                            }
                             return false;
                         }
-                        let scenario_result = root_for_ok.update(cx, |this, cx| {
-                            this.scenario_ui.service.as_ref()?;
-                            Some(this.save_scenario_form(
-                                &input_state,
-                                initial_form.clone(),
-                                require_password,
-                                if require_password {
-                                    "save-and-connect"
-                                } else {
-                                    "save"
-                                },
-                                cx,
-                            ))
-                        });
-                        if scenario_enabled {
-                            match scenario_result {
-                                Ok(Some(Ok(form))) => {
-                                    let _ = root_for_ok.update(cx, |this, cx| {
-                                        this.invalidate_connection_test();
-                                        if let (Some(group), Some(id)) = (&place_in_group, form.id) {
-                                            this.place_connection_in_group(&id.to_string(), group, cx);
-                                        }
-                                    });
-                                    if require_password {
-                                        if let Some(connection) = form.id {
-                                            let _ = root_for_ok.update(cx, |this, cx| {
-                                                this.start_scenario_connect(
-                                                    connection.to_string(),
-                                                    form.name.clone(),
-                                                    None,
-                                                    cx,
-                                                );
-                                            });
-                                        }
-                                    }
-                                    return true;
+                        // A connect needs the driver: asked for (and installed) before anything is saved.
+                        if require_password {
+                            let save = save.clone();
+                            let then: driver_manager::DialogStep = std::rc::Rc::new(move |window, cx| {
+                                if save(window, cx) {
+                                    window.close_dialog(cx);
                                 }
-                                Ok(Some(Err(error))) => {
-                                    window.open_alert_dialog(cx, move |dialog, _, _| {
-                                        dialog
-                                            .title(t!("connection_dialog.could_not_save_connection"))
-                                            .child(error.clone())
-                                    });
-                                }
-                                _ => {}
-                            }
-                            return false;
-                        }
-                        let Ok((store, session)) = root_for_ok.update(cx, |this, _| {
-                            (
-                                Arc::clone(&this.connection_ui.credentials),
-                                this.connection_ui.session_passwords.clone(),
-                            )
-                        }) else {
-                            return false;
-                        };
-                        let result = read_and_save_dialog_form(
-                            &input_state,
-                            initial_form.clone(),
-                            original_record.as_ref(),
-                            require_password,
-                            &store,
-                            cx,
-                        );
-                        match result {
-                            Ok(form) => {
-                                let runtime_uri = if require_password {
-                                    match runtime_uri_for_form(&form, original_record.as_ref(), &session) {
-                                        Ok(uri) => Some(uri),
-                                        Err(error) => {
-                                            let _ = root_for_ok.update(cx, |this, _| {
-                                                this.report_error(Area::Connect, None, &error)
-                                            });
-                                            window.open_alert_dialog(cx, move |dialog, _, _| {
-                                                dialog
-                                                    .title(t!("connection_dialog.invalid_connection_uri"))
-                                                    .child(error.clone())
-                                            });
-                                            return false;
-                                        }
-                                    }
-                                } else {
-                                    None
-                                };
-                                // What the sessions of its tabs connect with changed: they reconnect.
-                                let reconnect = original_record.as_ref().and_then(|original| {
-                                    let saved = form.clone().to_record(current_time(), Some(original)).ok()?;
-                                    let typed = !form.password.is_empty() || !form.ssh_secrets.secrets(&form.ssh.clone().unwrap_or_default()).is_empty();
-                                    (typed
-                                        || saved.uri != original.uri
-                                        || saved.db_type != original.db_type
-                                        || saved.network_settings_json != original.network_settings_json)
-                                        .then_some(())
-                                });
-                                let _ = root_for_ok.update(cx, |this, cx| {
-                                    this.refresh_saved_connections(cx);
-                                    if let (Some(group), Some(id)) = (&place_in_group, form.id) {
-                                        this.place_connection_in_group(&id.to_string(), group, cx);
-                                    }
-                                    if let (Some(id), false) = (form.id, form.password.is_empty()) {
-                                        // A password that is not saved is kept for this run (what is saved
-                                        // is read from the credential store), after the refresh: an edit of
-                                        // the address forgot the old one.
-                                        let key = id.to_string();
-                                        if form.save_password {
-                                            this.connection_ui.session_passwords.clear(&key);
-                                        } else {
-                                            this.connection_ui.session_passwords.set(&key, &form.password);
-                                        }
-                                    }
-                                    if let (Some(id), Some(())) = (form.id, reconnect) {
-                                        this.connection_edited(&id.to_string(), cx);
-                                    }
-                                    if let Some(id) = form.id {
-                                        // An agent session opened on the old settings does not survive the edit.
-                                        this.revoke_agent_access(&id.to_string());
-                                        // What was typed replaces whatever the old settings held.
-                                        let key = id.to_string();
-                                        this.tunnel_ui.secrets.remove(&key);
-                                        let typed = form.ssh_secrets.secrets(&form.ssh.clone().unwrap_or_default());
-                                        if !typed.is_empty() {
-                                            this.tunnel_ui.secrets.insert(key, typed);
-                                        }
-                                    }
-                                    if require_password {
-                                        if let (Some(id), Some(runtime_uri)) =
-                                            (form.id, runtime_uri)
-                                        {
-                                            this.ensure_connected_with_uri(
-                                                id.to_string(),
-                                                Some(runtime_uri),
-                                                None,
-                                                cx,
-                                            );
-                                        }
-                                    }
-                                    cx.notify();
-                                });
-                                true
-                            }
-                            Err(error) => {
-                                let _ = root_for_ok.update(cx, |this, _| {
-                                    this.report_error(Area::Connect, None, &error)
-                                });
-                                window.open_alert_dialog(cx, move |dialog, _, _| {
-                                    dialog
-                                        .title(t!("connection_dialog.could_not_save_connection"))
-                                        .child(form_message(error.clone()))
-                                });
-                                false
+                            });
+                            if wait_for_driver(&root_for_ok, input_state.selected_kind(), then, cx) {
+                                return false;
                             }
                         }
+                        save(window, cx)
                     }
                 })
         });

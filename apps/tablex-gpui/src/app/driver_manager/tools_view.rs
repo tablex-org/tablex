@@ -353,9 +353,7 @@ impl AppRoot {
                     .label("Allow Keychain access")
                     .compact()
                     .loading(self.driver_ui.tools.keychain_running())
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.allow_tool_keychain_access(window, cx)
-                    }))
+                    .on_click(cx.listener(|this, _, _, cx| this.start_keychain_authorization(cx)))
             }))
             .into_any_element()
     }

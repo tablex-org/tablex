@@ -430,7 +430,7 @@ pub(super) struct TrustTexts {
 pub(super) fn trust_texts(request: &HostKeyRequest, known_hosts: &str) -> TrustTexts {
     TrustTexts {
         intro: format!(
-            "TableX has not connected to this SSH server before, so it cannot tell whether {} really is the server you expect.",
+            "tablex has not connected to this SSH server before, so it cannot tell whether {} really is the server you expect.",
             host_port_always(&request.host, request.port)
         ),
         rows: vec![
@@ -951,10 +951,10 @@ impl AppRoot {
                                 .map(|(label, value, selector)| fact_row((*label).into(), value.clone(), selector)),
                         );
                         children.push(paragraph(
-                            "This could be a man-in-the-middle attack, or the server was reinstalled. TableX never accepts a changed key by itself and offers no button to do so.",
+                            "This could be a man-in-the-middle attack, or the server was reinstalled. tablex never accepts a changed key by itself and offers no button to do so.",
                         ));
                         children.push(paragraph(format!(
-                            "If the change is expected, ask the server's administrator, then remove the old entry for this host from the known_hosts file named above (TableX's own file is {known_hosts}) and connect again."
+                            "If the change is expected, ask the server's administrator, then remove the old entry for this host from the known_hosts file named above (tablex's own file is {known_hosts}) and connect again."
                         )));
                         column(children)
                     }),
@@ -1195,6 +1195,7 @@ impl AppRoot {
         self.sessions.disconnect(key);
         self.discard_pending_runs(key, attempt, "Connection cancelled: no password entered", cx);
         self.navigator_ui.pending_loads.remove(key);
+        self.navigator_ui.create_database_after_connect.remove(key);
         self.navigator.reset_node(&NavigatorNodeId::Connection { connection: key.to_owned() });
         self.navigator_ui.generation = self.navigator.generation();
         self.sync_sidebar_connections(cx);
@@ -1295,7 +1296,7 @@ impl AppRoot {
 
     /// The bastion's keyboard-interactive questions as a dialog (echo respected). Everything the
     /// server wrote is shown as quoted plain text under a fixed line that names the server: it
-    /// cannot retitle the dialog or pass for TableX.
+    /// cannot retitle the dialog or pass for tablex.
     pub(super) fn show_keyboard_interactive(&mut self, prompt: KiPrompt, cx: &mut Context<Self>) {
         if prompt.cancel.is_cancelled() {
             let _ = prompt.reply.send(None);
@@ -1333,7 +1334,7 @@ impl AppRoot {
                             .into_any_element()];
                         if !texts.server_text.is_empty() {
                             children.push(paragraph(
-                                "What follows is text the server sent. It is not from TableX.",
+                                "What follows is text the server sent. It is not from tablex.",
                             ));
                             for (index, quoted) in texts.server_text.iter().enumerate() {
                                 children.push(quoted_box(
@@ -1433,6 +1434,7 @@ impl AppRoot {
             self.show_host_key_problem(problem, cx);
         }
         self.discard_pending_runs(connection_key, attempt, &message, cx);
+        self.navigator_ui.create_database_after_connect.remove(connection_key);
         if let Some(requests) = self.navigator_ui.pending_loads.remove(connection_key) {
             for (request, generation) in requests {
                 self.navigator

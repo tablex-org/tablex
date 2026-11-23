@@ -10,7 +10,7 @@ use crate::settings::Settings;
 use crate::theme;
 #[path = "connection_picker_catalog.rs"]
 mod connection_picker_catalog;
-pub(crate) use connection_picker_catalog::DriverAvailability;
+pub(crate) use connection_picker_catalog::{DriverAvailability, DriverDownload};
 #[path = "connection_dialog_ssh.rs"]
 mod ssh_tab;
 #[cfg(test)]
@@ -189,6 +189,8 @@ pub struct ConnectionDialogInputs {
     picker_filter: Rc<RefCell<String>>,
     /// Which drivers exist (set by the app when it opens the dialog).
     drivers: Rc<RefCell<DriverAvailability>>,
+    /// What a click on the download badge of a tile does (set by the app, which owns the queue).
+    download_handler: Rc<RefCell<Option<OnDriverDownload>>>,
     _picker_subscription: Rc<gpui::Subscription>,
     _color_subscription: Rc<gpui::Subscription>,
     #[cfg(feature = "ui-scenarios")]
@@ -386,6 +388,7 @@ impl ConnectionDialogInputs {
             picker_view: Rc::new(Cell::new(PickerView::Grid)),
             picker_filter,
             drivers: Default::default(),
+            download_handler: Default::default(),
             _picker_subscription: Rc::new(picker_subscription),
             #[cfg(feature = "ui-scenarios")]
             scenario_id: NEXT_SCENARIO_DIALOG_ID.fetch_add(1, Ordering::Relaxed),
@@ -558,6 +561,16 @@ impl ConnectionDialogInputs {
         *self.drivers.borrow_mut() = drivers;
     }
 
+    /// What a click on the download badge of a tile does; it gets the driver id.
+    pub fn set_download_handler(&self, handler: impl Fn(&str, &mut Window, &mut App) + 'static) {
+        *self.download_handler.borrow_mut() = Some(Rc::new(handler));
+    }
+
+    /// The kind the picker (or the form) has chosen.
+    pub fn selected_kind(&self) -> ConnectionKind {
+        self.kind.get()
+    }
+
     pub fn picker_selection_is_visible(&self) -> bool {
         let query = self.picker_filter.borrow().trim().to_ascii_lowercase();
         let kind = self.kind.get();
@@ -653,6 +666,7 @@ impl ConnectionDialogInputs {
                 self.step.clone(),
                 self.kind_selected_callback(),
                 self.drivers.borrow().clone(),
+                self.download_handler.borrow().clone(),
                 height,
             )
             .into_any_element();
@@ -1658,6 +1672,7 @@ fn database_picker(
     step: Rc<Cell<ConnectionDialogStep>>,
     on_select: OnKindSelected,
     drivers: DriverAvailability,
+    on_download: Option<OnDriverDownload>,
     height: Pixels,
 ) -> impl IntoElement {
     let query = filter.borrow().trim().to_ascii_lowercase();
@@ -1713,7 +1728,7 @@ fn database_picker(
             for entry in entries {
                 grid = grid.child(picker_tile(
                     entry,
-                    entry.needs_download(&drivers),
+                    download_badge(entry, &drivers, &on_download),
                     selected.clone(),
                     category.clone(),
                     step.clone(),
@@ -1730,7 +1745,7 @@ fn database_picker(
             for entry in entries {
                 list = list.child(picker_row(
                     entry,
-                    entry.needs_download(&drivers),
+                    download_badge(entry, &drivers, &on_download),
                     selected.clone(),
                     category.clone(),
                     step.clone(),
@@ -1905,32 +1920,102 @@ fn view_toggle_button(
         })
 }
 
-/// The mark of a kind whose driver is not installed yet: a download icon (an
-/// arrow pointing down). In a tile it sits in the corner of the tile's box.
-fn download_mark(entry: PickerEntry, corner: bool) -> impl IntoElement {
+/// Runs when the download badge of a tile is clicked (with the driver id).
+type OnDriverDownload = Rc<dyn Fn(&str, &mut Window, &mut App)>;
+
+/// What the badge of a kind whose driver is not installed needs: the driver, how its download
+/// stands, and what a click does.
+struct DownloadBadge {
+    driver: &'static str,
+    state: Option<DriverDownload>,
+    on_download: Option<OnDriverDownload>,
+}
+
+/// The badge of `entry`, when its driver is in the catalog but not installed.
+fn download_badge(
+    entry: PickerEntry,
+    drivers: &DriverAvailability,
+    on_download: &Option<OnDriverDownload>,
+) -> Option<DownloadBadge> {
+    let kind = entry.kind.filter(|_| entry.needs_download(drivers))?;
+    Some(DownloadBadge {
+        driver: kind.driver_id(),
+        state: drivers.download(kind).cloned(),
+        on_download: on_download.clone(),
+    })
+}
+
+/// Tests: whether `kind` gets a download badge under `drivers`.
+#[cfg(test)]
+pub(crate) fn has_download_badge(kind: ConnectionKind, drivers: &DriverAvailability) -> bool {
+    connection_picker_catalog::entry_for_kind(kind)
+        .and_then(|entry| download_badge(entry, drivers, &None))
+        .is_some()
+}
+
+/// The badge of a kind whose driver is not installed yet: a download button (an arrow pointing
+/// down) that installs it through the Driver Manager's queue; it spins while the driver comes
+/// and turns into a warning mark, which retries, when the download failed. It occludes the tile
+/// under it, so a click on it downloads and does not also choose the kind. In a tile it sits in
+/// the corner of the tile's box.
+fn download_mark(entry: PickerEntry, corner: bool, badge: DownloadBadge) -> impl IntoElement {
+    let (tooltip, running, failed) = match &badge.state {
+        None => (t!("connection_dialog.download_the_driver"), false, false),
+        Some(DriverDownload::Running(fraction)) => (
+            t!("connection_dialog.downloading_the_driver", percent = (fraction * 100.0).round() as u32),
+            true,
+            false,
+        ),
+        Some(DriverDownload::Failed(message)) => {
+            (t!("connection_dialog.driver_download_failed", message = message), false, true)
+        }
+    };
+    let (driver, on_download) = (badge.driver, badge.on_download);
     div()
         .debug_selector(move || format!("connection-picker-download-{}", entry.id))
         .when(corner, |this| this.absolute().top(px(0.0)).right(px(0.0)))
         .flex_shrink_0()
         .size(px(18.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(4.0))
-        .bg(theme::surface())
-        .border_1()
-        .border_color(theme::border())
+        .when(running || failed, |this| {
+            // Where the state can be read from (the button itself has no state to look at).
+            this.child(div().absolute().size_full().debug_selector(move || {
+                format!("connection-picker-download-{}-{}", if running { "running" } else { "failed" }, entry.id)
+            }))
+        })
         .child(
-            Icon::empty()
-                .path("icons/download.svg")
-                .size(px(11.0))
-                .text_color(theme::text_muted()),
+            Button::new(gpui::SharedString::from(format!("picker-download-{}", entry.id)))
+                .debug_selector(move || format!("picker-download-{}", entry.id))
+                .icon(
+                    Icon::empty()
+                        .path(if failed { "icons/triangle-alert.svg" } else { "icons/download.svg" })
+                        .size(px(11.0))
+                        .text_color(if failed { theme::danger() } else { theme::text_muted() }),
+                )
+                .loading_icon(Icon::empty().path("icons/loader-circle.svg"))
+                .loading(running)
+                .compact()
+                .ghost()
+                .w(px(18.0))
+                .h(px(18.0))
+                .p(px(0.0))
+                .rounded(px(4.0))
+                .bg(theme::surface())
+                .border_1()
+                .border_color(if failed { theme::danger() } else { theme::border() })
+                .occlude()
+                .tooltip(tooltip)
+                .on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    if let Some(on_download) = &on_download {
+                        on_download(driver, window, cx);
+                    }
+                }),
         )
 }
 
 fn picker_tile(
     entry: PickerEntry,
-    download: bool,
+    download: Option<DownloadBadge>,
     selected: Rc<Cell<ConnectionKind>>,
     category: Rc<Cell<PickerCategory>>,
     step: Rc<Cell<ConnectionDialogStep>>,
@@ -1945,7 +2030,7 @@ fn picker_tile(
         .p(px(6.0))
         .outline()
         .selected(is_selected)
-        .when(download, |this| this.tooltip(t!("connection_dialog.the_driver_is_not_installed_yet")))
+        .when(download.is_some(), |this| this.tooltip(t!("connection_dialog.the_driver_is_not_installed_yet")))
         .child(
             // The tile's own box: the Button centres its content in a wrapper,
             // so the corner mark is placed against this one instead.
@@ -1994,13 +2079,13 @@ fn picker_tile(
                         ),
                 )
                 // Last, so it is drawn over nothing and nothing over it.
-                .when(download, |this| this.child(download_mark(entry, true))),
+                .when_some(download, |this, badge| this.child(download_mark(entry, true, badge))),
         )
 }
 
 fn picker_row(
     entry: PickerEntry,
-    download: bool,
+    download: Option<DownloadBadge>,
     selected: Rc<Cell<ConnectionKind>>,
     category: Rc<Cell<PickerCategory>>,
     step: Rc<Cell<ConnectionDialogStep>>,
@@ -2014,7 +2099,7 @@ fn picker_row(
         .px(px(10.0))
         .outline()
         .selected(is_selected)
-        .when(download, |this| this.tooltip(t!("connection_dialog.the_driver_is_not_installed_yet")))
+        .when(download.is_some(), |this| this.tooltip(t!("connection_dialog.the_driver_is_not_installed_yet")))
         .child(
             div()
                 .w_full()
@@ -2039,7 +2124,7 @@ fn picker_row(
                         .text_color(theme::text())
                         .child(entry.label),
                 )
-                .when(download, |this| this.child(download_mark(entry, false))),
+                .when_some(download, |this, badge| this.child(download_mark(entry, false, badge))),
         )
 }
 

@@ -1067,7 +1067,7 @@ mod tests {
         mongo.manifest.as_mut().unwrap().category = Some(DriverCategory::Nosql);
         let mut ch = item("clickhouse", DriverCatalogState::Available);
         ch.manifest.as_mut().unwrap().uri_schemes = vec!["clickhouse".into(), "http".into()];
-        let mut redis = item("redis", DriverCatalogState::Unavailable { reason: "Needs TableX \u{2265} 9".into() });
+        let mut redis = item("redis", DriverCatalogState::Unavailable { reason: "Needs tablex \u{2265} 9".into() });
         redis.manifest.as_mut().unwrap().category = Some(DriverCategory::KeyValue);
         let mut sqlite = item("sqlite", DriverCatalogState::Installed { version: "2.0.0".into() });
         sqlite.disabled = true;
@@ -1172,7 +1172,7 @@ mod tests {
         assert_eq!(badge_for(ch, None), None);
         assert_eq!(primary_action(ch, None), Some(PrimaryAction::Install));
         let redis = model.row("redis").unwrap();
-        assert_eq!(badge_for(redis, None), Some(Badge::Unavailable("Needs TableX \u{2265} 9".into())));
+        assert_eq!(badge_for(redis, None), Some(Badge::Unavailable("Needs tablex \u{2265} 9".into())));
         assert_eq!(primary_action(redis, None), None, "an unavailable driver cannot be installed");
         let sqlite = model.row("sqlite").unwrap();
         assert_eq!(badge_for(sqlite, None), Some(Badge::Disabled));

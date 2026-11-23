@@ -910,6 +910,301 @@ fn the_new_connection_picker_badges_downloadable_kinds_and_hides_driverless_ones
     assert!(!rig.rendered("connection-picker-mariadb"), "a kind with no driver stays hidden");
 }
 
+// --- missing drivers in the New Connection dialog ------------------------------------------------
+//
+// The picker's download badge is a button that installs through the Driver Manager's queue; Next,
+// Test and Save & Connect of a kind whose driver is missing open the "driver is not installed"
+// dialog and go on after the install; a connect asks for the catalog when it is not loaded.
+
+impl DmRig<'_> {
+    fn open_new_connection(&mut self) {
+        let app = self.app.clone();
+        self.visual.update(|window, cx| {
+            app.update(cx, |this, cx| this.open_connection_dialog(None, window, cx));
+        });
+        settle(self.visual);
+    }
+
+    /// The dialog of the saved connection `key`; `connect`: its "Save & Connect" form.
+    fn open_saved_connection(&mut self, key: &str, connect: bool) {
+        let (app, key) = (self.app.clone(), key.to_string());
+        self.visual.update(|window, cx| {
+            app.update(cx, |this, cx| {
+                let saved = this.saved_connections.iter().find(|saved| saved.matches_id(&key)).cloned().unwrap();
+                this.open_connection_dialog_with_requirement(Some(saved), connect, window, cx);
+            });
+        });
+        settle(self.visual);
+    }
+
+    fn dialog_inputs(&self) -> crate::connection_dialog::ConnectionDialogInputs {
+        self.read(|this| this.connection_ui.last_inputs.clone().expect("the dialog opened"))
+    }
+
+    /// The phase of the missing-driver dialog (its `Debug` text), if it is open.
+    fn prompt_phase(&self) -> Option<String> {
+        self.read(|this| this.driver_ui.prompt.as_ref().map(|prompt| format!("{:?}", prompt.phase)))
+    }
+
+    fn driver_errors(&self) -> usize {
+        self.read(driver_error_count)
+    }
+}
+
+fn driver_error_count(this: &AppRoot) -> usize {
+    (0..this.error_log.log.len())
+        .filter_map(|index| this.error_log.log.get(index))
+        .filter(|entry| entry.severity == crate::error_log::Severity::Error && entry.area == Area::Driver)
+        .count()
+}
+
+#[gpui::test]
+fn the_download_badge_of_a_tile_installs_the_driver_and_follows_the_job(cx: &mut TestAppContext) {
+    use crate::connection_dialog::DriverDownload;
+    let mut rig = DmRig::new(cx, TrustPolicy::Developer);
+    let mut slow = SlowArtifact::new(&rig.root, std::fs::read(&rig.dylib).unwrap());
+    rig.publish_at("1.0.0", &file_url(&slow.path));
+    rig.open_manager();
+    rig.open_new_connection();
+    rig.click("connection-picker-category-lightweight");
+    assert!(rig.rendered("picker-download-sqlite"), "the badge is a button of its own");
+    assert!(!rig.rendered("connection-picker-download-running-sqlite"), "nothing downloads yet");
+    let chosen = rig.dialog_inputs().selected_kind();
+
+    rig.click("picker-download-sqlite");
+    rig.wait("download progress", |this| {
+        matches!(
+            this.driver_ui.queue.job("sqlite").map(|job| &job.state),
+            Some(InstallState::Downloading { bytes, .. }) if *bytes > 0
+        )
+    });
+    assert!(rig.rendered("connection-picker-download-running-sqlite"), "the tile shows the download");
+    let running = rig.read(|this| this.driver_availability().download(ConnectionKind::Sqlite).cloned());
+    assert!(matches!(running, Some(DriverDownload::Running(fraction)) if fraction > 0.0), "{running:?}");
+    assert_eq!(rig.dialog_inputs().selected_kind(), chosen, "the click on the badge did not choose the tile");
+    assert!(rig.dialog_inputs().is_picker(), "nor advance to the form");
+
+    slow.release();
+    rig.wait("the install", |this| {
+        this.driver_ui.queue.job("sqlite").is_none() && this.driver_ui.handles.contains_key("sqlite")
+    });
+    assert!(rig.rendered("connection-picker-sqlite"), "the tile stays");
+    assert!(
+        !rig.rendered("picker-download-sqlite") && !rig.rendered("connection-picker-download-running-sqlite"),
+        "the badge is gone once the driver is installed"
+    );
+}
+
+#[gpui::test]
+fn a_failed_tile_download_shows_the_error_and_the_badge_retries(cx: &mut TestAppContext) {
+    use crate::connection_dialog::DriverDownload;
+    let mut rig = DmRig::new(cx, TrustPolicy::Developer);
+    // The driver's file is not where the catalog says.
+    rig.publish_at("1.0.0", "file:///nonexistent-sqlite.dylib");
+    rig.open_manager();
+    rig.open_new_connection();
+    rig.click("connection-picker-category-lightweight");
+    rig.click("picker-download-sqlite");
+    rig.wait("the failure", |this| {
+        matches!(this.driver_ui.queue.job("sqlite").map(|job| &job.state), Some(InstallState::Failed(_)))
+    });
+    assert_eq!(rig.driver_errors(), 1);
+    assert!(rig.rendered("connection-picker-download-failed-sqlite"), "the tile shows the error");
+    let failed = rig.read(|this| this.driver_availability().download(ConnectionKind::Sqlite).cloned());
+    assert!(matches!(failed, Some(DriverDownload::Failed(message)) if !message.is_empty()));
+    assert!(rig.rendered("picker-download-sqlite"), "and can be clicked again");
+
+    // The driver is published again; the same badge retries (a catalog refresh brings the new entry).
+    rig.publish("1.0.0");
+    rig.update(|this, cx| this.refresh_driver_catalog(cx));
+    rig.wait("the catalog", |this| this.driver_ui.catalog_task.is_none());
+    rig.click("picker-download-sqlite");
+    rig.wait("the install", |this| {
+        this.driver_ui.queue.job("sqlite").is_none() && this.driver_ui.handles.contains_key("sqlite")
+    });
+    assert!(!rig.rendered("picker-download-sqlite") && !rig.rendered("connection-picker-download-failed-sqlite"));
+}
+
+#[test]
+fn a_kind_without_a_known_downloadable_driver_gets_no_download_badge() {
+    use crate::connection_dialog::{has_download_badge, DriverAvailability};
+    let ids = |items: &[&str]| items.iter().map(|id| id.to_string()).collect();
+    let mysql = ConnectionKind::Mysql;
+    assert!(!has_download_badge(mysql, &DriverAvailability::default()), "catalog not loaded");
+    assert!(!has_download_badge(mysql, &DriverAvailability::known(ids(&[]), ids(&[]))), "not in the catalog");
+    assert!(!has_download_badge(mysql, &DriverAvailability::known(ids(&["mysql"]), ids(&[]))), "installed");
+    assert!(has_download_badge(mysql, &DriverAvailability::known(ids(&[]), ids(&["mysql"]))));
+}
+
+#[gpui::test]
+fn next_with_a_missing_driver_asks_to_install_it_and_then_goes_on_to_the_form(cx: &mut TestAppContext) {
+    let mut rig = DmRig::new(cx, TrustPolicy::Developer);
+    rig.publish("1.0.0");
+    rig.open_manager();
+    rig.open_new_connection();
+    rig.click("connection-picker-category-lightweight");
+    rig.click("connection-picker-sqlite");
+    rig.click("connection-picker-next");
+    assert_eq!(rig.prompt_phase().as_deref(), Some("Asking"));
+    assert!(rig.rendered("driver-prompt-body"), "the missing-driver dialog is open");
+    assert!(rig.dialog_inputs().is_picker(), "the dialog waits on the install");
+
+    rig.click("driver-prompt-install");
+    rig.wait("the install", |this| this.driver_ui.prompt.is_none() && this.driver_ui.handles.contains_key("sqlite"));
+    settle(rig.visual);
+    assert!(!rig.rendered("driver-prompt-body"), "the dialog closed itself");
+    assert!(!rig.dialog_inputs().is_picker(), "Next went on to the form");
+    assert!(rig.rendered("connection-config-file"), "the SQLite form is shown");
+}
+
+#[gpui::test]
+fn cancelling_the_missing_driver_dialog_leaves_the_picker_where_it_was(cx: &mut TestAppContext) {
+    let mut rig = DmRig::new(cx, TrustPolicy::Developer);
+    rig.publish("1.0.0");
+    rig.open_manager();
+    rig.open_new_connection();
+    rig.click("connection-picker-category-lightweight");
+    rig.click("connection-picker-sqlite");
+    rig.click("connection-picker-next");
+    assert_eq!(rig.prompt_phase().as_deref(), Some("Asking"));
+    rig.click("driver-prompt-cancel");
+    assert_eq!(rig.prompt_phase(), None);
+    assert!(!rig.rendered("driver-prompt-body"));
+    assert!(rig.dialog_inputs().is_picker() && rig.rendered("connection-picker-next"), "still on the picker");
+    assert!(rig.read(|this| this.driver_ui.queue.job("sqlite").is_none()), "nothing was installed");
+}
+
+#[gpui::test]
+fn test_with_a_missing_driver_asks_to_install_it_and_then_runs_the_test(cx: &mut TestAppContext) {
+    use crate::connection_dialog::TestStatus;
+    let db = SqliteDb::new(ITEMS_SEED);
+    let mut rig = DmRig::new(cx, TrustPolicy::Developer);
+    rig.publish("1.0.0");
+    rig.open_manager();
+    let (key, _) = rig.save_sqlite(&db, "needs driver");
+    rig.open_saved_connection(&key, false);
+    let status = rig.dialog_inputs().test_status.clone();
+    rig.click("test-connection");
+    assert_eq!(rig.prompt_phase().as_deref(), Some("Asking"));
+    assert_eq!(*status.borrow(), TestStatus::Idle, "the test did not start");
+
+    rig.click("driver-prompt-install");
+    rig.wait("the test", |_| matches!(*status.borrow(), TestStatus::Success { .. } | TestStatus::Failure(_)));
+    assert!(matches!(*status.borrow(), TestStatus::Success { .. }), "{:?}", status.borrow());
+    assert_eq!(rig.prompt_phase(), None);
+    assert!(rig.rendered("test-connection"), "the connection dialog is still open");
+}
+
+#[gpui::test]
+fn save_and_connect_with_a_missing_driver_installs_first_then_saves_and_connects(cx: &mut TestAppContext) {
+    let db = SqliteDb::new(ITEMS_SEED);
+    let mut rig = DmRig::new(cx, TrustPolicy::Developer);
+    rig.publish("1.0.0");
+    rig.open_manager();
+    let (key, _) = rig.save_sqlite(&db, "needs driver");
+
+    // Cancel leaves the dialog open and nothing connecting.
+    rig.open_saved_connection(&key, true);
+    rig.click("connection-save");
+    assert_eq!(rig.prompt_phase().as_deref(), Some("Asking"));
+    rig.click("driver-prompt-cancel");
+    assert_eq!(rig.prompt_phase(), None);
+    assert!(rig.rendered("connection-save"), "the dialog is where it was");
+    assert!(rig.read(|this| matches!(this.sessions.status(&key), ConnectionStatus::Disconnected)));
+
+    rig.click("connection-save");
+    assert_eq!(rig.prompt_phase().as_deref(), Some("Asking"));
+    rig.click("driver-prompt-install");
+    let k = key.clone();
+    rig.wait("saved and connected", move |this| {
+        this.driver_ui.prompt.is_none()
+            && matches!(this.sessions.status(&k), ConnectionStatus::Connected)
+            && this.driver_runtime.sessions.contains_key(&k)
+    });
+    settle(rig.visual);
+    assert!(!rig.rendered("connection-save"), "the dialog closed after the save");
+    assert!(rig.session_version(&key).contains("/sqlite/1.0.0/"));
+}
+
+#[gpui::test]
+fn a_connect_before_the_catalog_is_loaded_shows_loading_and_then_asks(cx: &mut TestAppContext) {
+    let db = SqliteDb::new(ITEMS_SEED);
+    let mut rig = DmRig::new(cx, TrustPolicy::Developer);
+    rig.publish("1.0.0");
+    assert!(rig.read(|this| this.driver_ui.model.rows().is_empty()), "the catalog is not loaded");
+    let (key, tab) = rig.save_sqlite(&db, "needs driver");
+    rig.update(|this, cx| {
+        this.workspace.tab_mut(tab).unwrap().sql = "SELECT 1".into();
+        this.run_active_tab_query(cx);
+    });
+    assert_eq!(rig.prompt_phase().as_deref(), Some("LoadingCatalog"), "not the raw connect error");
+    settle(rig.visual);
+    assert!(rig.rendered("driver-prompt-body"), "the dialog is open while the catalog loads");
+    rig.wait("the question", |this| {
+        this.driver_ui.prompt.as_ref().is_some_and(|prompt| prompt.phase == driver_manager::PromptPhase::Asking)
+    });
+    assert!(rig.read(|this| matches!(this.sessions.status(&key), ConnectionStatus::Connecting)));
+
+    rig.click("driver-prompt-install");
+    let k = key.clone();
+    rig.wait("connected", move |this| {
+        this.driver_ui.prompt.is_none() && matches!(this.sessions.status(&k), ConnectionStatus::Connected)
+    });
+    assert!(rig.session_version(&key).contains("/sqlite/1.0.0/"));
+}
+
+#[gpui::test]
+fn a_test_that_sets_no_catalog_source_never_reads_a_real_one(cx: &mut TestAppContext) {
+    let db = SqliteDb::new(ITEMS_SEED);
+    let mut rig = DmRig::new(cx, TrustPolicy::Developer);
+    rig.update(|this, _| this.driver_ui.manifest_source = None);
+    // The source a missing-driver connect would read the catalog from: a local file that is not
+    // there, never the release URL or a manifest lying around in `dist/`.
+    let source = rig.read(|this| this.driver_ui.manifest_source());
+    assert_eq!(source, driver_manager::TEST_NO_MANIFEST);
+    assert!(source.starts_with("file://") && !std::path::Path::new(&source["file://".len()..]).exists());
+
+    let (key, tab) = rig.save_sqlite(&db, "needs driver");
+    rig.update(|this, cx| {
+        this.workspace.tab_mut(tab).unwrap().sql = "SELECT 1".into();
+        this.run_active_tab_query(cx);
+    });
+    rig.wait("the catalog to fail locally", |this| {
+        this.driver_ui.prompt.as_ref().is_some_and(|prompt| matches!(prompt.phase, driver_manager::PromptPhase::CatalogFailed(_)))
+    });
+    let error = rig.read(|this| this.driver_ui.catalog_error.clone()).expect("the read failed");
+    assert!(error.contains("tablex-test-no-catalog-source"), "the failure names the local source: {error}");
+    assert!(rig.read(|this| matches!(this.sessions.status(&key), ConnectionStatus::Connecting)));
+}
+
+#[gpui::test]
+fn an_unreachable_catalog_shows_an_error_with_retry_and_the_driver_manager(cx: &mut TestAppContext) {
+    let db = SqliteDb::new(ITEMS_SEED);
+    let mut rig = DmRig::new(cx, TrustPolicy::Developer);
+    // No manifest at all: the catalog cannot be fetched.
+    let (key, tab) = rig.save_sqlite(&db, "needs driver");
+    rig.update(|this, cx| {
+        this.workspace.tab_mut(tab).unwrap().sql = "SELECT 1".into();
+        this.run_active_tab_query(cx);
+    });
+    rig.wait("the error", |this| {
+        this.driver_ui.prompt.as_ref().is_some_and(|prompt| matches!(prompt.phase, driver_manager::PromptPhase::CatalogFailed(_)))
+    });
+    settle(rig.visual);
+    assert!(rig.rendered("driver-prompt-body") && rig.rendered("driver-prompt-install") && rig.rendered("driver-prompt-open-manager"));
+    assert!(rig.read(|this| matches!(this.sessions.status(&key), ConnectionStatus::Connecting)), "not failed with a raw error");
+
+    // Back online: Retry reads the catalog again and asks.
+    rig.publish("1.0.0");
+    rig.click("driver-prompt-install");
+    rig.wait("the question", |this| {
+        this.driver_ui.prompt.as_ref().is_some_and(|prompt| prompt.phase == driver_manager::PromptPhase::Asking)
+    });
+    rig.click("driver-prompt-cancel");
+    let k = key.clone();
+    rig.wait("the usual failure", move |this| matches!(this.sessions.status(&k), ConnectionStatus::Failed(_)));
+}
+
 // --- Tools: tablex-mcp -------------------------------------------------------------------------
 //
 // The same rig: a `file://` manifest (developer mode) now also lists the `tablex-mcp` tool, whose
@@ -938,7 +1233,7 @@ impl DmRig<'_> {
                 serde_json::json!({"schemaVersion": 2, "generatedAt": "2026-10-08T00:00:00Z", "drivers": []})
             });
         manifest["tools"] = serde_json::json!([{
-            "id": "tablex-mcp", "kind": "mcpServer", "displayName": "TableX MCP server",
+            "id": "tablex-mcp", "kind": "mcpServer", "displayName": "tablex MCP server",
             "version": version, "description": "Lets MCP clients use your saved connections.",
             "artifacts": [{
                 "target": crate::drivers::current_target().id(),
@@ -1245,7 +1540,7 @@ fn the_formatter_has_its_own_row_beside_the_mcp_server_and_installs_updates_and_
         rig.assert_on_screen(selector);
     }
     let names = rig.read(|this| this.driver_ui.tools.standalone().map(|item| item.display_name.clone()).collect::<Vec<_>>());
-    assert_eq!(names, ["TableX MCP server", "SQL Formatter (sqruff)"]);
+    assert_eq!(names, ["tablex MCP server", "SQL Formatter (sqruff)"]);
     // The licence and the source are shown for the tool that names them (and only for it).
     rig.assert_on_screen("tool-origin:tablex-sqruff");
     assert!(!rig.rendered("tool-origin:tablex-mcp"));
@@ -1522,6 +1817,8 @@ fn allow_keychain_access_runs_the_tool_one_at_a_time_and_shows_its_outcome(cx: &
     app.update(visual, |this, cx| {
         this.seed_driver_manager_scenario(false);
         this.seed_driver_tools_fixture(true);
+        // Only the run of the tool: moving saved passwords would reach the Keychain.
+        this.driver_ui.tools.keychain_runner = Arc::new(driver_manager::run_keychain_authorization);
         this.driver_ui.selected = None;
         this.driver_ui.model.set_filter(DriverFilter::Tools);
         cx.notify();
@@ -1568,6 +1865,97 @@ fn allow_keychain_access_runs_the_tool_one_at_a_time_and_shows_its_outcome(cx: &
     assert_eq!(state(visual).1.as_deref(), Some("access was not kept: choose Always Allow"));
     assert_eq!(notifications(visual), before + 2);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Installing or updating the MCP server (macOS) starts the Keychain authorization on the new
+/// build; uninstalling it and installing another tool do not. The runner is a recorder: nothing
+/// here reaches the Keychain or runs the downloaded file.
+#[cfg(target_os = "macos")]
+#[gpui::test]
+fn installing_or_updating_the_mcp_server_starts_the_keychain_authorization(cx: &mut TestAppContext) {
+    let mut rig = DmRig::new(cx, TrustPolicy::Developer);
+    rig.publish("1.0.0");
+    rig.publish_tool("0.1.0", &tool_bytes(1));
+    rig.publish_formatter("0.1.0", &tool_bytes(7));
+    let calls = Arc::new(std::sync::Mutex::new(Vec::<std::path::PathBuf>::new()));
+    let recorder = Arc::clone(&calls);
+    rig.update(move |this, _| {
+        this.driver_ui.tools.keychain_runner = Arc::new(move |tool| {
+            recorder.lock().unwrap().push(tool.to_path_buf());
+            "authorized".to_string()
+        });
+    });
+    rig.open_manager();
+    rig.wait("both tool rows", |this| this.driver_ui.tools.item().is_some() && this.driver_ui.tools.item_of("tablex-sqruff").is_some());
+    rig.click(DriverFilter::Tools.selector());
+    let ran = |rig: &mut DmRig| {
+        rig.wait("the authorization to end", |this| !this.driver_ui.tools.keychain_running());
+        calls.lock().unwrap().clone()
+    };
+
+    // Another tool: nothing.
+    rig.click("tool-action-install:tablex-sqruff");
+    rig.wait("the formatter install", |this| this.driver_ui.tools.job.is_none() && this.driver_ui.tools.item_of("tablex-sqruff").is_some_and(|item| item.installed.is_some()));
+    assert!(ran(&mut rig).is_empty(), "the formatter needs no Keychain access");
+    assert_eq!(rig.read(|this| this.driver_ui.tools.keychain_notice.clone()), None);
+
+    // The MCP server installed: one run, on its path, and its outcome is shown.
+    rig.click("tool-action-install:tablex-mcp");
+    rig.wait("the tool install", |this| this.driver_ui.tools.job.is_none() && this.driver_ui.tools.item().is_some_and(|item| item.installed.is_some()));
+    assert_eq!(ran(&mut rig), [rig.tool_file()]);
+    assert_eq!(rig.read(|this| this.driver_ui.tools.keychain_notice.clone()).as_deref(), Some("authorized"));
+
+    // An update of it: another run.
+    rig.publish_tool("0.2.0", &tool_bytes(2));
+    rig.check_for_updates();
+    rig.click("tool-action-update:tablex-mcp");
+    rig.wait("the update", |this| {
+        this.driver_ui.tools.job.is_none() && this.driver_ui.tools.item().is_some_and(|item| matches!(&item.state, engine_driver_host::ToolCatalogState::Installed { version } if version == "0.2.0"))
+    });
+    assert_eq!(ran(&mut rig).len(), 2);
+
+    // An uninstall: none.
+    rig.click("tool-action-uninstall:tablex-mcp");
+    rig.wait("the uninstall", |this| this.driver_ui.op_task.is_none() && this.driver_ui.tools.item().is_some_and(|item| item.installed.is_none()));
+    assert_eq!(ran(&mut rig).len(), 2, "removing the tool authorizes nothing");
+}
+
+/// An update that finishes while a run still authorizes the previous build is not dropped: another
+/// run starts when that one ends.
+#[cfg(target_os = "macos")]
+#[gpui::test]
+fn an_update_that_finishes_during_an_authorization_run_starts_another_afterwards(cx: &mut TestAppContext) {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let mut rig = DmRig::new(cx, TrustPolicy::Developer);
+    rig.publish("1.0.0");
+    rig.publish_tool("0.1.0", &tool_bytes(1));
+    let (runs, release) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicBool::new(false)));
+    let (counted, gate) = (Arc::clone(&runs), Arc::clone(&release));
+    rig.update(move |this, _| {
+        this.driver_ui.tools.keychain_runner = Arc::new(move |_| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            while !gate.load(Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            "authorized".to_string()
+        });
+    });
+    rig.open_manager_with_tool();
+    rig.install_tool();
+    assert!(rig.read(|this| this.driver_ui.tools.keychain_running()), "the first run is waiting");
+
+    rig.publish_tool("0.2.0", &tool_bytes(2));
+    rig.check_for_updates();
+    rig.click("tool-action-update:tablex-mcp");
+    rig.wait("the update", |this| {
+        this.driver_ui.tools.job.is_none() && this.driver_ui.tools.item().is_some_and(|item| matches!(&item.state, engine_driver_host::ToolCatalogState::Installed { version } if version == "0.2.0"))
+    });
+    assert!(rig.read(|this| this.driver_ui.tools.keychain_again), "the new build waits for its run");
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+
+    release.store(true, Ordering::SeqCst);
+    rig.wait("both runs", |this| !this.driver_ui.tools.keychain_running() && !this.driver_ui.tools.keychain_again);
+    assert_eq!(runs.load(Ordering::SeqCst), 2, "one more run, for the new build");
 }
 
 #[gpui::test]
@@ -2022,7 +2410,7 @@ fn publish_signed(rig: &DmRig<'_>, key: &ed25519_dalek::SigningKey, generated: &
     let manifest = serde_json::json!({
         "schemaVersion": 2, "generatedAt": generated, "drivers": [],
         "tools": [{
-            "id": "tablex-mcp", "kind": "mcpServer", "displayName": "TableX MCP server", "version": "0.1.0",
+            "id": "tablex-mcp", "kind": "mcpServer", "displayName": "tablex MCP server", "version": "0.1.0",
             "artifacts": [{
                 "target": crate::drivers::current_target().id(),
                 "url": url, "sha256": tool_sha256(bytes), "sizeBytes": bytes.len(),
@@ -2239,7 +2627,7 @@ fn distrusting_the_catalog_keeps_every_installed_driver_even_an_unavailable_one(
     };
     ui.catalog = vec![
         // Installed, but its entry is unavailable here (needs a newer app).
-        item("legacy", DriverCatalogState::Unavailable { reason: "Needs TableX \u{2265} 9".into() }),
+        item("legacy", DriverCatalogState::Unavailable { reason: "Needs tablex \u{2265} 9".into() }),
         item("sqlite", DriverCatalogState::UpdateAvailable { installed: "1.0.0".into(), latest: "2.0.0".into() }),
         item("redis", DriverCatalogState::Available),
     ];

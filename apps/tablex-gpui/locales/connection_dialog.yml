@@ -273,6 +273,15 @@ connection_dialog:
   the_driver_is_not_installed_yet:
     en: The driver is not installed yet
     vi: Driver chưa được cài đặt
+  download_the_driver:
+    en: The driver is not installed yet. Click to download it
+    vi: Driver chưa được cài đặt. Bấm để tải về
+  downloading_the_driver:
+    en: "Downloading the driver… %{percent}%"
+    vi: "Đang tải driver… %{percent}%"
+  driver_download_failed:
+    en: "Download failed: %{message}. Click to retry"
+    vi: "Tải về thất bại: %{message}. Bấm để thử lại"
   not_supported_yet:
     en: Not supported yet
     vi: Chưa được hỗ trợ

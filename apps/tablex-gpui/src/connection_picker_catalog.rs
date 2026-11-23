@@ -1,5 +1,5 @@
 use crate::connections::ConnectionKind;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PickerCategory {
@@ -77,6 +77,17 @@ pub(crate) enum DriverPresence {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct DriverAvailability {
     known: Option<(HashSet<String>, HashSet<String>)>,
+    /// Downloads of downloadable drivers that are running or failed, by driver id.
+    downloads: HashMap<String, DriverDownload>,
+}
+
+/// A download that the badge of a tile shows.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum DriverDownload {
+    /// Queued or running, `0.0..=1.0`.
+    Running(f32),
+    /// The last attempt failed (the badge retries).
+    Failed(String),
 }
 
 impl DriverAvailability {
@@ -85,7 +96,18 @@ impl DriverAvailability {
     pub(crate) fn known(installed: HashSet<String>, downloadable: HashSet<String>) -> Self {
         Self {
             known: Some((installed, downloadable)),
+            downloads: HashMap::new(),
         }
+    }
+
+    pub(crate) fn with_downloads(mut self, downloads: HashMap<String, DriverDownload>) -> Self {
+        self.downloads = downloads;
+        self
+    }
+
+    /// The download of `kind`'s driver, if one is running or failed.
+    pub(crate) fn download(&self, kind: ConnectionKind) -> Option<&DriverDownload> {
+        self.downloads.get(kind.driver_id())
     }
 
     fn presence(&self, kind: ConnectionKind) -> DriverPresence {

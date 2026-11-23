@@ -9,6 +9,7 @@ mod tools_view;
 mod view;
 
 use super::*;
+use crate::connection_dialog::DriverDownload;
 use engine_driver_host::{
     DriverCatalogItem, DriverInstaller, DriverLoader, DriverManifestEntry, DriverOwners,
     DriverVerifier, InstallError as HostInstallError, InstallProgress, InstalledDriverRecord,
@@ -25,12 +26,14 @@ pub(super) use model::{
 };
 #[cfg(test)]
 pub(super) use model::primary_action;
-pub(super) use prompt::MissingDriverPrompt;
+pub(super) use prompt::{DialogStep, MissingDriverPrompt};
+#[cfg(test)]
+pub(super) use prompt::PromptPhase;
 pub(super) use tools::{addon_actions, installable_entry, AddonNeed, FormatterSeed, ShellAddonSeed, ToolAction};
 use tools::ToolsUi;
 #[cfg(test)]
 pub(super) use tools::{
-    client_config_json, code_span, tool_actions, tool_version_lines, ClientTextError, ShellQuoting,
+    client_config_json, code_span, run_keychain_authorization, tool_actions, tool_version_lines, ClientTextError, ShellQuoting,
     MCP_CAPABILITY_NOTE,
 };
 
@@ -167,6 +170,10 @@ async fn load_snapshot_with(
     .await
 }
 
+/// The catalog source of a test that set none: a local file that is not there.
+#[cfg(test)]
+pub(super) const TEST_NO_MANIFEST: &str = "file:///tablex-test-no-catalog-source/manifest.json";
+
 pub(super) struct DriverManagerUi {
     /// Newest loaded generation per driver id.
     pub(super) handles: HashMap<String, Arc<engine_driver_host::DriverHandle>>,
@@ -274,6 +281,22 @@ impl DriverManagerUi {
             .is_some_and(|row| row.status == RowStatus::Available && row.entry.is_some())
     }
 
+    /// Tests: a catalog was read and offers none of the drivers the test connects through, so a
+    /// connect that needs one fails the plain "not installed" way instead of opening the dialog.
+    #[cfg(test)]
+    pub(super) fn read_catalog_without_drivers(&mut self) {
+        self.installed_loaded = true;
+        self.catalog_policy = Some(self.policy);
+        self.catalog = vec![DriverCatalogItem {
+            id: "other".into(),
+            display_name: "Other".into(),
+            version: "1.0.0".into(),
+            state: engine_driver_host::DriverCatalogState::Installed { version: "1.0.0".into() },
+            manifest: None,
+            disabled: false,
+        }];
+    }
+
     /// Which drivers the New Connection picker may offer.
     pub(super) fn availability(&self) -> crate::connection_dialog::DriverAvailability {
         // Nothing installed and no catalog (offline): which kinds have a driver
@@ -295,7 +318,24 @@ impl DriverManagerUi {
             .filter(|row| self.is_downloadable(&row.id))
             .map(|row| row.id.clone())
             .collect();
+        // What the tiles of a driver that is on its way (or failed to be) show.
+        let downloads = self
+            .model
+            .rows()
+            .iter()
+            .filter(|row| self.is_downloadable(&row.id))
+            .filter_map(|row| {
+                let job = self.queue.job(&row.id)?;
+                let download = match &job.state {
+                    state if state.is_active() => DriverDownload::Running(state.fraction()),
+                    InstallState::Failed(failure) => DriverDownload::Failed(failure.message.clone()),
+                    _ => return None,
+                };
+                Some((row.id.clone(), download))
+            })
+            .collect();
         crate::connection_dialog::DriverAvailability::known(installed, downloadable)
+            .with_downloads(downloads)
     }
 
     /// Ids of the enabled drivers in `store`; empty when it cannot be read.
@@ -392,7 +432,15 @@ impl DriverManagerUi {
         }
     }
 
-    fn manifest_source(&self) -> String {
+    /// Where the catalog is read from. Test builds never default to a real source (the release
+    /// URL, or a `dist/` manifest that happens to be around): a test that wants a catalog sets
+    /// `manifest_source` itself, anything else reads a file that does not exist and so fails
+    /// locally, without a request.
+    pub(super) fn manifest_source(&self) -> String {
+        #[cfg(test)]
+        if self.manifest_source.is_none() {
+            return TEST_NO_MANIFEST.to_string();
+        }
         self.manifest_source
             .clone()
             .unwrap_or_else(|| crate::drivers::manifest_source(self.policy))
@@ -757,6 +805,7 @@ impl AppRoot {
                         this.driver_ui.catalog_error = Some(error.message);
                     }
                 }
+                this.on_driver_catalog_settled(cx);
                 cx.notify();
             });
         }));
@@ -807,6 +856,7 @@ impl AppRoot {
                 if !due {
                     this.driver_ui.catalog_task = None;
                 }
+                this.on_driver_catalog_settled(cx);
                 cx.notify();
             });
             if !due {
@@ -840,6 +890,7 @@ impl AppRoot {
                     Err(error) => this.driver_info(format!("Driver update check skipped: {error}")),
                 }
                 this.driver_ui.catalog_task = None;
+                this.on_driver_catalog_settled(cx);
                 cx.notify();
             });
         }));
@@ -881,6 +932,24 @@ impl AppRoot {
         self.pump_install_queue(cx);
         cx.notify();
         enqueued
+    }
+
+    /// The download badge of a tile in the New Connection picker: installs `id` from the
+    /// catalog through the queue (a failed one is queued again). The tile follows the job.
+    pub(in crate::app) fn install_driver_from_picker(&mut self, id: &str, cx: &mut Context<Self>) {
+        let entry = self
+            .driver_ui
+            .model
+            .row(id)
+            .filter(|row| row.status == RowStatus::Available)
+            .and_then(|row| row.entry.clone());
+        let Some(entry) = entry else {
+            return;
+        };
+        if self.enqueue_driver_install(entry, JobKind::Install, cx) == Enqueued::Stale {
+            let message = t!("driver_prompt.error_stale").into_owned();
+            self.with_driver_window(cx, move |window, cx| window.push_notification(message, cx));
+        }
     }
 
     pub(super) fn update_all_drivers(&mut self, cx: &mut Context<Self>) {
@@ -962,7 +1031,7 @@ impl AppRoot {
 
     fn on_install_progress(&mut self, id: &str, progress: InstallProgress, cx: &mut Context<Self>) {
         self.driver_ui.queue.progress(id, progress);
-        if self.driver_manager_visible() {
+        if self.driver_manager_visible() || self.connection_ui.dialog_open {
             cx.notify();
         }
     }
@@ -1586,7 +1655,7 @@ impl AppRoot {
                         .gap(px(8.0))
                         .text_size(px(13.0))
                         .child(
-                            "Developer mode turns off the checks that keep untrusted code out of TableX:",
+                            "Developer mode turns off the checks that keep untrusted code out of tablex:",
                         )
                         .child(div().text_color(theme::text_muted()).child(
                             "\u{2022} driver manifests from local files are accepted without a signature",
@@ -1595,7 +1664,7 @@ impl AppRoot {
                             "\u{2022} drivers from local files and ad-hoc signed drivers can be installed",
                         ))
                         .child(
-                            "A driver runs inside TableX with full access to your files and connections. Only turn this on if you build drivers yourself.",
+                            "A driver runs inside tablex with full access to your files and connections. Only turn this on if you build drivers yourself.",
                         ),
                 )
                 .footer(
@@ -1751,7 +1820,7 @@ impl AppRoot {
                 source_repo: "https://example.com/tablex".into(),
                 team_id: "ABCDE12345".into(),
                 category: Some(category),
-                description: Some(format!("{name} driver for TableX.")),
+                description: Some(format!("{name} driver for tablex.")),
                 artifacts: vec![DriverArtifact {
                     target: Some(target.id()),
                     url: format!("https://example.com/{id}.dylib"),
