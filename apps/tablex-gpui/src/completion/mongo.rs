@@ -391,7 +391,10 @@ impl<'a> Request<'a, '_> {
             if let Some(dot) = chain.rfind('.').filter(|_| chain.starts_with('.')) {
                 return (self.chain_plan(chain_start), chain_start + dot + 1);
             }
-            if state.stack.is_empty() && !chain.is_empty() && !chain.contains('.') {
+            if state.stack.is_empty()
+                && (!chain.is_empty() || self.editor.manual)
+                && !chain.contains('.')
+            {
                 return (Plan::Root, chain_start);
             }
         }
@@ -503,7 +506,7 @@ impl<'a> Request<'a, '_> {
             Plan::None => {}
             Plan::Keys(obj) => self.key_items(&mut ranker, obj),
             Plan::Values => {
-                if !prefix.is_empty() {
+                if !prefix.is_empty() || self.editor.manual {
                     let values = if self.editor.json {
                         JSON_VALUES
                     } else {

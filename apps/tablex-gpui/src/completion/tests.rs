@@ -3,11 +3,14 @@
 use std::time::Instant;
 
 use super::*;
+use crate::settings::KeywordCase;
 
 struct Out {
     replace: Range<usize>,
     text: String,
     items: Vec<(String, String, Kind, String)>,
+    /// Per item: how far back from the end of its insert the caret goes.
+    caret_back: Vec<usize>,
 }
 
 impl Out {
@@ -28,6 +31,10 @@ impl Out {
 
     fn insert_of(&self, label: &str) -> &str {
         &self.items[self.position(label)].1
+    }
+
+    fn caret_back_of(&self, label: &str) -> usize {
+        self.caret_back[self.position(label)]
     }
 
     fn kind_of(&self, label: &str) -> Kind {
@@ -64,6 +71,7 @@ fn run(editor: &Editor<'_>, marked: &str, catalog: &dyn Catalog) -> Out {
                 )
             })
             .collect(),
+        caret_back: completions.items.iter().map(|item| item.caret_back).collect(),
         text: text.clone(),
     }
 }
@@ -80,8 +88,22 @@ fn sql_editor(flavor: SqlFlavor) -> Editor<'static> {
     Editor::Sql(SqlEditor {
         flavor,
         identifier_quote,
+        keyword_case: KeywordCase::Keep,
+        manual: false,
         fragment_of: None,
     })
+}
+
+/// `marked` completed by an editor with the given keyword-case setting.
+fn cased(flavor: SqlFlavor, keyword_case: KeywordCase, marked: &str) -> Out {
+    let Editor::Sql(editor) = sql_editor(flavor) else { unreachable!() };
+    run(&Editor::Sql(SqlEditor { keyword_case, ..editor }), marked, &EmptyCatalog)
+}
+
+/// `marked` completed on request (Ctrl+Space) instead of while typing.
+fn pg_manual(marked: &str, catalog: &dyn Catalog) -> Out {
+    let Editor::Sql(editor) = sql_editor(SqlFlavor::Postgres) else { unreachable!() };
+    run(&Editor::Sql(SqlEditor { manual: true, ..editor }), marked, catalog)
 }
 
 fn pg(marked: &str, catalog: &dyn Catalog) -> Out {
@@ -104,7 +126,18 @@ fn mongo(role: MongoRole<'static>, json: bool) -> Editor<'static> {
         role,
         collection: Some("orders"),
         json,
+        manual: false,
     })
+}
+
+fn script_manual(marked: &str, catalog: &dyn Catalog) -> Out {
+    let editor = Editor::Mongo(MongoEditor {
+        role: MongoRole::Script,
+        collection: Some("orders"),
+        json: false,
+        manual: true,
+    });
+    run(&editor, marked, catalog)
 }
 
 fn script(marked: &str, catalog: &dyn Catalog) -> Out {
@@ -444,8 +477,41 @@ fn inserted_words_follow_the_typed_case() {
         pg("select * from a WH|", &EmptyCatalog).insert_of("WHERE"),
         "WHERE"
     );
-    assert_eq!(pg("select su|", &EmptyCatalog).insert_of("SUM"), "sum(");
+    assert_eq!(pg("select su|", &EmptyCatalog).insert_of("SUM"), "sum()");
     assert_eq!(pg("select NO|", &EmptyCatalog).insert_of("NOW"), "NOW()");
+}
+
+#[test]
+fn upper_case_setting_inserts_upper_case_words_whatever_was_typed() {
+    let upper = |marked| cased(SqlFlavor::Postgres, KeywordCase::Upper, marked);
+    assert_eq!(upper("select * from a wh|").insert_of("WHERE"), "WHERE");
+    assert_eq!(upper("sel|").insert_of("SELECT"), "SELECT");
+    assert_eq!(upper("select su|").insert_of("SUM"), "SUM()");
+    assert_eq!(upper("select NO|").insert_of("NOW"), "NOW()");
+}
+
+#[test]
+fn lower_case_setting_inserts_lower_case_words_whatever_was_typed() {
+    let lower = |marked| cased(SqlFlavor::Postgres, KeywordCase::Lower, marked);
+    assert_eq!(lower("select * from a WH|").insert_of("WHERE"), "where");
+    assert_eq!(lower("SEL|").insert_of("SELECT"), "select");
+    assert_eq!(lower("select SU|").insert_of("SUM"), "sum()");
+}
+
+#[test]
+fn as_typed_setting_follows_the_typed_case() {
+    let keep = |marked| cased(SqlFlavor::Postgres, KeywordCase::Keep, marked);
+    assert_eq!(keep("select * from a wh|").insert_of("WHERE"), "where");
+    assert_eq!(keep("select * from a WH|").insert_of("WHERE"), "WHERE");
+    assert_eq!(keep("select * from a Wh|").insert_of("WHERE"), "WHERE");
+}
+
+#[test]
+fn mixed_case_function_names_keep_their_spelling_in_every_case_setting() {
+    for case in [KeywordCase::Upper, KeywordCase::Lower, KeywordCase::Keep] {
+        let out = cased(SqlFlavor::Clickhouse, case, "select toStartOfInt|");
+        assert_eq!(out.insert_of("toStartOfInterval"), "toStartOfInterval()", "{case:?}");
+    }
 }
 
 #[test]
@@ -482,6 +548,8 @@ fn table_fragment_editor_completes_columns_of_its_table() {
     let editor = Editor::Sql(SqlEditor {
         flavor: SqlFlavor::Postgres,
         identifier_quote: '"',
+        keyword_case: KeywordCase::Keep,
+        manual: false,
         fragment_of: Some(Relation {
             namespace: None,
             name: "users",
@@ -832,11 +900,11 @@ fn clickhouse_function_names_keep_their_case_and_match_by_prefix() {
     for name in ["toStartOfInterval", "toStartOfDay", "toStartOfMonth"] {
         assert_eq!(out.kind_of(name), Kind::Function, "{name}");
     }
-    assert_eq!(out.insert_of("toStartOfInterval"), "toStartOfInterval(");
+    assert_eq!(out.insert_of("toStartOfInterval"), "toStartOfInterval()");
     assert!(!out.detail_of("toStartOfInterval").is_empty());
     // A lower-case query lower-cases SQL words but never a case-sensitive name.
     let lower = ch("select tostart|", &EmptyCatalog);
-    assert_eq!(lower.insert_of("toStartOfInterval"), "toStartOfInterval(");
+    assert_eq!(lower.insert_of("toStartOfInterval"), "toStartOfInterval()");
     let words = ch("select * from users wh|", &shop());
     assert_eq!(words.insert_of("WHERE"), "where");
     for (marked, name) in [
@@ -943,4 +1011,261 @@ fn clickhouse_statements_honour_backslash_escapes_and_hash_comments() {
     )
     .items
     .is_empty());
+}
+
+// ------------------------------------------------- completion on request
+
+#[test]
+fn an_empty_word_lists_nothing_while_typing_but_what_may_come_next_on_request() {
+    // Typing: no menu on an empty statement or after a finished table reference.
+    assert!(pg("|", &EmptyCatalog).items.is_empty());
+    assert!(pg("select * from users |", &shop()).items.is_empty());
+    // On request: the statement starters ...
+    let start = pg_manual("|", &EmptyCatalog);
+    assert_eq!(start.labels()[0], "select *");
+    assert!(start.has("insert into") && start.has("common table expression"), "{:?}", start.labels());
+    // ... and what may follow a table.
+    let after_table = pg_manual("select * from users |", &shop());
+    assert!(after_table.has("WHERE") && after_table.has("JOIN"), "{:?}", after_table.labels());
+}
+
+#[test]
+fn a_select_list_on_request_lists_columns_first_then_functions_and_keywords() {
+    let out = pg_manual("select | from users", &shop());
+    let labels = out.labels();
+    assert_eq!(&labels[..3], ["id", "name", "email"], "{labels:?}");
+    assert!(out.has("users") && out.has("DISTINCT") && out.has("CASE"), "{labels:?}");
+    assert!(out.position("email") < out.position("users"));
+    assert!(out.position("users") < out.position("DISTINCT"));
+    // The typed word is still what narrows the list.
+    let typed = pg_manual("select na| from users", &shop());
+    assert_eq!(typed.labels()[0], "name");
+    // Comments and strings stay silent on request too.
+    assert!(pg_manual("select 'ab|c'", &EmptyCatalog).items.is_empty());
+    assert!(pg_manual("-- |", &EmptyCatalog).items.is_empty());
+}
+
+#[test]
+fn a_mongo_script_on_request_lists_statements_and_values_after_an_empty_word() {
+    assert!(script("|", &mongo_catalog()).items.is_empty());
+    let start = script_manual("|", &mongo_catalog());
+    assert_eq!(start.labels()[0], "db.collection.find");
+    let values = run(
+        &Editor::Mongo(MongoEditor {
+            role: MongoRole::Filter,
+            collection: Some("orders"),
+            json: true,
+            manual: true,
+        }),
+        r#"{"status": |}"#,
+        &mongo_catalog(),
+    );
+    assert!(!values.items.is_empty());
+    assert!(run(&mongo(MongoRole::Filter, true), r#"{"status": |}"#, &mongo_catalog()).items.is_empty());
+}
+
+#[test]
+fn a_function_with_arguments_leaves_the_caret_between_its_parentheses() {
+    let out = pg("select su|", &EmptyCatalog);
+    assert_eq!(out.insert_of("SUM"), "sum()");
+    assert_eq!(out.caret_back_of("SUM"), 1);
+    // Without arguments there is nothing to type: the caret stays after `)`.
+    let now = pg("select NO|", &EmptyCatalog);
+    assert_eq!(now.insert_of("NOW"), "NOW()");
+    assert_eq!(now.caret_back_of("NOW"), 0);
+    // Keywords and names are plain.
+    assert_eq!(pg("select * from a wh|", &EmptyCatalog).caret_back_of("WHERE"), 0);
+    // The keyword-case setting still decides the case.
+    let upper = cased(SqlFlavor::Postgres, KeywordCase::Upper, "select su|");
+    assert_eq!((upper.insert_of("SUM"), upper.caret_back_of("SUM")), ("SUM()", 1));
+}
+
+// ------------------------------------------------------- foreign keys
+
+fn linked() -> StaticCatalog {
+    shop()
+        .foreign_key("orders_user_fk", "orders", &["user_id"], "users", &["id"])
+        .foreign_key("items_order_fk", "Order Items", &["order_id"], "orders", &["id"])
+}
+
+#[test]
+fn tables_with_a_foreign_key_to_or_from_a_table_in_scope_come_first_after_join() {
+    // Without foreign key metadata the catalog order stands.
+    let plain = pg("select * from \"Order Items\" i join |", &shop());
+    assert_eq!(plain.labels()[0], "users");
+    // With it, the partner of the table in scope is first, and says why.
+    let out = pg("select * from \"Order Items\" i join |", &linked());
+    assert_eq!(out.labels()[0], "orders");
+    assert_eq!(out.detail_of("orders"), "table, foreign key");
+    assert_eq!(out.detail_of("users"), "table");
+    // Both directions: orders declares a key to users and Order Items points at orders.
+    let both = pg("select * from orders o join |", &linked());
+    assert_eq!(&both.labels()[..2], ["users", "Order Items"]);
+    // A typed word still narrows; the key partner wins among equal matches.
+    let typed = pg("select * from orders o join u|", &linked());
+    assert_eq!(typed.labels()[0], "users");
+    // Plain FROM lists are not reordered.
+    assert_eq!(pg("select * from |", &linked()).labels()[0], "users");
+}
+
+#[test]
+fn a_join_condition_after_on_uses_the_aliases_in_scope() {
+    let out = pg("select * from orders o join users u on |", &linked());
+    assert_eq!(out.labels()[0], "o.user_id = u.id");
+    assert_eq!(out.insert_of("o.user_id = u.id"), "o.user_id = u.id");
+    assert_eq!(out.detail_of("o.user_id = u.id"), "foreign key orders_user_fk");
+    // The child side comes first whichever table is joined.
+    let reversed = pg("select * from users u join orders o on |", &linked());
+    assert_eq!(reversed.labels()[0], "o.user_id = u.id");
+    // Without an alias the table name stands; quoting follows the dialect.
+    let bare = pg("select * from orders join users on |", &linked());
+    assert_eq!(bare.labels()[0], "orders.user_id = users.id");
+    let quoted = pg("select * from orders join \"Order Items\" on |", &linked());
+    assert_eq!(quoted.labels()[0], "\"Order Items\".order_id = orders.id");
+    let mysql = run(
+        &sql_editor(SqlFlavor::Mysql),
+        "select * from orders o join `Order Items` on |",
+        &linked(),
+    );
+    assert_eq!(mysql.labels()[0], "`Order Items`.order_id = o.id");
+    // The columns of the tables follow the conditions.
+    assert!(out.position("o.user_id = u.id") < out.position("user_id"));
+    // A typed word narrows the conditions like everything else.
+    assert_eq!(pg("select * from orders o join users u on o|", &linked()).labels()[0], "o.user_id = u.id");
+    assert!(!pg("select * from orders o join users u on q|", &linked()).has("o.user_id = u.id"));
+    // Only the table joined last gets conditions: a later clause or an earlier ON do not.
+    assert!(!pg("select * from orders o join users u on o.user_id = u.id where |", &linked()).has("o.user_id = u.id"));
+}
+
+#[test]
+fn a_join_condition_links_the_joined_table_to_any_table_in_scope() {
+    let out = pg(
+        "select * from users u join orders o on o.user_id = u.id join \"Order Items\" i on |",
+        &linked(),
+    );
+    assert_eq!(out.labels()[0], "i.order_id = o.id");
+    assert!(!out.has("o.user_id = u.id"), "{:?}", out.labels());
+}
+
+#[test]
+fn composite_keys_join_with_and_and_follow_the_keyword_case() {
+    let catalog = shop().foreign_key(
+        "lines_fk",
+        "Order Items",
+        &["order_id", "sku"],
+        "orders",
+        &["id", "status"],
+    );
+    let out = pg("select * from \"Order Items\" i join orders o on |", &catalog);
+    assert_eq!(out.labels()[0], "i.order_id = o.id AND i.sku = o.status");
+    let Editor::Sql(editor) = sql_editor(SqlFlavor::Postgres) else { unreachable!() };
+    let lowered = run(
+        &Editor::Sql(SqlEditor { keyword_case: KeywordCase::Lower, ..editor }),
+        "select * from \"Order Items\" i join orders o on |",
+        &catalog,
+    );
+    assert_eq!(lowered.labels()[0], "i.order_id = o.id and i.sku = o.status");
+}
+
+#[test]
+fn the_on_item_after_the_joined_table_is_offered_on_request_or_when_on_is_typed_after_an_alias() {
+    // Typing a space after the table: nothing new pops up.
+    assert!(pg("select * from orders o join users u |", &linked()).items.is_empty());
+    // On request: ON with the condition, before the plain keywords.
+    let manual = pg_manual("select * from orders o join users u |", &linked());
+    assert_eq!(manual.labels()[0], "ON");
+    assert_eq!(manual.insert_of("ON"), "ON o.user_id = u.id");
+    assert_eq!(manual.detail_of("ON"), "o.user_id = u.id");
+    assert!(manual.has("WHERE"));
+    // Typing `O` after an alias.
+    let typed = pg("select * from orders o join users u O|", &linked());
+    assert_eq!(typed.labels()[0], "ON");
+    assert_eq!(typed.insert_of("ON"), "ON o.user_id = u.id");
+    assert_eq!(typed.replace, 36..37);
+    // The typed word may be the alias itself: no condition then.
+    assert!(!pg("select * from orders o join users O|", &linked()).has("ON o.user_id = u.id"));
+    assert!(!pg("select * from orders o join users u W|", &linked()).has("ON"));
+}
+
+#[test]
+fn nothing_is_offered_from_foreign_keys_that_are_not_cached() {
+    // `shop()` has no foreign key metadata: a catalog that answers "not loaded".
+    assert_eq!(pg("select * from orders o join users u on |", &shop()).labels()[0], "o.id");
+    assert!(!pg_manual("select * from orders o join users u |", &shop()).has("ON o.user_id = u.id"));
+}
+
+// ------------------------------------------------------------ expand *
+
+/// `(label, insert, replace)` of the items of `marked` completed on request.
+fn expand(marked: &str, catalog: &dyn Catalog) -> Vec<(String, String, Range<usize>)> {
+    let Editor::Sql(editor) = sql_editor(SqlFlavor::Postgres) else { unreachable!() };
+    let editor = Editor::Sql(SqlEditor { manual: true, ..editor });
+    let cursor = marked.find('|').unwrap();
+    let text = marked.replacen('|', "", 1);
+    let completions = complete(&editor, &text, cursor, catalog);
+    completions
+        .items
+        .iter()
+        .map(|item| {
+            (
+                item.label.to_string(),
+                item.insert.to_string(),
+                item.replace.clone().unwrap_or(completions.replace.clone()),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a_star_expands_to_the_columns_of_its_table() {
+    let found = expand("select *| from users", &shop());
+    assert_eq!(
+        found,
+        [("Expand to columns".to_owned(), "id, name, email".to_owned(), 7..8)]
+    );
+    // Accepting replaces the star and nothing else.
+    let mut text = "select * from users".to_owned();
+    text.replace_range(found[0].2.clone(), &found[0].1);
+    assert_eq!(text, "select id, name, email from users");
+    // After a comma and DISTINCT, inside a longer statement.
+    assert_eq!(expand("select id, *| from users where id = 1", &shop())[0].1, "id, name, email");
+    assert_eq!(expand("select distinct *| from users", &shop())[0].1, "id, name, email");
+    // Not while typing.
+    let typed = pg("select *| from users", &shop());
+    assert!(!typed.has("Expand to columns"), "{:?}", typed.labels());
+}
+
+#[test]
+fn a_star_over_several_tables_qualifies_the_columns_by_alias() {
+    let found = expand("select *| from users u join orders o on o.user_id = u.id", &shop());
+    assert_eq!(
+        found[0].1,
+        "u.id, u.name, u.email, o.id, o.user_id, o.total, o.status"
+    );
+    // Without aliases the table names qualify.
+    let bare = expand("select *| from users join orders on true", &shop());
+    assert!(bare[0].1.starts_with("users.id, users.name, users.email, orders.id"), "{}", bare[0].1);
+    // `alias.*` expands that table only and replaces the qualifier too.
+    let one = expand("select o.*| from users u join orders o on o.user_id = u.id", &shop());
+    assert_eq!(one[0].1, "o.id, o.user_id, o.total, o.status");
+    assert_eq!(one[0].2, 7..10);
+    // Quoted per dialect.
+    let spaced = StaticCatalog::default().table("t", &["id", "Mixed Case", "select"]);
+    assert_eq!(expand("select *| from t", &spaced)[0].1, "id, \"Mixed Case\", \"select\"");
+}
+
+#[test]
+fn a_star_is_not_expanded_where_it_is_not_a_select_list_star_or_the_columns_are_unknown() {
+    let none = |marked: &str, catalog: &dyn Catalog| {
+        let found = expand(marked, catalog);
+        assert!(found.iter().all(|item| item.0 != "Expand to columns"), "{marked}: {found:?}");
+    };
+    none("select count(*|) from users", &shop());
+    none("select 2 *| from users", &shop());
+    none("select * from users where id *| 2", &shop());
+    none("select u.*| from orders o", &shop());
+    // Columns not cached, or unknowable (a subquery): nothing to expand to, and no noise.
+    assert!(expand("select *| from nowhere", &shop()).is_empty());
+    assert!(expand("select *| from (select 1 as a) d", &shop()).is_empty());
+    assert!(expand("select *| from users u join nowhere n on true", &shop()).is_empty());
 }

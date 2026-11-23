@@ -125,8 +125,10 @@ pub(super) enum Insert<'a> {
     /// A table / column / schema name: quoted on demand, qualified by
     /// `namespace` when the candidate lives outside the default one.
     Identifier,
-    /// Keyword or function: follows the case the user typed, then `suffix`.
+    /// Keyword: follows the case the user typed (or the keyword-case setting), then `suffix`.
     Word { suffix: &'static str },
+    /// A function: the word, then `()`; with arguments the caret goes between the parentheses.
+    Call { no_args: bool },
     /// A document key: `name: `, `"name": ` in strict JSON, or just `name`
     /// when the cursor is already inside a quoted key.
     Property,
@@ -160,6 +162,13 @@ impl<'a> Candidate<'a> {
     pub(super) fn word(name: &'a str, kind: Kind, detail: &'a str, suffix: &'static str) -> Self {
         Self {
             insert: Insert::Word { suffix },
+            ..Self::new(name, kind, detail)
+        }
+    }
+
+    pub(super) fn call(name: &'a str, kind: Kind, detail: &'a str, no_args: bool) -> Self {
+        Self {
+            insert: Insert::Call { no_args },
             ..Self::new(name, kind, detail)
         }
     }

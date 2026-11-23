@@ -24,7 +24,7 @@ mod tests;
 use std::borrow::Cow;
 use std::ops::Range;
 
-pub use catalog::{Catalog, Column, Relation};
+pub use catalog::{Catalog, Column, ForeignKey, Relation};
 #[cfg(test)]
 pub use catalog::{EmptyCatalog, StaticCatalog};
 use rank::{prefix_bytes, Insert, Ranked, Tier};
@@ -65,6 +65,11 @@ pub struct SqlEditor<'a> {
     pub flavor: SqlFlavor,
     /// The driver's identifier quote (`"` or `` ` ``).
     pub identifier_quote: char,
+    /// The case of the keywords and functions inserted (Settings > Editor > Format SQL > Keyword case).
+    pub keyword_case: crate::settings::KeywordCase,
+    /// The user asked for the menu (Ctrl+Space) instead of typing into it:
+    /// an empty word still lists what may come next.
+    pub manual: bool,
     /// The text is only a `WHERE` / `ORDER BY` fragment of this table (the
     /// table-data bar): no statement structure, one implicit table in scope.
     pub fragment_of: Option<Relation<'a>>,
@@ -90,6 +95,8 @@ pub struct MongoEditor<'a> {
     pub collection: Option<&'a str>,
     /// Strict JSON editor: keys are inserted quoted.
     pub json: bool,
+    /// The menu was asked for (Ctrl+Space): an empty word still lists what may come next.
+    pub manual: bool,
 }
 
 pub enum Editor<'a> {
@@ -106,6 +113,11 @@ pub struct Item<'a> {
     pub kind: Kind,
     /// Bytes of `label` to highlight as the matched prefix (0 = none).
     pub matched: usize,
+    /// Replaces this range instead of [`Completions::replace`] (`*` -> its columns).
+    pub replace: Option<Range<usize>>,
+    /// Bytes of `insert`, counted from its end, the caret goes back by once
+    /// accepted (`sum()` puts it between the parentheses).
+    pub caret_back: usize,
 }
 
 pub struct Completions<'a> {
@@ -149,7 +161,7 @@ struct Style {
     pub folds_to_lower: bool,
     /// The cursor is already inside an opening quote.
     pub inside_quote: bool,
-    /// Keywords / functions follow a lower-case query.
+    /// Keywords / functions are inserted in lower case (the setting says so, or follows a lower-case query).
     pub lowercase_words: bool,
     /// Characters of the query, for the highlighted prefix.
     pub query_chars: usize,
@@ -188,6 +200,19 @@ impl Style {
     }
 }
 
+/// A keyword or function name followed by `suffix`. Only all-capitals words
+/// follow a lower-case query: case-sensitive names such as ClickHouse's
+/// `toStartOfInterval` keep their spelling.
+fn word<'a>(name: &'a str, suffix: &'static str, style: &Style) -> Cow<'a, str> {
+    if style.lowercase_words && !name.chars().any(char::is_lowercase) {
+        Cow::Owned(format!("{}{suffix}", name.to_lowercase()))
+    } else if suffix.is_empty() {
+        Cow::Borrowed(name)
+    } else {
+        Cow::Owned(format!("{name}{suffix}"))
+    }
+}
+
 fn render<'a>(ranked: Vec<Ranked<'a>>, style: &Style) -> Vec<Item<'a>> {
     let mut items: Vec<Item<'a>> = Vec::with_capacity(MAX_ITEMS.min(ranked.len()));
     for Ranked {
@@ -206,6 +231,7 @@ fn render<'a>(ranked: Vec<Ranked<'a>>, style: &Style) -> Vec<Item<'a>> {
         }) {
             continue;
         }
+        let mut caret_back = 0;
         let insert = match candidate.insert {
             Insert::Identifier => {
                 let name = style.identifier(candidate.name);
@@ -214,15 +240,11 @@ fn render<'a>(ranked: Vec<Ranked<'a>>, style: &Style) -> Vec<Item<'a>> {
                     None => name,
                 })
             }
-            // Only all-capitals words follow a lower-case query: case-sensitive
-            // names such as ClickHouse's `toStartOfInterval` keep their spelling.
-            Insert::Word { suffix }
-                if style.lowercase_words && !candidate.name.chars().any(char::is_lowercase) =>
-            {
-                Cow::Owned(format!("{}{suffix}", candidate.name.to_lowercase()))
+            Insert::Word { suffix } => word(candidate.name, suffix, style),
+            Insert::Call { no_args } => {
+                caret_back = usize::from(!no_args);
+                word(candidate.name, "()", style)
             }
-            Insert::Word { suffix: "" } => Cow::Borrowed(candidate.name),
-            Insert::Word { suffix } => Cow::Owned(format!("{}{suffix}", candidate.name)),
             Insert::Property => Cow::Owned(match style.property {
                 PropertyStyle::Bare => format!("{}: ", candidate.name),
                 PropertyStyle::Quoted => format!("\"{}\": ", candidate.name),
@@ -242,6 +264,8 @@ fn render<'a>(ranked: Vec<Ranked<'a>>, style: &Style) -> Vec<Item<'a>> {
             detail: candidate.detail,
             kind: candidate.kind,
             matched,
+            replace: None,
+            caret_back,
         });
         if items.len() == MAX_ITEMS {
             break;

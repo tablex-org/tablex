@@ -5,17 +5,20 @@
 use std::borrow::Cow;
 use std::ops::Range;
 
-use super::rank::{Candidate, Ranker};
+use crate::settings::KeywordCase;
+
+use super::rank::{match_tier, prefix_bytes, Candidate, Ranker, Tier};
 use super::sql_data_clickhouse;
 use super::sql_data::{self, is_reserved, Place, SNIPPETS};
 use super::sql_lex::{lex, statement_bounds, Tok, Token};
 use super::{
-    render, Catalog, Column, Completions, Kind, PropertyStyle, Relation, SqlEditor, SqlFlavor,
-    Style, MAX_ITEMS,
+    render, Catalog, Column, Completions, ForeignKey, Item, Kind, PropertyStyle, Relation,
+    SqlEditor, SqlFlavor, Style, MAX_ITEMS,
 };
 
 const RANK_CAP: usize = MAX_ITEMS + 10;
 
+const BOOST_TABLE_FK: u16 = 600;
 const BOOST_TABLE: u16 = 500;
 const BOOST_TABLE_OTHER_SCHEMA: u16 = 400;
 const BOOST_CTE: u16 = 450;
@@ -28,7 +31,7 @@ const BOOST_KEYWORD: u16 = 200;
 const BOOST_FUNCTION: u16 = 150;
 
 /// Table reference found in a `FROM` / `JOIN` / `UPDATE` / `INTO` list.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct TableRef<'a> {
     namespace: Option<&'a str>,
     name: &'a str,
@@ -46,6 +49,18 @@ impl<'a> TableRef<'a> {
         self.exposed_name().eq_ignore_ascii_case(qualifier)
     }
 }
+
+/// Where the cursor is in a `JOIN` that already names its table.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum JoinStage {
+    /// `JOIN t [alias] |`
+    AfterTable,
+    /// `JOIN t [alias] ON |`
+    AfterOn,
+}
+
+/// Most join conditions offered at once.
+const MAX_JOIN_CONDITIONS: usize = 8;
 
 /// What kind of position the cursor is in, from the nearest clause keyword.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -436,6 +451,9 @@ impl<'a> Query<'a, '_> {
         let before = self.typing.before;
         let qualified = qualifier(&self.source, before);
         let mut ranker = Ranker::new(prefix, RANK_CAP);
+        let style = self.style();
+        // Items listed before the ranked ones (join conditions).
+        let mut front: Vec<Item<'a>> = Vec::new();
 
         // Block structure: innermost query block, tables in scope.
         let mut open = Vec::new();
@@ -458,6 +476,15 @@ impl<'a> Query<'a, '_> {
             .copied()
             .filter(|&index| index + 1 != block_start);
         self.scope(&open);
+
+        if qualified.is_none() && head.is_none() && self.editor.fragment_of.is_none() {
+            if self.editor.manual && prefix.is_empty() {
+                if let Some(expand) = self.expand_star(&style, before, block_start) {
+                    return expand;
+                }
+            }
+            front = self.join_condition_items(&style, before, block_start);
+        }
 
         if let Some((parts, len)) = qualified {
             self.qualified_items(&mut ranker, &parts[2 - len..]);
@@ -488,15 +515,20 @@ impl<'a> Query<'a, '_> {
             if self.editor.flavor == SqlFlavor::Clickhouse && self.expects_engine(before) {
                 self.engine_items(&mut ranker);
             } else if expects_table {
-                self.relation_items(&mut ranker, None);
+                let related = if prev_is("JOIN") {
+                    self.related_tables()
+                } else {
+                    Vec::new()
+                };
+                self.relation_items(&mut ranker, None, &related);
                 self.cte_items(&mut ranker);
             } else if let Some(table) = self.insert_target(head, clause) {
                 self.column_items(&mut ranker, std::slice::from_ref(&table));
             } else if self.editor.fragment_of.is_none() && prev.is_none() && block_start == 0 {
-                if !prefix.is_empty() {
+                if !prefix.is_empty() || self.editor.manual {
                     self.statement_start_items(&mut ranker);
                 }
-            } else if prefix.is_empty() {
+            } else if prefix.is_empty() && !self.editor.manual {
                 let columns_expected = prev.is_some_and(|index| {
                     self.source.kind(index) == Some(Tok::Comma)
                         || [
@@ -515,15 +547,28 @@ impl<'a> Query<'a, '_> {
             }
         }
 
-        let style = Style {
+        let mut items = render(ranker.finish(), &style);
+        if !front.is_empty() {
+            items.splice(0..0, front);
+            items.truncate(MAX_ITEMS);
+        }
+        items
+    }
+
+    fn style(&self) -> Style {
+        let prefix = self.typing.prefix;
+        Style {
             quote: Some(self.editor.identifier_quote),
             folds_to_lower: self.editor.flavor == SqlFlavor::Postgres,
             inside_quote: self.typing.in_quote,
-            lowercase_words: !prefix.is_empty() && !prefix.chars().any(char::is_uppercase),
+            lowercase_words: match self.editor.keyword_case {
+                KeywordCase::Upper => false,
+                KeywordCase::Lower => true,
+                KeywordCase::Keep => !prefix.is_empty() && !prefix.chars().any(char::is_uppercase),
+            },
             query_chars: prefix.chars().count(),
             property: PropertyStyle::Bare,
-        };
-        render(ranker.finish(), &style)
+        }
     }
 
     /// Fills `refs` / `ctes`: the innermost query block plus every enclosing
@@ -630,7 +675,7 @@ impl<'a> Query<'a, '_> {
                     is_namespace |= namespace.eq_ignore_ascii_case(qualifier);
                 });
                 if is_namespace {
-                    self.relation_items(ranker, Some(qualifier));
+                    self.relation_items(ranker, Some(qualifier), &[]);
                 } else {
                     let reference = TableRef {
                         namespace: None,
@@ -646,7 +691,14 @@ impl<'a> Query<'a, '_> {
     }
 
     /// Tables and views. With `only_namespace`, just that schema's, unqualified.
-    fn relation_items(&self, ranker: &mut Ranker<'a, '_>, only_namespace: Option<&str>) {
+    /// `related` (foreign key partners of the tables in scope) come first.
+    fn relation_items(
+        &self,
+        ranker: &mut Ranker<'a, '_>,
+        only_namespace: Option<&str>,
+        related: &[&str],
+    ) {
+        self.catalog.expect_relations(only_namespace);
         self.catalog.relations(&mut |relation: Relation<'a>| {
             let default = self.is_default_namespace(relation.namespace);
             let kind = if relation.view {
@@ -654,7 +706,16 @@ impl<'a> Query<'a, '_> {
             } else {
                 Kind::Table
             };
-            let detail = if relation.view { "view" } else { "table" };
+            let partner = !related.is_empty()
+                && related
+                    .iter()
+                    .any(|name| name.eq_ignore_ascii_case(relation.name));
+            let detail = match (relation.view, partner) {
+                (false, false) => "table",
+                (true, false) => "view",
+                (false, true) => "table, foreign key",
+                (true, true) => "view, foreign key",
+            };
             let candidate = Candidate::new(relation.name, kind, detail);
             match only_namespace {
                 Some(namespace) => {
@@ -668,10 +729,17 @@ impl<'a> Query<'a, '_> {
                         ranker.offer(candidate, BOOST_TABLE);
                     }
                 }
-                None if default => ranker.offer(candidate, BOOST_TABLE),
+                None if default => ranker.offer(
+                    candidate,
+                    if partner { BOOST_TABLE_FK } else { BOOST_TABLE },
+                ),
                 None => ranker.offer(
                     candidate.in_namespace(relation.namespace),
-                    BOOST_TABLE_OTHER_SCHEMA,
+                    if partner {
+                        BOOST_TABLE_FK
+                    } else {
+                        BOOST_TABLE_OTHER_SCHEMA
+                    },
                 ),
             }
         });
@@ -759,11 +827,233 @@ impl<'a> Query<'a, '_> {
         }
     }
 
+    /// Tables that have a foreign key to or from a table already in scope.
+    fn related_tables(&self) -> Vec<&'a str> {
+        let mut related = Vec::new();
+        for reference in self.refs.iter().filter(|r| !r.derived) {
+            self.catalog
+                .foreign_keys(reference.namespace, reference.name, &mut |fk| {
+                    if fk.table.eq_ignore_ascii_case(reference.name) {
+                        related.push(fk.referenced);
+                    }
+                    if fk.referenced.eq_ignore_ascii_case(reference.name) {
+                        related.push(fk.table);
+                    }
+                });
+        }
+        related
+    }
+
+    /// The `JOIN` whose table was just written and where the cursor stands in it. The table
+    /// reference is at most `schema . name AS alias` long, so the search is bounded.
+    fn join_target(&self, before: usize, block_start: usize) -> Option<(TableRef<'a>, JoinStage)> {
+        let last = before.checked_sub(1).filter(|&index| index >= block_start)?;
+        let lowest = last.saturating_sub(7).max(block_start);
+        let join = (lowest..=last)
+            .rev()
+            .find(|&index| self.source.is_keyword(index, "JOIN"))?;
+        let (reference, next) = self.source.table_ref(join + 1, self.typing.token);
+        let stage = if next == before {
+            JoinStage::AfterTable
+        } else if next + 1 == before && self.source.is_keyword(next, "ON") {
+            JoinStage::AfterOn
+        } else {
+            return None;
+        };
+        Some((reference?, stage))
+    }
+
+    /// `ON o.user_id = u.id` for the foreign keys between the joined table and the ones in
+    /// scope; they come before everything else. Foreign keys that are not cached yet are
+    /// asked for through the catalog and offered on a later keystroke.
+    fn join_condition_items(
+        &self,
+        style: &Style,
+        before: usize,
+        block_start: usize,
+    ) -> Vec<Item<'a>> {
+        let prefix = self.typing.prefix;
+        let Some((joined, stage)) = self.join_target(before, block_start) else {
+            return Vec::new();
+        };
+        let on = if style.lowercase_words { "on" } else { "ON" };
+        // Right after the table the next word may be its alias: only on request, or once an
+        // alias is there and the typed word starts `ON`.
+        if stage == JoinStage::AfterTable
+            && !(self.editor.manual
+                || (!prefix.is_empty()
+                    && joined.alias.is_some()
+                    && match_tier(on, prefix).is_some()))
+        {
+            return Vec::new();
+        }
+        let others: Vec<TableRef<'a>> = self
+            .refs
+            .iter()
+            .filter(|r| !r.derived && **r != joined)
+            .copied()
+            .collect();
+        if others.is_empty() {
+            return Vec::new();
+        }
+        let and = if style.lowercase_words { " and " } else { " AND " };
+        let mut conditions: Vec<(String, &'a str)> = Vec::new();
+        let mut offer = |fk: ForeignKey<'a>, child: &TableRef<'a>, parent: &TableRef<'a>| {
+            let condition = fk
+                .columns
+                .iter()
+                .zip(fk.referenced_columns)
+                .map(|(column, referenced)| {
+                    format!(
+                        "{}.{} = {}.{}",
+                        style.identifier(child.exposed_name()),
+                        style.identifier(column),
+                        style.identifier(parent.exposed_name()),
+                        style.identifier(referenced),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(and);
+            if !condition.is_empty() && conditions.iter().all(|(known, _)| *known != condition) {
+                conditions.push((condition, fk.name));
+            }
+        };
+        for owner in std::iter::once(&joined).chain(&others) {
+            self.catalog
+                .foreign_keys(owner.namespace, owner.name, &mut |fk| {
+                    for other in &others {
+                        if fk.table.eq_ignore_ascii_case(joined.name)
+                            && fk.referenced.eq_ignore_ascii_case(other.name)
+                        {
+                            offer(fk, &joined, other);
+                        }
+                        if fk.table.eq_ignore_ascii_case(other.name)
+                            && fk.referenced.eq_ignore_ascii_case(joined.name)
+                        {
+                            offer(fk, other, &joined);
+                        }
+                    }
+                });
+        }
+        conditions.truncate(MAX_JOIN_CONDITIONS);
+        conditions
+            .into_iter()
+            .filter_map(|(condition, name)| {
+                let (label, insert, detail) = match stage {
+                    JoinStage::AfterTable => (
+                        on.to_owned(),
+                        format!("{on} {condition}"),
+                        condition,
+                    ),
+                    JoinStage::AfterOn => (
+                        condition.clone(),
+                        condition,
+                        format!("foreign key {name}"),
+                    ),
+                };
+                let tier = match_tier(&label, prefix)?;
+                let matched = if matches!(tier, Tier::Prefix | Tier::Exact) {
+                    prefix_bytes(&label, style.query_chars)
+                } else {
+                    0
+                };
+                Some(Item {
+                    label: Cow::Owned(label),
+                    insert: Cow::Owned(insert),
+                    detail: Cow::Owned(detail),
+                    kind: Kind::Snippet,
+                    matched,
+                    replace: None,
+                    caret_back: 0,
+                })
+            })
+            .collect()
+    }
+
+    /// `select *|` / `select t.*|` on request: one item that spells the columns out in place of
+    /// the `*`. `None` when the cursor is not right after a select-list `*`; no items when the
+    /// columns are not known (they are asked for, see [`Catalog::columns`]).
+    fn expand_star(
+        &self,
+        style: &Style,
+        before: usize,
+        block_start: usize,
+    ) -> Option<Vec<Item<'a>>> {
+        let star = before.checked_sub(1).filter(|&index| index >= block_start)?;
+        let token = self.source.tokens[star];
+        let cursor = self.typing.replace.end;
+        if token.kind != Tok::Op || token.text(self.source.text) != "*" || token.end != cursor {
+            return None;
+        }
+        // The `*` starts a select item: after `SELECT`, `DISTINCT` or a comma, with or without `qualifier.`.
+        let starts_item = |index: Option<usize>| {
+            index.is_some_and(|index| {
+                index >= block_start
+                    && (self.source.kind(index) == Some(Tok::Comma)
+                        || ["SELECT", "DISTINCT"]
+                            .iter()
+                            .any(|keyword| self.source.is_keyword(index, keyword)))
+            })
+        };
+        let (qualifier, from) = match star.checked_sub(1) {
+            Some(dot) if dot >= block_start && self.source.kind(dot) == Some(Tok::Dot) => {
+                let name = dot.checked_sub(1).filter(|&index| index >= block_start)?;
+                if !starts_item(name.checked_sub(1)) {
+                    return None;
+                }
+                (Some(self.source.ident(name)?), self.source.tokens[name].start)
+            }
+            previous if starts_item(previous) => (None, token.start),
+            _ => return None,
+        };
+        if self.clause_before(block_start, before) != Clause::Select {
+            return None;
+        }
+        let targets: Vec<TableRef<'a>> = match qualifier {
+            Some(qualifier) => self
+                .refs
+                .iter()
+                .filter(|r| r.answers_to(qualifier))
+                .copied()
+                .collect(),
+            None => self.refs.clone(),
+        };
+        // Several tables (or a written qualifier) keep the columns apart by their alias.
+        let qualified = qualifier.is_some() || targets.len() > 1;
+        let mut names: Vec<String> = Vec::new();
+        let mut known = !targets.is_empty();
+        for target in &targets {
+            let loaded = !target.derived
+                && self
+                    .catalog
+                    .columns(target.namespace, target.name, &mut |column| {
+                        let name = style.identifier(column.name);
+                        names.push(if qualified {
+                            format!("{}.{name}", style.identifier(target.exposed_name()))
+                        } else {
+                            name
+                        });
+                    });
+            known &= loaded;
+        }
+        if !known || names.is_empty() {
+            return Some(Vec::new());
+        }
+        Some(vec![Item {
+            label: Cow::Borrowed("Expand to columns"),
+            detail: Cow::Owned(format!("{} columns", names.len())),
+            insert: Cow::Owned(names.join(", ")),
+            kind: Kind::Snippet,
+            matched: 0,
+            replace: Some(from..cursor),
+            caret_back: 0,
+        }])
+    }
+
     fn function_items(&self, ranker: &mut Ranker<'a, '_>) {
         for function in sql_data::functions_for(self.editor.flavor) {
-            let suffix = if function.no_args() { "()" } else { "(" };
             ranker.offer(
-                Candidate::word(function.name, Kind::Function, function.desc, suffix),
+                Candidate::call(function.name, Kind::Function, function.desc, function.no_args()),
                 BOOST_FUNCTION,
             );
         }

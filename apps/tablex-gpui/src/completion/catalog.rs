@@ -17,9 +17,24 @@ pub struct Column<'a> {
     pub data_type: Option<&'a str>,
 }
 
+/// A foreign key, as the catalog caches it: `table` declares it, `referenced`
+/// is the table it points to. Names are unqualified.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ForeignKey<'a> {
+    pub name: &'a str,
+    pub table: &'a str,
+    pub columns: &'a [String],
+    pub referenced: &'a str,
+    pub referenced_columns: &'a [String],
+}
+
 pub trait Catalog {
     /// Tables and views visible to the editor.
     fn relations<'a>(&'a self, visit: &mut dyn FnMut(Relation<'a>));
+
+    /// A completion that lists the tables and views of `namespace` (`None`: the default one) or
+    /// resolves a table name in it. A catalog that loads lazily notes that those lists are wanted.
+    fn expect_relations(&self, _namespace: Option<&str>) {}
 
     /// Schemas / databases (the default one included).
     fn namespaces<'a>(&'a self, visit: &mut dyn FnMut(&'a str));
@@ -36,6 +51,18 @@ pub trait Catalog {
         relation: &str,
         visit: &mut dyn FnMut(Column<'a>),
     ) -> bool;
+
+    /// Foreign keys a relation declares and the ones other tables declare
+    /// against it. Returns `false` when they are not cached (the default: a
+    /// catalog without foreign key metadata).
+    fn foreign_keys<'a>(
+        &'a self,
+        _namespace: Option<&str>,
+        _relation: &str,
+        _visit: &mut dyn FnMut(ForeignKey<'a>),
+    ) -> bool {
+        false
+    }
 
     /// Mongo collection names of the editor's database.
     fn collections<'a>(&'a self, visit: &mut dyn FnMut(&'a str));
@@ -73,7 +100,13 @@ pub struct StaticCatalog {
     pub collections: Vec<String>,
     pub fields: Vec<String>,
     pub default_namespace: Option<String>,
+    /// `(name, table, columns, referenced table, referenced columns)`; once
+    /// one is added every table counts as loaded.
+    pub foreign_keys: Vec<StaticForeignKey>,
 }
+
+#[cfg(test)]
+pub type StaticForeignKey = (String, String, Vec<String>, String, Vec<String>);
 
 #[cfg(test)]
 impl StaticCatalog {
@@ -121,6 +154,26 @@ impl StaticCatalog {
                 .iter()
                 .map(|column| ((*column).to_owned(), None))
                 .collect(),
+        ));
+        self
+    }
+
+    /// A foreign key `table(columns)` -> `referenced(referenced_columns)`.
+    pub fn foreign_key(
+        mut self,
+        name: &str,
+        table: &str,
+        columns: &[&str],
+        referenced: &str,
+        referenced_columns: &[&str],
+    ) -> Self {
+        let owned = |names: &[&str]| names.iter().map(|name| (*name).to_owned()).collect();
+        self.foreign_keys.push((
+            name.to_owned(),
+            table.to_owned(),
+            owned(columns),
+            referenced.to_owned(),
+            owned(referenced_columns),
         ));
         self
     }
@@ -177,6 +230,20 @@ impl Catalog for StaticCatalog {
             });
         }
         true
+    }
+
+    fn foreign_keys<'a>(
+        &'a self,
+        _namespace: Option<&str>,
+        relation: &str,
+        visit: &mut dyn FnMut(ForeignKey<'a>),
+    ) -> bool {
+        for (name, table, columns, referenced, referenced_columns) in &self.foreign_keys {
+            if table.eq_ignore_ascii_case(relation) || referenced.eq_ignore_ascii_case(relation) {
+                visit(ForeignKey { name, table, columns, referenced, referenced_columns });
+            }
+        }
+        !self.foreign_keys.is_empty()
     }
 
     fn collections<'a>(&'a self, visit: &mut dyn FnMut(&'a str)) {
