@@ -74,10 +74,10 @@ pub enum AgentError {
         message: String,
         retryable: bool,
     },
-    /// The TableX app cannot be reached (not running, no channel on this platform, a broken one).
+    /// The tablex app cannot be reached (not running, no channel on this platform, a broken one).
     #[error("{0}")]
     AppUnavailable(String),
-    /// The TableX app was reached and said no.
+    /// The tablex app was reached and said no.
     #[error("{0}")]
     AppRefused(String),
     #[error("{0}")]

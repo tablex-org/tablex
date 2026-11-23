@@ -351,7 +351,7 @@ impl WriteApprover for AppApprover {
     }
 
     /// The user is asked, with the warning.
-    fn allows_dangerous(&self) -> bool {
+    fn allows_dangerous(&self, _connection: &engine_agent::ConnectionInfo) -> bool {
         true
     }
 }
@@ -567,7 +567,12 @@ pub(super) mod tests {
 
     #[test]
     fn the_app_allows_dangerous_statements_to_be_asked_about() {
-        assert!(approver().allows_dangerous());
+        use engine_agent::testing::connection;
+        let mut info = connection("c", engine_agent::ConnectionKind::Sqlite, None);
+        assert!(approver().allows_dangerous(&info));
+        // Also on a production connection: the card carries the warning.
+        info.connection_type.production = true;
+        assert!(approver().allows_dangerous(&info));
     }
 
     #[test]

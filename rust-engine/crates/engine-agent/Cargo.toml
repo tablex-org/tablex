@@ -2,7 +2,7 @@
 name = "engine-agent"
 version = "0.1.0"
 edition = "2021"
-description = "UI-free agent tool layer for TableX: typed tools, access policy, limits, schema context and audit log shared by the MCP server and the in-app assistant"
+description = "UI-free agent tool layer for tablex: typed tools, access policy, limits, schema context and audit log shared by the MCP server and the in-app assistant"
 
 [dependencies]
 engine-driver-api = { path = "../engine-driver-api" }

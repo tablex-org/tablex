@@ -225,7 +225,7 @@ fn connection_change_output() -> Value {
             ("connection_id", string("The new connection's id, or the removed one's.")),
             ("agent_access", string_enum(&ACCESS_LEVELS, "What you may do on the new connection.")),
             ("password_saved", boolean("A password was saved for the new connection.")),
-            ("app_notified", boolean("The running TableX was told to reload its connections (false when it is not running).")),
+            ("app_notified", boolean("The running tablex was told to reload its connections (false when it is not running).")),
             ("warning", string("Something that went wrong after the change was made.")),
         ],
         &["connection_id", "app_notified"],
@@ -265,10 +265,13 @@ macro_rules! execute_query_text {
         needs `read_write` and may be put to the user for approval when the connection allows it. \
         A refusal or a decline is final for this request: do not retry the statement or reword it to get \
         around it, tell the user instead. Multi-statement scripts are refused. At most 1000 rows (default \
-        200) and a total size limit are returned; check `truncated`. Dangerous statements (DROP, TRUNCATE, \
-        DELETE or UPDATE without WHERE, ...) are refused; a front end that can ask the user about them \
-        says to pass `dangerous` true, one that cannot (the MCP server) says so and the user has to run \
-        the statement themselves."
+        200) and a total size limit are returned; check `truncated`. Adding structure (CREATE TABLE, INDEX, \
+        VIEW, SEQUENCE, SCHEMA, TYPE; ALTER TABLE ... ADD COLUMN, CONSTRAINT or INDEX; COMMENT ON) is an \
+        ordinary change, approved like an INSERT. Dangerous statements (DROP, TRUNCATE, ALTER TABLE ... \
+        DROP, ALTER or MODIFY COLUMN, RENAME, DELETE or UPDATE without WHERE, ...) are refused unless \
+        `dangerous` is true, which puts them to the user with the danger shown; only do that when the \
+        user asked for it. The MCP server does that on a connection that is not of a production type; on \
+        a production one it refuses them and the user has to run the statement themselves in the tablex app."
     };
 }
 
@@ -278,8 +281,9 @@ macro_rules! execute_batch_text {
         more; the script is split into statements and each is judged like execute_query: if one \
         changes data the connection needs `read_write` and the user is asked ONCE to approve all the \
         changes of the script together, before anything runs. A script with a statement that is not \
-        allowed (a dangerous one: DROP, TRUNCATE, DELETE or UPDATE without WHERE ...; a blocked \
-        function; BEGIN, COMMIT, SET ...) is refused as a whole before anything runs, and so is one \
+        allowed (a dangerous one, which a script never runs: DROP, TRUNCATE, ALTER ... DROP, DELETE or \
+        UPDATE without WHERE ...; adding structure such as CREATE TABLE or ALTER TABLE ... ADD COLUMN is an \
+        ordinary change; a blocked function; BEGIN, COMMIT, SET ...) is refused as a whole before anything runs, and so is one \
         the user cannot review. A refusal or a decline is final for this request: do not retry it or \
         reword it to get around it, tell the user instead. At most 50 statements. The result has one \
         entry per statement that ran (rows, affected rows or the error, with the limits of \
@@ -642,8 +646,7 @@ fn spec_for(tool: ToolName, transactions: bool) -> ToolSpec {
                 asked to approve the exact command before anything is sent. A refusal or a decline is \
                 final for this request: do not retry it or reword it to get around it, tell the user \
                 instead. `filter` selects the documents (required; an empty filter is refused unless \
-                `allow_all` is true, and a front end that cannot ask the user about dangerous changes, the \
-                MCP server, refuses it then). Give `update` (update operators such as $set) or `pipeline` \
+                `allow_all` is true, and the MCP server refuses it then on a production connection). Give `update` (update operators such as $set) or `pipeline` \
                 (an update pipeline), not both. Only the first match is updated unless `many` is true; \
                 `upsert` inserts a document when nothing matches. Not available inside a transaction. The \
                 result has `n` (matched), `n_modified`, `upserted` and any `write_errors`.",
@@ -671,8 +674,7 @@ fn spec_for(tool: ToolName, transactions: bool) -> ToolSpec {
                 asked to approve the exact command before anything is sent. A refusal or a decline is \
                 final for this request: do not retry it or reword it to get around it, tell the user \
                 instead. `filter` selects the documents (required; an empty filter is refused unless \
-                `allow_all` is true, and a front end that cannot ask the user about dangerous changes, the \
-                MCP server, refuses it then). Only the first match is deleted unless `many` is true. Not \
+                `allow_all` is true, and the MCP server refuses it then on a production connection). Only the first match is deleted unless `many` is true. Not \
                 available inside a transaction. The result has the number deleted (`n`) and any \
                 `write_errors`.",
             input_schema: object(
@@ -817,11 +819,11 @@ fn spec_for(tool: ToolName, transactions: bool) -> ToolSpec {
         },
         ToolName::OpenTable => ToolSpec {
             name: tool.as_str(),
-            description: "Show a table, view or MongoDB collection to the user: TableX reveals it in its \
+            description: "Show a table, view or MongoDB collection to the user: tablex reveals it in its \
                 sidebar and opens it in a data tab, as a double click does. Nothing is read for you and \
                 no data is returned: use it when the user should look at the data. Needs access \
-                `schema_only` or more, and TableX has to be running; the connection is opened by TableX \
-                if needed. The answer means TableX took the request up, not that the table has \
+                `schema_only` or more, and tablex has to be running; the connection is opened by tablex \
+                if needed. The answer means tablex took the request up, not that the table has \
                 loaded.",
             input_schema: object(
                 vec![
@@ -836,7 +838,7 @@ fn spec_for(tool: ToolName, transactions: bool) -> ToolSpec {
                 vec![
                     connection.clone(),
                     ("object", string("The table, view or collection.")),
-                    ("requested", boolean("TableX took the request up; the table may still be loading.")),
+                    ("requested", boolean("tablex took the request up; the table may still be loading.")),
                 ],
                 &["connection_id", "object", "requested"],
             ),
@@ -844,15 +846,15 @@ fn spec_for(tool: ToolName, transactions: bool) -> ToolSpec {
         },
         ToolName::ExecuteAndShow => ToolSpec {
             name: tool.as_str(),
-            description: "Put a query in a new editor tab of TableX, where the user sees it, and run it \
-                there so the user sees the result. Needs access `read` or more, and TableX has to be \
+            description: "Put a query in a new editor tab of tablex, where the user sees it, and run it \
+                there so the user sees the result. Needs access `read` or more, and tablex has to be \
                 running. A query that is run (`run` true, the default) must be a single read; it runs \
-                under TableX's own rules, which may ask the user to confirm first or refuse (production \
-                or read-only connections), and the user answers in TableX. A query that changes data, a \
+                under tablex's own rules, which may ask the user to confirm first or refuse (production \
+                or read-only connections), and the user answers in tablex. A query that changes data, a \
                 script with several statements or a MongoDB script is not run from here: call with \
                 `run` false to only put it in the editor for the user to run, or use execute_query (a \
                 change is put to the user for approval). No rows are returned: use execute_query when \
-                you need the data yourself. The answer means TableX took the request up, not that the \
+                you need the data yourself. The answer means tablex took the request up, not that the \
                 query has finished.",
             input_schema: object(
                 vec![
@@ -866,8 +868,8 @@ fn spec_for(tool: ToolName, transactions: bool) -> ToolSpec {
             output_schema: object(
                 vec![
                     connection.clone(),
-                    ("shown", boolean("TableX opened the tab with the query in it.")),
-                    ("run", boolean("TableX was asked to run it (it may ask the user first).")),
+                    ("shown", boolean("tablex opened the tab with the query in it.")),
+                    ("run", boolean("tablex was asked to run it (it may ask the user first).")),
                 ],
                 &["connection_id", "shown", "run"],
             ),
@@ -875,18 +877,18 @@ fn spec_for(tool: ToolName, transactions: bool) -> ToolSpec {
         },
         ToolName::AddConnection => ToolSpec {
             name: tool.as_str(),
-            description: "Add a saved connection to TableX. The user is asked to approve every call \
+            description: "Add a saved connection to tablex. The user is asked to approve every call \
                 and sees the name, kind, address and connection type (never the password); a refusal \
                 or a decline is final: do not retry it, tell the user. Give either `uri` or the \
                 fields (`host`, `port`, `database`, `user`; SQLite: `path`, an absolute file path). \
                 The `uri` must not hold a password and only takes routing and TLS options (e.g. \
                 sslmode, authSource); give the password as `password`, which is saved in the \
-                credential store (without it the connection has none saved and TableX asks for it \
+                credential store (without it the connection has none saved and tablex asks for it \
                 when connecting). SSH tunnels, proxies and certificate files cannot be set up here. \
                 `connection_type` is the id or name of one of the user's connection types (default \
                 development). The new connection has no access setting of its own: what you may do on \
                 it is what the user's settings give its type (see `agent_access` in the answer, often \
-                `off`). The name must not be in use (case-insensitive). TableX does not need to be \
+                `off`). The name must not be in use (case-insensitive). tablex does not need to be \
                 running; a running one reloads its connections. The driver for the kind need not be \
                 installed yet.",
             input_schema: object(
@@ -941,7 +943,7 @@ fn spec_for(tool: ToolName, transactions: bool) -> ToolSpec {
         },
         ToolName::RemoveConnection => ToolSpec {
             name: tool.as_str(),
-            description: "Remove a saved connection from TableX, with its saved passwords and pinned \
+            description: "Remove a saved connection from tablex, with its saved passwords and pinned \
                 objects, and close your session on it. The user is asked to approve every call, and \
                 the question says when the connection is a production one; a refusal or a decline is \
                 final. It cannot be undone.",

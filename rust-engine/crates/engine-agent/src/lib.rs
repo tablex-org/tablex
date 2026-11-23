@@ -1,4 +1,4 @@
-//! The agent tool layer: what an AI agent may do with a TableX connection,
+//! The agent tool layer: what an AI agent may do with a tablex connection,
 //! behind one policy, shared by the MCP server and the in-app assistant.
 //!
 //! * **Tools** (nineteen, names stable; three more with [`ToolLayer::with_transactions`]: `begin_transaction`,

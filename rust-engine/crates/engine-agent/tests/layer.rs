@@ -294,6 +294,157 @@ fn list_connections_never_carries_a_uri_or_secret() {
     );
 }
 
+#[test]
+fn an_mcp_like_front_end_asks_about_dangerous_statements_off_production_only() {
+    let args = |flagged: Option<bool>| {
+        let mut args = json!({"connection_id": SQL, "statement": "DROP TABLE t"});
+        if let Some(flag) = flagged {
+            args["dangerous"] = json!(flag);
+        }
+        args
+    };
+    let mcp = || {
+        let mut approver = ScriptedApprover::new(ApprovalDecision::Approve, false);
+        Arc::get_mut(&mut approver).unwrap().allow_dangerous_off_production = true;
+        approver
+    };
+    // A development connection: without the flag the model is told how to ask; with it the user
+    // is asked, with the reason, and the driver gets `confirmed`.
+    let approver = mcp();
+    let fx = fixture_with(
+        Some(AgentAccess::ReadWrite),
+        false,
+        false,
+        Some(approver.clone()),
+        Limits::default(),
+        Vec::new(),
+    );
+    fx.open_all();
+    for flagged in [None, Some(false)] {
+        let outcome = fx.call("execute_query", args(flagged));
+        assert_eq!(code(&outcome), "agent.dangerous_refused");
+        assert!(outcome.to_text().contains("call again with dangerous=true"), "{}", outcome.to_text());
+    }
+    assert!(approver.asked.lock().unwrap().is_empty());
+    fx.sql.set_behavior(Behavior::Affected(0));
+    assert_eq!(code(&fx.call("execute_query", args(Some(true)))), "ok");
+    let asked = approver.asked.lock().unwrap().clone();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].0, "DROP TABLE t");
+    assert!(asked[0].1.as_deref().unwrap().contains("DROP"), "{asked:?}");
+    assert_eq!(fx.sql.runs.lock().unwrap().as_slice(), [("DROP TABLE t".to_owned(), true)]);
+    // A production connection: refused at once, whatever the flag, nobody is asked, and the
+    // message says why and what to do.
+    let approver = mcp();
+    let fx = fixture_with(
+        Some(AgentAccess::ReadWrite),
+        false,
+        true,
+        Some(approver.clone()),
+        Limits::default(),
+        Vec::new(),
+    );
+    fx.open_all();
+    for flagged in [None, Some(true)] {
+        let outcome = fx.call("execute_query", args(flagged));
+        assert_eq!(code(&outcome), "agent.dangerous_refused");
+        let message = outcome.to_text();
+        assert!(
+            message.contains("test does not run dangerous statements on a production connection (this one is of type `Production`)"),
+            "{message}"
+        );
+        assert!(message.contains("run it themselves in the tablex app"), "{message}");
+        assert!(!message.contains("dangerous=true"), "{message}");
+    }
+    assert!(approver.asked.lock().unwrap().is_empty());
+    assert_eq!(fx.sql.run_count(), 0);
+    // Below `read_write` a dangerous statement is a refused write, like any other.
+    let fx = fixture_with(
+        Some(AgentAccess::Read),
+        false,
+        false,
+        Some(mcp()),
+        Limits::default(),
+        Vec::new(),
+    );
+    fx.open_all();
+    assert_eq!(code(&fx.call("execute_query", args(Some(true)))), "agent.write_refused");
+    assert_eq!(fx.sql.run_count(), 0);
+}
+
+#[test]
+fn additive_ddl_is_asked_once_like_an_insert_and_destructive_ddl_is_dangerous() {
+    let additive = [
+        ("ALTER TABLE t ADD COLUMN biz_domain text", true),
+        ("CREATE SCHEMA s", true),
+        ("CREATE INDEX CONCURRENTLY IF NOT EXISTS i ON t (a)", false),
+        ("CREATE TABLE u (a int)", false),
+        ("COMMENT ON TABLE t IS 'x'", false),
+    ];
+    for production in [false, true] {
+        let mut approver = ScriptedApprover::new(ApprovalDecision::Approve, false);
+        Arc::get_mut(&mut approver).unwrap().allow_dangerous_off_production = true;
+        let fx = fixture_with(
+            Some(AgentAccess::ReadWrite),
+            false,
+            production,
+            Some(approver.clone()),
+            Limits::default(),
+            Vec::new(),
+        );
+        fx.open_all();
+        fx.sql.set_behavior(Behavior::Affected(0));
+        for (at, (sql, confirmed)) in additive.iter().enumerate() {
+            // No `dangerous` flag: it is an ordinary write.
+            let outcome = fx.call("execute_query", json!({"connection_id": SQL, "statement": sql}));
+            assert_eq!(code(&outcome), "ok", "{sql}: {}", outcome.to_text());
+            let asked = approver.asked.lock().unwrap().clone();
+            assert_eq!(asked.len(), at + 1, "asked once: {sql}");
+            assert_eq!(asked[at], ((*sql).to_owned(), None), "{sql}");
+            // The driver's own check asks to confirm some of them; the approval covers it.
+            assert_eq!(fx.sql.runs.lock().unwrap()[at], ((*sql).to_owned(), *confirmed), "{sql}");
+        }
+    }
+    // Destructive DDL is dangerous: refused without the flag, never asked.
+    let approver = ScriptedApprover::new(ApprovalDecision::Approve, true);
+    let fx = fixture_with(
+        Some(AgentAccess::ReadWrite),
+        false,
+        false,
+        Some(approver.clone()),
+        Limits::default(),
+        Vec::new(),
+    );
+    fx.open_all();
+    for sql in [
+        "ALTER TABLE t DROP COLUMN c",
+        "ALTER TABLE t ALTER COLUMN c TYPE text",
+        "DROP INDEX i",
+        "RENAME TABLE a TO b",
+    ] {
+        let outcome = fx.call("execute_query", json!({"connection_id": SQL, "statement": sql}));
+        assert_eq!(code(&outcome), "agent.dangerous_refused", "{sql}");
+    }
+    assert!(approver.asked.lock().unwrap().is_empty());
+    assert_eq!(fx.sql.run_count(), 0);
+    // With `read` access additive DDL is a refused write.
+    let fx = fixture_with(
+        Some(AgentAccess::Read),
+        false,
+        false,
+        Some(ScriptedApprover::new(ApprovalDecision::Approve, true)),
+        Limits::default(),
+        Vec::new(),
+    );
+    fx.open_all();
+    let outcome = fx.call(
+        "execute_query",
+        json!({"connection_id": SQL, "statement": "ALTER TABLE t ADD COLUMN c int"}),
+    );
+    assert_eq!(code(&outcome), "agent.write_refused");
+    assert_eq!(fx.sql.run_count(), 0);
+}
+
 // ------------------------------------------------------- the policy matrix
 
 /// Expected outcome of every tool case at each effective access
@@ -630,7 +781,7 @@ fn dangerous_statements_need_the_flag_and_an_approver_that_allows_them() {
     for flagged in [None, Some(true)] {
         let message = fx.call("execute_query", drop(flagged)).to_text();
         assert!(
-            message.contains("test never runs dangerous statements"),
+            message.contains("test does not run dangerous statements"),
             "{message}"
         );
         assert!(message.contains("do not retry"), "{message}");
@@ -1779,7 +1930,7 @@ impl engine_agent::WriteApprover for Probe {
         self.veto.clone().map_or(Ok(()), Err)
     }
 
-    fn allows_dangerous(&self) -> bool {
+    fn allows_dangerous(&self, _connection: &ConnectionInfo) -> bool {
         true
     }
 }

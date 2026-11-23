@@ -438,7 +438,7 @@ fn real_provider(address: std::net::SocketAddr) -> (Arc<dyn ChatProvider>, Arc<A
         None,
         None,
         Arc::clone(&keys),
-        Arc::new(crate::ai::transport::ReqwestTransport::new("TableX-test").direct()),
+        Arc::new(crate::ai::transport::ReqwestTransport::new("tablex-test").direct()),
         Arc::new(records::MemoryRecords::default()),
         None,
         Arc::new(NoSecrets),

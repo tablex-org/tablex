@@ -443,7 +443,7 @@ pub trait Session: Send + Sync {
     }
 }
 
-/// The running TableX app, which an agent may ask to show something to the user. Only the MCP
+/// The running tablex app, which an agent may ask to show something to the user. Only the MCP
 /// server has one (the in-app assistant is inside the app already), so only a layer built with
 /// [`ToolLayer::with_app`](crate::ToolLayer::with_app) has `open_table` and `execute_and_show`.
 /// Both calls block on the channel to the app, on the caller's worker thread; an error is
@@ -612,8 +612,9 @@ pub trait WriteApprover: Send + Sync {
         Ok(())
     }
 
-    /// `false`: dangerous statements are refused without asking (MCP mode).
-    fn allows_dangerous(&self) -> bool {
+    /// `false`: a dangerous statement on this connection is refused without asking. Default:
+    /// never allowed.
+    fn allows_dangerous(&self, _connection: &ConnectionInfo) -> bool {
         false
     }
 }

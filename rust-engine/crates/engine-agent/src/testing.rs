@@ -501,6 +501,8 @@ impl Session for FakeSession {
 pub struct ScriptedApprover {
     pub decision: ApprovalDecision,
     pub allow_dangerous: bool,
+    /// Allows dangerous statements except on a production connection, as the MCP server does.
+    pub allow_dangerous_off_production: bool,
     pub asked: Mutex<Vec<(String, Option<String>)>>,
     /// The database of each approval request.
     pub databases: Mutex<Vec<Option<String>>>,
@@ -515,6 +517,7 @@ impl ScriptedApprover {
         Arc::new(Self {
             decision,
             allow_dangerous,
+            allow_dangerous_off_production: false,
             asked: Mutex::new(Vec::new()),
             databases: Mutex::new(Vec::new()),
             transactions: Mutex::new(Vec::new()),
@@ -551,7 +554,8 @@ impl WriteApprover for ScriptedApprover {
         }
     }
 
-    fn allows_dangerous(&self) -> bool {
+    fn allows_dangerous(&self, connection: &ConnectionInfo) -> bool {
         self.allow_dangerous
+            || (self.allow_dangerous_off_production && !connection.connection_type.production)
     }
 }

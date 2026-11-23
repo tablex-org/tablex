@@ -9,7 +9,8 @@
 //! | read        | run           | write_refused            | write_refused                         | see below        |
 //! | read_write  | run           | ask the approver         | dangerous_refused unless flagged, then ask (if the approver allows it) | see below |
 //!
-//! A multi-statement script is `multi_statement`; transaction / session state
+//! Additive DDL (`CREATE ...`, `ALTER TABLE ... ADD ...`, `COMMENT ON`) is a plain write in the
+//! table, not a dangerous one: see [`crate::classify`]. A multi-statement script is `multi_statement`; transaction / session state
 //! (`BEGIN`, `SET`, `USE`, `MULTI`, ...) is `unsupported`; a blocked function or
 //! clause (`pg_read_file`, `INTO OUTFILE`, ...) is `blocked_function`; a command
 //! the driver blocks is `dangerous_refused`: all at every access that may run
@@ -93,6 +94,7 @@ mod tests {
             statements,
             class,
             danger: danger.map(str::to_owned),
+            driver_confirms: false,
             verb: "X".into(),
             session_state: false,
             unsupported_clause: None,
@@ -106,6 +108,42 @@ mod tests {
             Ok(Need::Approval { dangerous: None }) => "ask".into(),
             Ok(Need::Approval { dangerous: Some(_) }) => "ask-dangerous".into(),
             Err(error) => error.code().to_owned(),
+        }
+    }
+
+    #[test]
+    fn additive_ddl_asks_like_an_insert_and_destructive_ddl_needs_the_flag() {
+        use crate::classify::classify_sql;
+        use crate::ports::ConnectionKind;
+        use engine_driver_kit::sql::SqlLexOptions;
+        let check = |sql: &str, access: AgentAccess, flagged: bool| {
+            let classified =
+                classify_sql(sql, ConnectionKind::PostgreSql, &SqlLexOptions::postgres());
+            match check_statement(access, &classified, flagged, "SQL statement") {
+                Ok(Need::Nothing) => "run".to_owned(),
+                Ok(Need::Approval { dangerous: None }) => "ask".to_owned(),
+                Ok(Need::Approval { dangerous: Some(_) }) => "ask-dangerous".to_owned(),
+                Err(error) => error.code().to_owned(),
+            }
+        };
+        for sql in [
+            "ALTER TABLE t ADD COLUMN biz_domain text",
+            "CREATE TABLE t (a int)",
+            "CREATE INDEX CONCURRENTLY i ON t (a)",
+            "COMMENT ON TABLE t IS 'x'",
+        ] {
+            assert_eq!(check(sql, ReadWrite, false), "ask", "{sql}");
+            assert_eq!(check(sql, Read, false), "agent.write_refused", "{sql}");
+            assert_eq!(check(sql, SchemaOnly, false), "agent.access_denied", "{sql}");
+        }
+        for sql in [
+            "ALTER TABLE t DROP COLUMN c",
+            "ALTER TABLE t ALTER COLUMN c TYPE text",
+            "DROP INDEX i",
+        ] {
+            assert_eq!(check(sql, ReadWrite, false), "agent.dangerous_refused", "{sql}");
+            assert_eq!(check(sql, ReadWrite, true), "ask-dangerous", "{sql}");
+            assert_eq!(check(sql, Read, true), "agent.write_refused", "{sql}");
         }
     }
 

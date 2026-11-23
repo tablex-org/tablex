@@ -13,7 +13,9 @@
 
 use crate::functions;
 use crate::ports::ConnectionKind;
-use engine_driver_kit::sql::{classify, Keyword, SqlLexOptions};
+use engine_driver_kit::sql::{
+    classify, tokens, Classification, Keyword, SqlLexOptions, SqlToken, SqlTokenKind,
+};
 
 /// Whether a statement only reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +35,10 @@ pub struct Classified {
     pub class: StatementClass,
     /// Why the statement is dangerous (needs explicit approval), if it is.
     pub danger: Option<String>,
+    /// The statement is additive DDL (`ALTER TABLE ... ADD COLUMN`, `CREATE SCHEMA`) that the
+    /// driver's own classifier would still ask to confirm: the user's approval of the write
+    /// covers that question, so the layer sends it as confirmed.
+    pub driver_confirms: bool,
     /// The first keyword or command verb, upper-cased (for messages).
     pub verb: String,
     /// The statement changes transaction or session state (`BEGIN`, `SET`,
@@ -126,6 +132,7 @@ pub fn classify_sql(sql: &str, kind: ConnectionKind, options: &SqlLexOptions) ->
         .and_then(|statement| statement.keyword_range.clone())
         .map(|range| sql[range].to_ascii_uppercase())
         .unwrap_or_default();
+    let (danger, driver_confirms) = agent_danger(sql, &classification, options);
     Classified {
         statements: classification.statements.len(),
         class: if classification.pageable {
@@ -133,11 +140,179 @@ pub fn classify_sql(sql: &str, kind: ConnectionKind, options: &SqlLexOptions) ->
         } else {
             StatementClass::Write
         },
-        danger: classification.danger.map(|danger| danger.reason.to_owned()),
+        danger,
+        driver_confirms,
         session_state: SQL_SESSION_WORDS.contains(&functions::first_word(sql, options).as_str()),
         unsupported_clause: functions::unsupported_clause(sql, kind, options),
         blocked_function: functions::blocked_function(sql, kind, options),
         verb,
+    }
+}
+
+/// The first dangerous statement of the script, as the agent policy sees it, and whether an
+/// additive statement before it needs the driver's confirmation.
+///
+/// The driver's classifier (which the app's own editor uses for its confirm dialogs) treats every
+/// `ALTER` and `CREATE SCHEMA` as dangerous. For an agent, additive DDL is a normal write that the
+/// user approves like an `INSERT`: `CREATE ...` (tables, indexes, views, sequences, schemas,
+/// types), `COMMENT ON` and `ALTER TABLE ... ADD ...` (every clause an `ADD`). What destroys or
+/// changes existing structure or data stays dangerous (`DROP`, `TRUNCATE`, `ALTER ... DROP /
+/// ALTER / MODIFY / RENAME / SET ...`, `RENAME`, `CREATE OR REPLACE TABLE/DATABASE`, `DELETE` and
+/// `UPDATE` without `WHERE`), and so does any `ALTER` form not recognised as additive.
+fn agent_danger(
+    sql: &str,
+    classification: &Classification,
+    options: &SqlLexOptions,
+) -> (Option<String>, bool) {
+    let mut scan = None;
+    let mut confirms = false;
+    for statement in &classification.statements {
+        match (statement.keyword, statement.danger) {
+            (Some(Keyword::Alter), Some(reason)) if reason.starts_with("ALTER") => {}
+            (Some(Keyword::Create), Some(reason)) if reason.starts_with("CREATE DATABASE") => {}
+            (Some(Keyword::Create), None) => {
+                // The driver's classifier does not know `OR REPLACE TABLE`.
+                let scan = scan.get_or_insert_with(|| tokens(sql, options));
+                if Words::of(sql, scan.tokens.as_slice(), &statement.range).replaces_a_table() {
+                    return (Some(OR_REPLACE_TABLE.to_owned()), false);
+                }
+                continue;
+            }
+            (Some(Keyword::Other), None)
+                if statement
+                    .keyword_range
+                    .clone()
+                    .is_some_and(|range| sql[range].eq_ignore_ascii_case("RENAME")) =>
+            {
+                return (Some(RENAME.to_owned()), false);
+            }
+            (_, Some(reason)) => return (Some(reason.to_owned()), false),
+            (_, None) => continue,
+        }
+        // An ALTER or CREATE SCHEMA/DATABASE the driver asks to confirm: additive, or not?
+        let scan = scan.get_or_insert_with(|| tokens(sql, options));
+        // The content of an executable comment is code the lexer shows without its delimiters,
+        // and a versioned comment can be read two ways: not worth reasoning about.
+        if scan.executable_comment
+            || scan.unterminated
+            || classification.version_ambiguous
+            || !Words::of(sql, scan.tokens.as_slice(), &statement.range).is_additive_ddl()
+        {
+            return (statement.danger.map(str::to_owned), false);
+        }
+        confirms = true;
+    }
+    // A versioned comment that cannot be read one way is dangerous even when no statement is.
+    match &classification.danger {
+        Some(danger) if classification.version_ambiguous => (Some(danger.reason.to_owned()), false),
+        _ => (None, confirms),
+    }
+}
+
+const OR_REPLACE_TABLE: &str =
+    "CREATE OR REPLACE TABLE/DATABASE drops the existing object and its data";
+const RENAME: &str = "RENAME changes the name of a database object, which breaks what uses the old name";
+
+/// The tokens of one statement.
+struct Words<'a> {
+    sql: &'a str,
+    tokens: &'a [SqlToken],
+}
+
+impl<'a> Words<'a> {
+    fn of(sql: &'a str, all: &'a [SqlToken], range: &std::ops::Range<usize>) -> Self {
+        let start = all.partition_point(|token| token.range.start < range.start);
+        let length = all[start..].partition_point(|token| token.range.end <= range.end);
+        Self {
+            sql,
+            tokens: &all[start..start + length],
+        }
+    }
+
+    fn kind(&self, at: usize) -> Option<SqlTokenKind> {
+        self.tokens.get(at).map(|token| token.kind)
+    }
+
+    /// The token at `at` is this bare word.
+    fn is(&self, at: usize, word: &str) -> bool {
+        self.tokens.get(at).is_some_and(|token| {
+            token.kind == SqlTokenKind::Word && self.sql[token.range.clone()].eq_ignore_ascii_case(word)
+        })
+    }
+
+    fn is_name(&self, at: usize) -> bool {
+        matches!(self.kind(at), Some(SqlTokenKind::Word | SqlTokenKind::Quoted))
+    }
+
+    fn is_symbol(&self, at: usize, symbol: u8) -> bool {
+        self.tokens.get(at).is_some_and(|token| {
+            token.kind == SqlTokenKind::Other && self.sql.as_bytes()[token.range.start] == symbol
+        })
+    }
+
+    /// `CREATE OR REPLACE [TEMPORARY] TABLE` (MariaDB): drops the table it replaces.
+    fn replaces_a_table(&self) -> bool {
+        self.is(0, "CREATE")
+            && self.is(1, "OR")
+            && self.is(2, "REPLACE")
+            && (self.is(3, "TABLE") || (self.is(3, "TEMPORARY") && self.is(4, "TABLE")))
+    }
+
+    /// `CREATE SCHEMA|DATABASE` (not `OR REPLACE`), or `ALTER TABLE <name> ADD ... [, ADD ...]`.
+    fn is_additive_ddl(&self) -> bool {
+        if self.is(0, "CREATE") {
+            return !(self.is(1, "OR") && self.is(2, "REPLACE"));
+        }
+        if !(self.is(0, "ALTER") && self.is(1, "TABLE")) {
+            return false;
+        }
+        let mut at = 2;
+        if self.is(at, "IF") && self.is(at + 1, "EXISTS") {
+            at += 2;
+        }
+        if self.is(at, "ONLY") {
+            at += 1;
+        }
+        // The table name, possibly `schema.table`.
+        loop {
+            if !self.is_name(at) {
+                return false;
+            }
+            at += 1;
+            if self.is_symbol(at, b'.') {
+                at += 1;
+            } else {
+                break;
+            }
+        }
+        if self.is_symbol(at, b'*') {
+            at += 1;
+        }
+        // ClickHouse: ON CLUSTER <name>.
+        if self.is(at, "ON") && self.is(at + 1, "CLUSTER") {
+            if !self.is_name(at + 2) {
+                return false;
+            }
+            at += 3;
+        }
+        // Every comma-separated clause (outside parentheses) is an ADD.
+        let mut depth = 0usize;
+        let mut starts_clause = true;
+        for index in at..self.tokens.len() {
+            if starts_clause {
+                if !self.is(index, "ADD") {
+                    return false;
+                }
+                starts_clause = false;
+            }
+            match self.tokens[index].kind {
+                SqlTokenKind::Open => depth += 1,
+                SqlTokenKind::Close => depth = depth.saturating_sub(1),
+                SqlTokenKind::Comma if depth == 0 => starts_clause = true,
+                _ => {}
+            }
+        }
+        !starts_clause
     }
 }
 
@@ -328,6 +503,7 @@ pub fn classify_redis(command: &str) -> Classified {
         statements: usize::from(!verb.is_empty()),
         class,
         danger,
+        driver_confirms: false,
         session_state: REDIS_SESSION_VERBS.contains(&verb.as_str()),
         unsupported_clause: None,
         blocked_function: None,
@@ -510,13 +686,182 @@ mod tests {
         assert!(pg("TRUNCATE t").danger.is_some());
         assert!(pg("DELETE FROM t").danger.is_some());
         assert!(pg("UPDATE t SET a = 1").danger.is_some());
-        assert!(pg("ALTER TABLE t ADD c int").danger.is_some());
+        assert!(pg("ALTER TABLE t DROP c").danger.is_some());
         assert!(pg("DELETE FROM t WHERE id = 1").danger.is_none());
         assert!(pg("UPDATE t SET a = 1 WHERE id = 1").danger.is_none());
         assert!(pg("INSERT INTO t VALUES (1)").danger.is_none());
         assert!(pg("SELECT * FROM t").danger.is_none());
         // A dangerous statement later in a script is reported too.
         assert!(pg("SELECT 1; DROP TABLE t").danger.is_some());
+    }
+
+    fn dialect(kind: ConnectionKind) -> SqlLexOptions {
+        match kind {
+            ConnectionKind::PostgreSql => SqlLexOptions::postgres(),
+            ConnectionKind::MySql => SqlLexOptions::mysql(),
+            ConnectionKind::MariaDb => SqlLexOptions::mariadb(),
+            ConnectionKind::Sqlite => SqlLexOptions::sqlite(),
+            ConnectionKind::ClickHouse => SqlLexOptions::clickhouse(),
+            other => panic!("{other:?} is not SQL"),
+        }
+    }
+
+    /// `(dialect, statement)`: additive DDL is a normal write for an agent, and the driver's own
+    /// classifier is asked to confirm it only when it flags it.
+    const ADDITIVE: &[(ConnectionKind, &str)] = &[
+        (ConnectionKind::PostgreSql, "CREATE TABLE t (a int)"),
+        (ConnectionKind::PostgreSql, "CREATE TABLE IF NOT EXISTS t (a int)"),
+        (ConnectionKind::PostgreSql, "CREATE INDEX i ON t (a)"),
+        (ConnectionKind::PostgreSql, "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS i ON t (a)"),
+        (ConnectionKind::PostgreSql, "CREATE VIEW v AS SELECT 1"),
+        (ConnectionKind::PostgreSql, "CREATE OR REPLACE VIEW v AS SELECT 1"),
+        (ConnectionKind::PostgreSql, "CREATE SEQUENCE s"),
+        (ConnectionKind::PostgreSql, "CREATE SCHEMA IF NOT EXISTS s"),
+        (ConnectionKind::PostgreSql, "CREATE TYPE mood AS ENUM ('a', 'b')"),
+        (ConnectionKind::PostgreSql, "COMMENT ON TABLE t IS 'x'"),
+        (ConnectionKind::PostgreSql, "ALTER TABLE t ADD c int"),
+        (ConnectionKind::PostgreSql, "ALTER TABLE t ADD COLUMN c int"),
+        (ConnectionKind::PostgreSql, "alter table public.t add column if not exists c numeric(10, 2) default 0"),
+        (ConnectionKind::PostgreSql, "ALTER TABLE IF EXISTS ONLY \"my schema\".\"t\" ADD COLUMN c int"),
+        (ConnectionKind::PostgreSql, "ALTER TABLE t ADD COLUMN a int, ADD COLUMN b text"),
+        (ConnectionKind::PostgreSql, "ALTER TABLE t ADD CONSTRAINT u UNIQUE (a, b)"),
+        (ConnectionKind::PostgreSql, "ALTER TABLE t ADD CONSTRAINT fk FOREIGN KEY (a) REFERENCES o (id)"),
+        (ConnectionKind::PostgreSql, "/* migration */ ALTER TABLE t ADD COLUMN biz_domain text -- note"),
+        (ConnectionKind::MySql, "CREATE TABLE t (a int)"),
+        (ConnectionKind::MySql, "CREATE INDEX i ON t (a)"),
+        (ConnectionKind::MySql, "CREATE SCHEMA s"),
+        (ConnectionKind::MySql, "CREATE DATABASE IF NOT EXISTS d"),
+        (ConnectionKind::MySql, "ALTER TABLE `t` ADD COLUMN `c` int AFTER `a`"),
+        (ConnectionKind::MySql, "ALTER TABLE t ADD INDEX i (a)"),
+        (ConnectionKind::MySql, "ALTER TABLE t ADD KEY k (a), ADD UNIQUE (b)"),
+        (ConnectionKind::MySql, "ALTER TABLE t ADD (a int, b int)"),
+        (ConnectionKind::MySql, "ALTER TABLE t ADD COLUMN c enum('a,b', 'c') NOT NULL DEFAULT 'a,b'"),
+        (ConnectionKind::MariaDb, "ALTER TABLE t ADD COLUMN IF NOT EXISTS c int"),
+        (ConnectionKind::MariaDb, "CREATE DATABASE d"),
+        (ConnectionKind::Sqlite, "CREATE TABLE t (a int)"),
+        (ConnectionKind::Sqlite, "CREATE INDEX IF NOT EXISTS i ON t (a)"),
+        (ConnectionKind::Sqlite, "ALTER TABLE t ADD COLUMN c int"),
+        (ConnectionKind::ClickHouse, "CREATE TABLE t (a Int32) ENGINE = MergeTree ORDER BY a"),
+        (ConnectionKind::ClickHouse, "ALTER TABLE t ADD COLUMN IF NOT EXISTS c Int32"),
+        (ConnectionKind::ClickHouse, "ALTER TABLE db.t ON CLUSTER main ADD COLUMN c String AFTER a"),
+        (ConnectionKind::ClickHouse, "ALTER TABLE t ADD INDEX i a TYPE minmax GRANULARITY 1"),
+    ];
+
+    /// Destructive DDL, and what cannot be told to be additive, stay dangerous.
+    const DESTRUCTIVE: &[(ConnectionKind, &str)] = &[
+        (ConnectionKind::PostgreSql, "DROP TABLE t"),
+        (ConnectionKind::PostgreSql, "DROP INDEX i"),
+        (ConnectionKind::PostgreSql, "DROP INDEX CONCURRENTLY i"),
+        (ConnectionKind::PostgreSql, "DROP SCHEMA s CASCADE"),
+        (ConnectionKind::PostgreSql, "TRUNCATE t"),
+        (ConnectionKind::PostgreSql, "DELETE FROM t"),
+        (ConnectionKind::PostgreSql, "UPDATE t SET a = 1"),
+        (ConnectionKind::PostgreSql, "ALTER TABLE t DROP COLUMN c"),
+        (ConnectionKind::PostgreSql, "ALTER TABLE t DROP CONSTRAINT c"),
+        (ConnectionKind::PostgreSql, "ALTER TABLE t ALTER COLUMN c TYPE text"),
+        (ConnectionKind::PostgreSql, "ALTER TABLE t ALTER COLUMN c SET NOT NULL"),
+        (ConnectionKind::PostgreSql, "ALTER TABLE t RENAME TO u"),
+        (ConnectionKind::PostgreSql, "ALTER TABLE t RENAME COLUMN a TO b"),
+        (ConnectionKind::PostgreSql, "ALTER TABLE t SET SCHEMA other"),
+        (ConnectionKind::PostgreSql, "ALTER TABLE t SET (fillfactor = 70)"),
+        (ConnectionKind::PostgreSql, "ALTER TABLE t SET TABLESPACE x"),
+        (ConnectionKind::PostgreSql, "ALTER TABLE t ADD COLUMN a int, DROP COLUMN b"),
+        (ConnectionKind::PostgreSql, "ALTER TABLE t DROP COLUMN b, ADD COLUMN a int"),
+        (ConnectionKind::PostgreSql, "ALTER TABLE t ADD COLUMN a int,"),
+        (ConnectionKind::PostgreSql, "ALTER TABLE t"),
+        (ConnectionKind::PostgreSql, "ALTER TABLE t ATTACH PARTITION p FOR VALUES IN (1)"),
+        (ConnectionKind::PostgreSql, "ALTER INDEX i RENAME TO j"),
+        (ConnectionKind::PostgreSql, "ALTER SEQUENCE s RESTART"),
+        (ConnectionKind::PostgreSql, "ALTER VIEW v RENAME TO w"),
+        (ConnectionKind::PostgreSql, "ALTER ROLE r SUPERUSER"),
+        (ConnectionKind::PostgreSql, "ALTER SYSTEM SET x = 1"),
+        (ConnectionKind::PostgreSql, "ALTER TABLE ADD COLUMN c int"),
+        (ConnectionKind::PostgreSql, "GRANT ALL ON t TO u"),
+        (ConnectionKind::PostgreSql, "ALTER TABLE t RENAME TO \"ADD\""),
+        (ConnectionKind::MySql, "DROP DATABASE d"),
+        (ConnectionKind::MySql, "ALTER TABLE t DROP COLUMN c"),
+        (ConnectionKind::MySql, "ALTER TABLE t DROP INDEX i"),
+        (ConnectionKind::MySql, "ALTER TABLE t MODIFY COLUMN c bigint"),
+        (ConnectionKind::MySql, "ALTER TABLE t CHANGE a b int"),
+        (ConnectionKind::MySql, "ALTER TABLE t ADD COLUMN c int, MODIFY c bigint"),
+        (ConnectionKind::MySql, "ALTER TABLE t ADD COLUMN c int, ALGORITHM = INPLACE"),
+        (ConnectionKind::MySql, "ALTER TABLE t ENGINE = MyISAM"),
+        (ConnectionKind::MySql, "ALTER ONLINE TABLE t ADD COLUMN c int"),
+        (ConnectionKind::MySql, "RENAME TABLE a TO b"),
+        (ConnectionKind::MySql, "rename table a to b, c to d"),
+        (ConnectionKind::MySql, "ALTER TABLE t RENAME TO u"),
+        (ConnectionKind::MySql, "/*!50000 DROP TABLE t */"),
+        (ConnectionKind::MySql, "ALTER TABLE t /*!50000 DROP COLUMN c */"),
+        (ConnectionKind::MariaDb, "CREATE OR REPLACE TABLE t (a int)"),
+        (ConnectionKind::MariaDb, "CREATE OR REPLACE TEMPORARY TABLE t (a int)"),
+        (ConnectionKind::MariaDb, "CREATE OR REPLACE DATABASE d"),
+        (ConnectionKind::MariaDb, "CREATE OR REPLACE SCHEMA d"),
+        (ConnectionKind::Sqlite, "DROP TABLE t"),
+        (ConnectionKind::Sqlite, "ALTER TABLE t DROP COLUMN c"),
+        (ConnectionKind::Sqlite, "ALTER TABLE t RENAME TO u"),
+        (ConnectionKind::Sqlite, "ALTER TABLE t RENAME COLUMN a TO b"),
+        (ConnectionKind::ClickHouse, "DROP TABLE t"),
+        (ConnectionKind::ClickHouse, "TRUNCATE TABLE t"),
+        (ConnectionKind::ClickHouse, "ALTER TABLE t DELETE WHERE a = 1"),
+        (ConnectionKind::ClickHouse, "ALTER TABLE t UPDATE a = 1 WHERE b = 2"),
+        (ConnectionKind::ClickHouse, "ALTER TABLE t DROP COLUMN c"),
+        (ConnectionKind::ClickHouse, "ALTER TABLE t MODIFY COLUMN c String"),
+        (ConnectionKind::ClickHouse, "ALTER TABLE t ON CLUSTER main DROP PARTITION 1"),
+        (ConnectionKind::ClickHouse, "ALTER TABLE t ADD COLUMN c Int32, DELETE WHERE a = 1"),
+        (ConnectionKind::ClickHouse, "RENAME TABLE a TO b"),
+    ];
+
+    #[test]
+    fn additive_ddl_is_a_plain_write_for_an_agent() {
+        for (kind, sql) in ADDITIVE {
+            let got = classify_sql(sql, *kind, &dialect(*kind));
+            assert_eq!(got.class, StatementClass::Write, "{kind:?}: {sql}");
+            assert_eq!(got.danger, None, "{kind:?}: {sql}");
+            assert_eq!(got.statements, 1, "{kind:?}: {sql}");
+            assert!(!got.session_state, "{kind:?}: {sql}");
+            // The driver's own check still flags ALTER and CREATE SCHEMA: the approval covers it.
+            let driver = engine_driver_kit::sql::classify(sql, &dialect(*kind));
+            assert_eq!(got.driver_confirms, driver.danger.is_some(), "{kind:?}: {sql}");
+        }
+    }
+
+    #[test]
+    fn destructive_ddl_and_unknown_alter_forms_stay_dangerous() {
+        for (kind, sql) in DESTRUCTIVE {
+            let got = classify_sql(sql, *kind, &dialect(*kind));
+            assert_eq!(got.class, StatementClass::Write, "{kind:?}: {sql}");
+            assert!(got.danger.is_some(), "{kind:?}: {sql} must be dangerous");
+            assert!(!got.driver_confirms, "{kind:?}: {sql}");
+        }
+    }
+
+    #[test]
+    fn danger_is_judged_per_statement_of_a_script() {
+        let batch = |sql: &str| classify_sql(sql, ConnectionKind::PostgreSql, &SqlLexOptions::postgres());
+        // Additive statements around a destructive one: the destructive one is reported.
+        let got = batch("ALTER TABLE t ADD COLUMN c int; ALTER TABLE t DROP COLUMN c");
+        assert_eq!(got.statements, 2);
+        assert!(got.danger.as_deref().is_some_and(|reason| reason.starts_with("ALTER")));
+        assert!(batch("CREATE TABLE t (a int); DROP TABLE t").danger.is_some());
+        assert!(batch("ALTER TABLE t ADD c int; DELETE FROM t").danger.is_some());
+        assert_eq!(batch("ALTER TABLE t ADD c int; CREATE INDEX i ON t (c)").danger, None);
+        // A reading that does not close its comment, or a statement that merely mentions the words.
+        assert!(batch("ALTER TABLE t ADD c int /* DROP COLUMN").danger.is_some());
+        assert_eq!(batch("ALTER TABLE t ADD c text DEFAULT 'a, DROP COLUMN b'").danger, None);
+        assert_eq!(batch("ALTER TABLE t ADD c int -- , DROP COLUMN b").danger, None);
+        assert!(batch("ALTER TABLE t ADD c int, -- x\n DROP COLUMN b").danger.is_some());
+    }
+
+    #[test]
+    fn a_statement_that_hides_in_a_versioned_comment_stays_dangerous() {
+        let mysql = SqlLexOptions::mysql();
+        let got = classify_sql(
+            "/*!50000 ALTER TABLE t ADD COLUMN c int */",
+            ConnectionKind::MySql,
+            &mysql,
+        );
+        assert!(got.danger.is_some());
+        assert!(!got.driver_confirms);
     }
 
     #[test]

@@ -425,7 +425,7 @@ fn an_empty_filter_is_refused_unless_allow_all_and_then_it_is_dangerous() {
         request["allow_all"] = json!(true);
         let outcome = rig.call(tool, request);
         assert_eq!(code(&outcome), "agent.dangerous_refused", "{tool}");
-        assert!(outcome.to_text().contains("never runs dangerous"), "{}", outcome.to_text());
+        assert!(outcome.to_text().contains("does not run dangerous"), "{}", outcome.to_text());
         assert_eq!(rig.sent(), 0);
         assert!(rig.approver.asked().is_empty());
     }

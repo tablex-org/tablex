@@ -268,7 +268,7 @@ impl AssistantUi {
     /// The production wiring: the app's HTTP client, the OS credential store and the audit log
     /// under the app data directory. Scenarios and tests use an in-memory key store and no log.
     pub(super) fn production(agent: Option<Arc<AgentConnections>>, isolated: bool) -> Self {
-        let user_agent = format!("TableX/{}", env!("CARGO_PKG_VERSION"));
+        let user_agent = format!("tablex/{}", env!("CARGO_PKG_VERSION"));
         let transport = crate::ai::transport::ReqwestTransport::new(user_agent);
         // Tests talk to 127.0.0.1 and must not depend on a machine-wide proxy.
         #[cfg(test)]

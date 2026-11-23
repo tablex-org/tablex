@@ -503,6 +503,44 @@ fn dangerous_statements_need_the_flag_and_an_approver_that_allows_them() {
 }
 
 #[test]
+fn additive_ddl_runs_through_the_real_driver_without_the_dangerous_flag() {
+    // An approver that never allows dangerous statements: additive DDL does not need to.
+    let approver = ScriptedApprover::new(ApprovalDecision::Approve, false);
+    let rig = rig_with(
+        Some(AgentAccess::ReadWrite),
+        Some(approver.clone()),
+        Limits::default(),
+        Vec::new(),
+    );
+    rig.ok("open_session", json!({"connection_id": ID}));
+    for statement in [
+        "ALTER TABLE orders ADD COLUMN biz_domain TEXT",
+        "CREATE INDEX orders_biz ON orders (biz_domain)",
+        "CREATE TABLE extra (id INTEGER)",
+    ] {
+        rig.ok("execute_query", json!({"connection_id": ID, "statement": statement}));
+    }
+    assert_eq!(approver.asked.lock().unwrap().len(), 3);
+    assert!(approver.asked.lock().unwrap().iter().all(|(_, danger)| danger.is_none()));
+    // In a script too.
+    let ToolOutcome::Success(result) = batch(
+        &rig,
+        "ALTER TABLE extra ADD COLUMN note TEXT; ALTER TABLE extra ADD COLUMN more TEXT",
+        json!({}),
+    ) else {
+        panic!("the batch failed")
+    };
+    assert_eq!(result["ok"], true);
+    assert_eq!(approver.asked.lock().unwrap().len(), 4);
+    // What destroys structure still needs the flag, which this front end cannot give.
+    for statement in ["ALTER TABLE extra DROP COLUMN note", "DROP TABLE extra"] {
+        let refused = rig.call("execute_query", json!({"connection_id": ID, "statement": statement}));
+        assert_eq!(code(&refused), "agent.dangerous_refused", "{statement}");
+    }
+    assert_eq!(approver.asked.lock().unwrap().len(), 4);
+}
+
+#[test]
 fn a_long_statement_is_cancelled_and_the_session_survives() {
     let rig = rig(AgentAccess::Read);
     rig.ok("open_session", json!({"connection_id": ID}));

@@ -213,7 +213,7 @@ pub enum StoreError {
     /// The conversation, its connection or everything was deleted after the run that made the
     /// write began: nothing is written back.
     Detached,
-    /// The app database could not be used (damaged, from a newer TableX, an old file that could
+    /// The app database could not be used (damaged, from a newer tablex, an old file that could
     /// not be moved in, busy for too long); the text says which.
     Db(String),
 }
@@ -231,7 +231,7 @@ impl fmt::Display for StoreError {
             Self::Damaged(why) => write!(f, "the saved conversation cannot be read: {why}"),
             Self::NewerFormat(version) => write!(
                 f,
-                "it was saved by a newer version of TableX (format {version}; this one reads {FORMAT})"
+                "it was saved by a newer version of tablex (format {version}; this one reads {FORMAT})"
             ),
             Self::Stale => f.write_str("a newer version of it is saved already"),
             Self::Detached => f.write_str("it was deleted while it was being written"),

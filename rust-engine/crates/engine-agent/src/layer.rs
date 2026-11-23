@@ -392,7 +392,7 @@ pub struct ToolLayer {
     /// `begin_transaction`, `commit_transaction`, `rollback_transaction` and `execute_query`'s
     /// `transaction_id` exist (see [`with_transactions`](Self::with_transactions)).
     transactions_enabled: bool,
-    /// The running TableX app, when this front end has a channel to it (see
+    /// The running tablex app, when this front end has a channel to it (see
     /// [`with_app`](Self::with_app)).
     app: Option<Arc<dyn AppShow>>,
     /// The saved connections, when this front end lets an agent ask to change them (see
@@ -464,7 +464,7 @@ impl ToolLayer {
         self
     }
 
-    /// Offers `open_table` and `execute_and_show`, which show things in the running TableX app
+    /// Offers `open_table` and `execute_and_show`, which show things in the running tablex app
     /// through `app`. Off by default: the in-app assistant is inside the app and has none.
     ///
     /// * `open_table` needs access `schema_only`; the app opens the table as a double click does.
@@ -2406,11 +2406,8 @@ impl ToolLayer {
         trace: &mut Trace,
     ) -> Result<(), AgentError> {
         const WHAT: &str = "MongoDB command";
-        if let (Some(reason), false) = (call.dangerous, self.approver.allows_dangerous()) {
-            return Err(AgentError::DangerousRefused(format!(
-                "this {WHAT} is dangerous ({reason}) and {} never runs dangerous statements; do not retry it or reword it, ask the user to run it themselves in the TableX app",
-                self.front_end
-            )));
+        if let (Some(reason), false) = (call.dangerous, self.approver.allows_dangerous(info)) {
+            return Err(self.dangerous_not_run(WHAT, reason, info));
         }
         // No point asking the user for a write that could not be audited.
         if self.audit.as_ref().is_some_and(|audit| !audit.is_healthy()) {
@@ -2434,6 +2431,22 @@ impl ToolLayer {
             transaction: None,
         };
         self.ask_approval(call.tool, info, &request, WHAT, "approved", cancel, trace)
+    }
+
+    /// The refusal of a dangerous statement on a connection where the front end does not run
+    /// them (the approver's `allows_dangerous` is false).
+    fn dangerous_not_run(&self, what: &str, reason: &str, info: &ConnectionInfo) -> AgentError {
+        let why = if info.connection_type.production {
+            format!(
+                "{} does not run dangerous statements on a production connection (this one is of type `{}`)",
+                self.front_end, info.connection_type.name
+            )
+        } else {
+            format!("{} does not run dangerous statements", self.front_end)
+        };
+        AgentError::DangerousRefused(format!(
+            "this {what} is dangerous ({reason}) and {why}; do not retry it or reword it, ask the user to run it themselves in the tablex app"
+        ))
     }
 
     /// A collection name is drawn on the approval card and sent as it is (see
@@ -2551,18 +2564,15 @@ impl ToolLayer {
         let need = check_statement(
             access,
             classified,
-            flagged_dangerous || !self.approver.allows_dangerous(),
+            flagged_dangerous || !self.approver.allows_dangerous(info),
             what,
         )?;
         let is_write = matches!(need, Need::Approval { .. });
         let confirmed = match need {
             Need::Nothing => false,
             Need::Approval { dangerous } => {
-                if let (Some(reason), false) = (&dangerous, self.approver.allows_dangerous()) {
-                    return Err(AgentError::DangerousRefused(format!(
-                        "this {what} is dangerous ({reason}) and {} never runs dangerous statements; do not retry it or reword it, ask the user to run it themselves in the TableX app",
-                        self.front_end
-                    )));
+                if let (Some(reason), false) = (&dangerous, self.approver.allows_dangerous(info)) {
+                    return Err(self.dangerous_not_run(what, reason, info));
                 }
                 // No point asking the user for a write that could not be audited.
                 if self.audit.as_ref().is_some_and(|audit| !audit.is_healthy()) {
@@ -2737,7 +2747,9 @@ impl ToolLayer {
                 database,
                 limits,
                 row_limit: limits.rows_for(row_limit),
-                confirmed,
+                // Additive DDL the driver still asks to confirm: the approval of the write is
+                // the confirmation.
+                confirmed: confirmed || (is_write && classified.driver_confirms),
                 read_only,
             },
             cancel,
@@ -3145,7 +3157,7 @@ impl ToolLayer {
         let copy_access = AgentAccess::effective(None, &source.connection_type);
         if copy_access > source.effective_access() {
             return Err(AgentError::AccessDenied(format!(
-                "connection `{}` was not copied: the copy would get agent access `{copy_access}`, more than the `{}` the original has. The user can copy it in the TableX app",
+                "connection `{}` was not copied: the copy would get agent access `{copy_access}`, more than the `{}` the original has. The user can copy it in the tablex app",
                 source.name,
                 source.effective_access()
             )));
@@ -3809,7 +3821,7 @@ fn denial_message(
         message.push_str(" (production connections stay `off` until the user sets agent access on the connection)");
     }
     message.push_str(
-        ". Only the user can raise it in TableX: for all connections in Settings \u{2192} AI \u{2192} \
+        ". Only the user can raise it in tablex: for all connections in Settings \u{2192} AI \u{2192} \
          Default agent access, or for this connection in its Overrides \u{2192} Agent access.",
     );
     message

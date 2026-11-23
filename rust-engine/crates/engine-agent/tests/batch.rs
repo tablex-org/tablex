@@ -465,6 +465,33 @@ fn a_dangerous_statement_is_refused_even_by_a_front_end_that_asks_about_them() {
 }
 
 #[test]
+fn additive_ddl_in_a_script_is_an_ordinary_write_asked_once() {
+    let rig = rig(Options::default(), approving());
+    rig.open();
+    rig.ok(script(
+        "CREATE TABLE audit_copy (id int); ALTER TABLE items ADD COLUMN biz_domain text; \
+         CREATE INDEX CONCURRENTLY i ON items (name); COMMENT ON TABLE items IS 'x'",
+    ));
+    let asked = rig.approver.asked();
+    assert_eq!(asked.len(), 1, "one question for the whole script");
+    assert_eq!(asked[0].script, Some(4));
+    assert!(asked[0].dangerous.is_none());
+    // The driver's own check asks to confirm the ALTER; the approval of the script covers it.
+    let runs = rig.shared.runs.lock().unwrap().clone();
+    assert_eq!(runs.len(), 4);
+    assert_eq!(
+        runs.iter().map(|(_, confirmed)| *confirmed).collect::<Vec<_>>(),
+        [false, true, false, false]
+    );
+    // A destructive statement still refuses the whole script.
+    let outcome = rig.call(script("ALTER TABLE items ADD c int; ALTER TABLE items DROP COLUMN c"));
+    assert_eq!(code(&outcome), "agent.dangerous_refused");
+    assert!(outcome.to_text().contains("statement 2"), "{}", outcome.to_text());
+    assert_eq!(rig.shared_ran().len(), 4, "nothing more ran");
+    assert_eq!(rig.approver.asked().len(), 1);
+}
+
+#[test]
 fn writes_need_read_write_and_a_read_only_type_caps_it() {
     for (access, connection_type) in [
         (Some(AgentAccess::Read), ConnectionTypeInfo::default()),

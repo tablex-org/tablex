@@ -233,7 +233,7 @@ fn what_the_app_says_is_passed_on_with_its_own_code() {
     let app = FakeApp::new();
     let layer = layer(AgentAccess::Read, Some(&app));
     *app.answer.lock().unwrap() = Some(AgentError::AppUnavailable(
-        "TableX is not running. Open TableX and try again.".into(),
+        "tablex is not running. Open tablex and try again.".into(),
     ));
     for (tool, args) in [
         ("open_table", json!({"connection_id": PG, "database": "shop", "object": "orders"})),
@@ -242,7 +242,7 @@ fn what_the_app_says_is_passed_on_with_its_own_code() {
         match layer.call(tool, args) {
             ToolOutcome::Failure(error) => {
                 assert_eq!(error.code, "agent.app_unavailable");
-                assert!(error.message.contains("Open TableX and try again"));
+                assert!(error.message.contains("Open tablex and try again"));
             }
             other => panic!("{other:?}"),
         }

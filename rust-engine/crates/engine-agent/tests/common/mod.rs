@@ -111,7 +111,7 @@ impl SessionProvider for DriverProvider {
 /// A [`WriteApprover`] that remembers what it was asked, and answers as it is told.
 pub mod recorder {
     use engine_agent::{
-        ApprovalDecision, CancelToken, Language, WriteApproval, WriteApprover,
+        ApprovalDecision, CancelToken, ConnectionInfo, Language, WriteApproval, WriteApprover,
     };
     use std::sync::{Arc, Mutex};
 
@@ -190,7 +190,7 @@ pub mod recorder {
             self.still_allowed.lock().unwrap().clone()
         }
 
-        fn allows_dangerous(&self) -> bool {
+        fn allows_dangerous(&self, _connection: &ConnectionInfo) -> bool {
             self.allow_dangerous
         }
     }

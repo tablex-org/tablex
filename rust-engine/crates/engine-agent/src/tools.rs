@@ -85,7 +85,7 @@ impl ToolName {
         )
     }
 
-    /// The tools only a layer built with `with_app` offers (they act on the running TableX app).
+    /// The tools only a layer built with `with_app` offers (they act on the running tablex app).
     pub const fn is_app_tool(self) -> bool {
         matches!(self, Self::OpenTable | Self::ExecuteAndShow)
     }
@@ -288,9 +288,10 @@ pub struct ExecuteQueryRequest {
     pub database: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub row_limit: Option<usize>,
-    /// Set to ask for a dangerous statement (DROP, TRUNCATE, DELETE or UPDATE
-    /// without WHERE, ...) to be put to the user. Without it such statements
-    /// are refused.
+    /// Set to ask for a dangerous statement (DROP, TRUNCATE, ALTER ... DROP,
+    /// DELETE or UPDATE without WHERE, ...) to be put to the user. Without it
+    /// such statements are refused; some front ends (the MCP server on a
+    /// production connection) refuse them whatever the flag says.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dangerous: Option<bool>,
     /// Run the statement inside this open transaction (see `begin_transaction`).
@@ -723,7 +724,7 @@ pub struct OpenTableRequest {
 pub struct OpenTableResult {
     pub connection_id: String,
     pub object: String,
-    /// TableX took the request up; the table itself may still be loading.
+    /// tablex took the request up; the table itself may still be loading.
     pub requested: bool,
 }
 
@@ -743,9 +744,9 @@ pub struct ExecuteAndShowRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecuteAndShowResult {
     pub connection_id: String,
-    /// TableX took the request up and opened the tab.
+    /// tablex took the request up and opened the tab.
     pub shown: bool,
-    /// TableX was asked to run it (it may ask the user first, or refuse by its own rules).
+    /// tablex was asked to run it (it may ask the user first, or refuse by its own rules).
     pub run: bool,
 }
 
@@ -821,7 +822,7 @@ pub struct ConnectionChangeResult {
     /// The password was saved in the credential store for the new connection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password_saved: Option<bool>,
-    /// The running TableX app was told to reload its connections. Not an error when it was not
+    /// The running tablex app was told to reload its connections. Not an error when it was not
     /// running: it reads them when it starts.
     pub app_notified: bool,
     /// Something that went wrong after the change was made (a secret that could not be cleared).
