@@ -15,7 +15,7 @@ use support::*;
 const EXE: &str = env!("CARGO_BIN_EXE_tablex-mcp");
 const WAIT: Duration = Duration::from_secs(60);
 
-/// The binary with every TableX directory pointed into the temporary fixture.
+/// The binary with every tablex directory pointed into the temporary fixture.
 fn command() -> Command {
     let shared = shared();
     let mut command = Command::new(EXE);

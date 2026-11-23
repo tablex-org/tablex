@@ -2,7 +2,7 @@
 //! **elicitation** (`elicitation/create`), and runs only when the client answers `accept` with the
 //! boolean `run` set to `true` while the app's switch is still on.
 //!
-//! The client is the user's own agent host and may answer without showing the question; TableX
+//! The client is the user's own agent host and may answer without showing the question; tablex
 //! cannot see that. So conditions must all hold before anything is asked, checked in this order,
 //! each a [`ApprovalDecision::Refuse`] with a fixed reason the model can act on:
 //! 1. the switch "Let MCP clients run changes" in the app's Settings → AI is on (read from
@@ -16,8 +16,10 @@
 //!    a no, a dismissal, no usable answer, or the call cancelled after the question was sent;
 //!    counted for this server session), and fewer than [`MAX_OPEN_QUESTIONS`] questions are open in all.
 //!
-//! Dangerous statements never get here (`allows_dangerous` is false: the layer refuses them); the
-//! approver refuses one itself as well.
+//! Dangerous statements (`DROP`, `TRUNCATE`, a `DELETE` without `WHERE`, ...) are asked about like
+//! any write, with the danger and its reason stated first, but only on a connection that is not of
+//! a production type (`allows_dangerous`: the layer refuses them without asking on a production
+//! one); the approver refuses one on a production connection itself as well.
 //!
 //! The same question serves every write: an SQL statement or a Redis command, a MongoDB command
 //! (database, collection and the command as indented Extended JSON in the code block) and a script
@@ -52,7 +54,8 @@ use std::sync::{Mutex, MutexGuard};
 
 use engine_agent::sanitize::{is_right_to_left, spell_out};
 use engine_agent::{
-    ApprovalDecision, CancelToken, Language, TransactionApproval, WriteApproval, WriteApprover,
+    ApprovalDecision, CancelToken, ConnectionInfo, Language, TransactionApproval, WriteApproval,
+    WriteApprover,
 };
 use engine_connect::profile::mcp_writes_enabled;
 use rmcp::model::{
@@ -68,10 +71,10 @@ use tokio_util::sync::CancellationToken;
 /// Refusal: the app's switch is off (or its file cannot be read), when asking or when the client
 /// said yes.
 pub const REASON_SWITCH_OFF: &str =
-    "changes through the MCP server are turned off in TableX: Settings → AI";
+    "changes through the MCP server are turned off in tablex: Settings → AI";
 /// Refusal: the connection's type is a production one.
 pub const REASON_PRODUCTION: &str =
-    "a production connection can only be changed from the TableX app";
+    "a production connection can only be changed from the tablex app";
 /// Refusal: the client did not declare the elicitation capability.
 pub const REASON_NO_ELICITATION: &str = "this MCP client cannot ask the user";
 /// Refusal: [`MAX_DECLINES`] questions about the connection ended in a no or in no usable answer.
@@ -80,21 +83,21 @@ pub const REASON_DECLINED_OFTEN: &str =
      to this connection through MCP are off until the MCP server is restarted";
 /// Refusal: too big to be reviewed in a question.
 pub const REASON_TOO_LONG: &str = "too long to be shown for approval through MCP (more than 200 \
-     lines, 8000 characters in all or 400 in one line); the user can run it in the TableX app";
+     lines, 8000 characters in all or 400 in one line); the user can run it in the tablex app";
 /// Refusal: a line hides text behind a run of blanks.
 pub const REASON_HIDDEN_BLANKS: &str = "a line has a run of more than 24 spaces or tabs (a tab counts \
      as 8) followed by more text, which a code block can hide off-screen; the user can run it in the \
-     TableX app";
+     tablex app";
 /// Refusal: the writes of a transaction cannot be reviewed in one commit question.
 pub const REASON_COMMIT_NOT_REVIEWABLE: &str = "the changes in this transaction are too long to be \
      shown for approval through MCP (more than 200 lines, 8000 characters in all or 400 in one line, \
      or a line hides text behind a run of blanks); roll the transaction back, the user can run the \
-     changes in the TableX app";
+     changes in the tablex app";
 /// Refusal: [`MAX_OPEN_QUESTIONS`] questions are open.
 pub const REASON_BUSY: &str = "other changes are waiting for the user's answer";
-/// Refusal: the layer should never send a dangerous statement here.
-pub const REASON_DANGEROUS: &str =
-    "dangerous statements are never run through MCP; the user can run it in the TableX app";
+/// Refusal: the layer should never send a dangerous statement for a production connection here.
+pub const REASON_DANGEROUS: &str = "a dangerous statement is never run through MCP on a production \
+     connection; the user can run it in the tablex app";
 /// Refusal: the question did not reach the client.
 pub const REASON_NOT_DELIVERED: &str = "the question could not be delivered to the MCP client";
 /// Not approved: the question was sent but nothing usable came back.
@@ -285,11 +288,20 @@ impl ElicitingApprover {
         let characters = request.statement.chars().count();
         let plural = |n: usize| if n == 1 { "" } else { "s" };
         let fence = "`".repeat(longest_backtick_run(&shown).max(2) + 1);
-        let mut message = format!(
-            "An MCP client asks to run a {noun} that changes data. Nothing runs unless you accept.\n\n\
-             Connection: {} ({connection_type})\n\n",
-            label(request.connection_name),
-        );
+        let mut message = match request.dangerous {
+            Some(reason) => format!(
+                "DANGEROUS: an MCP client asks to run a {noun} that can destroy or change data or \
+                 structure that a rollback may not bring back. Nothing runs unless you accept.\n\n\
+                 Why it is dangerous: {reason}\n\n\
+                 Connection: {} ({connection_type})\n\n",
+                label(request.connection_name),
+            ),
+            None => format!(
+                "An MCP client asks to run a {noun} that changes data. Nothing runs unless you accept.\n\n\
+                 Connection: {} ({connection_type})\n\n",
+                label(request.connection_name),
+            ),
+        };
         if let Some(database) = request.database {
             message.push_str(&format!("Database: {}\n\n", label(database)));
         }
@@ -571,10 +583,11 @@ impl ElicitingApprover {
         }
     }
 
-    /// Conditions 1-3 of the module docs (and: no dangerous statement), in that order. The caller
-    /// that can be asked, or the fixed reason a write is refused without asking.
+    /// Conditions 1-3 of the module docs (and: no dangerous statement on a production connection),
+    /// in that order. The caller that can be asked, or the fixed reason a write is refused
+    /// without asking.
     fn preflight(&self, request: &WriteApproval<'_>) -> Result<Caller, &'static str> {
-        if request.dangerous.is_some() {
+        if request.dangerous.is_some() && request.production {
             return Err(REASON_DANGEROUS);
         }
         if !self.switch_on() {
@@ -659,9 +672,10 @@ impl WriteApprover for ElicitingApprover {
         }
     }
 
-    // Dangerous statements are refused by the layer without asking.
-    fn allows_dangerous(&self) -> bool {
-        false
+    /// A dangerous statement is put to the user like any write, except on a production
+    /// connection, where the layer refuses it without asking.
+    fn allows_dangerous(&self, connection: &ConnectionInfo) -> bool {
+        !connection.connection_type.production
     }
 }
 
@@ -1409,18 +1423,67 @@ mod tests {
     }
 
     #[test]
-    fn a_dangerous_request_is_refused_by_the_approver_itself() {
+    fn a_dangerous_request_is_refused_on_production_by_the_approver_itself() {
         let (_dir, path) = switch_on_file();
         let approver = ElicitingApprover::new(Some(path));
         let mut dangerous = request("DELETE FROM t", None);
         dangerous.dangerous = Some("DELETE without WHERE");
+        // Not of a production type: it is asked like any write (here: no client to ask).
+        assert_eq!(
+            approver.approve(&dangerous, &CancelToken::new()),
+            ApprovalDecision::Refuse {
+                reason: REASON_NO_ELICITATION.to_owned()
+            }
+        );
+        dangerous.production = true;
         assert_eq!(
             approver.approve(&dangerous, &CancelToken::new()),
             ApprovalDecision::Refuse {
                 reason: REASON_DANGEROUS.to_owned()
             }
         );
-        assert!(!approver.allows_dangerous());
+        assert_eq!(
+            approver.check_writable(&dangerous),
+            Err(REASON_DANGEROUS.to_owned())
+        );
+    }
+
+    #[test]
+    fn a_dangerous_statement_is_allowed_unless_the_connection_type_is_production() {
+        let approver = ElicitingApprover::new(None);
+        let mut connection = ConnectionInfo {
+            id: "c1".into(),
+            name: "Warehouse".into(),
+            kind: engine_agent::ConnectionKind::PostgreSql,
+            connection_type: engine_agent::ConnectionTypeInfo {
+                name: "Development".into(),
+                ..Default::default()
+            },
+            agent_access: None,
+            statement_timeout_secs: None,
+            revision: Default::default(),
+        };
+        assert!(approver.allows_dangerous(&connection));
+        // A connection with no type counts as not production.
+        connection.connection_type = Default::default();
+        assert!(approver.allows_dangerous(&connection));
+        connection.connection_type.production = true;
+        assert!(!approver.allows_dangerous(&connection));
+    }
+
+    #[test]
+    fn the_question_for_a_dangerous_statement_says_so_and_names_the_reason() {
+        let mut dangerous = request("DROP TABLE t", None);
+        dangerous.dangerous = Some("DROP permanently removes database objects");
+        let message = ElicitingApprover::message(&dangerous);
+        assert!(message.starts_with("DANGEROUS: an MCP client asks to run a statement"), "{message}");
+        assert!(
+            message.contains("Why it is dangerous: DROP permanently removes database objects"),
+            "{message}"
+        );
+        assert!(message.contains("Nothing runs unless you accept."), "{message}");
+        let plain = ElicitingApprover::message(&request("DROP TABLE t", None));
+        assert!(!plain.contains("DANGEROUS"), "{plain}");
     }
 
     fn mongo_request(statement: &str) -> WriteApproval<'_> {
@@ -1484,9 +1547,10 @@ mod tests {
                 reason: REASON_PRODUCTION.to_owned()
             }
         );
-        // An empty filter that was allowed is a dangerous change: not through MCP.
+        // An empty filter that was allowed is a dangerous change: not through MCP on production.
         let mut every_document = mongo_request(command);
         every_document.dangerous = Some("the filter is empty");
+        every_document.production = true;
         assert_eq!(
             on.approve(&every_document, &CancelToken::new()),
             ApprovalDecision::Refuse {

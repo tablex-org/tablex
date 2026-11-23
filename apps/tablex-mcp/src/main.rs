@@ -14,7 +14,7 @@ use tablex_mcp::transport::Signals;
 fn main() -> ExitCode {
     install_panic_hook();
     // Only the app moves the old files into the app database: until it has, this reads them, so
-    // an older TableX running beside this one keeps one truth (see `engine_storage::legacy`).
+    // an older tablex running beside this one keeps one truth (see `engine_storage::legacy`).
     engine_storage::legacy::set_import_allowed(false);
     match Command::parse(std::env::args_os().skip(1)) {
         Ok(Command::Serve) => serve(),
@@ -72,6 +72,12 @@ const MAX_BLOCKING_THREADS: usize = 32;
 const _: () = assert!(MAX_CONCURRENT_CALLS + 4 <= MAX_BLOCKING_THREADS);
 
 fn serve() -> ExitCode {
+    // Serving never raises a Keychain dialog (process-wide, until this returns): the user would not
+    // see it behind the MCP client, and the agent would hang. A secret macOS would have to ask
+    // about is an error that names `--authorize-keychain` (`credentials.keychain_access_needed`).
+    #[cfg(target_os = "macos")]
+    let _no_prompt = security_framework::os::macos::keychain::SecKeychain::disable_user_interaction()
+        .map_err(|error| eprintln!("tablex-mcp: cannot turn the Keychain prompt off: {error}"));
     for notice in setup::startup_notices() {
         eprintln!("tablex-mcp: {notice}");
     }

@@ -1,7 +1,7 @@
 //! `add_connection`, `duplicate_connection` and `remove_connection` end to end: the real server
 //! and tool layer over a temporary connection store (`TABLEX_DATA_DIR`), an in-memory credential
 //! store and a fake app on a temporary socket. Every call is put to the user through MCP
-//! elicitation; nothing touches the user's Keychain, data directory or a running TableX.
+//! elicitation; nothing touches the user's Keychain, data directory or a running tablex.
 
 mod support;
 
@@ -23,7 +23,7 @@ fn unique(prefix: &str) -> String {
     format!("{prefix}-{}", NEXT.fetch_add(1, Ordering::Relaxed))
 }
 
-/// A fake TableX that records what it is told.
+/// A fake tablex that records what it is told.
 struct FakeApp {
     _dir: tempfile::TempDir,
     path: PathBuf,
@@ -153,7 +153,7 @@ async fn an_approved_add_stores_the_record_and_keeps_the_password_in_the_secret_
     let (message, schema) = &asked[0];
     for part in [
         "ADD", &name, "postgresql", "db.local", "5432", "shop", "app", "Test", "sslmode=require",
-        "saved in TableX's credential store",
+        "saved in tablex's credential store",
     ] {
         assert!(message.contains(part), "{part}: {message}");
     }
@@ -262,7 +262,7 @@ async fn a_client_that_cannot_ask_is_refused_and_so_is_an_app_with_the_switch_of
     let name = unique("switch-off");
     let result = rig.add(add_args(&name)).await;
     assert_eq!(code(&result), "agent.write_refused");
-    assert!(error_message(&result).contains("turned off in TableX"), "{}", error_message(&result));
+    assert!(error_message(&result).contains("turned off in tablex"), "{}", error_message(&result));
     assert!(stored(&name).is_none());
     assert!(rig.seen.asked().is_empty());
 }

@@ -1,12 +1,13 @@
-//! `--authorize-keychain`: read, once and up front, the TableX master key and the saved secrets of
+//! `--authorize-keychain`: read, once and up front, the tablex master key and the saved secrets of
 //! every connection an agent may use, so macOS asks in one sitting (the user chooses Always Allow)
 //! and not in the middle of an agent's session. Saved secrets are encrypted rows of the app
 //! database (`tablex.db`, shared with the app: SQLite WAL, so both can run at once) whose key is a
 //! single Keychain item; its access list trusts the app, and this program is a separate executable,
 //! so macOS asks once for it. Secrets an older version kept as Keychain items of their own are
 //! read as they are (macOS asks for each of those once more): this program never copies them into
-//! the database and never creates the master key, only the app does. Nothing here prints a
-//! secret.
+//! the database and never creates the master key, only the app does (its "Allow Keychain access"
+//! moves them all in first, in one pass, see `EncryptedStore::copy_legacy_items`). While serving,
+//! the process never lets the Keychain ask the user (see `main.rs`). Nothing here prints a secret.
 
 use std::io::Write;
 use std::process::{Command, ExitCode, Stdio};
@@ -60,11 +61,11 @@ pub fn check(connector: &Connector, records: &[SavedConnectionRecord]) -> Result
     // The one item macOS asks about: the master key of the saved secrets.
     connector
         .unlock_credentials()
-        .map_err(|error| format!("cannot read the TableX master key ({error})"))?;
+        .map_err(|error| format!("cannot read the tablex master key ({error})"))?;
     // A settings file that cannot be read means the server treats every connection as off.
     let settings = connector
         .profile_settings()
-        .map_err(|error| format!("cannot read the TableX settings: {error}"))?;
+        .map_err(|error| format!("cannot read the tablex settings: {error}"))?;
     let mut report = Report::default();
     for record in records {
         // A connection of a type the agent never sees is not one it can use.
@@ -97,7 +98,7 @@ pub fn authorize(connector: &Connector) -> ExitCode {
         println!("The Keychain is a macOS feature: there is nothing to authorize on this platform.");
         return ExitCode::SUCCESS;
     }
-    println!("macOS asks once, for the TableX master key: choose Always Allow.");
+    println!("macOS asks once, for the tablex master key: choose Always Allow.");
     let report = match read_report(connector) {
         Ok(report) => report,
         Err(error) => return fail(&error),
@@ -193,13 +194,20 @@ fn fail(message: &str) -> ExitCode {
     ExitCode::FAILURE
 }
 
-/// What the model is told when the Keychain cannot be read (macOS): the command that fixes it,
-/// with the path quoted for a POSIX shell (single quotes; a `'` is written `'\''`).
-pub fn credential_hint(exe: &std::path::Path) -> String {
+/// The command that runs the authorisation, with the path quoted for a POSIX shell (single quotes;
+/// a `'` is written `'\''`): what the errors for an agent print, since a tool the Driver Manager
+/// installed is not on `PATH`.
+pub fn authorize_command(exe: &std::path::Path) -> String {
     let path = exe.to_string_lossy().replace('\'', "'\\''");
+    format!("'{path}' --authorize-keychain")
+}
+
+/// What the model is told when the Keychain cannot be read (macOS): the command that fixes it.
+pub fn credential_hint(exe: &std::path::Path) -> String {
     format!(
-        "macOS Keychain did not let tablex-mcp read the TableX master key: run '{path}' --authorize-keychain once \
-         in Terminal and choose Always Allow, then restart the MCP client."
+        "macOS Keychain did not let tablex-mcp read the tablex master key: run {} once \
+         in Terminal and choose Always Allow, then restart the MCP client.",
+        authorize_command(exe)
     )
 }
 
@@ -308,7 +316,7 @@ mod tests {
             .with_credentials(Arc::new(Locked))
             .with_settings_path(Some(dir.path().join("settings.json")));
         let error = check(&connector, &[record("read", "read")]).unwrap_err();
-        assert_eq!(error, "cannot read the TableX master key (user canceled)");
+        assert_eq!(error, "cannot read the tablex master key (user canceled)");
     }
 
     #[test]
@@ -317,6 +325,10 @@ mod tests {
         assert!(
             hint.contains(r"run '/Users/a b/it'\''s/tablex-mcp' --authorize-keychain once"),
             "{hint}"
+        );
+        assert_eq!(
+            authorize_command(Path::new("/Users/a b/it's/tablex-mcp")),
+            r"'/Users/a b/it'\''s/tablex-mcp' --authorize-keychain"
         );
     }
 

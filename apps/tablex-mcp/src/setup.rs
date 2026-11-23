@@ -68,15 +68,22 @@ pub fn build_layer_with_channel(
     app: Arc<dyn AppShow>,
     notify: Option<AppClient>,
 ) -> ToolLayer {
+    // On macOS a Keychain that will not hand a secret over is the user's one-time authorisation to
+    // give: say which command does it (both the open and the connection tools print it).
+    #[cfg(target_os = "macos")]
+    let exe = std::env::current_exe().and_then(std::path::absolute).ok();
+    #[cfg(target_os = "macos")]
+    let connector = match &exe {
+        Some(exe) => connector.with_keychain_command(crate::keychain::authorize_command(exe)),
+        None => connector,
+    };
     let settings_path = connector.settings_path().map(Path::to_path_buf);
     let admin_connector = connector.clone();
     let connections = AgentConnections::new(connector, Arc::new(RefusePrompts));
-    // On macOS a Keychain that will not hand a secret over is the user's one-time authorisation to
-    // give: say which command does it.
     #[cfg(target_os = "macos")]
-    let connections = match std::env::current_exe().and_then(std::path::absolute) {
-        Ok(exe) => connections.with_credential_hint(crate::keychain::credential_hint(&exe)),
-        Err(_) => connections,
+    let connections = match &exe {
+        Some(exe) => connections.with_credential_hint(crate::keychain::credential_hint(exe)),
+        None => connections,
     };
     let connections = Arc::new(connections);
     // One approver: the questions of writes and of connection changes share its budget of open

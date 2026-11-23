@@ -1,6 +1,6 @@
 //! `open_table` and `execute_and_show` end to end: the real server and tool layer over the real
 //! socket client, against a fake app listening on a temporary socket. Nothing here touches a
-//! running TableX or the user's data dir.
+//! running tablex or the user's data dir.
 
 mod support;
 
@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use support::*;
 use tablex_mcp::app_port::AppChannel;
 
-/// A fake TableX: records what it is asked and answers with `reply`.
+/// A fake tablex: records what it is asked and answers with `reply`.
 struct FakeApp {
     _dir: tempfile::TempDir,
     path: PathBuf,
@@ -163,13 +163,13 @@ async fn an_app_that_is_not_running_gives_a_clear_error() {
         let result = harness.call(tool, args).await;
         assert_eq!(result.is_error, Some(true));
         assert_eq!(code(&result), "agent.app_unavailable");
-        assert!(error_message(&result).contains("Open TableX and try again"));
+        assert!(error_message(&result).contains("Open tablex and try again"));
     }
 }
 
 #[tokio::test]
 async fn what_the_app_refuses_is_reported_with_its_reason() {
-    let app = FakeApp::listening(Reply::error("no saved connection `x` in TableX"));
+    let app = FakeApp::listening(Reply::error("no saved connection `x` in tablex"));
     let harness = Harness::start(Fixture::with_app(app.channel())).await;
     let conn = harness.fixture.connection(Some("read"));
     let result = harness

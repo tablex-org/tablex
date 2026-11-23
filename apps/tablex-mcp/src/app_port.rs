@@ -1,4 +1,4 @@
-//! The MCP server's channel to the running TableX app: `open_table` and `execute_and_show` of the
+//! The MCP server's channel to the running tablex app: `open_table` and `execute_and_show` of the
 //! tool layer go through [`AppChannel`] to the socket in the app data dir (see
 //! `engine_connect::app_channel`). It decides nothing; the layer's access rules ran before a
 //! request gets here, and the app's own rules run when it gets there.
@@ -30,12 +30,12 @@ impl AppChannel {
     fn send(&self, request: &Request) -> Result<(), AgentError> {
         let client = self.client.as_ref().ok_or_else(|| {
             AgentError::AppUnavailable(
-                "this platform has no data directory, so there is no channel to TableX".into(),
+                "this platform has no data directory, so there is no channel to tablex".into(),
             )
         })?;
         client.send(request).map(|_| ()).map_err(|error| match error {
             ClientError::Refused(reason) => {
-                AgentError::AppRefused(format!("TableX could not do it: {reason}"))
+                AgentError::AppRefused(format!("tablex could not do it: {reason}"))
             }
             other => AgentError::AppUnavailable(other.to_string()),
         })

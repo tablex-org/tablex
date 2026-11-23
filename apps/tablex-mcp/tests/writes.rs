@@ -494,8 +494,66 @@ async fn a_bare_carriage_return_is_refused_before_any_question() {
 }
 
 #[tokio::test]
-async fn dangerous_statements_never_ask() {
+async fn a_dangerous_statement_is_asked_about_off_production_only_when_flagged() {
     let rig = rig(1, false, true, Asker::answering(true, Ok(accepted(true)))).await;
+    // Without the flag the model is told how to ask; nobody is asked yet.
+    for dangerous in [json!(null), json!(false)] {
+        let mut arguments = json!({"connection_id": rig.ids[0], "statement": "DELETE FROM items"});
+        if !dangerous.is_null() {
+            arguments["dangerous"] = dangerous.clone();
+        }
+        let result = rig.harness.call("execute_query", arguments).await;
+        assert_eq!(code(&result), "agent.dangerous_refused", "{dangerous}: {}", text(&result));
+        assert!(
+            error_message(&result).contains("call again with dangerous=true"),
+            "{dangerous}: {}",
+            error_message(&result)
+        );
+    }
+    assert!(rig.harness.client.service().seen.asked().is_empty());
+    assert!(rig.runs(0).is_empty());
+    // With it the user is asked, with the danger said first and its reason named, and an
+    // approval runs the statement.
+    let result = rig
+        .harness
+        .call(
+            "execute_query",
+            json!({"connection_id": rig.ids[0], "statement": "DROP TABLE items", "dangerous": true}),
+        )
+        .await;
+    assert_eq!(code(&result), "ok", "{}", text(&result));
+    let asked = rig.harness.client.service().seen.asked();
+    assert_eq!(asked.len(), 1);
+    let message = &asked[0].0;
+    assert!(message.starts_with("DANGEROUS: an MCP client asks to run a statement"), "{message}");
+    assert!(
+        message.contains("Why it is dangerous: DROP permanently removes database objects"),
+        "{message}"
+    );
+    assert!(message.ends_with("\n```\nDROP TABLE items\n```"), "{message}");
+    assert_eq!(rig.runs(0), ["DROP TABLE items".to_owned()]);
+    rig.finish().await;
+}
+
+#[tokio::test]
+async fn a_declined_dangerous_statement_does_not_run() {
+    let rig = rig(1, false, true, Asker::answering(true, Ok(accepted(false)))).await;
+    let result = rig
+        .harness
+        .call(
+            "execute_query",
+            json!({"connection_id": rig.ids[0], "statement": "TRUNCATE items", "dangerous": true}),
+        )
+        .await;
+    assert_eq!(code(&result), "agent.write_refused", "{}", text(&result));
+    assert_eq!(rig.harness.client.service().seen.asked().len(), 1);
+    assert!(rig.runs(0).is_empty());
+    rig.finish().await;
+}
+
+#[tokio::test]
+async fn a_dangerous_statement_on_a_production_connection_is_refused_without_asking() {
+    let rig = rig(1, true, true, Asker::answering(true, Ok(accepted(true)))).await;
     for dangerous in [json!(null), json!(false), json!(true)] {
         let mut arguments = json!({"connection_id": rig.ids[0], "statement": "DELETE FROM items"});
         if !dangerous.is_null() {
@@ -508,12 +566,13 @@ async fn dangerous_statements_never_ask() {
             "{dangerous}: {}",
             text(&result)
         );
-        // MCP never runs them, and says so at once: no "call again with the flag" first.
+        // Said at once, with the reason and what to do: no "call again with the flag" first.
         assert_eq!(
             error_message(&result),
             "this SQL statement is dangerous (DELETE without WHERE removes every row of the table) \
-             and mcp never runs dangerous statements; do not retry it or reword it, ask the user \
-             to run it themselves in the TableX app",
+             and mcp does not run dangerous statements on a production connection (this one is of \
+             type `Development`); do not retry it or reword it, ask the user to run it themselves \
+             in the tablex app",
             "{dangerous}"
         );
     }
@@ -522,6 +581,73 @@ async fn dangerous_statements_never_ask() {
     assert!(rig.harness.client.service().seen.asked().is_empty());
     assert!(rig.runs(0).is_empty());
     rig.finish().await;
+}
+
+#[tokio::test]
+async fn additive_ddl_is_an_ordinary_write_asked_once_and_destructive_ddl_is_dangerous() {
+    let rig = rig(1, false, true, Asker::answering(true, Ok(accepted(true)))).await;
+    let add = "ALTER TABLE items ADD COLUMN biz_domain TEXT";
+    let result = rig.execute(0, add).await;
+    assert_eq!(code(&result), "ok", "{}", text(&result));
+    let asked = rig.harness.client.service().seen.asked();
+    assert_eq!(asked.len(), 1, "asked once");
+    assert!(asked[0].0.starts_with("An MCP client asks to run a statement that changes data."), "{}", asked[0].0);
+    assert!(!asked[0].0.contains("DANGEROUS"), "{}", asked[0].0);
+    assert_eq!(rig.runs(0), [add.to_owned()]);
+    // Dropping a column is dangerous: refused without the flag, nobody is asked.
+    let drop = rig.execute(0, "ALTER TABLE items DROP COLUMN biz_domain").await;
+    assert_eq!(code(&drop), "agent.dangerous_refused", "{}", text(&drop));
+    assert_eq!(rig.harness.client.service().seen.asked().len(), 1);
+    assert_eq!(rig.runs(0).len(), 1);
+    // A script of additive DDL is one question; a destructive statement refuses the script.
+    let script = rig
+        .harness
+        .call(
+            "execute_batch",
+            json!({"connection_id": rig.ids[0], "script": "CREATE TABLE a (x int); ALTER TABLE a ADD COLUMN y int"}),
+        )
+        .await;
+    assert_eq!(code(&script), "ok", "{}", text(&script));
+    assert_eq!(rig.harness.client.service().seen.asked().len(), 2);
+    let script = rig
+        .harness
+        .call(
+            "execute_batch",
+            json!({"connection_id": rig.ids[0], "script": "ALTER TABLE a DROP COLUMN y"}),
+        )
+        .await;
+    assert_eq!(code(&script), "agent.dangerous_refused", "{}", text(&script));
+    assert_eq!(rig.harness.client.service().seen.asked().len(), 2);
+    rig.finish().await;
+}
+
+#[tokio::test]
+async fn ddl_on_a_connection_with_read_access_is_a_refused_write() {
+    let fixture = Fixture::new();
+    fixture.set_mcp_writes(true);
+    let conn = fixture.typed_connection(Some("read"), "");
+    let asker = Asker::answering(true, Ok(accepted(true)));
+    let seen = Arc::clone(&asker.seen);
+    let harness = Harness::start_with(fixture, asker).await;
+    let opened = harness
+        .call("open_session", json!({"connection_id": conn.id}))
+        .await;
+    assert_eq!(code(&opened), "ok", "{}", text(&opened));
+    for (statement, dangerous) in [
+        ("ALTER TABLE items ADD COLUMN biz_domain TEXT", false),
+        ("ALTER TABLE items DROP COLUMN label", true),
+    ] {
+        let result = harness
+            .call(
+                "execute_query",
+                json!({"connection_id": conn.id, "statement": statement, "dangerous": dangerous}),
+            )
+            .await;
+        assert_eq!(code(&result), "agent.write_refused", "{statement}: {}", text(&result));
+    }
+    assert!(seen.asked().is_empty());
+    harness.client.cancel().await.unwrap();
+    harness.server.await.unwrap().unwrap();
 }
 
 #[tokio::test]
@@ -963,11 +1089,11 @@ async fn the_instructions_and_tool_descriptions_say_a_write_may_be_asked_and_a_r
 fn the_fixed_reasons_read_as_the_documentation_says() {
     assert_eq!(
         REASON_SWITCH_OFF,
-        "changes through the MCP server are turned off in TableX: Settings \u{2192} AI"
+        "changes through the MCP server are turned off in tablex: Settings \u{2192} AI"
     );
     assert_eq!(
         REASON_PRODUCTION,
-        "a production connection can only be changed from the TableX app"
+        "a production connection can only be changed from the tablex app"
     );
     assert_eq!(REASON_NO_ELICITATION, "this MCP client cannot ask the user");
 }
@@ -1379,7 +1505,7 @@ async fn a_statement_too_long_to_review_is_not_asked() {
         "nothing more was asked"
     );
     assert_eq!(rig.runs(0).len(), 3);
-    assert!(REASON_TOO_LONG.contains("the user can run it in the TableX app"));
+    assert!(REASON_TOO_LONG.contains("the user can run it in the tablex app"));
     rig.finish().await;
 }
 

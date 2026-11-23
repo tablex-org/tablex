@@ -38,15 +38,15 @@ pub enum ConfigError {
 pub const USAGE: &str = "\
 Usage: tablex-mcp [OPTION]
 
-MCP server (stdio) for TableX. With no option it serves: the MCP client starts it and talks to it
+MCP server (stdio) for tablex. With no option it serves: the MCP client starts it and talks to it
 on stdin / stdout. Access is off by default; set a default for all connections in
-TableX > Settings > AI > Default agent access, or one per connection in
-TableX > connection > Overrides > Agent access.
+tablex > Settings > AI > Default agent access, or one per connection in
+tablex > connection > Overrides > Agent access.
 
 Options:
       --print-config   print a ready-to-paste MCP client configuration and exit
       --authorize-keychain
-                       let this program read the TableX master key (one Keychain item) and
+                       let this program read the tablex master key (one Keychain item) and
                        the saved passwords of the connections agents may use (macOS); run it
                        once after installing, and again if macOS asks after an update
   -V, --version        print the version and exit

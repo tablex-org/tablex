@@ -181,18 +181,33 @@ async fn the_question_names_the_database_the_collection_and_the_exact_command() 
 }
 
 #[tokio::test]
-async fn an_empty_filter_never_asks_through_mcp_and_a_mistake_is_refused_before_it_could() {
-    let rig = rig(false, true, Asker::answering(true, Ok(accepted(true)))).await;
-    let mistake = rig.write("mongo_delete", json!({"filter": {}, "many": true})).await;
+async fn an_empty_filter_is_asked_as_dangerous_off_production_and_refused_on_production() {
+    // Off production: a mistake (no `allow_all`) is refused before anything; with `allow_all` the
+    // user is asked, with the danger said first, and a yes sends the command.
+    let dev = rig(false, true, Asker::answering(true, Ok(accepted(true)))).await;
+    let mistake = dev.write("mongo_delete", json!({"filter": {}, "many": true})).await;
     assert_eq!(code(&mistake), "agent.invalid_arguments", "{}", text(&mistake));
-    let dangerous = rig
+    assert!(dev.sent().is_empty());
+    assert!(dev.harness.client.service().seen.asked().is_empty());
+    let dangerous = dev
+        .write("mongo_delete", json!({"filter": {}, "many": true, "allow_all": true}))
+        .await;
+    assert_eq!(code(&dangerous), "ok", "{}", text(&dangerous));
+    let asked = dev.harness.client.service().seen.asked();
+    assert_eq!(asked.len(), 1);
+    assert!(asked[0].0.starts_with("DANGEROUS: an MCP client asks to run a command"), "{}", asked[0].0);
+    assert_eq!(dev.sent().len(), 1);
+    dev.finish().await;
+    // On production the same call is refused without asking.
+    let on_production = rig(true, true, Asker::answering(true, Ok(accepted(true)))).await;
+    let dangerous = on_production
         .write("mongo_delete", json!({"filter": {}, "many": true, "allow_all": true}))
         .await;
     assert_eq!(code(&dangerous), "agent.dangerous_refused", "{}", text(&dangerous));
-    assert!(message(&dangerous).contains("never runs dangerous"), "{}", message(&dangerous));
-    assert!(rig.sent().is_empty());
-    assert!(rig.harness.client.service().seen.asked().is_empty());
-    rig.finish().await;
+    assert!(message(&dangerous).contains("does not run dangerous statements on a production connection"), "{}", message(&dangerous));
+    assert!(on_production.sent().is_empty());
+    assert!(on_production.harness.client.service().seen.asked().is_empty());
+    on_production.finish().await;
 }
 
 #[tokio::test]

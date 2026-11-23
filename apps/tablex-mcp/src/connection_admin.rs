@@ -25,7 +25,7 @@ use engine_agent::{
 };
 use engine_connect::app_channel::{AppClient, Request};
 use engine_connect::connect::{accounts_of, Connector};
-use engine_connect::credentials::SecretKind;
+use engine_connect::credentials::{CredentialError, SecretKind};
 use engine_connect::new_connection::{self, NewConnection, Tls};
 use engine_connect::profile::{self, ConnectionType, DEVELOPMENT};
 use engine_connect::records::{self, ConnectionKind};
@@ -69,8 +69,25 @@ fn store_error(what: &str, error: impl std::fmt::Display) -> AgentError {
     AgentError::driver("connections.store_failed", format!("{what}: {error}"), false)
 }
 
-fn credentials_error(what: &str, error: impl std::fmt::Display) -> AgentError {
+fn credentials_error(connector: &Connector, what: &str, error: CredentialError) -> AgentError {
+    // The Keychain would have to ask the user: say how to allow it, as an open does.
+    if error == CredentialError::InteractionNotAllowed {
+        return AgentError::driver("credentials.keychain_access_needed", connector.keychain_access_needed(), false);
+    }
     AgentError::driver("credentials.unavailable", format!("{what}: {error}"), false)
+}
+
+/// What to say of a removed connection whose secrets could not all be cleared. An old Keychain
+/// item that macOS would have to ask about stays (nothing here may ask). Nothing reads it again;
+/// the user may delete it in Keychain Access.
+fn removal_warning(error: &CredentialError) -> String {
+    if *error == CredentialError::InteractionNotAllowed {
+        return "the connection was removed, but an old Keychain item of its password stays (macOS would \
+                have to ask before deleting it). Nothing reads it any more; delete it in Keychain Access if \
+                you like"
+            .to_owned();
+    }
+    format!("the connection was removed, but its saved secrets could not be cleared: {error}")
 }
 
 fn now() -> f64 {
@@ -93,7 +110,7 @@ impl ConnectionStore {
     fn settings(&self) -> Result<profile::ProfileSettings, AgentError> {
         self.connector.profile_settings().map_err(|error| {
             AgentError::invalid(format!(
-                "the connection types could not be read from the TableX settings, so nothing was changed: {error}"
+                "the connection types could not be read from the tablex settings, so nothing was changed: {error}"
             ))
         })
     }
@@ -259,14 +276,14 @@ impl ConnectionStore {
         let (mut message, shown): (String, Vec<&str>) = match plan {
             Plan::Add { record, password, type_name, production } => {
                 let mut message = format!(
-                    "An MCP client asks to ADD a connection to TableX. Nothing is added unless you accept.\n\nName: {}\n\n{}",
+                    "An MCP client asks to ADD a connection to tablex. Nothing is added unless you accept.\n\nName: {}\n\n{}",
                     label(&record.name),
                     kind_type(record, type_name, *production),
                 );
                 message.push_str(&if password.is_some() {
-                    "Password: one is given; it is saved in TableX's credential store and not shown here.\n\n".to_owned()
+                    "Password: one is given; it is saved in tablex's credential store and not shown here.\n\n".to_owned()
                 } else {
-                    "Password: none is saved; TableX asks for it when connecting.\n\n".to_owned()
+                    "Password: none is saved; tablex asks for it when connecting.\n\n".to_owned()
                 });
                 message.push_str(
                     "The connection has no agent access setting of its own: it follows your settings for its connection type.",
@@ -292,7 +309,7 @@ impl ConnectionStore {
             }
             Plan::Remove { record, type_name, production } => {
                 let mut message = format!(
-                    "An MCP client asks to REMOVE a connection from TableX. This cannot be undone. Nothing is removed unless you accept.\n\nName: {}\n\n{}",
+                    "An MCP client asks to REMOVE a connection from tablex. This cannot be undone. Nothing is removed unless you accept.\n\nName: {}\n\n{}",
                     label(&record.name),
                     kind_type(record, type_name, *production),
                 );
@@ -318,7 +335,7 @@ impl ConnectionStore {
     fn driver_missing(&self, db_type: &str) -> Option<String> {
         matches!(self.connector.driver_store().record(db_type), Ok(None)).then(|| {
             format!(
-                "the {db_type} driver is not installed yet: install it from TableX's Driver Manager before connecting"
+                "the {db_type} driver is not installed yet: install it from tablex's Driver Manager before connecting"
             )
         })
     }
@@ -331,7 +348,7 @@ impl ConnectionStore {
         if let Some(password) = password {
             credentials
                 .write(SecretKind::Database, &record.id, password)
-                .map_err(|error| credentials_error("the password could not be saved, so the connection was not added", error))?;
+                .map_err(|error| credentials_error(&self.connector, "the password could not be saved, so the connection was not added", error))?;
         }
         if let Err(error) = connection::upsert_connection(&record) {
             if password.is_some() {
@@ -382,7 +399,7 @@ impl ConnectionAdmin for ConnectionStore {
                             .connector
                             .credentials()
                             .load(SecretKind::Database, &account)
-                            .map_err(|error| credentials_error("the saved password of the original could not be read, so nothing was copied", error))?;
+                            .map_err(|error| credentials_error(&self.connector, "the saved password of the original could not be read, so nothing was copied", error))?;
                         if password.is_some() {
                             break;
                         }
@@ -406,9 +423,7 @@ impl ConnectionAdmin for ConnectionStore {
                 let mut warning = None;
                 for account in accounts_of(&record.id) {
                     if let Err(error) = self.connector.credentials().delete_all(&account) {
-                        warning.get_or_insert(format!(
-                            "the connection was removed, but its saved secrets could not be cleared: {error}"
-                        ));
+                        warning.get_or_insert(removal_warning(&error));
                     }
                 }
                 ConnectionChanged {
@@ -421,5 +436,48 @@ impl ConnectionAdmin for ConnectionStore {
         };
         changed.app_notified = self.notify();
         Ok(changed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn connector(command: Option<&str>) -> Connector {
+        let dir = std::env::temp_dir();
+        let connector = Connector::new(std::sync::Arc::new(engine_driver_host::InstalledDriverStore::new(&dir)));
+        match command {
+            Some(command) => connector.with_keychain_command(command.into()),
+            None => connector,
+        }
+    }
+
+    #[test]
+    fn a_keychain_that_would_ask_the_user_is_told_with_the_fix_and_other_errors_stay_unavailable() {
+        let command = "'/Users/a b/tablex-mcp' --authorize-keychain";
+        let blocked = credentials_error(
+            &connector(Some(command)),
+            "the password could not be saved",
+            CredentialError::InteractionNotAllowed,
+        );
+        assert_eq!(blocked.code(), "credentials.keychain_access_needed");
+        let text = blocked.to_string();
+        assert!(text.contains("Allow Keychain access") && text.contains(command), "{text}");
+        assert!(!text.contains("could not be saved"), "{text}");
+        let other = credentials_error(
+            &connector(None),
+            "the password could not be saved",
+            CredentialError::Platform("locked".into()),
+        );
+        assert_eq!(other.code(), "credentials.unavailable");
+    }
+
+    #[test]
+    fn a_removed_connection_whose_old_item_needs_the_user_says_it_stays_not_that_it_cannot_be_read() {
+        let text = removal_warning(&CredentialError::InteractionNotAllowed);
+        assert!(text.contains("stays") && text.contains("Keychain Access") && !text.contains("cannot read"), "{text}");
+        assert!(!text.contains("cannot read"), "{text}");
+        let other = removal_warning(&CredentialError::Platform("keychain locked".into()));
+        assert!(other.ends_with("could not be cleared: keychain locked"), "{other}");
     }
 }
