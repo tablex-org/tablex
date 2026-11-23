@@ -1,6 +1,6 @@
-<img src="apps/tablex-gpui/assets/icons/table.svg" align="right" width="64" height="64" alt="TableX" />
+<img src=".github/logo.png" align="right" width="80" height="80" alt="tablex" />
 
-# TableX
+# tablex
 
 A performance-first database client written in Rust with [GPUI](https://www.gpui.rs/).
 
@@ -8,7 +8,7 @@ A performance-first database client written in Rust with [GPUI](https://www.gpui
 - Database support comes from driver plugins that the app downloads, verifies and loads at run time.
 - Results travel as Apache Arrow from the driver to a virtualized grid.
 
-![TableX: a PostgreSQL query and its results](.github/screenshots/sql-results.png)
+![tablex: a PostgreSQL query and its results](.github/screenshots/sql-results.png)
 
 ## Databases
 
@@ -48,7 +48,7 @@ The screenshots use the app's built-in sample data.
 
 ## Download
 
-macOS 12 or later: the `.dmg` for your Mac (Apple silicon or Intel) from the [latest release](https://github.com/tablex-org/tablex/releases/latest). Drag TableX to Applications. The app is not notarized yet, so confirm the first launch with right-click > **Open**. Databases are added from **Driver Manager** inside the app.
+macOS 12 or later: the `.dmg` for your Mac (Apple silicon or Intel) from the [latest release](https://github.com/tablex-org/tablex/releases/latest). Drag tablex to Applications. The app is not notarized yet, so confirm the first launch with right-click > **Open**. Databases are added from **Driver Manager** inside the app.
 
 Linux and Windows: build from source.
 

@@ -1,4 +1,4 @@
-# TableX
+# tablex
 
 Performance-first native macOS database client with multi-DB extensibility. Performance is #1 — always optimize for speed, low memory usage, and responsiveness.
 
