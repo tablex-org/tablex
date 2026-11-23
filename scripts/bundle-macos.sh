@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Assemble target/release/bundle/TableX.app from a release build of tablex-gpui.
+# Assemble target/release/bundle/tablex.app from a release build of tablex-gpui.
 #
 # Without a bundle, macOS names the app after the executable ("tablex-gpui") and
 # gives it no Dock icon identity; the menu bar title comes from CFBundleName.
@@ -34,7 +34,7 @@ fi
 version="$(sed -n 's/^version = "\(.*\)"/\1/p' apps/tablex-gpui/Cargo.toml | head -n 1)"
 # The same `org.tablex` prefix as the signed tools (org.tablex.tablex-mcp, ...).
 bundle_id="${TABLEX_BUNDLE_ID:-org.tablex.TableX}"
-app="$target_dir/release/bundle/TableX.app"
+app="$target_dir/release/bundle/tablex.app"
 contents="$app/Contents"
 
 rm -rf "$app"
@@ -71,8 +71,8 @@ cat > "$contents/Info.plist" <<PLIST
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key><string>TableX</string>
-    <key>CFBundleDisplayName</key><string>TableX</string>
+    <key>CFBundleName</key><string>tablex</string>
+    <key>CFBundleDisplayName</key><string>tablex</string>
     <key>CFBundleIdentifier</key><string>$bundle_id</string>
     <key>CFBundleExecutable</key><string>TableX</string>
     <key>CFBundlePackageType</key><string>APPL</string>

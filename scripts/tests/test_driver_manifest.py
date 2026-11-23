@@ -724,8 +724,8 @@ class AppManifestTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.dir = Path(self.tmp.name)
-        self.arm = self.dir / "TableX-0.2.0-macos-apple-silicon.app.zip"
-        self.intel = self.dir / "TableX-0.2.0-macos-intel.app.zip"
+        self.arm = self.dir / "tablex-0.2.0-macos-apple-silicon.app.zip"
+        self.intel = self.dir / "tablex-0.2.0-macos-intel.app.zip"
         self.arm.write_bytes(b"arm zip")
         self.intel.write_bytes(b"intel zip bytes")
         self.zips = [("x86_64-apple-darwin", self.intel), ("aarch64-apple-darwin", self.arm)]
@@ -757,7 +757,7 @@ class AppManifestTests(unittest.TestCase):
             build("v0.2", self.BASE, self.zips)
         with self.assertRaises(dm.ManifestError):
             build("0.2.0", "http://example.com/v0.2.0", self.zips)
-        dmg = self.dir / "TableX.dmg"
+        dmg = self.dir / "tablex.dmg"
         dmg.write_bytes(b"x")
         with self.assertRaises(dm.ManifestError):
             build("0.2.0", self.BASE, [("aarch64-apple-darwin", dmg), ("x86_64-apple-darwin", self.intel)])

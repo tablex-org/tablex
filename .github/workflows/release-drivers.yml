@@ -402,7 +402,7 @@ jobs:
               cat "release-notes/${RELEASE_TAG}.md"
               printf '\n---\n\n'
             fi
-            echo "Driver plugins and tools for TableX, installed by the app from Driver Manager (this is not the app)."
+            echo "Driver plugins and tools for tablex, installed by the app from Driver Manager (this is not the app)."
           } > release-notes.md
           gh release view "${RELEASE_TAG}" >/dev/null 2>&1 || \
             gh release create "${RELEASE_TAG}" --title "Drivers ${RELEASE_TAG#drivers-v}" --latest=false \
@@ -441,7 +441,7 @@ jobs:
           set -euo pipefail
           gh release view drivers-catalog >/dev/null 2>&1 || \
             gh release create drivers-catalog --title "Driver catalog" --latest=false \
-              --notes "Signed driver manifest read by TableX. Refreshed by every drivers-v* release."
+              --notes "Signed driver manifest read by tablex. Refreshed by every drivers-v* release."
           gh release upload drivers-catalog --clobber \
             dist/drivers/drivers-manifest.json dist/drivers/drivers-manifest.json.sig
 

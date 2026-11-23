@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Pack a TableX.app (from scripts/bundle-macos.sh) into a compressed disk image
+# Pack a tablex.app (from scripts/bundle-macos.sh) into a compressed disk image
 # with an /Applications shortcut, so a user drags the app across to install it.
 #
 # Usage: scripts/dmg-macos.sh APP OUT.dmg
@@ -18,7 +18,7 @@ ln -s /Applications "$stage/Applications"
 
 mkdir -p "$(dirname "$out")"
 rm -f "$out"
-hdiutil create -volname "TableX" -srcfolder "$stage" -fs HFS+ -format UDZO -imagekey zlib-level=9 \
+hdiutil create -volname "tablex" -srcfolder "$stage" -fs HFS+ -format UDZO -imagekey zlib-level=9 \
     -ov "$out" >/dev/null
 hdiutil verify "$out" >/dev/null
 echo "$out"

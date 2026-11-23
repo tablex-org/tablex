@@ -16,7 +16,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 HELPER = ROOT / "scripts" / "gpui-capture-helper.swift"
 PROBE = Path(__file__).with_name("native-input-probe.swift")
-TITLE = "TableX UI Scenario: new-connection"
+TITLE = "tablex UI Scenario: new-connection"
 SHIFT_FLAG = 1 << 17
 COMMAND_FLAG = 1 << 20
 
@@ -95,7 +95,7 @@ class NativeCaptureInputTests(unittest.TestCase):
                     cls.events.append(json.loads(line))
 
     def test_native_click_tab_and_unicode_are_received_once(self):
-        args = ("--pid", str(self.ready["pid"]), "--path", str(self.probe_bin), "--window-id", str(self.ready["windowNumber"]), "--title", "TableX UI Scenario: new-connection")
+        args = ("--pid", str(self.ready["pid"]), "--path", str(self.probe_bin), "--window-id", str(self.ready["windowNumber"]), "--title", "tablex UI Scenario: new-connection")
         self.invoke("click", *args, "--x", "100", "--y", "200")
         self.invoke("key", *args, "--key", "tab")
         self.invoke("text", *args, "--text-stdin", stdin="A🙂é")
@@ -138,7 +138,7 @@ class NativeCaptureInputTests(unittest.TestCase):
         self.drain_events(0.1)
         before = len(self.events)
         for path, window in (("/not/the/owned/process", self.ready["windowNumber"]), (str(self.probe_bin), self.ready["secondaryWindowNumber"])):
-            result = subprocess.run([str(self.helper_bin), "key", "--pid", str(self.ready["pid"]), "--path", path, "--window-id", str(window), "--title", "TableX UI Scenario: new-connection", "--key", "tab"], text=True, capture_output=True)
+            result = subprocess.run([str(self.helper_bin), "key", "--pid", str(self.ready["pid"]), "--path", path, "--window-id", str(window), "--title", "tablex UI Scenario: new-connection", "--key", "tab"], text=True, capture_output=True)
             self.assertNotEqual(result.returncode, 0)
         self.drain_events(0.3)
         self.assertEqual(len(self.events), before)
@@ -146,7 +146,7 @@ class NativeCaptureInputTests(unittest.TestCase):
     def test_unicode_chunk_boundary_does_not_split_surrogates(self):
         self.drain_events(0.1)
         before = len(self.events)
-        args = ("--pid", str(self.ready["pid"]), "--path", str(self.probe_bin), "--window-id", str(self.ready["windowNumber"]), "--title", "TableX UI Scenario: new-connection")
+        args = ("--pid", str(self.ready["pid"]), "--path", str(self.probe_bin), "--window-id", str(self.ready["windowNumber"]), "--title", "tablex UI Scenario: new-connection")
         self.invoke("text", *args, "--text-stdin", stdin="x" * 19 + "🙂" + "y")
         self.drain_events()
         keys = [event for event in self.events[before:] if event.get("kind") == "key" and event.get("phase") == "down"]
@@ -156,7 +156,7 @@ class NativeCaptureInputTests(unittest.TestCase):
     def test_z_double_click_uses_native_click_counts(self):
         self.drain_events(0.1)
         before = len(self.events)
-        self.invoke("click", "--pid", str(self.ready["pid"]), "--path", str(self.probe_bin), "--window-id", str(self.ready["windowNumber"]), "--title", "TableX UI Scenario: new-connection", "--x", "100", "--y", "200", "--click-count", "2")
+        self.invoke("click", "--pid", str(self.ready["pid"]), "--path", str(self.probe_bin), "--window-id", str(self.ready["windowNumber"]), "--title", "tablex UI Scenario: new-connection", "--x", "100", "--y", "200", "--click-count", "2")
         self.drain_events()
         mouse = [event for event in self.events[before:] if event.get("kind") == "mouse"]
         self.assertEqual([event["phase"] for event in mouse], ["down", "up", "down", "up"])

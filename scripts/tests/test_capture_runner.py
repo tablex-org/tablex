@@ -95,14 +95,14 @@ class CaptureRunnerTests(unittest.TestCase):
     def test_mongo_grid_is_an_approved_scenario(self):
         self.assertEqual(
             runner.scenario_title("mongo-grid"),
-            "TableX UI Scenario: mongo-grid",
+            "tablex UI Scenario: mongo-grid",
         )
         self.assertIn("mongo-grid", runner.SCENARIOS)
 
     def test_table_diagram_is_an_approved_scenario(self):
         self.assertEqual(
             runner.scenario_title("table-diagram"),
-            "TableX UI Scenario: table-diagram",
+            "tablex UI Scenario: table-diagram",
         )
         self.assertIn("table-diagram", runner.SCENARIOS)
         self.assertIn("Track", runner.KNOWN_ACTIVE_TABS)
@@ -110,7 +110,7 @@ class CaptureRunnerTests(unittest.TestCase):
     def test_database_diagram_is_an_approved_scenario(self):
         self.assertEqual(
             runner.scenario_title("database-diagram"),
-            "TableX UI Scenario: database-diagram",
+            "tablex UI Scenario: database-diagram",
         )
         self.assertIn("database-diagram", runner.SCENARIOS)
         self.assertIn("main diagram", runner.KNOWN_ACTIVE_TABS)
@@ -118,71 +118,80 @@ class CaptureRunnerTests(unittest.TestCase):
     def test_table_properties_edit_is_an_approved_scenario(self):
         self.assertEqual(
             runner.scenario_title("table-properties-edit"),
-            "TableX UI Scenario: table-properties-edit",
+            "tablex UI Scenario: table-properties-edit",
         )
         self.assertIn("table-properties-edit", runner.SCENARIOS)
         self.assertIn("orders", runner.KNOWN_ACTIVE_TABS)
         self.assertIn(
-            '"TableX UI Scenario: table-properties-edit"',
+            '"tablex UI Scenario: table-properties-edit"',
             Path(runner.__file__).with_name("gpui-capture-helper.swift").read_text(),
         )
+
+    def test_showcase_is_an_approved_scenario(self):
+        self.assertEqual(
+            runner.scenario_title("showcase"),
+            "tablex UI Scenario: showcase",
+        )
+        self.assertIn("showcase", runner.SCENARIOS)
+        self.assertIn("showcase", runner.FIXTURES)
+        self.assertIn('"tablex UI Scenario: showcase"', Path(runner.__file__).with_name("gpui-capture-helper.swift").read_text())
 
     def test_grouped_tabs_is_an_approved_scenario(self):
         self.assertEqual(
             runner.scenario_title("grouped-tabs"),
-            "TableX UI Scenario: grouped-tabs",
+            "tablex UI Scenario: grouped-tabs",
         )
         self.assertIn("grouped-tabs", runner.SCENARIOS)
         self.assertIn("grouped-tabs-lone", runner.SCENARIOS)
-        self.assertIn('"TableX UI Scenario: grouped-tabs"', Path(runner.__file__).with_name("gpui-capture-helper.swift").read_text())
+        self.assertIn('"tablex UI Scenario: grouped-tabs"', Path(runner.__file__).with_name("gpui-capture-helper.swift").read_text())
 
     def test_settings_is_an_approved_scenario(self):
         self.assertEqual(
             runner.scenario_title("settings"),
-            "TableX UI Scenario: settings",
+            "tablex UI Scenario: settings",
         )
         self.assertIn("settings", runner.SCENARIOS)
-        self.assertIn('"TableX UI Scenario: settings"', Path(runner.__file__).with_name("gpui-capture-helper.swift").read_text())
+        self.assertIn('"tablex UI Scenario: settings"', Path(runner.__file__).with_name("gpui-capture-helper.swift").read_text())
 
     def test_settings_shortcuts_is_an_approved_scenario(self):
         self.assertEqual(
             runner.scenario_title("settings-shortcuts"),
-            "TableX UI Scenario: settings-shortcuts",
+            "tablex UI Scenario: settings-shortcuts",
         )
         self.assertIn("settings-shortcuts", runner.SCENARIOS)
-        self.assertIn('"TableX UI Scenario: settings-shortcuts"', Path(runner.__file__).with_name("gpui-capture-helper.swift").read_text())
+        self.assertIn('"tablex UI Scenario: settings-shortcuts"', Path(runner.__file__).with_name("gpui-capture-helper.swift").read_text())
 
     def test_connection_overrides_is_an_approved_scenario(self):
         self.assertEqual(
             runner.scenario_title("connection-overrides"),
-            "TableX UI Scenario: connection-overrides",
+            "tablex UI Scenario: connection-overrides",
         )
         self.assertIn("connection-overrides", runner.SCENARIOS)
-        self.assertIn('"TableX UI Scenario: connection-overrides"', Path(runner.__file__).with_name("gpui-capture-helper.swift").read_text())
+        self.assertIn('"tablex UI Scenario: connection-overrides"', Path(runner.__file__).with_name("gpui-capture-helper.swift").read_text())
 
     def test_connection_overview_is_an_approved_scenario(self):
         self.assertEqual(
             runner.scenario_title("connection-overview"),
-            "TableX UI Scenario: connection-overview",
+            "tablex UI Scenario: connection-overview",
         )
         self.assertIn("connection-overview", runner.SCENARIOS)
-        self.assertIn('"TableX UI Scenario: connection-overview"', Path(runner.__file__).with_name("gpui-capture-helper.swift").read_text())
+        self.assertIn('"tablex UI Scenario: connection-overview"', Path(runner.__file__).with_name("gpui-capture-helper.swift").read_text())
 
     def test_import_selection_is_an_approved_scenario(self):
         self.assertEqual(
             runner.scenario_title("import-selection"),
-            "TableX UI Scenario: import-selection",
+            "tablex UI Scenario: import-selection",
         )
         self.assertIn("import-selection", runner.SCENARIOS)
-        self.assertIn('"TableX UI Scenario: import-selection"', Path(runner.__file__).with_name("gpui-capture-helper.swift").read_text())
+        self.assertIn('"tablex UI Scenario: import-selection"', Path(runner.__file__).with_name("gpui-capture-helper.swift").read_text())
 
     def test_redis_is_an_approved_scenario(self):
         self.assertEqual(
             runner.scenario_title("redis"),
-            "TableX UI Scenario: redis",
+            "tablex UI Scenario: redis",
         )
         self.assertIn("redis", runner.SCENARIOS)
-        self.assertIn('"TableX UI Scenario: redis"', Path(runner.__file__).with_name("gpui-capture-helper.swift").read_text())
+        self.assertIn('"tablex UI Scenario: redis"', Path(runner.__file__).with_name("gpui-capture-helper.swift").read_text())
 
     def test_launch_theme_flag_forces_the_scenario_theme_through_the_environment(self):
         args = runner.parser().parse_args(["launch", "--binary", "/x", "--output", "/y", "--theme", "light"])

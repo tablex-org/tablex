@@ -1,18 +1,18 @@
 name: Release App
-# Builds TableX.app for macOS (Apple silicon and Intel) from a `v*` tag, packs each
+# Builds tablex.app for macOS (Apple silicon and Intel) from a `v*` tag, packs each
 # into a .dmg (scripts/bundle-macos.sh + scripts/dmg-macos.sh) and publishes them as
 # the GitHub Release of that tag, marked latest. The tag must be the app version of
 # apps/tablex-gpui/Cargo.toml (`v0.1.0` for 0.1.0).
 #
 # There is no Developer ID: the build jobs make an ad-hoc signed bundle, and the publish job signs it
-# again with the TableX release certificate (self-signed, pinned in scripts/release-signing.sha1; the
+# again with the tablex release certificate (self-signed, pinned in scripts/release-signing.sha1; the
 # .p12 is the `release` environment's TABLEX_CODESIGN_P12 / _PASSWORD) before packing the .dmg and the
 # update zip. Its designated requirement is the same in every release, so what a user allowed in the
 # Keychain survives an update. It is not notarized: macOS asks the user to confirm the first launch
 # (the release notes say how). Drivers are not in the app: it installs them from the signed driver
 # catalog (release-drivers.yml).
 #
-# In-app update: each build also packs the bundle as `TableX-<version>-macos-<arch>.app.zip`, and the
+# In-app update: each build also packs the bundle as `tablex-<version>-macos-<arch>.app.zip`, and the
 # publish job writes `app-update.json` (version, size and SHA-256 of both zips) and signs it with the
 # driver catalog's key (`DRIVER_MANIFEST_SIGNING_KEY`, a secret of the `release` environment, which the
 # publish job alone uses; the environment must allow `v*` tags). The app verifies that signature with
@@ -91,8 +91,8 @@ jobs:
           scripts/bundle-macos.sh --binary "target/${{ matrix.target }}/dist/tablex-gpui"
           # The ad-hoc signed bundle; the publish job signs it with the release certificate and packs
           # the .dmg and the update zip. ditto keeps the bundle's symlinks.
-          ditto -c -k --keepParent target/release/bundle/TableX.app \
-            "dist/TableX-${VERSION}-macos-${{ matrix.arch }}.app.zip"
+          ditto -c -k --keepParent target/release/bundle/tablex.app \
+            "dist/tablex-${VERSION}-macos-${{ matrix.arch }}.app.zip"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -137,14 +137,14 @@ jobs:
           set -euo pipefail
           version="${TAG#v}"
           for arch in apple-silicon intel; do
-            zip="dist/TableX-${version}-macos-${arch}.app.zip"
+            zip="dist/tablex-${version}-macos-${arch}.app.zip"
             work="$(mktemp -d)"
             ditto -x -k "${zip}" "${work}"
-            scripts/release-signing.sh sign "${work}/TableX.app"
-            scripts/release-signing.sh verify "${work}/TableX.app" org.tablex.TableX
+            scripts/release-signing.sh sign "${work}/tablex.app"
+            scripts/release-signing.sh verify "${work}/tablex.app" org.tablex.TableX
             rm -f "${zip}"
-            ditto -c -k --keepParent "${work}/TableX.app" "${zip}"
-            scripts/dmg-macos.sh "${work}/TableX.app" "dist/TableX-${version}-macos-${arch}.dmg"
+            ditto -c -k --keepParent "${work}/tablex.app" "${zip}"
+            scripts/dmg-macos.sh "${work}/tablex.app" "dist/tablex-${version}-macos-${arch}.dmg"
             rm -rf "${work}"
           done
 
@@ -172,8 +172,8 @@ jobs:
           python3 scripts/driver_manifest.py app-manifest \
             --version "${version}" \
             --base-url "https://github.com/${GITHUB_REPOSITORY_NAME}/releases/download/${TAG}" \
-            --zip "aarch64-apple-darwin=dist/TableX-${version}-macos-apple-silicon.app.zip" \
-            --zip "x86_64-apple-darwin=dist/TableX-${version}-macos-intel.app.zip" \
+            --zip "aarch64-apple-darwin=dist/tablex-${version}-macos-apple-silicon.app.zip" \
+            --zip "x86_64-apple-darwin=dist/tablex-${version}-macos-intel.app.zip" \
             --out dist/app-update.json \
             --key-env DRIVER_MANIFEST_SIGNING_KEY \
             --signer rust-engine/target/release/examples/sign-manifest
@@ -188,16 +188,16 @@ jobs:
           set -euo pipefail
           version="${TAG#v}"
           cat > notes.md <<EOF
-          TableX ${version} for macOS 12 or later.
+          tablex ${version} for macOS 12 or later.
 
           | Mac | Download |
           | --- | --- |
-          | Apple silicon (M1 and later) | \`TableX-${version}-macos-apple-silicon.dmg\` |
-          | Intel | \`TableX-${version}-macos-intel.dmg\` |
+          | Apple silicon (M1 and later) | \`tablex-${version}-macos-apple-silicon.dmg\` |
+          | Intel | \`tablex-${version}-macos-intel.dmg\` |
 
-          Open the .dmg and drag TableX to Applications. The app is not notarized by Apple yet, so
-          the first launch needs a confirmation: right-click TableX in Applications and choose
-          **Open**, or run \`xattr -dr com.apple.quarantine /Applications/TableX.app\`.
+          Open the .dmg and drag tablex to Applications. The app is not notarized by Apple yet, so
+          the first launch needs a confirmation: right-click tablex in Applications and choose
+          **Open**, or run \`xattr -dr com.apple.quarantine /Applications/tablex.app\`.
 
           Database drivers are installed from the app: **Driver Manager** lists PostgreSQL,
           MySQL, MariaDB, SQLite, MongoDB, Redis and ClickHouse.
@@ -206,5 +206,5 @@ jobs:
           sed -i.bak 's/^          //' notes.md
           # What changed first (release-notes/<tag>.md), then the install notes.
           { cat "release-notes/${TAG}.md"; printf '\n---\n\n'; cat notes.md; } > release-notes.md
-          gh release create "${TAG}" --title "TableX ${version}" --notes-file release-notes.md --latest \
+          gh release create "${TAG}" --title "tablex ${version}" --notes-file release-notes.md --latest \
             dist/*.dmg dist/*.app.zip dist/app-update.json dist/app-update.json.sig

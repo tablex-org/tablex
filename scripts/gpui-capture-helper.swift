@@ -5,43 +5,44 @@ import Darwin
 import Foundation
 
 let allowedScenarioTitles: Set<String> = [
-    "TableX UI Scenario: new-connection",
-    "TableX UI Scenario: connection-tree",
-    "TableX UI Scenario: connection-overview",
-    "TableX UI Scenario: result-grid",
-    "TableX UI Scenario: result-footer",
-    "TableX UI Scenario: mongo-grid",
-    "TableX UI Scenario: table-diagram",
-    "TableX UI Scenario: database-diagram",
-    "TableX UI Scenario: table-properties-edit",
-    "TableX UI Scenario: driver-manager",
-    "TableX UI Scenario: driver-manager-tools",
-    "TableX UI Scenario: missing-driver",
-    "TableX UI Scenario: split-panes",
-    "TableX UI Scenario: split-panes-drop",
-    "TableX UI Scenario: grouped-tabs",
-    "TableX UI Scenario: grouped-tabs-lone",
-    "TableX UI Scenario: settings",
-    "TableX UI Scenario: settings-shortcuts",
-    "TableX UI Scenario: connection-overrides",
-    "TableX UI Scenario: import-selection",
-    "TableX UI Scenario: redis",
-    "TableX UI Scenario: settings-ai",
-    "TableX UI Scenario: settings-ai-ollama",
-    "TableX UI Scenario: assistant",
-    "TableX UI Scenario: assistant-streaming",
-    "TableX UI Scenario: assistant-no-key",
-    "TableX UI Scenario: assistant-access-off",
-    "TableX UI Scenario: assistant-error",
-    "TableX UI Scenario: assistant-approval",
-    "TableX UI Scenario: assistant-approval-dangerous",
-    "TableX UI Scenario: assistant-approval-long",
-    "TableX UI Scenario: assistant-access-write",
-    "TableX UI Scenario: assistant-history",
-    "TableX UI Scenario: assistant-readonly",
-    "TableX UI Scenario: assistant-editor-action",
-    "TableX UI Scenario: updates",
-    "TableX UI Scenario: updates-changelog",
+    "tablex UI Scenario: new-connection",
+    "tablex UI Scenario: connection-tree",
+    "tablex UI Scenario: connection-overview",
+    "tablex UI Scenario: result-grid",
+    "tablex UI Scenario: result-footer",
+    "tablex UI Scenario: mongo-grid",
+    "tablex UI Scenario: table-diagram",
+    "tablex UI Scenario: database-diagram",
+    "tablex UI Scenario: showcase",
+    "tablex UI Scenario: table-properties-edit",
+    "tablex UI Scenario: driver-manager",
+    "tablex UI Scenario: driver-manager-tools",
+    "tablex UI Scenario: missing-driver",
+    "tablex UI Scenario: split-panes",
+    "tablex UI Scenario: split-panes-drop",
+    "tablex UI Scenario: grouped-tabs",
+    "tablex UI Scenario: grouped-tabs-lone",
+    "tablex UI Scenario: settings",
+    "tablex UI Scenario: settings-shortcuts",
+    "tablex UI Scenario: connection-overrides",
+    "tablex UI Scenario: import-selection",
+    "tablex UI Scenario: redis",
+    "tablex UI Scenario: settings-ai",
+    "tablex UI Scenario: settings-ai-ollama",
+    "tablex UI Scenario: assistant",
+    "tablex UI Scenario: assistant-streaming",
+    "tablex UI Scenario: assistant-no-key",
+    "tablex UI Scenario: assistant-access-off",
+    "tablex UI Scenario: assistant-error",
+    "tablex UI Scenario: assistant-approval",
+    "tablex UI Scenario: assistant-approval-dangerous",
+    "tablex UI Scenario: assistant-approval-long",
+    "tablex UI Scenario: assistant-access-write",
+    "tablex UI Scenario: assistant-history",
+    "tablex UI Scenario: assistant-readonly",
+    "tablex UI Scenario: assistant-editor-action",
+    "tablex UI Scenario: updates",
+    "tablex UI Scenario: updates-changelog",
 ]
 
 struct HelperError: Error {
@@ -451,6 +452,8 @@ func keyCode(_ key: String) throws -> CGKeyCode {
     case "cmd-f": return 3
     case "cmd-k": return 40
     case "cmd-shift-g": return 5
+    case "ctrl-space": return 49
+    case "cmd-i": return 34
     case "backspace": return 51
     case "left": return 123
     case "right": return 124
@@ -474,6 +477,8 @@ func keyFlags(_ key: String) -> CGEventFlags {
     case "cmd-f": return .maskCommand
     case "cmd-k": return .maskCommand
     case "cmd-shift-g": return [.maskCommand, .maskShift]
+    case "ctrl-space": return .maskControl
+    case "cmd-i": return .maskCommand
     case "shift-left", "shift-right", "shift-up", "shift-down": return .maskShift
     default: return []
     }
@@ -506,6 +511,19 @@ func key(pid: pid_t, expectedPath: String, id: CGWindowID, expectedTitle: String
     drainPostedEvents()
 }
 
+/// The ANSI key code of a lower-case letter, digit, space or common SQL punctuation.
+func asciiKeyCode(_ unit: UInt16) -> CGKeyCode? {
+    let codes: [Character: CGKeyCode] = [
+        "a": 0, "s": 1, "d": 2, "f": 3, "h": 4, "g": 5, "z": 6, "x": 7, "c": 8, "v": 9,
+        "b": 11, "q": 12, "w": 13, "e": 14, "r": 15, "y": 16, "t": 17, "1": 18, "2": 19,
+        "3": 20, "4": 21, "6": 22, "5": 23, "=": 24, "9": 25, "7": 26, "-": 27, "8": 28,
+        "0": 29, "o": 31, "u": 32, "i": 34, "p": 35, "l": 37, "j": 38, "k": 40, ";": 41,
+        ",": 43, "/": 44, "n": 45, "m": 46, ".": 47, " ": 49,
+    ]
+    guard let scalar = Unicode.Scalar(unit) else { return nil }
+    return codes[Character(scalar)]
+}
+
 func text(pid: pid_t, expectedPath: String, id: CGWindowID, expectedTitle: String, value: String) throws {
     let window = try target(pid: pid, expectedPath: expectedPath, id: id, expectedTitle: expectedTitle)
     try activate(pid, window: window, expectedTitle: expectedTitle)
@@ -514,13 +532,19 @@ func text(pid: pid_t, expectedPath: String, id: CGWindowID, expectedTitle: Strin
     let units = Array(value.utf16)
     var index = 0
     while index < units.count {
+        // A single ASCII char goes with its key code: handlers that read the key itself (Vim's
+        // Normal mode) see `i` as `i`, not the `a` key a bare Unicode event carries. Longer text
+        // stays a bare Unicode event, which an input method (Telex) leaves alone.
         var end = min(index + 20, units.count)
-        if end < units.count && (0xD800...0xDBFF).contains(units[end - 1]) {
+        var virtualKey: CGKeyCode = 0
+        if units.count == 1, let code = asciiKeyCode(units[index]) {
+            virtualKey = code
+        } else if end < units.count && (0xD800...0xDBFF).contains(units[end - 1]) {
             end -= 1
         }
         let chunk = Array(units[index..<end])
-        guard let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
-              let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) else {
+        guard let down = CGEvent(keyboardEventSource: source, virtualKey: virtualKey, keyDown: true),
+              let up = CGEvent(keyboardEventSource: source, virtualKey: virtualKey, keyDown: false) else {
             throw HelperError(message: "could not create Unicode keyboard event")
         }
         chunk.withUnsafeBufferPointer { buffer in

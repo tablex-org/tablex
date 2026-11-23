@@ -20,8 +20,8 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent
 HELPER_SOURCE = ROOT / "gpui-capture-helper.swift"
 HELPER_PREFIX = "tablex-gpui-capture-helper-"
-SCENARIOS = ("new-connection", "connection-tree", "connection-overview", "result-grid", "result-footer", "mongo-grid", "table-diagram", "database-diagram", "table-properties-edit", "driver-manager", "driver-manager-tools", "missing-driver", "split-panes", "split-panes-drop", "grouped-tabs", "grouped-tabs-lone", "settings", "settings-shortcuts", "connection-overrides", "import-selection", "redis", "assistant", "assistant-streaming", "assistant-no-key", "assistant-access-off", "assistant-error", "assistant-approval", "assistant-approval-dangerous", "assistant-approval-long", "assistant-access-write", "assistant-history", "assistant-readonly", "assistant-editor-action", "settings-ai", "settings-ai-ollama", "updates", "updates-changelog")
-FIXTURES = ("sample", "populated", "pending-edits", "empty", "loading", "error", "narrow", "disconnected", "states")
+SCENARIOS = ("new-connection", "connection-tree", "connection-overview", "result-grid", "result-footer", "mongo-grid", "table-diagram", "database-diagram", "showcase", "table-properties-edit", "driver-manager", "driver-manager-tools", "missing-driver", "split-panes", "split-panes-drop", "grouped-tabs", "grouped-tabs-lone", "settings", "settings-shortcuts", "connection-overrides", "import-selection", "redis", "assistant", "assistant-streaming", "assistant-no-key", "assistant-access-off", "assistant-error", "assistant-approval", "assistant-approval-dangerous", "assistant-approval-long", "assistant-access-write", "assistant-history", "assistant-readonly", "assistant-editor-action", "settings-ai", "settings-ai-ollama", "updates", "updates-changelog")
+FIXTURES = ("sample", "populated", "pending-edits", "empty", "loading", "error", "narrow", "disconnected", "states", "showcase")
 THEMES = ("dark", "light", "system")
 LANGUAGES = ("system", "en", "vi")
 DEFAULT_SCENARIO = "new-connection"
@@ -79,7 +79,7 @@ def safe_case(value: str) -> str:
 def scenario_title(scenario: str) -> str:
     if scenario not in SCENARIOS:
         fail(f"unsupported scenario: {scenario}")
-    return f"TableX UI Scenario: {scenario}"
+    return f"tablex UI Scenario: {scenario}"
 
 
 def binary_path(value: str) -> Path:
@@ -247,7 +247,7 @@ def process_identity(run: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         fail(f"invalid run pid: {pid}")
     info = helper("process-info", "--pid", str(pid))
     if not isinstance(info, dict) or not info.get("alive"):
-        fail(f"owned TableX process is not running: pid {pid}")
+        fail(f"owned tablex process is not running: pid {pid}")
     actual_path = os.path.realpath(str(info.get("path", "")))
     if actual_path != expected_path:
         fail(f"pid {pid} is not owned by this runner (path {actual_path!r})")
@@ -286,7 +286,7 @@ def windows_for(run: dict[str, Any]) -> dict[str, Any]:
             None,
         )
     if current is None:
-        fail(f"could not find owned TableX window for pid {pid}")
+        fail(f"could not find owned tablex window for pid {pid}")
     if current.get("title") != title:
         fail(f"owned window has unexpected title: {current.get('title')!r}")
     return current
@@ -345,7 +345,7 @@ def launch(args: argparse.Namespace) -> None:
             except RunnerError:
                 pass
             else:
-                fail(f"an owned TableX process is already running in {output}")
+                fail(f"an owned tablex process is already running in {output}")
 
     stdout_path = output / "stdout.log"
     (output / "actions.jsonl").write_text("", encoding="utf-8")
@@ -397,7 +397,7 @@ def launch(args: argparse.Namespace) -> None:
                 break
             except RunnerError:
                 if process.poll() is not None or time.monotonic() >= window_deadline:
-                    fail(f"timed out finding owned TableX window; see {stdout_path}")
+                    fail(f"timed out finding owned tablex window; see {stdout_path}")
                 time.sleep(0.1)
         # An inactive native window may not paint. Activate the owned window before awaiting its rendered checkpoint.
         helper(
@@ -417,7 +417,7 @@ def launch(args: argparse.Namespace) -> None:
             if any(event.get("event") == "ready" and event.get("pid") == process.pid for event in events):
                 break
             if process.poll() is not None:
-                fail(f"TableX exited before ready; see {stdout_path}")
+                fail(f"tablex exited before ready; see {stdout_path}")
             time.sleep(0.05)
         else:
             fail(f"timed out waiting for ready event; see {stdout_path}")
@@ -1179,7 +1179,7 @@ def stop(args: argparse.Namespace) -> None:
 
 
 def parser() -> argparse.ArgumentParser:
-    root = argparse.ArgumentParser(description="Native macOS capture runner for TableX GPUI scenarios")
+    root = argparse.ArgumentParser(description="Native macOS capture runner for tablex GPUI scenarios")
     commands = root.add_subparsers(dest="command", required=True)
 
     launch_parser = commands.add_parser("launch", help="launch an approved UI scenario")
@@ -1207,7 +1207,7 @@ def parser() -> argparse.ArgumentParser:
     group.add_argument("--move", nargs=2, action="append", metavar=("X", "Y"), type=float, help="append a button-free mouse move to a paced trace")
     act_parser.add_argument("--move-hz", type=int, default=60, help="mouse-move trace cadence (1-120 Hz)")
     group.add_argument("--text")
-    group.add_argument("--key", choices=("escape", "tab", "enter", "cmd-a", "cmd-f", "cmd-k", "cmd-shift-g", "backspace", "left", "right", "up", "down", "shift-left", "shift-right", "shift-up", "shift-down", "home", "end", "page-up", "page-down"))
+    group.add_argument("--key", choices=("escape", "tab", "enter", "cmd-a", "cmd-f", "cmd-k", "cmd-shift-g", "ctrl-space", "cmd-i", "backspace", "left", "right", "up", "down", "shift-left", "shift-right", "shift-up", "shift-down", "home", "end", "page-up", "page-down"))
     act_parser.set_defaults(handler=act)
 
     capture_parser = commands.add_parser("capture", help="capture one owned window into a new case directory")

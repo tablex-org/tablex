@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure the shipped size of a TableX executable and check it against a budget.
+"""Measure the shipped size of a tablex executable and check it against a budget.
 
   python3 scripts/size_report.py                 # measure target/dist/tablex-gpui
   python3 scripts/size_report.py --package tablex-mcp   # the standalone MCP server

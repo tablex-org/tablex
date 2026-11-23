@@ -63,7 +63,7 @@ environment without the key variable.
 
 App update manifest (`app-manifest`, published by release-app.yml as `app-update.json` +
 `app-update.json.sig` on the release of the app's tag): {kind: "tablex-app-update", schema: 1, version, generatedAt,
-artifacts: [{target, url, size, sha256}]} with one `TableX-<version>-macos-<arch>.app.zip` per target
+artifacts: [{target, url, size, sha256}]} with one `tablex-<version>-macos-<arch>.app.zip` per target
 (aarch64-apple-darwin | x86_64-apple-darwin). It is signed like the driver catalog: the same key, the
 same `sign-manifest` example, a detached base64 ed25519 signature over the exact bytes. The app
 verifies it with the keys it pins for the driver catalog before it reads a field.
@@ -91,7 +91,7 @@ CATEGORIES = ("sql", "nosql", "analytics", "key_value")
 TOOL_META = {
     "tablex-mcp": (
         "mcpServer",
-        "TableX MCP server",
+        "tablex MCP server",
         "Lets MCP clients (Claude Code, Claude Desktop, Cursor) use your saved connections, within each connection's assistant access.",
         (),
     ),
@@ -109,7 +109,7 @@ TOOL_META = {
     ),
 }
 # Licence and source of what a tool is made of, shown before it is installed: id -> (SPDX licence,
-# source repository). A tool built on third-party code names that code, not only TableX.
+# source repository). A tool built on third-party code names that code, not only tablex.
 TOOL_SOURCES = {
     "tablex-mcp": ("AGPL-3.0-only", DEFAULT_SOURCE_REPO),
     "tablex-mongo-shell": ("AGPL-3.0-only", DEFAULT_SOURCE_REPO),
@@ -653,7 +653,7 @@ def _cmd_sign(args: argparse.Namespace) -> int:
 
 
 def crate_min_app_version(cargo_toml: str | Path) -> str:
-    """The oldest TableX a crate's build works with: `min-app-version` of its Cargo.toml's
+    """The oldest tablex a crate's build works with: `min-app-version` of its Cargo.toml's
     `[package.metadata.tablex]` table, else DEFAULT_MIN_APP_VERSION. Read line by line (no TOML
     library: the runners' Python may predate tomllib); a malformed value is an error, never
     silently the default."""
@@ -716,7 +716,7 @@ def main(argv: list[str] | None = None) -> int:
 
     minimum = sub.add_parser(
         "min-app-version",
-        help="print the oldest TableX a crate works with ([package.metadata.tablex] min-app-version of its Cargo.toml)",
+        help="print the oldest tablex a crate works with ([package.metadata.tablex] min-app-version of its Cargo.toml)",
     )
     minimum.add_argument("cargo_toml")
     minimum.set_defaults(func=_cmd_min_app_version)

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Signs release builds (TableX.app, tablex-mcp) with the TableX release certificate: a self-signed
+# Signs release builds (tablex.app, tablex-mcp) with the tablex release certificate: a self-signed
 # code-signing certificate, kept for good, whose SHA-1 is pinned in scripts/release-signing.sha1 and in
 # the app's updater. A build signed with it has the same designated requirement in every release
 # (`identifier … and certificate root = H"<sha1>"`), so what a user allowed in the Keychain for one

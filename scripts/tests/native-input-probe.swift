@@ -1,7 +1,7 @@
 import AppKit
 import Foundation
 
-let title = "TableX UI Scenario: new-connection"
+let title = "tablex UI Scenario: new-connection"
 
 final class ProbeView: NSView {
     override var acceptsFirstResponder: Bool { true }
@@ -17,7 +17,7 @@ final class ProbeWindow: NSWindow {
     init(role: String, frame: NSRect) {
         self.role = role
         super.init(contentRect: frame, styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        title = role == "primary" ? "TableX UI Scenario: new-connection" : "TableX UI Scenario: secondary"
+        title = role == "primary" ? "tablex UI Scenario: new-connection" : "tablex UI Scenario: secondary"
         contentView = ProbeView(frame: NSRect(origin: .zero, size: frame.size))
         acceptsMouseMovedEvents = true
         isReleasedWhenClosed = false
