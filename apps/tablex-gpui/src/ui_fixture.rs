@@ -138,6 +138,23 @@ impl MongoFixtureCatalog {
         }
     }
 
+    /// The shop's MongoDB databases and collections.
+    fn showcase() -> Self {
+        let mut catalog = Self::new();
+        catalog.databases = crate::ui_fixture_showcase::MONGO_DATABASES.iter().map(|name| name.to_string()).collect();
+        catalog.collections = HashMap::from([
+            (
+                "shop".to_string(),
+                crate::ui_fixture_showcase::MONGO_COLLECTIONS.iter().map(|name| name.to_string()).collect(),
+            ),
+            (
+                "analytics".to_string(),
+                ["events", "funnels", "sessions_daily"].iter().map(|name| name.to_string()).collect(),
+            ),
+        ]);
+        catalog
+    }
+
     fn default_indexes() -> Vec<MongoIndexInfo> {
         let index = |name: &str, field: &str, unique: bool, ttl: Option<i64>| MongoIndexInfo {
             name: name.into(),
@@ -339,7 +356,7 @@ impl UiFixture {
         if std::env::var("TABLEX_FIXTURE_REDIS").as_deref() == Ok("1") {
             fixture.add_redis();
         }
-        if clickhouse {
+        if clickhouse && kind != FixtureKind::Showcase {
             fixture.connections.push(connection(
                 CLICKHOUSE_ID,
                 "ClickHouse fixture",
@@ -352,6 +369,9 @@ impl UiFixture {
 
     fn sample(kind: FixtureKind) -> Self {
         let mut fixture = Self::sample_rows(kind);
+        if kind == FixtureKind::Showcase {
+            fixture.use_showcase();
+        }
         if kind == FixtureKind::States {
             fixture.connections.extend([
                 connection(BILLING_ID, "Billing", ConnectionKind::Postgres, "postgres://billing.invalid/billing"),
@@ -404,6 +424,37 @@ impl UiFixture {
             mongo_scripts_enabled: std::env::var("TABLEX_FIXTURE_SCRIPTS").as_deref() == Ok("1"),
             redis: None,
         }
+    }
+
+    /// The `showcase` scenario's workspace: five connections under their own names, the shop's
+    /// MongoDB catalog and orders (`ui_fixture_showcase` answers the SQL side).
+    fn use_showcase(&mut self) {
+        use crate::ui_fixture_showcase as showcase;
+        let mut production = connection(
+            POSTGRES_ID,
+            "Production",
+            ConnectionKind::Postgres,
+            &format!("postgres://{}:5432/{}", showcase::PRODUCTION_HOST, showcase::DATABASE),
+        );
+        production.ssh_tunnel = true;
+        self.connections = vec![
+            production,
+            connection(
+                CLICKHOUSE_ID,
+                "Analytics",
+                ConnectionKind::Clickhouse,
+                "clickhouse://analytics.example.com:8123/analytics",
+            ),
+            connection(MONGO_ID, "Orders", ConnectionKind::Mongodb, "mongodb://orders.example.com/shop"),
+        ];
+        self.add_redis();
+        if let Some(cache) = self.connections.last_mut() {
+            cache.name = "Cache".into();
+            cache.uri = "redis://cache.example.com:6379/0".into();
+        }
+        self.connections.push(connection(SQLITE_ID, "Local", ConnectionKind::Sqlite, "sqlite://local.db"));
+        self.mongo_seed_rows = showcase::mongo_orders();
+        self.mongo_catalog = MongoFixtureCatalog::showcase();
     }
 
     /// Adds the Redis sidebar connection with its in-memory server. Opt-in
@@ -752,6 +803,14 @@ impl UiFixture {
         &self.connections
     }
 
+    /// The structure columns of the table a tab shows (the showcase has a table of its own for each).
+    pub fn catalog_columns_of(&self, schema: &str, object: &str) -> Vec<crate::catalog::CatalogColumn> {
+        if self.kind == FixtureKind::Showcase {
+            return crate::ui_fixture_showcase::catalog_columns(schema, object);
+        }
+        self.catalog_columns()
+    }
+
     pub fn catalog_columns(&self) -> Vec<crate::catalog::CatalogColumn> {
         [
             ("id", "int64", false, true),
@@ -783,6 +842,11 @@ impl UiFixture {
     pub fn load(&self, request: &LoadRequest) -> Result<FixtureLoad, String> {
         if self.kind == FixtureKind::Error {
             return Err("fixture catalog error".into());
+        }
+        if self.kind == FixtureKind::Showcase {
+            if let Some(loaded) = self.showcase_load(request) {
+                return loaded;
+            }
         }
         match request {
             LoadRequest::Databases { connection } => match self.connection_kind(connection) {
@@ -916,6 +980,19 @@ impl UiFixture {
                 .map(|column| navigator::column_child(connection, database, schema, object, column))
                 .collect(),
             )),
+            LoadRequest::TableFolder {
+                connection,
+                schema,
+                object,
+                ..
+            } => {
+                let properties =
+                    crate::ui_fixture_properties::table_properties(self.kind, connection, schema, object)?;
+                Ok(FixtureLoad::Children(navigator::sql_driver::table_folder_children(
+                    &request.parent_id(),
+                    &properties,
+                )))
+            }
             LoadRequest::Provider {
                 connection,
                 parent,
@@ -985,6 +1062,12 @@ impl UiFixture {
         }
         if self.connection_kind(connection).is_none() {
             return Err("unknown fixture connection".into());
+        }
+        // The showcase's SQL tab: its one query (Run shows the same result again).
+        if self.kind == FixtureKind::Showcase {
+            let batch = crate::ui_fixture_showcase::top_customers()?;
+            let total_count = batch.num_rows() as i64;
+            return Ok(QueryResultBatch { batches: vec![Arc::new(batch)], total_count });
         }
         let filter = filter
             .filter(|filter| !filter.trim().is_empty())
@@ -1068,6 +1151,11 @@ impl UiFixture {
         }
         if self.connection_kind(connection).is_none() {
             return Err("unknown fixture connection".into());
+        }
+        // The showcase's tables show their rows as they are (no filter or sort of its own).
+        if self.kind == FixtureKind::Showcase {
+            let (batches, total_count) = crate::ui_fixture_showcase::table_page(schema, object, offset, limit)?;
+            return Ok(QueryResultBatch { batches: batches.into_iter().map(Arc::new).collect(), total_count });
         }
         let condition = fixture_parse_where(where_clause)?;
         let terms = fixture_parse_order(order_by)?;
@@ -1337,6 +1425,42 @@ impl UiFixture {
             self.next_mongo_document_id = next_document_id;
         }
         Ok(requests.len())
+    }
+
+    /// What the showcase answers for a catalog load (`None`: the generic answer will do).
+    fn showcase_load(&self, request: &LoadRequest) -> Option<Result<FixtureLoad, String>> {
+        use crate::ui_fixture_showcase as showcase;
+        let children = |children| Some(Ok(FixtureLoad::Children(children)));
+        match request {
+            LoadRequest::Databases { connection } => {
+                let kind = self.connection_kind(connection)?;
+                matches!(kind, ConnectionKind::Postgres | ConnectionKind::Clickhouse | ConnectionKind::Sqlite).then(|| {
+                    Ok(FixtureLoad::Children(
+                        showcase::databases(kind)
+                            .into_iter()
+                            .map(|database| navigator::database_child(connection, database))
+                            .collect(),
+                    ))
+                })
+            }
+            LoadRequest::Schemas { connection, database }
+                if self.connection_kind(connection) == Some(ConnectionKind::Postgres) =>
+            {
+                children(
+                    showcase::SCHEMAS
+                        .into_iter()
+                        .map(|schema| navigator::schema_child(connection, database, schema))
+                        .collect(),
+                )
+            }
+            LoadRequest::Objects { connection, database, schema, group } => {
+                showcase::objects(connection, database, schema, *group).and_then(children)
+            }
+            LoadRequest::Columns { connection, database, schema, object } => {
+                children(showcase::columns(connection, database, schema, object))
+            }
+            _ => None,
+        }
     }
 
     fn connection_kind(&self, id: &str) -> Option<ConnectionKind> {
@@ -3056,6 +3180,34 @@ mod tests {
         assert!(properties.ddl.unwrap().starts_with("-- engine: MergeTree"));
         // Off by default.
         assert_eq!(UiFixture::with_clickhouse(FixtureKind::Sample, false).connections().len(), 3);
+    }
+
+    #[test]
+    fn table_folders_answer_from_the_fixture_description_of_each_dialect() {
+        use crate::navigator::TableFolder;
+        let fixture = UiFixture::with_clickhouse(FixtureKind::Sample, true);
+        // (connection, schema, folder) -> the rows the folder lists.
+        let rows = |connection: &str, schema: &str, folder| {
+            let request = LoadRequest::TableFolder {
+                connection: connection.into(),
+                database: "d".into(),
+                schema: schema.into(),
+                object: "t".into(),
+                folder,
+            };
+            match fixture.load(&request).expect("fixture load") {
+                FixtureLoad::Children(children) => children.into_iter().map(|child| child.label).collect::<Vec<_>>(),
+                _ => panic!("children expected"),
+            }
+        };
+        assert_eq!(rows(POSTGRES_ID, "public", TableFolder::Indexes), ["t_pkey", "t_name_key", "t_payload_idx"]);
+        assert_eq!(rows(POSTGRES_ID, "public", TableFolder::Constraints), ["t_pkey", "t_name_key", "t_score_check"]);
+        assert_eq!(rows(POSTGRES_ID, "public", TableFolder::ForeignKeys), ["t_customer_fk", "t_region_fk"]);
+        assert_eq!(rows(POSTGRES_ID, "public", TableFolder::Triggers), ["t_audit", "t_touch"]);
+        assert_eq!(rows(SQLITE_ID, "main", TableFolder::Indexes), ["sqlite_autoindex_t_1"]);
+        assert!(rows(SQLITE_ID, "main", TableFolder::ForeignKeys).is_empty());
+        assert_eq!(rows(CLICKHOUSE_ID, "d", TableFolder::Indexes), ["name_idx"]);
+        assert!(rows(CLICKHOUSE_ID, "d", TableFolder::Triggers).is_empty());
     }
 
     #[test]

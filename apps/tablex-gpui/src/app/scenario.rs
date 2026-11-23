@@ -655,8 +655,14 @@ impl AppRoot {
         let Some(service) = self.scenario_ui.service.as_ref() else {
             return;
         };
+        let (schema, object) = self
+            .workspace
+            .tab(tab_id)
+            .map(|tab| (tab.schema.clone().unwrap_or_default(), tab.collection.clone()))
+            .unwrap_or_default();
+        let columns = service.fixture().catalog_columns_of(&schema, &object);
         if let Some(runtime) = self.workspace.runtime_mut(tab_id) {
-            runtime.set_structure_columns(service.fixture().catalog_columns());
+            runtime.set_structure_columns(columns);
         }
     }
 
@@ -712,11 +718,7 @@ impl AppRoot {
         let Some(service) = self.scenario_ui.service.as_ref() else {
             return;
         };
-        let (window_width, window_height) = if service.scenario().fixture == FixtureKind::Narrow {
-            (720, 650)
-        } else {
-            (1100, 850)
-        };
+        let (window_width, window_height) = service.scenario().window_size();
         let mut checkpoint = serde_json::json!({
             "event": event,
             "scenario": service.scenario().name(),
@@ -893,6 +895,7 @@ impl AppRoot {
                     this.sync_sidebar_connections(cx);
                     if matches!(outcome, FixtureOutcome::Success) {
                         this.rerun_tabs_after_reconnect(&connection, cx);
+                        this.connected_for_create_database(&connection, cx);
                         let is_mongo = this
                             .saved_connections
                             .iter()
@@ -934,6 +937,7 @@ impl AppRoot {
                             }
                         }
                     } else {
+                        this.navigator_ui.create_database_after_connect.remove(&connection);
                         let error = match outcome {
                             FixtureOutcome::Error => "Connection failed: simulated fixture error",
                             FixtureOutcome::Timeout => {
@@ -1122,6 +1126,160 @@ impl AppRoot {
         self.navigator_ui.generation = self.navigator.generation();
     }
 
+    /// `showcase`: a workspace as it looks in daily use (`ui_fixture_showcase`). Production
+    /// (PostgreSQL 16, read-only, behind SSH), Analytics and Orders are connected and grouped as
+    /// "Work", Cache and Local follow. The tree is open down to the columns of `orders`; tabs: a
+    /// SQL tab with its result (active), the MongoDB `orders` collection and the `customers`
+    /// table. Everything is applied here, from the fixture, so nothing waits on a timer.
+    #[cfg(any(test, feature = "ui-scenarios"))]
+    pub(super) fn seed_showcase_scenario(&mut self) {
+        use crate::settings::connection::{ConnectionProfile, PRODUCTION};
+        use crate::ui_fixture::{CLICKHOUSE_ID, MONGO_ID, POSTGRES_ID};
+        let database = crate::ui_fixture_showcase::DATABASE;
+        // A debug metric, on by default in debug builds only: not part of a marketing shot.
+        Arc::make_mut(&mut self.settings).appearance.show_fps = false;
+
+        // Connections: who is connected, Production's type and its tunnel, the group.
+        for id in [POSTGRES_ID, CLICKHOUSE_ID, MONGO_ID] {
+            if let Some(attempt) = self.sessions.begin_connect(id) {
+                self.sessions.finish_connect(id, attempt, Ok(()));
+            }
+        }
+        self.sync_connected_ids();
+        self.navigator.enable_provider(MONGO_ID);
+        self.connection_policy.set_profile(
+            POSTGRES_ID,
+            ConnectionProfile { type_id: PRODUCTION.into(), ..Default::default() },
+        );
+        if let Some(ty) = Arc::make_mut(&mut self.settings)
+            .connection_types
+            .iter_mut()
+            .find(|ty| ty.id == PRODUCTION)
+        {
+            ty.read_only = true;
+        }
+        self.seed_tunnel(
+            POSTGRES_ID.into(),
+            &crate::ssh_tunnel::SshSettings {
+                enabled: true,
+                host: "bastion.example.com".into(),
+                user: "deploy".into(),
+                ..Default::default()
+            },
+        );
+        self.driver_runtime.server_versions.insert(POSTGRES_ID.into(), 160_200);
+        let mut preferences = self.navigator.preferences().clone();
+        let all: Vec<String> = self.saved_connections.iter().map(|saved| saved.id.to_string()).collect();
+        let work = [POSTGRES_ID, CLICKHOUSE_ID, MONGO_ID].map(String::from);
+        let _ = preferences.add_group("work", "Work", None);
+        let _ = preferences.move_connections(&all, &work, Some("work"), 0);
+        let _ = preferences.move_group("work", None, 0);
+        let _ = self.navigator.set_preferences(preferences);
+
+        // The tree: Production > shop > public > Tables, with `orders` open on its Columns.
+        let root = NavigatorNodeId::Connection { connection: POSTGRES_ID.into() };
+        self.apply_scenario_expansion(&root);
+        let shop = NavigatorNodeId::Database { connection: POSTGRES_ID.into(), database: database.into() };
+        self.apply_scenario_expansion(&shop);
+        let public = NavigatorNodeId::Schema {
+            connection: POSTGRES_ID.into(),
+            database: database.into(),
+            schema: "public".into(),
+        };
+        // Expanding a schema lists its groups without a load.
+        self.navigator.toggle_expansion(&public);
+        let tables = navigator::object_group_id(POSTGRES_ID, database, "public", ObjectGroup::Tables);
+        self.apply_scenario_expansion(&tables);
+        let orders = NavigatorNodeId::Object {
+            connection: POSTGRES_ID.into(),
+            database: database.into(),
+            schema: "public".into(),
+            object: "orders".into(),
+        };
+        // A table lists its folders at once; the Columns folder loads when opened.
+        self.navigator.toggle_expansion(&orders);
+        if let Some(columns) = orders.table_folder(crate::navigator::TableFolder::Columns) {
+            self.apply_scenario_expansion(&columns);
+        }
+        self.navigator.select_visible(&orders, false, false);
+        self.navigator_ui.generation = self.navigator.generation();
+
+        // Tabs: no Welcome page; the SQL tab with its result, the Mongo collection, the table;
+        // the SQL tab on top.
+        let welcome: Vec<u64> = self
+            .workspace
+            .tabs()
+            .iter()
+            .filter(|tab| tab.kind == TabKind::Welcome)
+            .map(|tab| tab.id)
+            .collect();
+        for id in welcome {
+            self.workspace.close_tab(id);
+        }
+        let query = self.workspace.open_query_tab_with_metadata(
+            "Top customers",
+            TabMetadata {
+                connection_id: POSTGRES_ID.into(),
+                database: database.into(),
+                schema: Some("public".into()),
+                ..Default::default()
+            },
+        );
+        if let Some(tab) = self.workspace.tab_mut(query) {
+            tab.output_limit = 100;
+            tab.sql = crate::ui_fixture_showcase::TOP_CUSTOMERS_SQL.into();
+        }
+        if let Some(runtime) = self.workspace.runtime_mut(query) {
+            runtime.pagination = crate::query::PaginationState::new(100);
+        }
+        let result = self
+            .scenario_ui
+            .service
+            .as_ref()
+            .map(|service| service.query_page(POSTGRES_ID, database, "public", "", 0, 100));
+        let run = self.workspace.runtime_mut(query).and_then(|runtime| runtime.query.begin());
+        if let (Some(run), Some(result)) = (run, result) {
+            self.apply_query_result(query, run, result);
+        }
+
+        let (mongo, _) = self.workspace.open_or_activate_collection_tab(MONGO_ID, database, "orders");
+        if let Some(tab) = self.workspace.tab_mut(mongo) {
+            tab.output_limit = 50;
+        }
+        if let Some(runtime) = self.workspace.runtime_mut(mongo) {
+            runtime.pagination = crate::query::PaginationState::new(50);
+        }
+        self.run_scenario_query_for_tab(mongo);
+
+        let customers = self.workspace.open_query_tab_with_metadata(
+            "customers",
+            TabMetadata {
+                connection_id: POSTGRES_ID.into(),
+                database: database.into(),
+                schema: Some("public".into()),
+                collection: "customers".into(),
+                query_mode: Some(QueryMode::PostgresTable),
+                ..Default::default()
+            },
+        );
+        if let Some(tab) = self.workspace.tab_mut(customers) {
+            tab.output_limit = 50;
+            tab.sql = "SELECT * FROM public.customers".into();
+        }
+        if let Some(runtime) = self.workspace.runtime_mut(customers) {
+            runtime.pagination = crate::query::PaginationState::new(50);
+        }
+        self.install_scenario_structure(customers);
+        let result = self.scenario_ui.service.as_ref().map(|service| {
+            service.query_sql_table_page((POSTGRES_ID, database, "public", "customers"), 0, 50, ("", ""))
+        });
+        let run = self.workspace.runtime_mut(customers).and_then(|runtime| runtime.query.begin());
+        if let (Some(run), Some(result)) = (run, result) {
+            self.apply_query_result(customers, run, result);
+        }
+        self.workspace.activate_tab(query);
+    }
+
     /// `connection-overview`: the Postgres fixture's Connection tab. `sample`
     /// is connected (server 16.2, driver 0.3.1, a read-only Production type, an
     /// SSH tunnel, eight databases listed but not expanded in the sidebar); `error` failed to
@@ -1290,6 +1448,8 @@ impl AppRoot {
                 self.navigator_ui.generation = self.navigator.generation();
                 self.after_provider_collections_loaded(&request, cx);
                 self.continue_sidebar_locate(cx);
+                self.completion_node_loaded(&request.parent_id(), cx);
+                self.pump_remote_search(cx);
             }
             Err(error) => self.apply_navigator_load(&request, generation, Err(error), cx),
         }

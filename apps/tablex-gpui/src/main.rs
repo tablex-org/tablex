@@ -135,6 +135,8 @@ mod ui_fixture_diagram;
 #[cfg(feature = "ui")]
 mod ui_fixture_properties;
 mod ui_fixture_redis;
+#[cfg(feature = "ui")]
+mod ui_fixture_showcase;
 mod ui_scenario;
 #[cfg(feature = "ui")]
 mod vim;
@@ -153,14 +155,14 @@ fn main() {
     let scenario = match ui_scenario::UiScenario::from_args(std::env::args()) {
         Ok(scenario) => scenario,
         Err(error) => {
-            eprintln!("TableX UI scenario arguments: {error}");
+            eprintln!("tablex UI scenario arguments: {error}");
             std::process::exit(2);
         }
     };
     if let Err(error) =
         ui_scenario::ensure_feature_enabled(scenario.as_ref(), cfg!(feature = "ui-scenarios"))
     {
-        eprintln!("TableX UI scenario arguments: {error}");
+        eprintln!("tablex UI scenario arguments: {error}");
         std::process::exit(2);
     }
     let scenario = match scenario
@@ -169,7 +171,7 @@ fn main() {
     {
         Ok(scenario) => scenario,
         Err(error) => {
-            eprintln!("TableX UI scenario environment: {error}");
+            eprintln!("tablex UI scenario environment: {error}");
             std::process::exit(2);
         }
     };
@@ -204,12 +206,12 @@ fn main() {
     let scenario = match ui_scenario::UiScenario::from_args(std::env::args()) {
         Ok(scenario) => scenario,
         Err(error) => {
-            eprintln!("TableX UI scenario arguments: {error}");
+            eprintln!("tablex UI scenario arguments: {error}");
             std::process::exit(2);
         }
     };
     if let Err(error) = ui_scenario::ensure_feature_enabled(scenario.as_ref(), false) {
-        eprintln!("TableX UI scenario arguments: {error}");
+        eprintln!("tablex UI scenario arguments: {error}");
         std::process::exit(2);
     }
 }

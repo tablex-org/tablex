@@ -39,9 +39,9 @@ impl Default for ShellState {
 }
 
 impl AppRoot {
-    /// "TableX 0.1.0 - <active tab> · <connection>"; just the app and version with no tab.
+    /// "tablex 0.1.0 - <active tab> · <connection>"; just the app and version with no tab.
     pub(super) fn window_title(&self) -> SharedString {
-        let app = concat!("TableX ", env!("CARGO_PKG_VERSION"));
+        let app = concat!("tablex ", env!("CARGO_PKG_VERSION"));
         let Some(tab) = self.workspace.active_tab() else {
             return SharedString::new_static(app);
         };
@@ -185,7 +185,7 @@ impl Render for AppRoot {
             .bg(theme::chrome())
             .border_b_1()
             .border_color(theme::border())
-            // Window title ("TableX 0.1.0 - <active tab>"),
+            // Window title ("tablex 0.1.0 - <active tab>"),
             // centred in the space between the window controls and the gear.
             .child(
                 div()
@@ -691,11 +691,10 @@ impl Render for AppRoot {
 pub(crate) fn open_with_scenario(scenario: Option<UiScenario>, cx: &mut gpui::App) {
     let scenario_size = scenario
         .as_ref()
-        .filter(|scenario| scenario.fixture == FixtureKind::Narrow)
-        .map(|_| (720.0, 650.0))
-        .unwrap_or((1100.0, 850.0));
+        .map(UiScenario::window_size)
+        .map_or((1100.0, 850.0), |(width, height)| (width as f32, height as f32));
     let scenario_title = scenario.as_ref().map(|scenario| {
-        gpui::SharedString::from(format!("TableX UI Scenario: {}", scenario.name()))
+        gpui::SharedString::from(format!("tablex UI Scenario: {}", scenario.name()))
     });
     actions::bind_keys(cx);
     cx.open_window(
@@ -790,7 +789,7 @@ pub(crate) fn open_with_scenario(scenario: Option<UiScenario>, cx: &mut gpui::Ap
             root
         },
     )
-    .expect("failed to open TableX window");
+    .expect("failed to open tablex window");
     // After the first window exists: install the menu bar and take the
     // foreground so the previous app's menus do not stay on screen.
     super::menus::finish_launch(cx, |cx| cx.activate(true));

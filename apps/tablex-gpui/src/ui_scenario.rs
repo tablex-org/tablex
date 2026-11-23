@@ -151,6 +151,10 @@ pub enum ScenarioKind {
     TableDiagram,
     /// The whole-database diagram tab of the same catalog.
     DatabaseDiagram,
+    /// A workspace as it looks in daily use, for marketing screenshots: five connections (three in
+    /// a group), the PostgreSQL `shop` tree opened on `orders`, a SQL tab with its result, the
+    /// MongoDB `orders` collection and the `customers` table (`ui_fixture_showcase`).
+    Showcase,
     /// The `orders` table's Properties > Columns in structure edit mode with a rename, a type
     /// change, an added and a dropped column, an index and a foreign key pending
     /// (`TABLEX_SEED_PROPERTIES=review` opens the Changes dialog, `=type` leaves a Type cell open on
@@ -224,7 +228,7 @@ pub enum ScenarioKind {
     SettingsAi,
     /// Settings on the AI Assistant page with Ollama selected, a model chosen and an optional key.
     SettingsAiOllama,
-    /// The Update Center on its TableX tab: a newer release with its notes.
+    /// The Update Center on its tablex tab: a newer release with its notes.
     Updates,
     /// The Update Center on its Changelog tab.
     UpdatesChangelog,
@@ -241,6 +245,7 @@ impl ScenarioKind {
             Self::MongoGrid => "mongo-grid",
             Self::TableDiagram => "table-diagram",
             Self::DatabaseDiagram => "database-diagram",
+            Self::Showcase => "showcase",
             Self::TablePropertiesEdit => "table-properties-edit",
             Self::DriverManager => "driver-manager",
             Self::DriverManagerTools => "driver-manager-tools",
@@ -288,6 +293,7 @@ impl ScenarioKind {
             "mongo-grid" => Self::MongoGrid,
             "table-diagram" => Self::TableDiagram,
             "database-diagram" => Self::DatabaseDiagram,
+            "showcase" => Self::Showcase,
             "table-properties-edit" => Self::TablePropertiesEdit,
             "driver-manager" => Self::DriverManager,
             "driver-manager-tools" => Self::DriverManagerTools,
@@ -338,6 +344,8 @@ pub enum FixtureKind {
     /// `connection-tree` with one connection per status (connected, connecting,
     /// failed, disconnected, behind SSH, selected) and a node whose load failed.
     States,
+    /// The data of the `showcase` scenario (it always runs on it, whatever `--ui-fixture` says).
+    Showcase,
 }
 
 impl FixtureKind {
@@ -352,6 +360,7 @@ impl FixtureKind {
             Self::Narrow => "narrow",
             Self::Disconnected => "disconnected",
             Self::States => "states",
+            Self::Showcase => "showcase",
         }
     }
 
@@ -366,6 +375,7 @@ impl FixtureKind {
             "narrow" => Self::Narrow,
             "disconnected" => Self::Disconnected,
             "states" => Self::States,
+            "showcase" => Self::Showcase,
             _ => return None,
         })
     }
@@ -405,7 +415,7 @@ impl UiScenario {
                     }
                     let Some(kind) = ScenarioKind::parse(value) else {
                         return Err(format!(
-                            "unsupported UI scenario '{value}'; expected new-connection, connection-tree, connection-overview, result-grid, result-footer, mongo-grid, table-diagram, database-diagram, table-properties-edit, driver-manager, driver-manager-tools, missing-driver, split-panes, split-panes-drop, grouped-tabs, grouped-tabs-lone, settings, settings-shortcuts, connection-overrides, import-selection, redis, assistant, assistant-streaming, assistant-no-key, assistant-access-off, assistant-error, assistant-approval, assistant-approval-dangerous, assistant-approval-long, assistant-access-write, assistant-history, assistant-readonly, assistant-editor-action, settings-ai, settings-ai-ollama, updates, or updates-changelog"
+                            "unsupported UI scenario '{value}'; expected new-connection, connection-tree, connection-overview, result-grid, result-footer, mongo-grid, table-diagram, database-diagram, showcase, table-properties-edit, driver-manager, driver-manager-tools, missing-driver, split-panes, split-panes-drop, grouped-tabs, grouped-tabs-lone, settings, settings-shortcuts, connection-overrides, import-selection, redis, assistant, assistant-streaming, assistant-no-key, assistant-access-off, assistant-error, assistant-approval, assistant-approval-dangerous, assistant-approval-long, assistant-access-write, assistant-history, assistant-readonly, assistant-editor-action, settings-ai, settings-ai-ollama, updates, or updates-changelog"
                         ));
                     };
                     scenario = Some(kind);
@@ -416,7 +426,7 @@ impl UiScenario {
                     }
                     let Some(kind) = FixtureKind::parse(value) else {
                         return Err(format!(
-                            "unknown UI fixture '{value}'; expected sample, populated, pending-edits, empty, loading, error, narrow, disconnected, or states"
+                            "unknown UI fixture '{value}'; expected sample, populated, pending-edits, empty, loading, error, narrow, disconnected, states, or showcase"
                         ));
                     };
                     fixture = Some(kind);
@@ -429,6 +439,8 @@ impl UiScenario {
 
         let kind = scenario.ok_or_else(|| "missing --ui-scenario".to_string())?;
         let fixture = fixture.ok_or_else(|| "missing --ui-fixture".to_string())?;
+        // The showcase is one workspace: it has its own data, whichever fixture was named.
+        let fixture = if kind == ScenarioKind::Showcase { FixtureKind::Showcase } else { fixture };
         Ok(Some(Self {
             kind,
             fixture,
@@ -450,6 +462,15 @@ impl UiScenario {
 
     pub fn fixture_name(&self) -> &'static str {
         self.fixture.name()
+    }
+
+    /// The window's size in points: the `narrow` fixture's small one, the showcase's roomier one, else 1100 x 850.
+    pub fn window_size(&self) -> (u32, u32) {
+        match (self.fixture, self.kind) {
+            (FixtureKind::Narrow, _) => (720, 650),
+            (_, ScenarioKind::Showcase) => (1360, 860),
+            _ => (1100, 850),
+        }
     }
 }
 
@@ -740,6 +761,21 @@ mod tests {
             UiScenario::from_args(["tablex-gpui", "--ui-scenario", "new-connection", "--wat"])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn the_showcase_scenario_always_runs_on_its_own_data() {
+        for fixture in ["sample", "populated", "empty", "showcase"] {
+            let scenario = UiScenario::from_args(["tablex-gpui", "--ui-scenario", "showcase", "--ui-fixture", fixture])
+                .unwrap()
+                .unwrap();
+            assert_eq!((scenario.name(), scenario.fixture_name()), ("showcase", "showcase"), "{fixture}");
+            assert_eq!(scenario.window_size(), (1360, 860));
+        }
+        let narrow = UiScenario::from_args(["tablex-gpui", "--ui-scenario", "result-grid", "--ui-fixture", "narrow"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(narrow.window_size(), (720, 650));
     }
 
     #[test]

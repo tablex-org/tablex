@@ -56,6 +56,9 @@ pub fn table_properties(
     if kind == FixtureKind::Error {
         return Err("fixture properties error".into());
     }
+    if kind == FixtureKind::Showcase {
+        return crate::ui_fixture_showcase::table_properties(connection, schema, object);
+    }
     let qualified = if schema.is_empty() {
         object.to_string()
     } else {
