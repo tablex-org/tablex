@@ -120,6 +120,8 @@ impl AppRoot {
             | NavigatorNodeId::Object { connection, .. }
             | NavigatorNodeId::SchemaObject { connection, .. }
             | NavigatorNodeId::Column { connection, .. }
+            | NavigatorNodeId::TableFolder { connection, .. }
+            | NavigatorNodeId::TableItem { connection, .. }
             | NavigatorNodeId::Provider { connection, .. } => Some(connection.clone()),
             NavigatorNodeId::Group { .. } => None,
         }

@@ -200,7 +200,7 @@ pub(in crate::app) enum PluginError {
 impl fmt::Display for PluginError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NoDataDirectory => f.write_str("TableX has no data directory, so no MongoDB Shell plugin can be installed"),
+            Self::NoDataDirectory => f.write_str("tablex has no data directory, so no MongoDB Shell plugin can be installed"),
             Self::NotInstalled => f.write_str("The MongoDB Shell plugin is not installed (or its file changed since it was installed). Install it from the Driver Manager"),
             Self::Unusable(error) => write!(f, "The MongoDB Shell plugin cannot be used: {error}. Reinstall it from the Driver Manager"),
         }

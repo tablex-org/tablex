@@ -299,10 +299,10 @@ impl Unavailable {
             Self::NotWritable(folder)
                 if folder.starts_with("/Volumes") || folder.components().any(|part| part.as_os_str() == "AppTranslocation") =>
             {
-                Some("Move TableX to Applications to update it.".to_owned())
+                Some("Move tablex to Applications to update it.".to_owned())
             }
             Self::NotWritable(folder) => Some(format!(
-                "TableX can't update itself: {} is not writable.",
+                "tablex can't update itself: {} is not writable.",
                 folder.display()
             )),
         }
@@ -609,12 +609,12 @@ pub(in crate::app) fn verify_bundle(
     // signed by anyone else or ad hoc. (An ad-hoc build, before the certificate, takes either.)
     let requirement = release_requirement(&expected);
     if satisfies(&running.path, &requirement) && !satisfies(new, &requirement) {
-        return Err(invalid("the update is not signed with the TableX release certificate".into()));
+        return Err(invalid("the update is not signed with the tablex release certificate".into()));
     }
     Ok(())
 }
 
-/// SHA-1 of the TableX release certificate (self-signed, see scripts/release-signing.sh); the same
+/// SHA-1 of the tablex release certificate (self-signed, see scripts/release-signing.sh); the same
 /// value as scripts/release-signing.sha1.
 pub(in crate::app) const RELEASE_CERTIFICATE_SHA1: &str = "e9c5169be47d243df33356bf151b83d2a025f726";
 
@@ -724,7 +724,7 @@ pub(in crate::app) fn swap(
     let swap = |error: String| InstallError::Swap(error);
     if backup.exists() {
         if backup_in_use(&backup) {
-            return Err(swap("another TableX is still running from the previous update".into()));
+            return Err(swap("another tablex is still running from the previous update".into()));
         }
         // A backup of this very version left by an earlier try is stale.
         std::fs::remove_dir_all(&backup).map_err(|error| swap(error.to_string()))?;

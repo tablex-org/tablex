@@ -2,7 +2,7 @@
 // holds no CONNECT privilege on, and "Connect as Another User...": real clicks, hovers and typing
 // in the sidebar and the connection dialog, on the production theme. The connection store is the
 // test process's temporary data dir and the credential store a fake of the test's own: nothing
-// here touches the Keychain or the user's TableX data.
+// here touches the Keychain or the user's tablex data.
 
 /// A thread-safe credential store of the test's own.
 #[derive(Default)]

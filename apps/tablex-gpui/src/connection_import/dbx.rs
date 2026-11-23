@@ -107,7 +107,7 @@ fn connection_of(entry: &Value) -> ImportedConnection {
     connection
 }
 
-/// DBX chains its transport layers in order, each reached through the one before. TableX's route
+/// DBX chains its transport layers in order, each reached through the one before. tablex's route
 /// is: an optional proxy, then SSH servers (all but the last are jump hosts, the last is the
 /// bastion, at most `MAX_JUMPS + 1`). A chain of exactly that shape is imported; any other (a
 /// proxy after an SSH server, two proxies, an HTTP script tunnel, too many servers, a layer
@@ -355,7 +355,7 @@ mod tests {
         let (ssh, proxy, _) = route(&[("ssh", "a.example.com"), ("ssh", "b.example.com")]);
         assert_eq!(ssh.unwrap().jumps.len(), 1);
         assert!(proxy.is_none());
-        // A shape TableX cannot express is not translated at all.
+        // A shape tablex cannot express is not translated at all.
         for kinds in [
             vec![("ssh", "a.example.com"), ("proxy", "proxy.example.com")],
             vec![("proxy", "p1.example.com"), ("proxy", "p2.example.com")],
@@ -371,7 +371,7 @@ mod tests {
         assert!(note.unwrap().contains("too many"));
         let (ssh, _, note) = route(&[("ssh", ""), ("ssh", "b.example.com")]);
         assert!(ssh.is_none() && note.is_some());
-        // Exactly the most TableX can chain still imports.
+        // Exactly the most tablex can chain still imports.
         let max: Vec<(&str, String)> = (0..9).map(|i| ("ssh", format!("h{i}.example.com"))).collect();
         let max: Vec<(&str, &str)> = max.iter().map(|(k, h)| (*k, h.as_str())).collect();
         assert_eq!(route(&max).0.unwrap().jumps.len(), 8);

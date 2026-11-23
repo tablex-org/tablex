@@ -66,6 +66,7 @@ impl<'a> ExplainRig<'a> {
         app.update(visual, |this, _| {
             this.scenario_ui.service = None;
             this.driver_ui.store = std::sync::Arc::new(engine_driver_host::InstalledDriverStore::new(&store_dir));
+            this.driver_ui.read_catalog_without_drivers();
         });
         Self { app, visual }
     }

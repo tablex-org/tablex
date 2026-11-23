@@ -1,4 +1,4 @@
-//! "A newer TableX exists": the check on launch (once a day, when the preference is on) and the
+//! "A newer tablex exists": the check on launch (once a day, when the preference is on) and the
 //! "Check for Updates" command, and the notice that reports them. The logic without UI is in
 //! [`check`]; installing one (the signed manifest, download, swap) is in [`install`]. Nothing runs
 //! besides the launch check and the command; nothing is sent but the requests for the latest release
@@ -277,7 +277,7 @@ impl AppRoot {
         });
     }
 
-    /// The notice: "TableX <v> is available" with Install & Restart (a verified update this app can
+    /// The notice: "tablex <v> is available" with Install & Restart (a verified update this app can
     /// install) or Download, then Later and Skip This Version. It stays until one of them (or its
     /// close button) is used.
     fn show_update_notice(&mut self, offer: Offer, cx: &mut Context<Self>) {
@@ -285,7 +285,7 @@ impl AppRoot {
         if self.update_ui.center.open {
             return;
         }
-        let title = format!("TableX {} is available", offer.release.version);
+        let title = format!("tablex {} is available", offer.release.version);
         #[cfg(test)]
         self.update_ui.shown.push(title.clone());
         let root = cx.entity().downgrade();
@@ -389,7 +389,7 @@ impl AppRoot {
         cancel: Arc<std::sync::atomic::AtomicBool>,
         cx: &mut Context<Self>,
     ) {
-        let title = format!("Installing TableX {version}");
+        let title = format!("Installing tablex {version}");
         #[cfg(test)]
         self.update_ui.shown.push(title.clone());
         self.with_ui_window(cx, move |window, cx| {
@@ -463,7 +463,7 @@ impl AppRoot {
         if self.update_ui.center.open {
             return;
         }
-        let title = format!("TableX {version} is installed");
+        let title = format!("tablex {version} is installed");
         #[cfg(test)]
         self.update_ui.shown.push(title.clone());
         let root = cx.entity().downgrade();

@@ -30,7 +30,7 @@ impl ChannelUi {
 }
 
 impl AppRoot {
-    /// Starts listening on the socket in the app data dir. A second TableX leaves the first one's
+    /// Starts listening on the socket in the app data dir. A second tablex leaves the first one's
     /// socket alone (and says so in the Error Log); a platform without the channel says nothing.
     #[cfg(not(test))]
     pub(super) fn start_app_channel(&mut self, cx: &mut Context<Self>) {
@@ -59,11 +59,11 @@ impl AppRoot {
         let handler: Handler = Arc::new(move |request| {
             let (reply_to, reply) = std::sync::mpsc::channel();
             if requests.send_blocking((request, reply_to)).is_err() {
-                return Reply::error("TableX is closing");
+                return Reply::error("tablex is closing");
             }
             reply
                 .recv_timeout(UI_WAIT)
-                .unwrap_or_else(|_| Reply::error("TableX did not answer in time"))
+                .unwrap_or_else(|_| Reply::error("tablex did not answer in time"))
         });
         self.app_channel.listener = Some(Listener::bind(path, handler)?);
         self.app_channel._task = Some(cx.spawn(async move |this, cx| {
@@ -73,7 +73,7 @@ impl AppRoot {
                         let _ = reply_to.send(reply);
                     }
                     Err(_) => {
-                        let _ = reply_to.send(Reply::error("TableX is closing"));
+                        let _ = reply_to.send(Reply::error("tablex is closing"));
                         break;
                     }
                 }
@@ -115,7 +115,7 @@ impl AppRoot {
 
     fn channel_reload_connections(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
         if self.scenario_ui.service.is_some() {
-            return Err("this TableX is a UI scenario with no saved connections".into());
+            return Err("this tablex is a UI scenario with no saved connections".into());
         }
         if self.refresh_saved_connections(cx) {
             Ok(())
@@ -130,7 +130,7 @@ impl AppRoot {
             .saved_connections
             .iter()
             .find(|saved| saved.matches_id(connection_id))
-            .ok_or_else(|| format!("no saved connection `{connection_id}` in TableX"))?;
+            .ok_or_else(|| format!("no saved connection `{connection_id}` in tablex"))?;
         if saved.disabled {
             return Err(format!("the connection `{}` is disabled", saved.name));
         }

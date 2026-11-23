@@ -247,7 +247,11 @@ fn live_clickhouse_navigator_columns_and_create_database(cx: &mut TestAppContext
     assert!(rig.tree_children(&views).contains(&view), "{:?}", rig.tree_children(&views));
     let object = object_node(&key, &database, &database, &table);
     rig.expand(&object);
-    assert_eq!(rig.tree_children(&object), ["id", "name"]);
+    // ClickHouse: columns and data-skipping indexes; no constraints, foreign keys or triggers.
+    assert_eq!(rig.tree_children(&object), ["Columns", "Indexes"]);
+    let columns = object.table_folder(crate::navigator::TableFolder::Columns).expect("a table");
+    rig.expand(&columns);
+    assert_eq!(rig.tree_children(&columns), ["id", "name"]);
 
     // Create Database through the menu's reviewed path, listed, then dropped again.
     rig.app.update(rig.visual, |this, _| {

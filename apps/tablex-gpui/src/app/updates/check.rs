@@ -246,7 +246,7 @@ fn get(address: &str, max_bytes: u64) -> Result<String, String> {
         text
     };
     let client = zed_reqwest::blocking::Client::builder()
-        .user_agent(format!("TableX/{}", env!("CARGO_PKG_VERSION")))
+        .user_agent(format!("tablex/{}", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(10))
         .timeout(Some(Duration::from_secs(20)))
         .https_only(true)

@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-// Where TableX keeps its files and what the OS calls its credential store are shared with
+// Where tablex keeps its files and what the OS calls its credential store are shared with
 // `tablex-mcp`, so they live in `engine-connect`.
 pub use engine_connect::platform::{
     app_data_dir, ssh_known_hosts_path, CREDENTIAL_STORE_LABEL,

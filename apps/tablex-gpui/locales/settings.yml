@@ -331,14 +331,31 @@ settings:
         description:
           en: "Debug metric: frames per second in the status bar."
           vi: "Chỉ số gỡ lỗi: số khung hình mỗi giây trên thanh trạng thái."
+      error_log_place:
+        title:
+          en: Error Log position
+          vi: Vị trí nhật ký lỗi
+        description:
+          en: "Where the Error Log opens: at the bottom of the window, on the right, or in a tab of its own. The position button in the Error Log header changes it too."
+          vi: "Nơi nhật ký lỗi mở ra: ở dưới cửa sổ, ở bên phải hoặc trong một tab riêng. Nút vị trí trên tiêu đề nhật ký lỗi cũng đổi được mục này."
+        options:
+          bottom:
+            en: Bottom
+            vi: Dưới
+          right:
+            en: Right
+            vi: Bên phải
+          tab:
+            en: In a tab of its own
+            vi: Trong tab riêng
     updates:
       check_automatically:
         title:
           en: Check for updates automatically
           vi: Tự động kiểm tra cập nhật
         description:
-          en: "Once a day, when TableX starts, ask GitHub whether a newer version exists. Nothing but the request itself is sent. Check for Updates in the command palette works either way."
-          vi: "Mỗi ngày một lần, khi TableX khởi động, hỏi GitHub xem có phiên bản mới không. Chỉ gửi đúng yêu cầu đó. Lệnh Kiểm tra cập nhật trong bảng lệnh vẫn dùng được dù bật hay tắt."
+          en: "Once a day, when tablex starts, ask GitHub whether a newer version exists. Nothing but the request itself is sent. Check for Updates in the command palette works either way."
+          vi: "Mỗi ngày một lần, khi tablex khởi động, hỏi GitHub xem có phiên bản mới không. Chỉ gửi đúng yêu cầu đó. Lệnh Kiểm tra cập nhật trong bảng lệnh vẫn dùng được dù bật hay tắt."
     editor:
       line_numbers:
         title:
@@ -456,8 +473,8 @@ settings:
           en: Keyword case
           vi: Kiểu chữ của từ khoá
         description:
-          en: "The case Format SQL gives reserved words (SELECT, FROM, WHERE, ...). Other words keep the case they were typed in."
-          vi: "Kiểu chữ mà Định dạng SQL áp cho các từ dành riêng (SELECT, FROM, WHERE, ...). Các từ khác giữ nguyên như đã gõ."
+          en: "The case Format SQL gives reserved words (SELECT, FROM, WHERE, ...) and completion gives the keywords and functions it inserts. Other words keep the case they were typed in. As typed: completion follows the case of the word being typed."
+          vi: "Kiểu chữ mà Định dạng SQL áp cho các từ dành riêng (SELECT, FROM, WHERE, ...) và mà gợi ý áp cho từ khoá và hàm nó chèn vào. Các từ khác giữ nguyên như đã gõ. Như đã gõ: gợi ý theo kiểu chữ của từ đang gõ."
         options:
           upper:
             en: UPPER CASE
@@ -755,8 +772,8 @@ settings:
           en: Connection keep-alive interval
           vi: Chu kỳ giữ kết nối
         description:
-          en: "Seconds an open connection may sit idle before TableX checks it is still alive, so one that died (a server restart, a night asleep) is noticed and reopened on its next use. 0 means never check."
-          vi: "Số giây một kết nối đang mở được nằm yên trước khi TableX kiểm tra nó còn sống không, để kết nối đã chết (máy chủ khởi động lại, máy ngủ qua đêm) được phát hiện và mở lại ở lần dùng kế tiếp. 0 là không kiểm tra."
+          en: "Seconds an open connection may sit idle before tablex checks it is still alive, so one that died (a server restart, a night asleep) is noticed and reopened on its next use. 0 means never check."
+          vi: "Số giây một kết nối đang mở được nằm yên trước khi tablex kiểm tra nó còn sống không, để kết nối đã chết (máy chủ khởi động lại, máy ngủ qua đêm) được phát hiện và mở lại ở lần dùng kế tiếp. 0 là không kiểm tra."
       pg_dump_path:
         title:
           en: pg_dump
@@ -860,8 +877,8 @@ settings:
           en: Restore tabs on start
           vi: Khôi phục tab khi khởi động
         description:
-          en: Which tabs come back after restarting TableX.
-          vi: Những tab nào quay lại sau khi khởi động lại TableX.
+          en: Which tabs come back after restarting tablex.
+          vi: Những tab nào quay lại sau khi khởi động lại tablex.
         options:
           all:
             en: All tabs
@@ -935,8 +952,8 @@ settings:
           en: Keep conversations on this computer
           vi: Lưu cuộc trò chuyện trên máy này
         description:
-          en: "Each finished conversation is saved in TableX's app database (tablex.db in its data folder), so History can reopen it. They can contain query results. Turning this off stops saving; it does not delete what is saved."
-          vi: "Mỗi cuộc trò chuyện đã xong được lưu trong cơ sở dữ liệu ứng dụng của TableX (tablex.db trong thư mục dữ liệu), để Lịch sử có thể mở lại. Chúng có thể chứa kết quả truy vấn. Tắt thì ngừng lưu; không xoá những gì đã lưu."
+          en: "Each finished conversation is saved in tablex's app database (tablex.db in its data folder), so History can reopen it. They can contain query results. Turning this off stops saving; it does not delete what is saved."
+          vi: "Mỗi cuộc trò chuyện đã xong được lưu trong cơ sở dữ liệu ứng dụng của tablex (tablex.db trong thư mục dữ liệu), để Lịch sử có thể mở lại. Chúng có thể chứa kết quả truy vấn. Tắt thì ngừng lưu; không xoá những gì đã lưu."
       agent_access:
         title:
           en: Default agent access
@@ -959,8 +976,8 @@ settings:
           en: Let MCP clients run changes
           vi: Cho phép client MCP chạy thay đổi
         description:
-          en: "An MCP client (the program you connected TableX's MCP server to) may then ask to run statements that change data on connections whose assistant access is \"Read and write\". TableX asks that client to put each one to you; a client set to answer by itself can run them without you seeing them, so turn this on only for a client you trust. Never on a connection of a production type (only the built-in Production type counts; a custom type is not production). Off by default."
-          vi: "Khi bật, một client MCP (chương trình bạn đã nối với máy chủ MCP của TableX) có thể yêu cầu chạy các câu lệnh làm thay đổi dữ liệu trên những kết nối có quyền trợ lý là \"Đọc và ghi\". TableX yêu cầu client đó hỏi bạn từng câu lệnh; client được đặt để tự trả lời có thể chạy chúng mà bạn không thấy, nên chỉ bật cho client bạn tin cậy. Không bao giờ áp dụng cho kết nối loại production (chỉ loại Production có sẵn được tính; loại tuỳ chỉnh không phải production). Mặc định tắt."
+          en: "An MCP client (the program you connected tablex's MCP server to) may then ask to run statements that change data on connections whose assistant access is \"Read and write\". tablex asks that client to put each one to you; a client set to answer by itself can run them without you seeing them, so turn this on only for a client you trust. Never on a connection of a production type (only the built-in Production type counts; a custom type is not production). Off by default."
+          vi: "Khi bật, một client MCP (chương trình bạn đã nối với máy chủ MCP của tablex) có thể yêu cầu chạy các câu lệnh làm thay đổi dữ liệu trên những kết nối có quyền trợ lý là \"Đọc và ghi\". tablex yêu cầu client đó hỏi bạn từng câu lệnh; client được đặt để tự trả lời có thể chạy chúng mà bạn không thấy, nên chỉ bật cho client bạn tin cậy. Không bao giờ áp dụng cho kết nối loại production (chỉ loại Production có sẵn được tính; loại tuỳ chỉnh không phải production). Mặc định tắt."
       base_url:
         title:
           en: Base URL

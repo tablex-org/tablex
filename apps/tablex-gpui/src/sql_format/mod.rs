@@ -227,7 +227,7 @@ impl ToolOptions {
             .map_err(|error| match error {
                 FormatHostError::NotInstalled { .. } => FormatError::ToolNotInstalled,
                 FormatHostError::ProtocolMismatch { found, expected } => FormatError::Failed(format!(
-                    "SQL Formatter (sqruff) speaks protocol {found} and this TableX speaks {expected}. Update SQL Formatter (sqruff) in the Driver Manager"
+                    "SQL Formatter (sqruff) speaks protocol {found} and this tablex speaks {expected}. Update SQL Formatter (sqruff) in the Driver Manager"
                 )),
                 other => process_failure(other),
             })

@@ -4,7 +4,7 @@
 //! The session is one row of the app database (`<data dir>/tablex/tablex.db`, document kind
 //! `session`, see [`engine_storage::documents`]). Before that it was
 //! `<data dir>/tablex/gpui-workspace-session.json`: the first read moves that file in and leaves
-//! it as it was (it is not written any more, so an older TableX still sees its last session).
+//! it as it was (it is not written any more, so an older tablex still sees its last session).
 //! The Swift app's `workspace-session.json` is never written (see `session.rs`, which stays a
 //! read-only import used when there is no session at all).
 //!
@@ -162,7 +162,7 @@ pub enum LoadOutcome {
     /// The session is stored but cannot be used (damaged, or from a newer version); the message
     /// is user-facing. [`quarantine`] moves it aside.
     Unusable(String),
-    /// The database could not be read (damaged, from a newer TableX, an old session file that
+    /// The database could not be read (damaged, from a newer tablex, an old session file that
     /// could not be moved in); the message is user-facing. Nothing is moved aside.
     Failed(String),
 }

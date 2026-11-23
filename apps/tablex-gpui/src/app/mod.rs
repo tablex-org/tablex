@@ -103,6 +103,7 @@ mod sidebar_batch;
 mod sidebar_batch_ui;
 mod sidebar_config;
 mod sidebar_import;
+mod sidebar_names;
 mod sidebar_pins;
 mod smart_commit;
 mod source_tab;
@@ -116,6 +117,7 @@ mod transaction_dialogs;
 mod tunnel_ui;
 mod updates;
 mod vim;
+mod vim_caret;
 mod workspace;
 
 use actions::*;
@@ -259,6 +261,11 @@ pub struct AppRoot {
     /// Connection type and setting overrides of the saved connections.
     connection_policy: connection_policy::ConnectionPolicy,
     query_editors: workspace::WorkspaceEditors,
+    /// Foreign keys of the tables the SQL completion asked about (join suggestions).
+    completion_foreign_keys: completion::ForeignKeyCache,
+    /// One `describe_object` answer per table for its navigator folders.
+    table_folder_describes: navigator_ui::FolderDescribes,
+    completion_loads: completion::CompletionLoads,
     format_ui: sql_editor::FormatUi,
     mongo_ui: results::mongo::MongoUiState,
     aggregate_ui: aggregate::AggregateUi,
@@ -421,7 +428,7 @@ impl AppRoot {
                 && crate::drivers::driver_data_dir_override().is_none()
             {
                 eprintln!(
-                    "TableX: ignoring {}: it is not an absolute path",
+                    "tablex: ignoring {}: it is not an absolute path",
                     crate::drivers::DRIVER_DATA_DIR_ENV
                 );
             }
@@ -506,6 +513,9 @@ impl AppRoot {
             saved_connections,
             connection_policy,
             query_editors: workspace::WorkspaceEditors::default(),
+            completion_foreign_keys: completion::ForeignKeyCache::default(),
+            table_folder_describes: navigator_ui::FolderDescribes::default(),
+            completion_loads: completion::CompletionLoads::default(),
             format_ui: sql_editor::FormatUi::default(),
             mongo_ui: results::mongo::MongoUiState::default(),
             aggregate_ui: aggregate::AggregateUi::default(),
@@ -641,6 +651,8 @@ impl AppRoot {
                 app.seed_driver_manager_scenario(true);
             }
             Some(crate::ui_scenario::ScenarioKind::Redis) => app.seed_redis_scenario(cx),
+            #[cfg(any(test, feature = "ui-scenarios"))]
+            Some(crate::ui_scenario::ScenarioKind::Showcase) => app.seed_showcase_scenario(),
             Some(crate::ui_scenario::ScenarioKind::ConnectionOverview) => {
                 app.seed_connection_overview_scenario();
             }
@@ -751,6 +763,7 @@ mod tests {
     include!("tests/navigator.rs");
     include!("tests/sidebar.rs");
     include!("tests/sidebar_pins.rs");
+    include!("tests/sidebar_names.rs");
     include!("tests/navigator_status.rs");
     include!("tests/sidebar_batch.rs");
     include!("tests/sidebar_import.rs");
@@ -806,6 +819,7 @@ mod tests {
     include!("tests/clickhouse.rs");
     include!("tests/redis.rs");
     include!("tests/error_log.rs");
+    include!("tests/showcase.rs");
     include!("tests/command_palette.rs");
     include!("tests/settings.rs");
     include!("tests/i18n.rs");

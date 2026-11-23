@@ -1,4 +1,4 @@
-//! The Update Center: the title bar's Updates button and the dialog behind it, with the TableX tab
+//! The Update Center: the title bar's Updates button and the dialog behind it, with the tablex tab
 //! (the state of the check and the install) and the Changelog tab (the app's releases, fetched when
 //! the tab is first shown). The check, the install and the notice's actions are the ones in
 //! [`super`]; this file only shows them.
@@ -22,7 +22,7 @@ const RECENT_RELEASES: usize = 5;
 /// The tallest the body of a tab grows before it scrolls.
 const BODY_MAX_HEIGHT: f32 = 380.0;
 
-/// What the last check found, as the TableX tab shows it.
+/// What the last check found, as the tablex tab shows it.
 pub(in crate::app) enum Status {
     /// No check has finished in this run.
     Idle,
@@ -45,7 +45,7 @@ pub(in crate::app) enum Changelog {
 pub(in crate::app) struct UpdateCenter {
     /// The dialog is on screen: results are shown in it instead of in a notice.
     pub(in crate::app) open: bool,
-    /// 0: TableX, 1: Changelog.
+    /// 0: tablex, 1: Changelog.
     pub(in crate::app) tab: usize,
     pub(in crate::app) status: Status,
     /// When the last check started.
@@ -88,13 +88,13 @@ impl AppRoot {
         matches!(self.update_ui.center.status, Status::Available(_)) || self.update_ui.pending_restart.is_some()
     }
 
-    /// The line the TableX tab leads with.
+    /// The line the tablex tab leads with.
     pub(in crate::app) fn update_status_line(&self) -> String {
         let ui = &self.update_ui;
         if ui.install.is_some() {
             return match &ui.center.status {
-                Status::Available(offer) => format!("Installing TableX {}", offer.release.version),
-                _ => "Installing TableX".to_owned(),
+                Status::Available(offer) => format!("Installing tablex {}", offer.release.version),
+                _ => "Installing tablex".to_owned(),
             };
         }
         if ui.task.is_some() {
@@ -105,9 +105,9 @@ impl AppRoot {
         }
         match &ui.center.status {
             Status::Idle => "No check has run yet.".to_owned(),
-            Status::UpToDate => format!("TableX is up to date ({})", ui.current),
+            Status::UpToDate => format!("tablex is up to date ({})", ui.current),
             Status::Available(Offer { release, .. }) | Status::Skipped(release) => {
-                format!("TableX {} is available", release.version)
+                format!("tablex {} is available", release.version)
             }
             Status::Failed(_) => "Couldn't check for updates".to_owned(),
         }
@@ -129,7 +129,7 @@ impl AppRoot {
             .when(self.update_known(), |this| this.child(title_bar_dot("title-updates-dot")))
     }
 
-    /// Opens the Update Center on the TableX tab, and checks when no check ran lately (`force`: always).
+    /// Opens the Update Center on the tablex tab, and checks when no check ran lately (`force`: always).
     pub(in crate::app) fn open_update_center(&mut self, window: &mut Window, force: bool, cx: &mut Context<Self>) {
         if self.update_ui.center.open {
             if force {
@@ -260,7 +260,7 @@ fn render_dialog(dialog: Dialog, root: &gpui::WeakEntity<AppRoot>, cx: &gpui::Ap
                 let index = *index;
                 let _ = root.update(cx, |this, cx| this.select_update_tab(index, cx));
             })
-            .child(Tab::new().label("TableX").debug_selector(|| "update-tab-release".into()))
+            .child(Tab::new().label("tablex").debug_selector(|| "update-tab-release".into()))
             .child(Tab::new().label("Changelog").debug_selector(|| "update-tab-changelog".into()))
     };
     let footer = {
@@ -531,7 +531,7 @@ fn release_list(
                         })
                         .gap_2()
                         .items_baseline()
-                        .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(format!("TableX {version}")))
+                        .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(format!("tablex {version}")))
                         .when_some(release.date.clone(), |this, date| this.child(muted(date, cx)))
                         .when(current, |this| this.child(muted("(installed)", cx))),
                 )

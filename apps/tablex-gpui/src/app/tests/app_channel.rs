@@ -1,6 +1,6 @@
 // The app's end of the channel from `tablex-mcp`: a request goes through the real handler (and,
 // for one test, the real socket) and ends in the same tabs, editor text and Run path the user's own
-// clicks use. A temporary data dir and socket; never a running TableX.
+// clicks use. A temporary data dir and socket; never a running tablex.
 
 use engine_connect::app_channel::{AppClient, ClientError, Reply, Request};
 

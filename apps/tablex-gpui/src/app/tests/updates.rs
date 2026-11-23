@@ -173,7 +173,7 @@ impl Drop for UpdateRig<'_> {
 fn a_newer_release_shows_the_notice_and_download_opens_its_page(cx: &mut TestAppContext) {
     let mut rig = UpdateRig::new(cx, FakeReleases::tag("v0.2.0"), "0.1.0");
     rig.launch_check();
-    assert_eq!(rig.shown(), ["TableX 0.2.0 is available"]);
+    assert_eq!(rig.shown(), ["tablex 0.2.0 is available"]);
     assert_eq!(rig.notifications(), 1);
     for button in ["update-download", "update-later", "update-skip"] {
         assert!(rig.visual.debug_bounds(button).is_some(), "{button}");
@@ -227,7 +227,7 @@ fn skip_this_version_is_remembered_and_silences_later_checks(cx: &mut TestAppCon
     rig.releases.set_tag("v0.3.0");
     rig.forget_last_check();
     rig.launch_check();
-    assert_eq!(rig.shown(), ["TableX 0.2.0 is available", "TableX 0.3.0 is available"]);
+    assert_eq!(rig.shown(), ["tablex 0.2.0 is available", "tablex 0.3.0 is available"]);
     assert_eq!(rig.notifications(), 1);
 }
 
@@ -242,7 +242,7 @@ fn the_palette_check_with_an_equal_version_says_up_to_date_even_when_not_due(cx:
     rig.palette_check();
     assert_eq!(rig.releases.calls(), 2);
     assert!(rig.center_open() && rig.shows("update-status"));
-    assert_eq!(rig.status_line(), "TableX is up to date (0.1.0)");
+    assert_eq!(rig.status_line(), "tablex is up to date (0.1.0)");
     assert!(rig.shown().is_empty(), "no notice besides the dialog");
     assert_eq!(rig.notifications(), 0);
 }
@@ -253,7 +253,7 @@ fn the_palette_check_shows_a_newer_release_even_when_it_was_skipped(cx: &mut Tes
     updates::check::skip_version(&rig.state, &updates::check::Version::parse("0.2.0").unwrap()).unwrap();
     rig.palette_check();
     assert!(rig.center_open());
-    assert_eq!(rig.status_line(), "TableX 0.2.0 is available");
+    assert_eq!(rig.status_line(), "tablex 0.2.0 is available");
     assert!(rig.visual.debug_bounds("update-download").is_some());
 }
 
@@ -311,7 +311,7 @@ fn the_launch_check_does_not_fetch_when_the_preference_is_off_the_build_is_debug
     rig.app.update(rig.visual, |this, _| this.update_ui.current = "0.1.0".into());
     rig.launch_check();
     assert_eq!(rig.releases.calls(), 1);
-    assert_eq!(rig.shown(), ["TableX 0.2.0 is available"]);
+    assert_eq!(rig.shown(), ["tablex 0.2.0 is available"]);
 }
 
 // --- Install & Restart ---------------------------------------------------------------------------
@@ -321,7 +321,7 @@ fn the_launch_check_does_not_fetch_when_the_preference_is_off_the_build_is_debug
 use updates::install::tests as fixtures;
 
 const INSTALL_TARGET: &str = "aarch64-apple-darwin";
-const ZIP_URL: &str = "https://github.com/tablex-org/tablex/releases/download/v0.2.0/TableX-0.2.0-macos-apple-silicon.app.zip";
+const ZIP_URL: &str = "https://github.com/tablex-org/tablex/releases/download/v0.2.0/tablex-0.2.0-macos-apple-silicon.app.zip";
 
 fn app_manifest(size: u64, sha256: &str) -> serde_json::Value {
     serde_json::json!({
@@ -414,7 +414,7 @@ fn install_and_restart_downloads_verifies_swaps_the_bundle_and_restarts(cx: &mut
     let scratch = fixtures::Scratch::new();
     let running = scratch.0.join("TableX.app");
     fixtures::make_bundle(&scratch.0, "TableX.app", "org.tablex.TableX", "0.1.0");
-    let new = fixtures::make_bundle(&scratch.0.join("packed"), "TableX.app", "org.tablex.TableX", "0.2.0");
+    let new = fixtures::make_bundle(&scratch.0.join("packed"), "tablex.app", "org.tablex.TableX", "0.2.0");
     let zip = scratch.0.join("release.zip");
     fixtures::zip_of(&new, &zip);
     let bytes = std::fs::read(&zip).unwrap();
@@ -499,7 +499,7 @@ fn the_install_shows_its_progress_and_cancel_stops_it_quietly(cx: &mut TestAppCo
 
     rig.launch_check();
     rig.click("update-install");
-    assert_eq!(rig.shown().last().map(String::as_str), Some("Installing TableX 0.2.0"));
+    assert_eq!(rig.shown().last().map(String::as_str), Some("Installing tablex 0.2.0"));
     assert_eq!(rig.notifications(), 1);
     assert!(rig.shows("update-progress") && rig.shows("update-cancel"));
     assert!(!rig.shows("update-install"), "the notice is the progress now");
@@ -542,7 +542,7 @@ fn closing_the_progress_notice_cancels_the_install(cx: &mut TestAppContext) {
 }
 
 // --- the Update Center -----------------------------------------------------------------------------
-// The title bar button and the dialog behind it: the TableX tab (the check and the install) and the
+// The title bar button and the dialog behind it: the tablex tab (the check and the install) and the
 // Changelog tab (the releases, from the fake list fetcher).
 
 use updates::center::Changelog;
@@ -654,7 +654,7 @@ fn the_updates_button_sits_left_of_the_theme_button_opens_the_center_and_escape_
 fn an_up_to_date_build_is_told_so_and_shows_no_dot(cx: &mut TestAppContext) {
     let mut rig = UpdateRig::new(cx, FakeReleases::tag("v0.1.6"), "0.1.6");
     rig.open_center();
-    assert_eq!(rig.status_line(), "TableX is up to date (0.1.6)");
+    assert_eq!(rig.status_line(), "tablex is up to date (0.1.6)");
     assert!(rig.shows("update-status"));
     assert!(!rig.shows("title-updates-dot"));
     assert!(!rig.shows("update-install") && !rig.shows("update-download"));
@@ -687,7 +687,7 @@ fn a_newer_release_puts_a_dot_on_the_button_and_the_center_shows_its_notes_and_i
     rig.visual.cx.executor().advance_clock(Duration::from_secs(2));
     settle(rig.visual);
     assert_eq!(rig.notifications(), 0, "the dialog takes over from the notice");
-    assert_eq!(rig.status_line(), "TableX 0.2.0 is available");
+    assert_eq!(rig.status_line(), "tablex 0.2.0 is available");
     assert!(rig.shows("update-notes"));
     assert!(rig.markdown_sources(&markdown).iter().any(|source| source == "Fixed the crash on exit."));
     assert!(rig.shows("update-install") && rig.shows("update-skip") && !rig.shows("update-download"));
@@ -695,7 +695,7 @@ fn a_newer_release_puts_a_dot_on_the_button_and_the_center_shows_its_notes_and_i
 
     // Install & Restart is the notice's install: the progress is in the dialog, with Cancel.
     rig.click("update-install");
-    assert_eq!(rig.status_line(), "Installing TableX 0.2.0");
+    assert_eq!(rig.status_line(), "Installing tablex 0.2.0");
     assert!(rig.shows("update-progress") && rig.shows("update-cancel") && !rig.shows("update-install"));
     assert_eq!(rig.notifications(), 0, "no second progress notice");
     rig.click("update-cancel");
@@ -732,7 +732,7 @@ fn a_finished_install_asks_for_a_restart_in_the_center(cx: &mut TestAppContext) 
     let scratch = fixtures::Scratch::new();
     let running = scratch.0.join("TableX.app");
     fixtures::make_bundle(&scratch.0, "TableX.app", "org.tablex.TableX", "0.1.0");
-    let new = fixtures::make_bundle(&scratch.0.join("packed"), "TableX.app", "org.tablex.TableX", "0.2.0");
+    let new = fixtures::make_bundle(&scratch.0.join("packed"), "tablex.app", "org.tablex.TableX", "0.2.0");
     let zip = scratch.0.join("release.zip");
     fixtures::zip_of(&new, &zip);
     let bytes = std::fs::read(&zip).unwrap();
@@ -835,6 +835,6 @@ fn a_failed_check_shows_its_reason_and_retry_checks_again(cx: &mut TestAppContex
     rig.click("update-retry");
     rig.finish();
     assert_eq!(rig.releases.calls(), 2);
-    assert_eq!(rig.status_line(), "TableX is up to date (0.1.0)");
+    assert_eq!(rig.status_line(), "tablex is up to date (0.1.0)");
     assert!(!rig.shows("update-retry"));
 }

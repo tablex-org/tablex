@@ -8,7 +8,7 @@ use crate::credentials::CredentialError;
 
 /// What the confirmation says. The names are the same as the error texts use.
 pub(super) const RESET_WARNING: &str = "All saved connection passwords, SSH passwords and key \
-    passphrases, and the AI API key are removed from TableX (the items older versions kept in the \
+    passphrases, and the AI API key are removed from tablex (the items older versions kept in the \
     system credential store included), and you have to enter them again. \
     Your connections, query history and settings are kept. This cannot be undone.";
 

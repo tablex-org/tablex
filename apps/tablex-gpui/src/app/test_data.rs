@@ -1,4 +1,4 @@
-//! Test-only: keeps every `AppRoot` a test builds off the user's TableX data.
+//! Test-only: keeps every `AppRoot` a test builds off the user's tablex data.
 //!
 //! Real mode (no UI scenario) reads the connection store, saved SQL, the assistant's conversations
 //! and the other files under the app data dir, and a scenario app whose test turns the fixture
@@ -40,7 +40,7 @@ pub(super) fn assert_real_mode_isolated() {
     let asked_for = REAL_MODE_ASKED_FOR.replace(false);
     assert!(
         asked_for && DATA_DIR.get().is_some() && data_dir_override().as_ref() == DATA_DIR.get(),
-        "a test built a real-mode AppRoot on the user's TableX data: use \
+        "a test built a real-mode AppRoot on the user's tablex data: use \
          AppRoot::new_for_test (fixture scenario) or AppRoot::new_isolated"
     );
 }

@@ -123,7 +123,7 @@ impl AppRoot {
                     self.sidebar.notice = Some(message);
                 }
                 // The database itself could not be read (busy for too long, damaged, from a newer
-                // TableX): nothing is moved aside, and nothing is saved for the rest of this run,
+                // tablex): nothing is moved aside, and nothing is saved for the rest of this run,
                 // or the first save would replace the session that is stored and was not read.
                 LoadOutcome::Failed(message) => {
                     self.shell.session.path = None;

@@ -112,7 +112,7 @@ impl std::fmt::Debug for Secret {
     }
 }
 
-/// Whether TableX can open the imported connection.
+/// Whether tablex can open the imported connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImportKind {
     Supported(ConnectionKind),
@@ -243,9 +243,9 @@ impl ImportedProxy {
     }
 }
 
-/// SSH tunnel details of an imported connection, mapped onto TableX's own tunnel settings.
+/// SSH tunnel details of an imported connection, mapped onto tablex's own tunnel settings.
 /// The tunnel is switched on only when everything it needs is there: a password for password
-/// authentication (the foreign tool kept it somewhere TableX can read), a key file for a key.
+/// authentication (the foreign tool kept it somewhere tablex can read), a key file for a key.
 /// The secrets go to the credential store like the database password, never into the record.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ImportedSsh {
@@ -308,7 +308,7 @@ pub struct ImportedConnection {
     pub uri: Option<String>,
     pub ssh: Option<ImportedSsh>,
     pub proxy: Option<ImportedProxy>,
-    /// Why part of the file's route could not be imported (a hop TableX cannot express or that
+    /// Why part of the file's route could not be imported (a hop tablex cannot express or that
     /// was cut off). A route with a note is never switched on, and the selection says so.
     pub route_note: Option<&'static str>,
 }
@@ -336,7 +336,7 @@ impl ImportedConnection {
         self.ssh.is_some() || self.proxy.is_some() || self.route_note.is_some()
     }
 
-    /// Why the route stays off whatever the secrets: the file's own note, or what TableX's tunnel
+    /// Why the route stays off whatever the secrets: the file's own note, or what tablex's tunnel
     /// settings would refuse (a blank SSH user, no key file...).
     fn route_off_reason(&self) -> Option<String> {
         match self.route_note {
@@ -357,7 +357,7 @@ impl ImportedConnection {
             && self.proxy.as_ref().is_none_or(ImportedProxy::usable)
     }
 
-    /// TableX's tunnel settings for the route, `None` without one.
+    /// tablex's tunnel settings for the route, `None` without one.
     fn route_settings(&self, on: bool) -> Option<SshSettings> {
         if self.ssh.is_none() && self.proxy.is_none() {
             return None;
@@ -552,7 +552,7 @@ pub struct ImportPreview {
 }
 
 impl ImportPreview {
-    /// Distinct products with no TableX equivalent, in file order.
+    /// Distinct products with no tablex equivalent, in file order.
     pub fn unsupported_labels(&self) -> Vec<String> {
         unsupported_labels(self.connections.iter())
     }

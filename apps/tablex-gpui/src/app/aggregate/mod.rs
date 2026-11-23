@@ -341,7 +341,7 @@ impl AppRoot {
                 .line_number(true)
                 .soft_wrap(false)
                 .default_value(text)
-                .completion(completion)
+                .completion(completion, window, cx)
         });
         let subscription = cx.subscribe_in(
             &editor,
@@ -395,7 +395,7 @@ impl AppRoot {
                 .line_number(false)
                 .soft_wrap(true)
                 .default_value(stage.body.clone())
-                .completion(completion)
+                .completion(completion, window, cx)
         });
         let items = operator_items();
         let choice = operator_choice(&stage.operator);

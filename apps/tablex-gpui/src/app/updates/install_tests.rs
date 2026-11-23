@@ -26,7 +26,7 @@ pub(in crate::app) fn sign(key: &SigningKey, body: &[u8]) -> Vec<u8> {
     format!("{signature}\n").into_bytes()
 }
 
-const URL: &str = "https://github.com/tablex-org/tablex/releases/download/v0.2.0/TableX-0.2.0-macos-apple-silicon.app.zip";
+const URL: &str = "https://github.com/tablex-org/tablex/releases/download/v0.2.0/tablex-0.2.0-macos-apple-silicon.app.zip";
 const SHA: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 fn manifest_json(version: &str) -> serde_json::Value {
@@ -282,7 +282,7 @@ fn a_folder_that_cannot_be_written_is_not_installable_and_says_so() {
 fn a_disk_image_or_a_translocated_launch_is_told_to_move_the_app() {
     for folder in ["/Volumes/TableX", "/private/var/folders/x/AppTranslocation/ABC/d"] {
         let note = Unavailable::NotWritable(PathBuf::from(folder)).note().unwrap();
-        assert_eq!(note, "Move TableX to Applications to update it.", "{folder}");
+        assert_eq!(note, "Move tablex to Applications to update it.", "{folder}");
     }
     let note = Unavailable::NotWritable(PathBuf::from("/Applications")).note().unwrap();
     assert!(note.contains("/Applications") && note.contains("not writable"), "{note}");
@@ -451,7 +451,7 @@ fn a_download_is_checked_unpacked_and_verified_beside_the_running_bundle() {
     let scratch = Scratch::new();
     let running = running(&scratch.0);
     let packed = scratch.0.join("packed");
-    let new = make_bundle(&packed, "TableX.app", "org.tablex.TableX", "0.2.0");
+    let new = make_bundle(&packed, "tablex.app", "org.tablex.TableX", "0.2.0");
     let zip = scratch.0.join("release.zip");
     zip_of(&new, &zip);
     let bytes = std::fs::read(&zip).unwrap();

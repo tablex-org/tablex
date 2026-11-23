@@ -42,7 +42,7 @@ const fn rgba(hex: u32) -> Rgba {
 /// active palette; call sites stay unchanged and never allocate or lock.
 macro_rules! palette {
     ($($(#[$doc:meta])* $name:ident: $dark:expr, $light:expr;)*) => {
-        /// The TableX colors of one appearance.
+        /// The tablex colors of one appearance.
         #[derive(Debug, Clone, Copy, PartialEq)]
         pub struct Palette {
             $($(#[$doc])* pub $name: Rgba,)*
@@ -127,7 +127,7 @@ pub fn palette() -> &'static Palette {
     if ACTIVE.with(Cell::get).is_dark() { &DARK } else { &LIGHT }
 }
 
-/// The mode the TableX palette (and the component theme) currently show.
+/// The mode the tablex palette (and the component theme) currently show.
 pub fn mode() -> ThemeMode {
     ACTIVE.with(Cell::get)
 }
@@ -149,8 +149,8 @@ pub fn init(cx: &mut App) {
     register_sql_language();
 }
 
-/// Makes `mode` the TableX palette and re-derives the component theme from
-/// it (stock theme of that mode, then the TableX overrides), refreshing every
+/// Makes `mode` the tablex palette and re-derives the component theme from
+/// it (stock theme of that mode, then the tablex overrides), refreshing every
 /// window. Called at startup, on a Settings change and when the OS appearance
 /// changes under `System`.
 pub fn apply(mode: ThemeMode, cx: &mut App) {
@@ -192,7 +192,7 @@ fn hex(color: Rgba) -> String {
 }
 
 /// Tints the component highlight theme (used by every tree-sitter code view)
-/// with TableX tokens so JSON keys, strings, numbers, booleans and null stay
+/// with tablex tokens so JSON keys, strings, numbers, booleans and null stay
 /// visually distinct: keys red, strings green, numbers amber, booleans blue.
 fn apply_syntax_colors(theme: &mut Theme) {
     let mut highlight = (*theme.highlight_theme).clone();
@@ -418,7 +418,7 @@ mod tests {
             super::init(cx);
             let theme = gpui_component::theme::Theme::global(cx);
             // Dialog paints `tokens.background`; it must not keep the stock
-            // near-black palette after TableX overrides `colors`.
+            // near-black palette after tablex overrides `colors`.
             assert_eq!(
                 gpui::Hsla::from(theme.tokens.background),
                 gpui::Hsla::from(super::background())

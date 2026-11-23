@@ -43,7 +43,7 @@ gpui::actions!(
 );
 
 /// Display name of the application in the menu bar and About dialog.
-pub(super) const APP_NAME: &str = "TableX";
+pub(super) const APP_NAME: &str = "tablex";
 
 /// Installs the key bindings, action handlers and menu bar, then asks the
 /// platform to activate the app. Called once, after the first window opened:
@@ -259,21 +259,21 @@ mod tests {
     fn menu_bar_has_the_expected_menus_and_items() {
         let menus = build();
         let titles: Vec<_> = menus.iter().map(|menu| menu.name.to_string()).collect();
-        assert_eq!(titles, ["TableX", "File", "Edit", "View", "Window", "Help"]);
+        assert_eq!(titles, ["tablex", "File", "Edit", "View", "Window", "Help"]);
         assert_eq!(
             names(&menus[0]),
             [
-                "About TableX",
+                "About tablex",
                 "Check for Updates…",
                 "-",
                 "Settings…",
                 "Driver Manager…",
                 "-",
-                "Hide TableX",
+                "Hide tablex",
                 "Hide Others",
                 "Show All",
                 "-",
-                "Quit TableX"
+                "Quit tablex"
             ]
         );
         assert_eq!(
@@ -323,7 +323,7 @@ mod tests {
             action_of(0, "Driver Manager…"),
             "tablex_menu::DriverManager"
         );
-        assert_eq!(action_of(0, "Quit TableX"), "tablex_menu::Quit");
+        assert_eq!(action_of(0, "Quit tablex"), "tablex_menu::Quit");
         assert_eq!(action_of(1, "Close Tab"), "tablex::CloseActiveTab");
         assert_eq!(action_of(3, "Error Log"), "tablex::ToggleErrorLog");
         assert_eq!(action_of(3, "AI Assistant"), "tablex::ToggleAssistant");
@@ -375,12 +375,12 @@ mod tests {
                 .map(|menu| menu.name.to_string())
                 .collect::<Vec<_>>()
         });
-        assert_eq!(titles, ["TableX", "File", "Edit", "View", "Window", "Help"]);
+        assert_eq!(titles, ["tablex", "File", "Edit", "View", "Window", "Help"]);
         let quit_items = cx.update(|cx| {
             cx.get_menus().unwrap()[0]
                 .items
                 .iter()
-                .filter(|item| matches!(item, OwnedMenuItem::Action { name, .. } if name == "Quit TableX"))
+                .filter(|item| matches!(item, OwnedMenuItem::Action { name, .. } if name == "Quit tablex"))
                 .count()
         });
         assert_eq!(quit_items, 1);

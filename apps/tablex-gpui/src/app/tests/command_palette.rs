@@ -551,13 +551,13 @@ fn palette_reaches_about_and_quit_where_no_native_menu_bar_exists(cx: &mut TestA
     palette_open(visual);
     palette_type(visual, "about");
     let found = palette_snapshot(&app, visual);
-    assert!(palette_titles(&found, "Actions").contains(&"About TableX".to_string()));
+    assert!(palette_titles(&found, "Actions").contains(&"About tablex".to_string()));
     visual.update(|window, cx| window.close_dialog(cx));
     palette_settle(visual);
     palette_open(visual);
     palette_type(visual, "quit");
     let found = palette_snapshot(&app, visual);
-    assert!(palette_titles(&found, "Actions").contains(&"Quit TableX".to_string()));
+    assert!(palette_titles(&found, "Actions").contains(&"Quit tablex".to_string()));
 }
 
 #[gpui::test]

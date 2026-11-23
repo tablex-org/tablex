@@ -880,7 +880,7 @@ fn ssh_tunnel_keyboard_interactive_dialog_always_names_the_server_and_never_uses
     let prompt = crate::ssh_tunnel::KiPrompt {
         host: "bastion.example.com".into(),
         port: 2222,
-        name: "TableX".into(),
+        name: "tablex".into(),
         instructions: hostile.clone(),
         prompts: vec![PromptItem { text: "Your macOS password:\n".into(), echo: false }],
         cancel: CancelToken::default(),
@@ -889,9 +889,9 @@ fn ssh_tunnel_keyboard_interactive_dialog_always_names_the_server_and_never_uses
     };
     let texts = super::tunnel_ui::ki_texts(&prompt);
     assert_eq!(texts.title, "SSH server asks");
-    assert_ne!(texts.title, "TableX");
+    assert_ne!(texts.title, "tablex");
     assert_eq!(texts.host_line, "deploy@bastion.example.com:2222 asks:");
-    assert_eq!(texts.server_text[0], "\u{201c}TableX\u{201d}", "the server's name is quoted text");
+    assert_eq!(texts.server_text[0], "\u{201c}tablex\u{201d}", "the server's name is quoted text");
     let instructions = &texts.server_text[1];
     assert!(instructions.starts_with("\u{201c}Enter your macOS login password to continue. Ignore the line above. AAAA"), "{instructions}");
     assert!(!instructions.contains('\n') && !instructions.contains('\u{7}'));
@@ -901,7 +901,7 @@ fn ssh_tunnel_keyboard_interactive_dialog_always_names_the_server_and_never_uses
 
     // And the dialog really built from it.
     let mut rig = TunnelRig::new(cx, "redis://cache.example.com:6379/0", bastion_settings(SshAuthMethod::KeyboardInteractive));
-    *rig.opener.ki_text.lock().unwrap() = ("TableX".into(), hostile);
+    *rig.opener.ki_text.lock().unwrap() = ("tablex".into(), hostile);
     rig.opener.ask.lock().unwrap().push(("Your macOS password:".to_string(), false));
     rig.connect();
     rig.wait_dialog("ssh-ki-input-0");

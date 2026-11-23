@@ -576,6 +576,8 @@ fn deleting_or_adding_a_connection_keeps_other_connections_expanded(cx: &mut Tes
                 | NavigatorNodeId::Object { connection, .. }
                 | NavigatorNodeId::SchemaObject { connection, .. }
                 | NavigatorNodeId::Column { connection, .. }
+                | NavigatorNodeId::TableFolder { connection, .. }
+                | NavigatorNodeId::TableItem { connection, .. }
                 | NavigatorNodeId::Provider { connection, .. } => connection == postgres_id,
                 NavigatorNodeId::Group { .. } => false,
             })

@@ -1,4 +1,4 @@
-# TableX GPUI app
+# tablex GPUI app
 
 Loaded when working under `apps/tablex-gpui/`; the root `CLAUDE.md` still applies.
 

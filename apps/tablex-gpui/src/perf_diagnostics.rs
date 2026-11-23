@@ -101,7 +101,7 @@ pub fn install_with_sink(cx: &mut gpui::App, sink: impl FnMut(Value) + Send + 's
     };
     let started = cx.start_hang_monitor(config, on_poll(std::process::id(), Instant::now(), sink));
     if let Err(error) = started {
-        eprintln!("TableX perf diagnostics: hang monitor not started: {error}");
+        eprintln!("tablex perf diagnostics: hang monitor not started: {error}");
     }
 }
 

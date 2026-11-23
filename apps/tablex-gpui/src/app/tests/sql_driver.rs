@@ -386,6 +386,8 @@ fn every_kind_connects_through_its_driver_and_reports_a_missing_install(
     let ids = app.update(visual, |this, cx| {
         this.scenario_ui.service = None;
         this.driver_ui.store = std::sync::Arc::new(engine_driver_host::InstalledDriverStore::new(&store_dir));
+        // The catalog offers none of them (else a connect would ask to install the driver).
+        this.driver_ui.read_catalog_without_drivers();
         // No driver installed: PostgreSQL and SQLite report it like MySQL does.
         let ids = [
             (ConnectionKind::Mysql, "mysql://u@h/db"),

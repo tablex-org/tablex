@@ -118,7 +118,7 @@ impl Server {
 }
 
 fn transport() -> ReqwestTransport {
-    ReqwestTransport::new("TableX-test").direct()
+    ReqwestTransport::new("tablex-test").direct()
 }
 
 fn timeouts(first_byte_ms: u64, idle_ms: u64) -> Timeouts {
@@ -218,7 +218,7 @@ fn the_headers_sent_are_the_providers_and_nothing_else_of_note() {
             "unexpected header {name}"
         );
     }
-    assert_eq!(seen.header("user-agent"), Some("TableX-test"));
+    assert_eq!(seen.header("user-agent"), Some("tablex-test"));
     server.finish();
 }
 
@@ -703,7 +703,7 @@ fn a_plain_loopback_address_never_reaches_a_proxy_with_the_key() {
     let cancel = CancelToken::new();
     // This transport has a proxy configured, as a machine with HTTP_PROXY would.
     let transport =
-        ReqwestTransport::new("TableX-test").with_test_proxy(&format!("http://{proxy}"));
+        ReqwestTransport::new("tablex-test").with_test_proxy(&format!("http://{proxy}"));
     let response = transport
         .send(
             post(server.url("/v1/messages"), timeouts(5000, 5000)),
@@ -729,7 +729,7 @@ fn control_a_remote_https_address_does_go_through_the_proxy() {
     let (proxy, heard) = spy();
     let cancel = CancelToken::new();
     let transport =
-        ReqwestTransport::new("TableX-test").with_test_proxy(&format!("http://{proxy}"));
+        ReqwestTransport::new("tablex-test").with_test_proxy(&format!("http://{proxy}"));
     let _ = transport.send(
         post(
             "https://gateway.example.invalid/v1/messages".into(),

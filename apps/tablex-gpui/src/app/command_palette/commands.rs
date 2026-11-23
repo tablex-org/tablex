@@ -148,10 +148,10 @@ impl StaticAction {
             Self::ToggleTabRows => "Show Tabs in a Second Row",
             Self::NextTabGroup => "Next Tab Group",
             Self::PreviousTabGroup => "Previous Tab Group",
-            Self::About => "About TableX",
+            Self::About => "About tablex",
             Self::CheckForUpdates => "Check for Updates",
             Self::ResetSavedPasswords => "Reset Saved Passwords\u{2026}",
-            Self::Quit => "Quit TableX",
+            Self::Quit => "Quit tablex",
         }
     }
 
@@ -227,9 +227,9 @@ impl StaticAction {
                 hinted("Show the previous connection group of tabs", "workspace.previous_tab_group")
             }
             Self::About => "Show the application version".into(),
-            Self::CheckForUpdates => "Ask GitHub whether a newer version of TableX exists".into(),
+            Self::CheckForUpdates => "Ask GitHub whether a newer version of tablex exists".into(),
             Self::ResetSavedPasswords => "Remove every saved password and the AI key, after a confirmation; connections and history are kept".into(),
-            Self::Quit => hinted("Close TableX", "app.quit"),
+            Self::Quit => hinted("Close tablex", "app.quit"),
         }
     }
 
