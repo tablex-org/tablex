@@ -683,6 +683,33 @@ fn the_empty_result_area_runs_the_query_with_its_run_button(cx: &mut TestAppCont
     assert!(visual.debug_bounds("empty-run-query").is_none(), "the result replaces the empty state");
 }
 
+/// A table-data, Mongo find or Redis key tab that sits idle (restored without running, or its result
+/// withdrawn) offers the same run, worded as a load.
+#[gpui::test]
+fn the_empty_result_area_of_a_browse_tab_loads_the_data_with_its_button(cx: &mut TestAppContext) {
+    for mode in [QueryMode::SqlTable, QueryMode::MongoFind, QueryMode::RedisKey] {
+        let (app, visual) = layout_app(cx);
+        click_debug_button(visual, "global-new-query");
+        settle(visual);
+        let tab = active_tab(&app, visual);
+        app.update(visual, |this, cx| {
+            this.workspace.tab_mut(tab).unwrap().query_mode = Some(mode.clone());
+            this.workspace.tab_mut(tab).unwrap().collection = "items".into();
+            this.workspace.runtime_mut(tab).unwrap().last_executed_query = Some(String::new());
+            cx.notify();
+        });
+        settle(visual);
+        assert!(visual.debug_bounds("empty-run-query").is_some(), "{mode:?}: the idle tab has a button");
+        let generation = |app: &gpui::Entity<AppRoot>, visual: &gpui::VisualTestContext| {
+            app.read_with(visual, |this, _| this.workspace.runtime(tab).unwrap().query.generation())
+        };
+        let before = generation(&app, visual);
+        click_debug_button(visual, "empty-run-query");
+        settle(visual);
+        assert!(generation(&app, visual) > before, "{mode:?}: the button started a run");
+    }
+}
+
 // ---- hide / show the results (`results.toggle`) -------------------------------------------------
 
 #[gpui::test]

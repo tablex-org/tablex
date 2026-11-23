@@ -161,7 +161,7 @@ pub fn load(path: &Path, legacy: &Legacy) -> Loaded {
     match serde_json::from_str::<Settings>(&text) {
         Ok(settings) if settings.schema_version > SCHEMA_VERSION => Loaded {
             notice: Some(format!(
-                "The settings were written by a newer version of TableX (format {}); unknown settings are ignored",
+                "The settings were written by a newer version of tablex (format {}); unknown settings are ignored",
                 settings.schema_version
             )),
             needs_save: false,

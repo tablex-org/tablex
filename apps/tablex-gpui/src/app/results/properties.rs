@@ -307,6 +307,7 @@ impl AppRoot {
     ) {
         if let Some(runtime) = self.workspace.runtime_mut(tab_id) {
             runtime.columns_panel.props.finish(&key, result);
+            runtime.columns_panel.apply_pending_tab();
         }
         self.notify_tab(tab_id, cx);
     }
@@ -333,7 +334,9 @@ impl AppRoot {
                 (connection, Some(database.as_str()), Some(schema.as_str()), None)
             }
             NavigatorNodeId::Object { connection, database, schema, object }
-            | NavigatorNodeId::Column { connection, database, schema, object, .. } => (
+            | NavigatorNodeId::Column { connection, database, schema, object, .. }
+            | NavigatorNodeId::TableFolder { connection, database, schema, object, .. }
+            | NavigatorNodeId::TableItem { connection, database, schema, object, .. } => (
                 connection,
                 Some(database.as_str()),
                 Some(schema.as_str()),
@@ -343,6 +346,10 @@ impl AppRoot {
             | NavigatorNodeId::SchemaObject { .. }
             | NavigatorNodeId::Provider { .. } => return,
         };
+        self.completion_foreign_keys
+            .forget(|key| key.covered_by(connection, database, schema, object));
+        self.table_folder_describes
+            .forget(|key| key.covered_by(connection, database, schema, object));
         let ids: Vec<u64> = self.workspace.tabs().iter().map(|tab| tab.id).collect();
         for id in ids {
             if let Some(props) = self.workspace.runtime_mut(id).map(|runtime| &mut runtime.columns_panel.props) {

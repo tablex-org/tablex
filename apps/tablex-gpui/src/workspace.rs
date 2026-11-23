@@ -58,6 +58,9 @@ pub enum TabKind {
     /// its place): the source tab is kept by the app. Never persisted: it is a view of another
     /// tab's result.
     Results,
+    /// The Error Log in a tab of its own (singleton; the app keeps the one log view). Never
+    /// persisted: the place is a setting, and the log opens again on demand.
+    ErrorLog,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -601,7 +604,7 @@ fn session_tab(tab: &Tab) -> Option<crate::gpui_session::SessionTab> {
         // Singleton utility tab; reopened on demand.
         TabKind::DriverManager | TabKind::Settings => return None,
         // A wizard over a file and a load in flight: nothing to restore.
-        TabKind::Import | TabKind::Transfer | TabKind::SqlFile | TabKind::Backup | TabKind::Restore | TabKind::Accounts | TabKind::ProcessList | TabKind::Results => return None,
+        TabKind::Import | TabKind::Transfer | TabKind::SqlFile | TabKind::Backup | TabKind::Restore | TabKind::Accounts | TabKind::ProcessList | TabKind::Results | TabKind::ErrorLog => return None,
     };
     Some(SessionTab {
         kind: kind.into(),
@@ -764,10 +767,10 @@ impl WorkspaceState {
         let persisted: Vec<u64> = self
             .tabs
             .iter()
-            .filter(|tab| !matches!(tab.kind, TabKind::DriverManager | TabKind::Settings))
+            .filter(|tab| session_tab(tab).is_some())
             .map(|tab| tab.id)
             .collect();
-        // Index within the persisted list (driver tabs are skipped).
+        // Index within the persisted list (tabs the session leaves out are skipped).
         let index_of = |id: u64| persisted.iter().position(|persisted| *persisted == id);
         let active = self
             .panes
@@ -986,6 +989,16 @@ impl WorkspaceState {
             return id;
         }
         self.open_tab_with_kind(TabKind::Settings, "Settings")
+    }
+
+    /// Opens the Error Log tab, or shows the one that is open.
+    pub fn open_error_log_tab(&mut self, title: &str) -> u64 {
+        if let Some(tab) = self.tabs.iter().find(|tab| tab.kind == TabKind::ErrorLog) {
+            let id = tab.id;
+            self.activate_tab(id);
+            return id;
+        }
+        self.open_tab_with_kind(TabKind::ErrorLog, title.to_string())
     }
 
     /// "Open data tabs next to the active tab": a new data tab sits right

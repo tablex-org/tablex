@@ -1215,31 +1215,38 @@ impl AppRoot {
         let shell_failed = self
             .shell_view(tab_id)
             .is_some_and(|view| view.error.is_some());
+        // A table-data, Mongo find or Redis key tab loads data; it does not run a query of the user's.
+        let (is_query_tab, browse) = self.workspace.tab(tab_id).map_or((false, false), |tab| {
+            (
+                tab.kind == TabKind::Query,
+                tab.query_mode.is_table_data() || tab.query_mode.is_mongo_find() || tab.query_mode.is_redis_key(),
+            )
+        });
         let message = match status {
             _ if shell_failed => t!("grid.no_result_script_failed").into_owned(),
             Some(QueryStatus::Ready { .. }) => t!("grid.no_rows_returned").into_owned(),
             Some(QueryStatus::Running { .. }) => t!("grid.running_query").into_owned(),
             Some(QueryStatus::Failed(error)) => failed_query_text(error),
             Some(QueryStatus::Cancelled) => t!("grid.query_cancelled").into_owned(),
+            _ if browse => t!("grid.load_the_data_to_see_rows").into_owned(),
             _ => t!("grid.run_a_query_to_see_results").into_owned(),
         };
-        // Nothing run yet (an editor tab whose run was withdrawn, or whose result is gone): the
-        // editor's Run, for the tab this area belongs to (it may show in a Results tab or window).
-        let run_button = (!shell_failed
-            && matches!(status, None | Some(QueryStatus::Idle))
-            && self.results_movable(tab_id))
-        .then(|| {
+        // Nothing run yet (a tab restored without running, whose run was withdrawn, or whose result
+        // is gone): the tab's Run, for the tab this area belongs to (it may show in a Results tab
+        // or window). A browse tab says Load; it is the same run.
+        let run_button = (!shell_failed && is_query_tab && matches!(status, None | Some(QueryStatus::Idle))).then(|| {
+            let (label, tooltip) = if browse {
+                (t!("grid.load_the_data"), t!("grid.load_the_data"))
+            } else {
+                (t!("editor.run"), t!("editor.run_the_statement"))
+            };
             Button::new(("empty-run-query", tab_id))
                 .debug_selector(|| "empty-run-query".into())
                 .icon(Icon::empty().path("icons/play.svg").size(px(12.0)))
-                .label(t!("editor.run"))
+                .label(label)
                 .compact()
                 .primary()
-                .tooltip(shortcuts::with_label(
-                    &t!("editor.run_the_statement"),
-                    &self.settings.shortcuts,
-                    "editor.run",
-                ))
+                .tooltip(shortcuts::with_label(&tooltip, &self.settings.shortcuts, "editor.run"))
                 .on_click(cx.listener(move |this, _, window, cx| this.run_tab_as_its_run_button(tab_id, window, cx)))
         });
         div()

@@ -224,7 +224,7 @@ impl AppRoot {
                 }
                 Err(error) => {
                     self.settings_ui.mcp_off_unsaved |= mcp_off;
-                    self.settings_save_failed(&error, "TableX will try again", cx);
+                    self.settings_save_failed(&error, "tablex will try again", cx);
                 }
             }
         }
@@ -358,6 +358,9 @@ impl AppRoot {
                 self.settings_language_changed(window, cx);
             }
             cx.refresh_windows();
+        }
+        if changed.contains(&"appearance.error_log_place") {
+            self.sync_error_log_place(cx);
         }
         if changed.contains(&"appearance.theme") {
             let system = window
@@ -649,7 +652,7 @@ impl AppRoot {
                 Ok(_) => this.settings_reached_the_file(cx),
                 Err(error) => this.settings_save_failed(
                     &error,
-                    "it is written again at the next settings change and when TableX quits",
+                    "it is written again at the next settings change and when tablex quits",
                     cx,
                 ),
             });

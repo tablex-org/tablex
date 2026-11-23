@@ -277,6 +277,7 @@ impl AppRoot {
         let is_redis_console = tab.query_mode.is_redis_command();
         let is_driver_manager = tab.kind == TabKind::DriverManager;
         let is_settings = tab.kind == TabKind::Settings;
+        let is_error_log = tab.kind == TabKind::ErrorLog;
         let is_diagram = tab.kind == TabKind::Diagram;
         let is_source = tab.kind == TabKind::Source;
         let import = (tab.kind == TabKind::Import).then(|| self.imports.get(&tab_id).cloned()).flatten();
@@ -366,6 +367,15 @@ impl AppRoot {
                         .rounded(gpui_component::theme::Theme::global(cx).radius)
                         .border_1()
                         .border_color(theme::border())
+                        // Object rows dragged from the sidebar insert their names at the drop point
+                        // (SQL and MongoDB script editors; a Redis console takes commands, not names).
+                        .when(!is_redis_console, |this| {
+                            this.drag_over::<navigator_ui::ObjectDrag>(|style, _, _, _| style.border_color(theme::accent()))
+                                .on_drop(cx.listener(move |this, drag: &navigator_ui::ObjectDrag, window, cx| {
+                                    let at = window.mouse_position();
+                                    this.drop_objects_on_editor(tab_id, &drag.ids, at, window, cx);
+                                }))
+                        })
                         .child(
                     // Fills its area: the whole panel until the first run, then the upper part
                     // of the editor / results split. The same entity either way.
@@ -427,6 +437,7 @@ impl AppRoot {
         let backup = backup.map(|view| div().flex_1().min_h_0().min_w_0().child(view));
         let accounts = accounts.map(|view| div().flex_1().min_h_0().min_w_0().child(view));
         let process_list = process_list.map(|view| div().flex_1().min_h_0().min_w_0().child(view));
+        let error_log = is_error_log.then(|| self.render_error_log_tab(window, cx));
         let driver_manager = if is_driver_manager {
             self.render_driver_manager(window, cx)
         } else {
@@ -516,6 +527,7 @@ impl AppRoot {
             .children(backup)
             .children(accounts)
             .children(process_list)
+            .children(error_log)
             .children(result_content)
             .children(drop_highlight)
             .into_any_element()

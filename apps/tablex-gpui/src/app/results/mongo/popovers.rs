@@ -355,7 +355,7 @@ impl AppRoot {
             let remove = ui::icon_button(
                 mongo_filter_element_id("mongo-filter-remove", tab_id, rule_id),
                 IconName::Close,
-                "Remove filter rule",
+                t!("grid.remove_rule"),
             )
             .with_size(gpui_component::Size::XSmall)
             .disabled(rules.len() == 1)
@@ -435,7 +435,7 @@ impl AppRoot {
                         .border_color(theme::border())
                         .text_size(px(12.0))
                         .text_color(theme::text_muted())
-                        .child("No value"),
+                        .child(t!("grid.no_value")),
                 );
             }
             rows = rows.child(row.child(remove));
@@ -443,7 +443,7 @@ impl AppRoot {
         let add = Button::new(("mongo-filter-add", tab_id))
             .with_size(gpui_component::Size::XSmall)
             .icon(Icon::new(IconName::Plus).size(px(14.0)))
-            .label("Add rule")
+            .label(t!("grid.add_rule"))
             .compact()
             .ghost()
             .h(px(28.0))
@@ -457,7 +457,8 @@ impl AppRoot {
             }));
         let reset = Button::new(("mongo-filter-reset", tab_id))
             .with_size(gpui_component::Size::XSmall)
-            .label("Reset rules")
+            .label(t!("grid.reset_rules"))
+            .tooltip(t!("grid.reset_rules_tooltip"))
             .compact()
             .ghost()
             .h(px(28.0))
@@ -468,7 +469,8 @@ impl AppRoot {
             .debug_selector(|| "mongo-filter-clear".into())
             .with_size(gpui_component::Size::XSmall)
             .icon(Icon::new(IconName::Delete).size(px(14.0)))
-            .label("Clear Filter")
+            .label(t!("grid.clear_filter"))
+            .tooltip(t!("grid.clear_filter_tooltip"))
             .compact()
             .ghost()
             .h(px(28.0))
@@ -477,7 +479,7 @@ impl AppRoot {
             }));
         let apply = Button::new(("mongo-filter-apply", tab_id))
             .with_size(gpui_component::Size::XSmall)
-            .label("Apply Filter")
+            .label(t!("grid.apply_filter"))
             .compact()
             .primary()
             .h(px(28.0))
@@ -517,7 +519,7 @@ impl AppRoot {
                         div()
                             .text_size(px(12.0))
                             .text_color(theme::text())
-                            .child("Filter"),
+                            .child(t!("grid.filter")),
                     )
                     .child(clear),
             )

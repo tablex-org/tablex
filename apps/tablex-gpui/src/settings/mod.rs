@@ -84,6 +84,16 @@ choice_enum!(
 );
 
 choice_enum!(
+    /// Where the Error Log opens: the bottom or the right side of the main area, or a tab of its
+    /// own. The Error Log header's position button changes it as well.
+    ErrorLogPlace {
+        Bottom => ("bottom", "Bottom"),
+        Right => ("right", "Right"),
+        Tab => ("tab", "In a tab of its own"),
+    }
+);
+
+choice_enum!(
     /// What a script run does when a statement fails.
     OnScriptError {
         Stop => ("stop", "Stop at the failing statement"),
@@ -309,6 +319,8 @@ pub struct Appearance {
     pub compact_tab_titles: bool,
     /// Debug metric in the status bar; on by default only in debug builds.
     pub show_fps: bool,
+    /// Where the Error Log opens (the status bar icon and its shortcut).
+    pub error_log_place: ErrorLogPlace,
 }
 
 impl Default for Appearance {
@@ -326,6 +338,7 @@ impl Default for Appearance {
             tab_rows: false,
             compact_tab_titles: false,
             show_fps: cfg!(any(debug_assertions, feature = "perf-diagnostics")),
+            error_log_place: ErrorLogPlace::Bottom,
         }
     }
 }
@@ -739,7 +752,7 @@ impl AiSettings {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Updates {
-    /// Ask GitHub once a day, on launch, whether a newer TableX exists.
+    /// Ask GitHub once a day, on launch, whether a newer tablex exists.
     pub check_automatically: bool,
 }
 
@@ -857,6 +870,7 @@ mod tests {
         assert_serde_names_match::<RunScope>();
         assert_serde_names_match::<OnScriptError>();
         assert_serde_names_match::<ResultsPosition>();
+        assert_serde_names_match::<ErrorLogPlace>();
         assert_serde_names_match::<KeywordCase>();
         assert_serde_names_match::<FormatterChoice>();
         assert_serde_names_match::<BooleanDisplay>();

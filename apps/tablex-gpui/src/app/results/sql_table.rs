@@ -409,7 +409,7 @@ impl AppRoot {
                 .line_number(false)
                 .soft_wrap(false)
                 .default_value(value)
-                .completion(completion)
+                .completion(completion, window, cx)
         });
         let editor_for_events = editor.clone();
         cx.subscribe_in(
@@ -856,6 +856,18 @@ impl AppRoot {
                 .items_center()
                 .gap(px(4.0))
                 .children(filter_control)
+                // Sets the filter button apart from the WHERE text it writes.
+                .when(field == SqlField::Where, |this| {
+                    this.child(
+                        div()
+                            .debug_selector(|| "sql-where-divider".into())
+                            .flex_shrink_0()
+                            .w(px(1.0))
+                            .h(px(16.0))
+                            .mx(px(2.0))
+                            .bg(theme::border()),
+                    )
+                })
                 .child(
                     div()
                         .debug_selector(move || format!("{slug}-label"))

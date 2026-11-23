@@ -663,3 +663,315 @@ fn cmd_shift_l_toggles_the_pane(cx: &mut TestAppContext) {
     settle(visual);
     assert!(visual.debug_bounds("error-log-pane").is_none(), "and closes it again");
 }
+
+// ---- placement: bottom, right or a tab of its own ----------------------------------
+
+/// Picks `slug` ("below", "right", "tab") in the Error Log toolbar's position menu.
+fn pick_error_log_place(visual: &mut gpui::VisualTestContext, slug: &str) {
+    click_debug_button(visual, "error-log-place");
+    settle(visual);
+    let item = Box::leak(format!("error-log-place-{slug}").into_boxed_str());
+    click_debug_button(visual, item);
+    settle(visual);
+}
+
+fn error_log_place_of(app: &gpui::Entity<AppRoot>, visual: &gpui::VisualTestContext) -> crate::settings::ErrorLogPlace {
+    app.read_with(visual, |this, _| this.error_log_place())
+}
+
+/// A new SQL tab (the editor area is on screen) with the Error Log opened from the status bar.
+fn query_tab_with_log(cx: &mut TestAppContext) -> (gpui::Entity<AppRoot>, &mut gpui::VisualTestContext, u64) {
+    let (app, visual) = layout_app(cx);
+    click_debug_button(visual, "global-new-query");
+    settle(visual);
+    let query = active_tab(&app, visual);
+    open_log_pane(visual);
+    (app, visual, query)
+}
+
+#[gpui::test]
+fn the_position_menu_moves_the_pane_bottom_right_and_to_a_tab(cx: &mut TestAppContext) {
+    use crate::settings::ErrorLogPlace;
+    let (app, visual, query) = query_tab_with_log(cx);
+    // Bottom (the default): under the editor, full width.
+    let area = visual.debug_bounds("query-editor-area").expect("editor area");
+    let pane = visual.debug_bounds("error-log-pane").unwrap();
+    assert!(pane.top() >= area.bottom() - gpui::px(1.0), "below the editor: {area:?} {pane:?}");
+    assert!(pane.size.width > gpui::px(900.0), "full width: {pane:?}");
+    assert!(visual.debug_bounds("error-log-place").is_some(), "the position button is in the toolbar");
+    let close = visual.debug_bounds("error-log-close").unwrap();
+    let place = visual.debug_bounds("error-log-place").unwrap();
+    assert!(place.right() <= close.left(), "left of the close button: {place:?} {close:?}");
+
+    // Right: beside the editor and tab strip area, full height of the main area.
+    pick_error_log_place(visual, "right");
+    assert_eq!(error_log_place_of(&app, visual), ErrorLogPlace::Right);
+    let area = visual.debug_bounds("query-editor-area").expect("editor area");
+    let pane = visual.debug_bounds("error-log-pane").expect("pane");
+    assert!(pane.left() >= area.right() - gpui::px(1.0), "right of the editor: {area:?} {pane:?}");
+    assert!(pane.size.height > gpui::px(500.0), "full height: {pane:?}");
+    assert!(pane.size.width < gpui::px(600.0), "a side pane, not the whole width: {pane:?}");
+    let status = visual.debug_bounds("status-bar").unwrap();
+    assert!(pane.bottom() <= status.top() + gpui::px(1.0), "above the status bar");
+    assert!(visual.debug_bounds("error-log-place").is_some());
+
+    // A tab of its own: the tab shows the pane, the query tab's editor is not on screen.
+    pick_error_log_place(visual, "tab");
+    assert_eq!(error_log_place_of(&app, visual), ErrorLogPlace::Tab);
+    let tab = active_tab(&app, visual);
+    assert_ne!(tab, query);
+    app.read_with(visual, |this, _| {
+        assert_eq!(this.workspace.tab(tab).unwrap().kind, TabKind::ErrorLog);
+        assert_eq!(this.error_log.tab, Some(tab));
+    });
+    let pane = visual.debug_bounds("error-log-pane").expect("pane in the tab");
+    assert!(visual.debug_bounds("query-editor-area").is_none(), "the tab shows the log only");
+    assert!(pane.size.width > gpui::px(500.0) && pane.size.height > gpui::px(400.0), "fills the tab: {pane:?}");
+
+    // Back to the bottom: the tab closes, the pane is under the editor again.
+    pick_error_log_place(visual, "below");
+    assert_eq!(error_log_place_of(&app, visual), ErrorLogPlace::Bottom);
+    app.read_with(visual, |this, _| {
+        assert!(this.workspace.tab(tab).is_none(), "the Error Log tab closed");
+        assert!(this.error_log.tab.is_none() && this.error_log.open, "still open, now docked");
+    });
+    assert_eq!(active_tab(&app, visual), query);
+    let area = visual.debug_bounds("query-editor-area").expect("editor area");
+    let pane = visual.debug_bounds("error-log-pane").expect("pane");
+    assert!(pane.top() >= area.bottom() - gpui::px(1.0), "below again: {area:?} {pane:?}");
+}
+
+#[test]
+fn narrow_panes_drop_source_then_date_and_keep_the_message_readable() {
+    use super::error_log_view::ColumnLayout;
+    assert_eq!(ColumnLayout::for_width(1000.0), ColumnLayout::ALL);
+    assert_eq!(ColumnLayout::for_width(480.0), ColumnLayout { source: false, date: true });
+    assert_eq!(ColumnLayout::for_width(360.0), ColumnLayout { source: false, date: true });
+    assert_eq!(ColumnLayout::for_width(320.0), ColumnLayout { source: false, date: false });
+}
+
+/// The Right place at the default 1100pt window: the table keeps a readable Message column, the
+/// toolbar rows are one line each and never overlap, and rows line up under their headers.
+#[gpui::test]
+fn right_pane_at_the_default_window_size_has_a_readable_table_and_no_overlap(cx: &mut TestAppContext) {
+    let (app, visual, _query) = query_tab_with_log(cx);
+    report(&app, visual, |this| {
+        this.report_error(Area::Query, None, "short");
+        this.report_error(
+            Area::Navigator,
+            None,
+            format!("a very long failure message {}", "that keeps going ".repeat(40)),
+        );
+        this.report_warning(Area::App, None, "a warning");
+    });
+    pick_error_log_place(visual, "right");
+    let pane = visual.debug_bounds("error-log-pane").expect("pane");
+    assert!(
+        pane.size.width >= gpui::px(359.0) && pane.size.width <= gpui::px(460.0),
+        "about 40% of the content area, at least 360pt: {pane:?}"
+    );
+
+    let header = visual.debug_bounds("error-log-header").unwrap();
+    let filters = visual.debug_bounds("error-log-filters").unwrap();
+    let columns = visual.debug_bounds("error-col-message").unwrap();
+    assert!(header.bottom() <= filters.top() + gpui::px(0.5), "title row above the filters: {header:?} {filters:?}");
+    assert!(filters.bottom() <= columns.top() + gpui::px(0.5), "filters above the table header: {filters:?} {columns:?}");
+    assert!(header.size.height < gpui::px(40.0) && filters.size.height <= gpui::px(32.5), "one line each");
+    // Title, pills and search sit left to right inside their row; the close button ends the title row.
+    let title_count = visual.debug_bounds("error-log-count").unwrap();
+    let place = visual.debug_bounds("error-log-place").unwrap();
+    let close = visual.debug_bounds("error-log-close").unwrap();
+    assert!(title_count.right() <= place.left() && close.right() <= pane.right() + gpui::px(0.5));
+    let last_pill = visual.debug_bounds("error-filter-info").unwrap();
+    let search = visual.debug_bounds("error-log-search").unwrap();
+    assert!(last_pill.right() <= search.left() + gpui::px(0.5), "pills then search: {last_pill:?} {search:?}");
+    assert!(search.right() <= pane.right() + gpui::px(0.5), "search inside the pane: {search:?}");
+    assert!(search.size.width >= gpui::px(72.0));
+
+    // The Message column keeps the room; Source is dropped, Date stays.
+    assert!(columns.size.width >= gpui::px(160.0), "Message is readable: {columns:?}");
+    assert!(visual.debug_bounds("error-col-source").is_none(), "Source is hidden in a narrow pane");
+    let date = visual.debug_bounds("error-col-date").expect("Date stays");
+    assert!(columns.right() <= date.left() + gpui::px(0.5) && date.right() <= pane.right());
+    for row in 0..3 {
+        let message = visual.debug_bounds(Box::leak(format!("error-cell-{row}-message").into_boxed_str())).unwrap();
+        let cell = visual.debug_bounds(Box::leak(format!("error-cell-{row}-date").into_boxed_str())).unwrap();
+        assert_eq!(message.left(), columns.left(), "row {row} starts under the header");
+        assert_eq!(message.size.width, columns.size.width, "row {row} has the header's width");
+        assert_eq!(cell.size.width, date.size.width);
+        assert!(message.size.height < gpui::px(30.0), "row {row} is one line, not one letter per line");
+    }
+
+    // Widening the pane brings Source back; the pane stays resizable.
+    let grab = gpui::point(pane.left(), pane.center().y);
+    visual.simulate_mouse_down(grab, gpui::MouseButton::Left, Default::default());
+    for dx in [4.0, 60.0, 200.0] {
+        visual.simulate_mouse_move(
+            gpui::point(grab.x - gpui::px(dx), grab.y),
+            gpui::MouseButton::Left,
+            Default::default(),
+        );
+        settle(visual);
+    }
+    visual.simulate_mouse_up(
+        gpui::point(grab.x - gpui::px(200.0), grab.y),
+        gpui::MouseButton::Left,
+        Default::default(),
+    );
+    settle(visual);
+    settle(visual);
+    let wide = visual.debug_bounds("error-log-pane").unwrap();
+    assert!(wide.size.width > pane.size.width + gpui::px(100.0), "dragging the divider left widens it: {pane:?} -> {wide:?}");
+    if wide.size.width >= gpui::px(574.0) {
+        assert!(visual.debug_bounds("error-col-source").is_some(), "Source returns in a wide pane");
+    }
+    assert!(visual.debug_bounds("error-col-message").unwrap().size.width >= gpui::px(160.0));
+}
+
+#[gpui::test]
+fn moving_the_pane_keeps_filter_search_selection_sort_and_scroll(cx: &mut TestAppContext) {
+    let (app, visual, _query) = query_tab_with_log(cx);
+    report(&app, visual, |this| {
+        for index in 0..60 {
+            this.report_error(Area::Query, None, format!("failure number {index}"));
+        }
+        this.report_warning(Area::App, None, "a warning that the Errors pill hides");
+    });
+    click_debug_button(visual, "error-filter-errors");
+    click_debug_button(visual, "error-sort-source");
+    settle(visual);
+    let search = app.read_with(visual, |this, _| this.error_log.search.clone().unwrap());
+    visual.update(|window, cx| search.update(cx, |input, cx| input.set_value("failure", window, cx)));
+    settle(visual);
+    app.update(visual, |this, cx| {
+        let id = this.error_log.log.get(20).unwrap().id;
+        this.error_log.selected = Some(id);
+        this.error_log.scroll.scroll_to_item(20, gpui::ScrollStrategy::Top);
+        cx.notify();
+    });
+    settle(visual);
+    let snapshot = |app: &gpui::Entity<AppRoot>, visual: &mut gpui::VisualTestContext| {
+        app.read_with(visual, |this, cx| {
+            (
+                this.error_log.spec.clone(),
+                this.error_log.selected,
+                this.error_log.search.as_ref().unwrap().read(cx).value().to_string(),
+                f32::from(this.error_log.scroll.0.borrow().base_handle.offset().y),
+            )
+        })
+    };
+    let before = snapshot(&app, visual);
+    assert_eq!(before.0.severity, crate::error_log::SeverityFilter::Errors);
+    assert_eq!(before.0.sort, crate::error_log::SortKey::Source);
+    assert_eq!(before.2, "failure");
+    assert!(before.3 < -100.0, "scrolled down: {}", before.3);
+    for place in ["right", "tab", "below", "right"] {
+        pick_error_log_place(visual, place);
+        let after = snapshot(&app, visual);
+        assert_eq!(after.0, before.0, "filter, search and sort spec after {place}");
+        assert_eq!(after.1, before.1, "selection after {place}");
+        assert_eq!(after.2, before.2, "search text after {place}");
+        assert!((after.3 - before.3).abs() < 1.0, "scroll after {place}: {} vs {}", after.3, before.3);
+        let pill = visual.debug_bounds("error-filter-errors");
+        assert!(pill.is_some(), "the pane is on screen after {place}");
+    }
+}
+
+#[gpui::test]
+fn the_toggle_works_in_every_place(cx: &mut TestAppContext) {
+    use crate::settings::ErrorLogPlace;
+    let (app, visual) = layout_app(cx);
+    visual.update(|_, cx| actions::bind_keys(cx));
+    click_debug_button(visual, "global-new-query");
+    settle(visual);
+    let query = active_tab(&app, visual);
+    for place in [ErrorLogPlace::Bottom, ErrorLogPlace::Right, ErrorLogPlace::Tab] {
+        app.update(visual, |this, cx| {
+            let mut next = (*this.settings).clone();
+            next.appearance.error_log_place = place;
+            this.apply_settings(next, None, cx);
+        });
+        settle(visual);
+        assert!(visual.debug_bounds("error-log-pane").is_none(), "{place:?}: closed to start with");
+        click_debug_button(visual, "error-log-toggle");
+        settle(visual);
+        assert!(visual.debug_bounds("error-log-pane").is_some(), "{place:?}: the icon opens it");
+        assert_eq!(active_tab(&app, visual) != query, place == ErrorLogPlace::Tab, "{place:?}: only a tab place has a tab");
+        click_debug_button(visual, "error-log-toggle");
+        settle(visual);
+        assert!(visual.debug_bounds("error-log-pane").is_none(), "{place:?}: the icon closes it");
+        app.read_with(visual, |this, _| {
+            assert!(!this.error_log.open && this.error_log.tab.is_none(), "{place:?}: closed, no tab left");
+            assert_eq!(this.workspace.tabs().iter().filter(|tab| tab.kind == TabKind::ErrorLog).count(), 0);
+        });
+        assert_eq!(active_tab(&app, visual), query);
+        // The shortcut too.
+        tb_focus_root(&app, visual);
+        visual.simulate_keystrokes("secondary-shift-l");
+        settle(visual);
+        assert!(visual.debug_bounds("error-log-pane").is_some(), "{place:?}: the shortcut opens it");
+        visual.simulate_keystrokes("secondary-shift-l");
+        settle(visual);
+        assert!(visual.debug_bounds("error-log-pane").is_none(), "{place:?}: and closes it");
+    }
+}
+
+#[gpui::test]
+fn in_a_tab_the_toggle_brings_the_tab_forward_and_closing_the_tab_closes_the_log(cx: &mut TestAppContext) {
+    let (app, visual, query) = query_tab_with_log(cx);
+    pick_error_log_place(visual, "tab");
+    let tab = active_tab(&app, visual);
+    activate_tab_by_click(visual, query);
+    assert!(visual.debug_bounds("error-log-pane").is_none(), "the query tab does not show the log");
+    // From another tab the status-bar icon shows the Error Log tab instead of closing the log.
+    click_debug_button(visual, "error-log-toggle");
+    settle(visual);
+    assert_eq!(active_tab(&app, visual), tab, "the Error Log tab came forward");
+    assert!(visual.debug_bounds("error-log-pane").is_some());
+    app.read_with(visual, |this, _| assert!(this.error_log.open));
+    // Closing the tab closes the Error Log (the place stays).
+    app.update(visual, |this, cx| this.close_tab(tab, cx));
+    settle(visual);
+    app.read_with(visual, |this, _| {
+        assert!(!this.error_log.open && this.error_log.tab.is_none());
+        assert_eq!(this.error_log_place(), crate::settings::ErrorLogPlace::Tab);
+    });
+    assert!(visual.debug_bounds("error-log-pane").is_none());
+    // Opening it again shows it in a tab.
+    click_debug_button(visual, "error-log-toggle");
+    settle(visual);
+    app.read_with(visual, |this, _| {
+        let tab = this.workspace.active_tab().unwrap();
+        assert_eq!(tab.kind, TabKind::ErrorLog);
+    });
+}
+
+#[gpui::test]
+fn the_chosen_place_survives_a_restart(cx: &mut TestAppContext) {
+    cx.dispatcher.allow_parking();
+    let (app, visual, _query) = query_tab_with_log(cx);
+    let path = settings_temp_path();
+    app.update(visual, |this, _| this.settings_ui.path = Some(path.clone()));
+    pick_error_log_place(visual, "right");
+    visual.executor().advance_clock(std::time::Duration::from_millis(400));
+    wait_until(visual, "the settings file", |_| path.exists());
+    let on_disk = crate::settings::store::load(&path, &crate::settings::store::Legacy::default());
+    assert_eq!(on_disk.settings.appearance.error_log_place, crate::settings::ErrorLogPlace::Right);
+    assert!(std::fs::read_to_string(&path).unwrap().contains("\"error_log_place\": \"right\""));
+
+    // "Relaunch": defaults in memory, the file read back.
+    app.update(visual, |this, cx| {
+        this.settings = std::sync::Arc::new(Settings::default());
+        this.settings_ui.path = Some(path.clone());
+        this.init_settings(cx);
+    });
+    settle(visual);
+    assert_eq!(error_log_place_of(&app, visual), crate::settings::ErrorLogPlace::Right);
+    click_debug_button(visual, "error-log-toggle");
+    click_debug_button(visual, "error-log-toggle");
+    settle(visual);
+    let area = visual.debug_bounds("query-editor-area").expect("editor area");
+    let pane = visual.debug_bounds("error-log-pane").expect("pane");
+    assert!(pane.left() >= area.right() - gpui::px(1.0), "opens on the right after a restart");
+    let _ = std::fs::remove_file(path);
+}

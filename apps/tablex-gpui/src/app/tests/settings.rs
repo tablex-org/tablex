@@ -786,7 +786,7 @@ fn the_title_bar_names_the_app_version_and_the_active_tab(cx: &mut TestAppContex
         );
     }
     assert_eq!(title.center().y, gear.center().y, "same bar");
-    let version = concat!("TableX ", env!("CARGO_PKG_VERSION"));
+    let version = concat!("tablex ", env!("CARGO_PKG_VERSION"));
     click(visual, "open-settings".into());
     let (shown, os_title) = app.read_with(visual, |this, _| {
         (this.window_title(), this.shell.window_title.clone())
@@ -955,7 +955,8 @@ fn autocomplete_settings_limit_the_list_add_a_space_and_can_switch_it_off(cx: &m
     );
     visual.simulate_keystrokes("enter");
     settle(visual);
-    assert_eq!(editor_value(&editor, visual), "select 1 where ");
+    // The keyword case setting is Upper by default, whatever case was typed.
+    assert_eq!(editor_value(&editor, visual), "select 1 WHERE ");
     apply_editor_setting(&app, visual, |editor| {
         editor.autocomplete_insert_space = false
     });
@@ -1192,7 +1193,7 @@ fn the_theme_switches_dark_light_system_on_apply_and_system_follows_the_os(
     settings_nav(visual, "appearance");
     assert_eq!(draft_of(&app, visual).appearance.theme, ThemeChoice::Dark);
 
-    // Dark -> Light: a draft changes nothing until Apply, then both the TableX
+    // Dark -> Light: a draft changes nothing until Apply, then both the tablex
     // palette and the component theme switch.
     pick_theme(visual, "down enter");
     assert_eq!(draft_of(&app, visual).appearance.theme, ThemeChoice::Light);
@@ -1601,7 +1602,7 @@ fn a_retry_of_the_mcp_switch_off_that_fails_too_still_says_the_switch_is_on(
     let first = app
         .read_with(visual, |this, _| this.sidebar.notice.clone())
         .expect("the failure is shown");
-    assert!(first.contains("TableX will try again"), "{first}");
+    assert!(first.contains("tablex will try again"), "{first}");
 
     // The obstacle stays: the retry fails as well, and the notice still names the switch.
     visual

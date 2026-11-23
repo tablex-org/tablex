@@ -261,7 +261,7 @@ impl AppRoot {
         self.notify_tab(tab_id, cx);
     }
 
-    /// "Reset rules": back to one blank rule; the WHERE field is untouched.
+    /// "Start over": back to one blank rule; the WHERE field is untouched.
     fn reset_sql_filter_rules(&mut self, tab_id: u64, cx: &mut Context<Self>) {
         let first = self.sql_filter_columns(tab_id).into_iter().next();
         if let Some(tab) = self.workspace.tab_mut(tab_id) {
@@ -330,7 +330,7 @@ impl AppRoot {
         self.rerun_sql_table(tab_id, super::sql_table::SqlField::Where, &generated, cx);
     }
 
-    /// Clear Filter: drops every rule and the WHERE text and re-runs.
+    /// "Remove filter": drops every rule and the WHERE text and re-runs.
     fn clear_sql_filter(&mut self, tab_id: u64, window: &mut Window, cx: &mut Context<Self>) {
         if self.block_sql_filter_for_staged_changes(tab_id, cx) {
             return;
@@ -820,6 +820,7 @@ impl AppRoot {
             .with_size(Size::XSmall)
             .icon(Icon::new(IconName::Delete).size(px(14.0)))
             .label(t!("grid.clear_filter"))
+            .tooltip(t!("grid.clear_filter_tooltip"))
             .compact()
             .ghost()
             .h(px(28.0))
@@ -840,6 +841,7 @@ impl AppRoot {
             .debug_selector(|| "sql-filter-reset".into())
             .with_size(Size::XSmall)
             .label(t!("grid.reset_rules"))
+            .tooltip(t!("grid.reset_rules_tooltip"))
             .compact()
             .ghost()
             .h(px(28.0))
@@ -960,7 +962,8 @@ impl AppRoot {
             )
             .compact()
             .ghost()
-            .selected(open || active)
+            // Grey only while the builder is open: an applied filter shows in the icon and badge.
+            .selected(open)
             .tooltip(t!("grid.filter_builder"));
         let panel = if open {
             let can_run = self.sql_table_can_run(tab_id);
@@ -1010,17 +1013,21 @@ impl AppRoot {
                     div()
                         .debug_selector(|| "sql-filter-badge".into())
                         .absolute()
-                        .right(px(-4.0))
-                        .top(px(-2.0))
-                        .min_w(px(14.0))
-                        .h(px(14.0))
+                        .right(px(-3.0))
+                        .top(px(-3.0))
+                        .min_w(px(13.0))
+                        .h(px(13.0))
                         .px(px(3.0))
                         .flex()
                         .items_center()
                         .justify_center()
                         .rounded(px(7.0))
+                        // A ring in the bar's color keeps the badge off the icon's outline.
+                        .border_1()
+                        .border_color(theme::background())
                         .bg(theme::accent())
-                        .text_size(px(9.0))
+                        .text_size(px(8.0))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(theme::background())
                         .child(count.to_string()),
                 )

@@ -124,7 +124,8 @@ impl AppRoot {
             )
             .compact()
             .ghost()
-            .selected(filter_open || filter_count > 0)
+            // Grey only while the builder is open: an applied filter shows in the icon and badge.
+            .selected(filter_open)
             .tooltip(t!("editor.build_filter"));
         let grid = self.grid(tab_id);
         let result_columns: Vec<String> = (0..grid.column_count())
@@ -152,17 +153,21 @@ impl AppRoot {
                 this.child(
                     div()
                         .absolute()
-                        .right(px(-4.0))
-                        .top(px(-2.0))
-                        .min_w(px(14.0))
-                        .h(px(14.0))
+                        .right(px(-3.0))
+                        .top(px(-3.0))
+                        .min_w(px(13.0))
+                        .h(px(13.0))
                         .px(px(3.0))
                         .flex()
                         .items_center()
                         .justify_center()
                         .rounded(px(7.0))
+                        // A ring in the bar's color keeps the badge off the icon's outline.
+                        .border_1()
+                        .border_color(theme::background())
                         .bg(theme::accent())
-                        .text_size(px(9.0))
+                        .text_size(px(8.0))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(theme::background())
                         .child(filter_count.to_string()),
                 )
@@ -361,6 +366,16 @@ impl AppRoot {
             .items_center()
             .gap(px(4.0))
             .child(filter_trigger)
+            // Sets the buttons apart from the filter text they act on.
+            .child(
+                div()
+                    .debug_selector(|| "mongo-filter-divider".into())
+                    .flex_shrink_0()
+                    .w(px(1.0))
+                    .h(px(16.0))
+                    .mx(px(2.0))
+                    .bg(theme::border()),
+            )
             .child(
                 div()
                     .debug_selector(|| "mongo-filter-toolbar-text".into())

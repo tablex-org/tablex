@@ -78,6 +78,12 @@ grid:
   run_a_query_to_see_results:
     en: Run a query to see results
     vi: Chạy một truy vấn để xem kết quả
+  load_the_data_to_see_rows:
+    en: Load the data to see rows
+    vi: Tải dữ liệu để xem các dòng
+  load_the_data:
+    en: Load the data
+    vi: Tải dữ liệu
   connection_lost:
     en: "The connection to the database was lost (%{detail}). Reconnect, then run the query again."
     vi: "Mất kết nối đến cơ sở dữ liệu (%{detail}). Hãy kết nối lại rồi chạy lại truy vấn."
@@ -256,14 +262,20 @@ grid:
     en: Toggle AND / OR
     vi: Đổi AND / OR
   clear_filter:
-    en: Clear Filter
-    vi: Xoá bộ lọc
+    en: Remove filter
+    vi: Bỏ lọc
+  clear_filter_tooltip:
+    en: Remove the filter and run the query again without it
+    vi: Bỏ bộ lọc và chạy lại truy vấn không lọc
   add_rule:
     en: Add rule
     vi: Thêm điều kiện
   reset_rules:
-    en: Reset rules
-    vi: Đặt lại điều kiện
+    en: Start over
+    vi: Soạn lại
+  reset_rules_tooltip:
+    en: Clear the rules below. The data stays filtered until you apply.
+    vi: Xoá các điều kiện bên dưới. Dữ liệu vẫn lọc như cũ cho tới khi bấm Áp dụng.
   apply_filter:
     en: Apply Filter
     vi: Áp dụng bộ lọc

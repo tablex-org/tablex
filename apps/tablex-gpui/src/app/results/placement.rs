@@ -474,6 +474,28 @@ fn give_app_window_its_root(root: gpui::EntityId, cx: &mut gpui::App) {
     }
 }
 
+/// One checked item of a placement dropdown (the Results header's and the Error Log's): the place's
+/// icon and `label`, with the debug selector `<selector>-<slug>`.
+pub(in crate::app) fn place_menu_item(
+    selector: &'static str,
+    place: ResultsPlace,
+    label: String,
+    checked: bool,
+    on_pick: impl Fn(&mut gpui::App) + 'static,
+) -> PopupMenuItem {
+    PopupMenuItem::element(move |_, _| {
+        div()
+            .debug_selector(move || format!("{selector}-{}", place.slug()))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .child(Icon::empty().path(place.icon()).size(px(13.0)))
+            .child(label.clone())
+    })
+    .checked(checked)
+    .on_click(move |_, _, app| on_pick(app))
+}
+
 impl AppRoot {
     /// The control in the Results header that picks where the results of `tab_id` go.
     pub(in crate::app) fn render_results_place_menu(
@@ -494,21 +516,9 @@ impl AppRoot {
                 let menu = ResultsPlace::ALL.iter().fold(menu, |menu, place| {
                     let place = *place;
                     let root = root.clone();
-                    menu.item(
-                        PopupMenuItem::element(move |_, _| {
-                            div()
-                                .debug_selector(move || format!("results-place-{}", place.slug()))
-                                .flex()
-                                .items_center()
-                                .gap(px(8.0))
-                                .child(Icon::empty().path(place.icon()).size(px(13.0)))
-                                .child(place.label())
-                        })
-                        .checked(place == current)
-                        .on_click(move |_, _, app| {
-                            let _ = root.update(app, |this, cx| this.set_results_place(tab_id, place, cx));
-                        }),
-                    )
+                    menu.item(place_menu_item("results-place", place, place.label(), place == current, move |app| {
+                        let _ = root.update(app, |this, cx| this.set_results_place(tab_id, place, cx));
+                    }))
                 });
                 // Results in a Results tab or window are not "hidden": they have a place already.
                 if !current.is_beside() {

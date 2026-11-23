@@ -132,7 +132,7 @@ impl AppRoot {
                 .line_number(false)
                 .soft_wrap(false)
                 .default_value(value)
-                .completion(completion)
+                .completion(completion, window, cx)
         });
         let editor_for_events = editor.clone();
         cx.subscribe_in(
@@ -193,7 +193,7 @@ impl AppRoot {
                 .line_number(false)
                 .soft_wrap(false)
                 .default_value(value)
-                .completion(completion)
+                .completion(completion, window, cx)
         });
         let editor_for_events = editor.clone();
         cx.subscribe_in(

@@ -1,6 +1,18 @@
-//! Error Log pane: the status-bar icon, the resizable bottom pane (toolbar,
+//! Error Log pane: the status-bar icon, the resizable pane (toolbar,
 //! severity pills, search, virtualized table), the Event details dialog and
 //! the `report_*` entry points every failure site calls.
+//!
+//! Where the pane shows is the `appearance.error_log_place` setting (the position button in its
+//! toolbar and the Settings page change the same value, so it survives a restart): the bottom or
+//! the right side of the main area, or a tab of its own (`TabKind::ErrorLog`). It is one view
+//! (`ErrorLogUi` holds its filter, search, selection, sort and scroll) embedded where the place
+//! says, so moving it keeps all of that. Closing it, from its button, Escape, the status-bar icon
+//! or by closing its tab, closes the Error Log whatever the place; the place stays, and opening it
+//! again shows it there. A toggle (icon, Cmd/Ctrl+Shift+L) from another tab brings the Error Log
+//! tab forward; from the tab itself it closes it. There is no place of its own window: that would
+//! need a second window drawing through `AppRoot` (the results window's machinery, with its
+//! window-bound inputs and callback caveats), and the search input and dialogs belong to the app's
+//! window.
 //!
 //! Costs. With the pane closed the only per-frame work is `unseen_*` reads
 //! for the icon and one `Vec::is_empty` check for queued file writes. With it
@@ -17,13 +29,25 @@ use crate::error_log::{
 };
 use gpui::{ClipboardItem, Entity, SharedString, Subscription};
 use gpui_component::input::InputEvent;
-use gpui_component::resizable::{resizable_panel, v_resizable, ResizableState};
+use crate::settings::ErrorLogPlace;
+use gpui_component::resizable::{h_resizable, resizable_panel, v_resizable, ResizableState};
 use std::time::SystemTime;
 
 const DEFAULT_PANE_HEIGHT: f32 = 200.0;
 const MIN_PANE_HEIGHT: f32 = 96.0;
+/// The right-hand pane opens at this share of the content area (the window beside the sidebar),
+/// but never narrower than `MIN_DEFAULT_PANE_WIDTH`; the divider still moves it down to
+/// `MIN_PANE_WIDTH`.
+const DEFAULT_PANE_SHARE: f32 = 0.4;
+const MIN_DEFAULT_PANE_WIDTH: f32 = 360.0;
+const MIN_PANE_WIDTH: f32 = 320.0;
+/// What the main area keeps beside a right-hand pane.
+const MIN_UPPER_WIDTH: f32 = 320.0;
 const SOURCE_COL_WIDTH: f32 = 200.0;
 const DATE_COL_WIDTH: f32 = 170.0;
+/// The Message column never gets narrower than this, gutter and gap included (it clips its text;
+/// it is never one letter per line).
+const MESSAGE_COL_MIN_WIDTH: f32 = 160.0;
 /// Severity icon (13px) + gap (6px): the Message column's leading gutter.
 const ICON_GUTTER: f32 = 19.0;
 /// Horizontal padding shared by the header and every row.
@@ -66,6 +90,28 @@ impl gpui_component::IconNamed for ErrorLogGlyph {
     }
 }
 
+impl ErrorLogPlace {
+    const ALL: [Self; 3] = [Self::Bottom, Self::Right, Self::Tab];
+
+    /// The Results place with the same icon and slug (the shared placement control).
+    fn results_place(self) -> results::placement::ResultsPlace {
+        use results::placement::ResultsPlace;
+        match self {
+            Self::Bottom => ResultsPlace::Below,
+            Self::Right => ResultsPlace::Right,
+            Self::Tab => ResultsPlace::Tab,
+        }
+    }
+
+    fn label(self) -> String {
+        match self {
+            Self::Bottom => t!("error_log.place_bottom").into_owned(),
+            Self::Right => t!("error_log.place_right").into_owned(),
+            Self::Tab => t!("error_log.place_tab").into_owned(),
+        }
+    }
+}
+
 impl Severity {
     fn color(self) -> gpui::Rgba {
         match self {
@@ -95,13 +141,41 @@ enum Column {
     Date,
 }
 
+/// Which of the optional columns a pane of a given width shows. The Message column is always
+/// there and gets what the others leave, at least `MESSAGE_COL_MIN_WIDTH`. A narrow pane (the
+/// Right place at its default width is about 360pt) drops Source first (the Details dialog and the
+/// export still have it; sorting by it needs a wider pane), then Date: the columns are hidden
+/// rather than squeezed, so what stays is readable and header and rows never drift apart. The
+/// Bottom and Tab places are as wide as the window and always show all three.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) struct ColumnLayout {
+    pub(super) source: bool,
+    pub(super) date: bool,
+}
+
+impl ColumnLayout {
+    pub(super) const ALL: Self = Self { source: true, date: true };
+
+    /// `pane_width` is the pane's own width (padding included).
+    pub(super) fn for_width(pane_width: f32) -> Self {
+        let inner = pane_width - 2.0 * ROW_PADDING_X;
+        let source_width = SOURCE_COL_WIDTH;
+        let date_width = DATE_COL_WIDTH;
+        let message = MESSAGE_COL_MIN_WIDTH;
+        Self {
+            source: inner >= message + source_width + date_width,
+            date: inner >= message + date_width,
+        }
+    }
+}
+
 impl Column {
     /// An empty cell with this column's width rule: Message takes the rest
-    /// (and clips), Source and Date are fixed and never shrink.
+    /// (and clips, down to its minimum), Source and Date are fixed and never shrink.
     fn cell(self) -> gpui::Div {
-        let cell = div().pr(px(CELL_GAP)).overflow_hidden();
+        let cell = div().pr(px(CELL_GAP)).overflow_hidden().whitespace_nowrap();
         match self {
-            Self::Message => cell.flex_1().min_w_0(),
+            Self::Message => cell.flex_1().min_w(px(MESSAGE_COL_MIN_WIDTH)),
             Self::Source => cell.w(px(SOURCE_COL_WIDTH)).flex_shrink_0(),
             Self::Date => cell.w(px(DATE_COL_WIDTH)).flex_shrink_0(),
         }
@@ -150,9 +224,13 @@ pub(super) struct ErrorLogUi {
     /// Log revision `visible` was built for; `None` after a spec change.
     built: Option<u64>,
     pub(super) selected: Option<u64>,
-    scroll: UniformListScrollHandle,
+    pub(super) scroll: UniformListScrollHandle,
+    /// The sizes of the bottom pane and of the right-hand pane (one split each).
     split: Entity<ResizableState>,
-    search: Option<Entity<InputState>>,
+    split_right: Entity<ResizableState>,
+    /// The tab that shows the pane while the place is a tab.
+    pub(super) tab: Option<u64>,
+    pub(super) search: Option<Entity<InputState>>,
     focus: FocusHandle,
     pub(super) notice: Option<SharedString>,
     _quit: Option<Subscription>,
@@ -175,6 +253,8 @@ impl ErrorLogUi {
             selected: None,
             scroll: UniformListScrollHandle::new(),
             split: cx.new(|_| ResizableState::default()),
+            split_right: cx.new(|_| ResizableState::default()),
+            tab: None,
             search: None,
             focus: cx.focus_handle(),
             notice: None,
@@ -420,10 +500,14 @@ impl AppRoot {
     // --- pane state ------------------------------------------------------------
 
     pub(super) fn toggle_error_log(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.error_log.open {
-            self.close_error_log(cx);
-        } else {
-            self.open_error_log(None, window, cx);
+        match self.error_log.tab {
+            // In its tab: from another tab a toggle brings it forward, from the tab it closes it.
+            Some(tab) if self.workspace.active_tab().map(|active| active.id) != Some(tab) => {
+                self.activate_tab_ui(tab, cx);
+                self.error_log.focus.focus(window, cx);
+            }
+            _ if self.error_log.open => self.close_error_log(cx),
+            _ => self.open_error_log(None, window, cx),
         }
     }
 
@@ -453,13 +537,59 @@ impl AppRoot {
                     .scroll_to_item(position, gpui::ScrollStrategy::Nearest);
             }
         }
-        ui.focus.focus(window, cx);
+        self.sync_error_log_place(cx);
+        self.error_log.focus.focus(window, cx);
         self.notify_chrome(cx);
     }
 
     pub(super) fn close_error_log(&mut self, cx: &mut Context<Self>) {
+        // Taken first: the tab's closing then has nothing left to report.
+        if let Some(tab) = self.error_log.tab.take() {
+            self.close_tab_unremembered(tab, cx);
+        }
         self.error_log.open = false;
         self.notify_chrome(cx);
+    }
+
+    /// Makes the tab match the place: an open Error Log has its tab while the place is a tab
+    /// (opened, or brought forward), and none otherwise. The pane itself follows the place when it
+    /// renders.
+    pub(super) fn sync_error_log_place(&mut self, cx: &mut Context<Self>) {
+        let in_tab = self.error_log.open && self.error_log_place() == ErrorLogPlace::Tab;
+        match (in_tab, self.error_log.tab) {
+            (true, _) => {
+                let tab = self.workspace.open_error_log_tab(&t!("menu.error_log"));
+                self.error_log.tab = Some(tab);
+                self.activate_tab_ui(tab, cx);
+            }
+            (false, Some(tab)) => {
+                self.error_log.tab = None;
+                self.close_tab_unremembered(tab, cx);
+            }
+            (false, None) => {}
+        }
+        cx.notify();
+    }
+
+    /// The Error Log's tab was closed (by the user, or with a bulk close): the Error Log is closed.
+    pub(super) fn error_log_tab_closing(&mut self, tab_id: u64, cx: &mut Context<Self>) {
+        if self.error_log.tab == Some(tab_id) {
+            self.error_log.tab = None;
+            self.error_log.open = false;
+            self.notify_chrome(cx);
+        }
+    }
+
+    pub(super) fn error_log_place(&self) -> ErrorLogPlace {
+        self.settings.appearance.error_log_place
+    }
+
+    /// The position button's pick: the same change as the Settings page's (applied at once, saved
+    /// after the debounce); `sync_error_log_place` follows from it.
+    fn set_error_log_place(&mut self, place: ErrorLogPlace, cx: &mut Context<Self>) {
+        let mut next = (*self.settings).clone();
+        next.appearance.error_log_place = place;
+        self.apply_settings(next, None, cx);
     }
 
     fn ensure_error_log_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -801,42 +931,97 @@ impl AppRoot {
             .into_any_element()
     }
 
-    /// The whole pane inside a vertical resizable split under `upper`.
+    /// Where the right-hand pane opens: `DEFAULT_PANE_SHARE` of the content area beside the sidebar.
+    fn default_right_pane_width(&self, window: &Window) -> f32 {
+        let sidebar = if self.shell.sidebar_collapsed { 36.0 } else { self.shell.sidebar_width };
+        ((f32::from(window.viewport_size().width) - sidebar) * DEFAULT_PANE_SHARE)
+            .max(MIN_DEFAULT_PANE_WIDTH)
+    }
+
+    /// The pane in a resizable split with `upper`: under it, or (place Right) beside it. In a tab
+    /// of its own the pane is not part of the main area (`render_error_log_tab`).
     pub(super) fn with_error_log_pane(
         &mut self,
         upper: impl IntoElement,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        if !self.error_log.open {
+        let place = self.error_log_place();
+        if !self.error_log.open || place == ErrorLogPlace::Tab {
             return upper.into_any_element();
         }
-        let pane = self.render_error_log_pane(window, cx);
+        let pane = self.render_error_log_pane(place, window, cx);
+        let default_width = self.default_right_pane_width(window);
+        let upper = resizable_panel().child(upper.into_any_element());
+        let pane_panel = resizable_panel().child(pane);
+        let split = if place == ErrorLogPlace::Right {
+            h_resizable("error-log-split-right")
+                .with_state(&self.error_log.split_right)
+                .child(upper.size_range(px(MIN_UPPER_WIDTH)..gpui::Pixels::MAX))
+                .child(
+                    pane_panel
+                        .size(px(default_width))
+                        .size_range(px(MIN_PANE_WIDTH)..gpui::Pixels::MAX),
+                )
+        } else {
+            v_resizable("error-log-split")
+                .with_state(&self.error_log.split)
+                .child(upper.size_range(px(120.0)..gpui::Pixels::MAX))
+                .child(
+                    pane_panel
+                        .size(px(DEFAULT_PANE_HEIGHT))
+                        .size_range(px(MIN_PANE_HEIGHT)..gpui::Pixels::MAX),
+                )
+        };
         div()
             .flex()
             .flex_1()
             .min_h_0()
             .min_w_0()
-            .child(
-                v_resizable("error-log-split")
-                    .with_state(&self.error_log.split)
-                    .child(
-                        resizable_panel()
-                            .size_range(px(120.0)..gpui::Pixels::MAX)
-                            .child(upper.into_any_element()),
-                    )
-                    .child(
-                        resizable_panel()
-                            .size(px(DEFAULT_PANE_HEIGHT))
-                            .size_range(px(MIN_PANE_HEIGHT)..gpui::Pixels::MAX)
-                            .child(pane),
-                    ),
-            )
+            .child(split)
+            .into_any_element()
+    }
+
+    /// The content of the Error Log tab: the same pane, filling the tab.
+    pub(super) fn render_error_log_tab(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let pane = self.render_error_log_pane(ErrorLogPlace::Tab, window, cx);
+        div().flex_1().min_h_0().min_w_0().child(pane).into_any_element()
+    }
+
+    /// The control that picks where the pane goes: the Results header's, with the same icons.
+    fn render_error_log_place_menu(&self, place: ErrorLogPlace, cx: &mut Context<Self>) -> AnyElement {
+        let root = cx.entity().downgrade();
+        Button::new("error-log-place")
+            .debug_selector(|| "error-log-place".into())
+            .icon(Icon::empty().path(place.results_place().icon()).size(px(12.0)))
+            .compact()
+            .ghost()
+            .tooltip(t!("error_log.position"))
+            .dropdown_menu(move |menu, _, _| {
+                ErrorLogPlace::ALL.iter().fold(menu, |menu, choice| {
+                    let choice = *choice;
+                    let root = root.clone();
+                    menu.item(results::placement::place_menu_item(
+                        "error-log-place",
+                        choice.results_place(),
+                        choice.label(),
+                        choice == place,
+                        move |app| {
+                            let _ = root.update(app, |this, cx| this.set_error_log_place(choice, cx));
+                        },
+                    ))
+                })
+            })
             .into_any_element()
     }
 
     fn render_error_log_pane(
         &mut self,
+        place: ErrorLogPlace,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
@@ -863,6 +1048,7 @@ impl AppRoot {
                     .debug_selector(move || id.to_string())
             };
         let header = div()
+            .debug_selector(|| "error-log-header".into())
             .h(px(theme::HEADER_HEIGHT))
             .flex_shrink_0()
             .flex()
@@ -880,6 +1066,8 @@ impl AppRoot {
                     .flex()
                     .items_center()
                     .gap(px(6.0))
+                    .flex_shrink_0()
+                    .whitespace_nowrap()
                     .border_b_2()
                     .border_color(theme::accent())
                     .text_color(theme::text())
@@ -953,13 +1141,19 @@ impl AppRoot {
                 ),
             )
             .child(ui::separator())
+            .child(self.render_error_log_place_menu(place, cx))
             .child(
                 toolbar_button("error-log-close", ErrorLogGlyph::Close, "Close", false)
                     .on_click(cx.listener(|this, _, _, cx| this.close_error_log(cx))),
             );
 
         let pills = SeverityFilter::ALL.into_iter().fold(
-            div().flex().items_center().gap(px(2.0)),
+            div()
+                .flex()
+                .flex_shrink_0()
+                .items_center()
+                .gap(px(2.0))
+                .whitespace_nowrap(),
             |row, filter| {
                 let id = filter.element_id();
                 row.child(
@@ -975,8 +1169,12 @@ impl AppRoot {
                 )
             },
         );
+        // The search field takes what the pills leave (up to 260pt) and shrinks with the pane, so
+        // the row stays one line and never reaches into the header above it.
         let filter_row = div()
+            .debug_selector(|| "error-log-filters".into())
             .h(px(32.0))
+            .overflow_hidden()
             .flex_shrink_0()
             .flex()
             .items_center()
@@ -988,7 +1186,9 @@ impl AppRoot {
             .children(search.map(|input| {
                 div()
                     .debug_selector(|| "error-log-search".into())
-                    .w(px(260.0))
+                    .flex_1()
+                    .min_w(px(72.0))
+                    .max_w(px(260.0))
                     .child(
                         Input::new(&input)
                             .small()
@@ -999,6 +1199,18 @@ impl AppRoot {
                     )
             }));
 
+        let layout = match place {
+            // Before the split has measured itself the pane is about to open at its default width.
+            ErrorLogPlace::Right => ColumnLayout::for_width(
+                self.error_log
+                    .split_right
+                    .read(cx)
+                    .sizes()
+                    .get(1)
+                    .map_or_else(|| self.default_right_pane_width(window), |width| f32::from(*width)),
+            ),
+            ErrorLogPlace::Bottom | ErrorLogPlace::Tab => ColumnLayout::ALL,
+        };
         let sort_cell = |label: &'static str, key: SortKey, id: &'static str| {
             let active = spec.sort == key;
             div()
@@ -1041,18 +1253,22 @@ impl AppRoot {
                     .debug_selector(|| Column::Message.header_selector().into())
                     .child("Message"),
             )
-            .child(
-                Column::Source
-                    .cell()
-                    .debug_selector(|| Column::Source.header_selector().into())
-                    .child(sort_cell("Source", SortKey::Source, "error-sort-source")),
-            )
-            .child(
-                Column::Date
-                    .cell()
-                    .debug_selector(|| Column::Date.header_selector().into())
-                    .child(sort_cell("Date", SortKey::Date, "error-sort-date")),
-            );
+            .when(layout.source, |this| {
+                this.child(
+                    Column::Source
+                        .cell()
+                        .debug_selector(|| Column::Source.header_selector().into())
+                        .child(sort_cell("Source", SortKey::Source, "error-sort-source")),
+                )
+            })
+            .when(layout.date, |this| {
+                this.child(
+                    Column::Date
+                        .cell()
+                        .debug_selector(|| Column::Date.header_selector().into())
+                        .child(sort_cell("Date", SortKey::Date, "error-sort-date")),
+                )
+            });
 
         let body = if shown == 0 {
             div()
@@ -1073,12 +1289,12 @@ impl AppRoot {
             let rows = uniform_list(
                 "error-log-rows",
                 shown,
-                cx.processor(|this, range: Range<usize>, _window, _cx| {
+                cx.processor(move |this, range: Range<usize>, _window, _cx| {
                     let ui = &this.error_log;
                     range
                         .filter_map(|position| {
                             let entry = ui.log.get(*ui.visible.get(position)?)?;
-                            Some(entry.row(position, ui.selected == Some(entry.id)))
+                            Some(entry.row(position, ui.selected == Some(entry.id), layout))
                         })
                         .collect::<Vec<_>>()
                 }),
@@ -1147,8 +1363,12 @@ impl AppRoot {
             .min_h_0()
             .overflow_hidden()
             .bg(theme::background())
-            .border_t_1()
             .border_color(theme::border())
+            .map(|pane| match place {
+                ErrorLogPlace::Bottom => pane.border_t_1(),
+                ErrorLogPlace::Right => pane.border_l_1(),
+                ErrorLogPlace::Tab => pane,
+            })
             .child(header)
             .child(filter_row)
             .child(columns)
@@ -1159,7 +1379,7 @@ impl AppRoot {
 
 impl LogEntry {
     /// One table row. Clones stored `SharedString`s only.
-    fn row(&self, position: usize, selected: bool) -> gpui::Div {
+    fn row(&self, position: usize, selected: bool, layout: ColumnLayout) -> gpui::Div {
         let entry = self;
         let color = entry.severity.color();
         let row = div()
@@ -1204,21 +1424,25 @@ impl LogEntry {
                     )
                 }),
         )
-        .child(
-            Column::Source
-                .cell()
-                .debug_selector(move || Column::Source.row_selector(position))
-                .truncate()
-                .text_color(theme::text_muted())
-                .child(entry.source.clone()),
-        )
-        .child(
-            Column::Date
-                .cell()
-                .debug_selector(move || Column::Date.row_selector(position))
-                .text_color(theme::text_muted())
-                .child(entry.time_text.clone()),
-        )
+        .when(layout.source, |this| {
+            this.child(
+                Column::Source
+                    .cell()
+                    .debug_selector(move || Column::Source.row_selector(position))
+                    .truncate()
+                    .text_color(theme::text_muted())
+                    .child(entry.source.clone()),
+            )
+        })
+        .when(layout.date, |this| {
+            this.child(
+                Column::Date
+                    .cell()
+                    .debug_selector(move || Column::Date.row_selector(position))
+                    .text_color(theme::text_muted())
+                    .child(entry.time_text.clone()),
+            )
+        })
     }
 
     /// Body of the Event details dialog.

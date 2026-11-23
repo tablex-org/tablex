@@ -643,8 +643,14 @@ fn build_registry() -> Vec<SettingDescriptor> {
             |s, v| s.appearance.show_fps = v,
             d,
         ),
+        choice(
+            place!("appearance.error_log_place", Appearance, "Status bar", "Error Log position", "Where the Error Log opens: at the bottom of the window, on the right, or in a tab of its own. The position button in the Error Log header changes it too."),
+            |s| s.appearance.error_log_place,
+            |s, v| s.appearance.error_log_place = v,
+            d,
+        ),
         toggle(
-            place!("updates.check_automatically", Appearance, "Updates", "Check for updates automatically", "Once a day, when TableX starts, ask GitHub whether a newer version exists. Nothing but the request itself is sent. Check for Updates in the command palette works either way."),
+            place!("updates.check_automatically", Appearance, "Updates", "Check for updates automatically", "Once a day, when tablex starts, ask GitHub whether a newer version exists. Nothing but the request itself is sent. Check for Updates in the command palette works either way."),
             |s| s.updates.check_automatically,
             |s, v| s.updates.check_automatically = v,
             d,
@@ -740,7 +746,7 @@ fn build_registry() -> Vec<SettingDescriptor> {
             d,
         ),
         choice(
-            place!("editor.format_keyword_case", Editor, "Format SQL", "Keyword case", "The case Format SQL gives reserved words (SELECT, FROM, WHERE, ...). Other words keep the case they were typed in."),
+            place!("editor.format_keyword_case", Editor, "Format SQL", "Keyword case", "The case Format SQL gives reserved words (SELECT, FROM, WHERE, ...) and completion gives the keywords and functions it inserts. Other words keep the case they were typed in. As typed: completion follows the case of the word being typed."),
             |s| s.editor.format_keyword_case,
             |s, v| s.editor.format_keyword_case = v,
             d,
@@ -937,7 +943,7 @@ fn build_registry() -> Vec<SettingDescriptor> {
         )
         .overridable(),
         number::<u32>(
-            place!("query.keep_alive_secs", Query, "Timeouts", "Connection keep-alive interval", "Seconds an open connection may sit idle before TableX checks it is still alive, so one that died (a server restart, a night asleep) is noticed and reopened on its next use. 0 means never check.")
+            place!("query.keep_alive_secs", Query, "Timeouts", "Connection keep-alive interval", "Seconds an open connection may sit idle before tablex checks it is still alive, so one that died (a server restart, a night asleep) is noticed and reopened on its next use. 0 means never check.")
             ,
             profile::KEEP_ALIVE_SECS_LIMITS,
             |s| s.query.keep_alive_secs,
@@ -1037,7 +1043,7 @@ fn build_registry() -> Vec<SettingDescriptor> {
             d,
         ),
         choice(
-            place!("navigation.restore_tabs", Navigation, "Opening", "Restore tabs on start", "Which tabs come back after restarting TableX."),
+            place!("navigation.restore_tabs", Navigation, "Opening", "Restore tabs on start", "Which tabs come back after restarting tablex."),
             |s| s.navigation.restore_tabs,
             |s, v| s.navigation.restore_tabs = v,
             d,
@@ -1076,7 +1082,7 @@ fn build_registry() -> Vec<SettingDescriptor> {
                 .then_some("settings.unavailable.fallback_anthropic_only")
         }),
         toggle(
-            place!("ai.keep_conversations", Ai, "Conversations", "Keep conversations on this computer", "Each finished conversation is saved in TableX's app database (tablex.db in its data folder), so History can reopen it. They can contain query results. Turning this off stops saving; it does not delete what is saved."),
+            place!("ai.keep_conversations", Ai, "Conversations", "Keep conversations on this computer", "Each finished conversation is saved in tablex's app database (tablex.db in its data folder), so History can reopen it. They can contain query results. Turning this off stops saving; it does not delete what is saved."),
             |s| s.ai.keep_conversations,
             |s, v| s.ai.keep_conversations = v,
             d,
@@ -1088,7 +1094,7 @@ fn build_registry() -> Vec<SettingDescriptor> {
             d,
         ),
         toggle(
-            place!("ai.mcp_writes", Ai, "MCP server", "Let MCP clients run changes", "An MCP client (the program you connected TableX's MCP server to) may then ask to run statements that change data on connections whose assistant access is \"Read and write\". TableX asks that client to put each one to you; a client set to answer by itself can run them without you seeing them, so turn this on only for a client you trust. Never on a connection of a production type (only the built-in Production type counts; a custom type is not production). Off by default."),
+            place!("ai.mcp_writes", Ai, "MCP server", "Let MCP clients run changes", "An MCP client (the program you connected tablex's MCP server to) may then ask to run statements that change data on connections whose assistant access is \"Read and write\". tablex asks that client to put each one to you; a client set to answer by itself can run them without you seeing them, so turn this on only for a client you trust. Never on a connection of a production type (only the built-in Production type counts; a custom type is not production). Off by default."),
             |s| s.ai.mcp_writes,
             |s, v| s.ai.mcp_writes = v,
             d,

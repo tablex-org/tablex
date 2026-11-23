@@ -341,7 +341,7 @@ impl AppRoot {
                 .tab_size(super::settings_state::tab_size_of(&editor_settings))
                 .auto_close(editor_settings.auto_close)
                 .default_value(sql.clone())
-                .completion(completion)
+                .completion(completion, window, cx)
         });
         let editor_for_events = editor.clone();
         cx.subscribe(
@@ -717,6 +717,7 @@ impl AppRoot {
     pub(super) fn close_tab_unremembered(&mut self, tab_id: u64, cx: &mut Context<Self>) {
         // A Results tab gives the results back; a query tab takes its Results tab or window along.
         self.results_tab_closing(tab_id, cx);
+        self.error_log_tab_closing(tab_id, cx);
         self.auto_refresh.tasks.remove(&tab_id);
         self.query_tasks.started_at.remove(&tab_id);
         if self
