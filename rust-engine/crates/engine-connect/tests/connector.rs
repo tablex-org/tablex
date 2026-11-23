@@ -953,6 +953,21 @@ fn the_agent_never_masks_a_password_that_is_the_user_or_the_database_name() {
 
 // ---- the credential store is read for what the connection saves, once ---------------------------
 
+/// A credential store whose items macOS would have to ask the user about, with that turned off.
+struct Blocked;
+
+impl CredentialStore for Blocked {
+    fn load(&self, _: SecretKind, _: &str) -> Result<Option<String>, CredentialError> {
+        Err(CredentialError::InteractionNotAllowed)
+    }
+    fn write(&self, _: SecretKind, _: &str, _: &str) -> Result<(), CredentialError> {
+        Ok(())
+    }
+    fn delete(&self, _: SecretKind, _: &str) -> Result<(), CredentialError> {
+        Ok(())
+    }
+}
+
 /// A credential store that fails every read, and counts them.
 #[derive(Default)]
 struct Locked(std::sync::atomic::AtomicUsize);
@@ -1051,6 +1066,20 @@ fn a_saved_password_in_a_store_that_cannot_be_read_still_fails_the_agent_open_cl
         error.message
     );
     assert_eq!(store.reads(), 1, "one failed read, no retries");
+}
+
+#[test]
+fn a_keychain_that_would_ask_the_user_fails_the_agent_open_with_the_authorize_hint() {
+    const ASKS: &str = "7A1B2C3D-0000-4000-8000-000000000014";
+    upsert_connection(&postgres_record(ASKS, "{}")).unwrap();
+    let (_, layer) = agent_over(Arc::new(Blocked), Arc::clone(&env().drivers), "asks-pg.json");
+    let outcome = layer.call("open_session", json!({"connection_id": ASKS.to_lowercase()}));
+    let ToolOutcome::Failure(error) = outcome else {
+        panic!("a secret that cannot be read without a dialog must not open a session");
+    };
+    assert_eq!(error.code, "credentials.keychain_access_needed", "{}", error.message);
+    assert!(error.message.contains("Allow Keychain access"), "{}", error.message);
+    assert!(error.message.contains("--authorize-keychain"), "{}", error.message);
 }
 
 #[test]

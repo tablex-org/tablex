@@ -475,6 +475,9 @@ pub struct Connector {
     settings_path: Option<PathBuf>,
     /// What was typed for connections that save no password (empty unless the front end shares one).
     session_passwords: SessionPasswords,
+    /// How a terminal runs the Keychain authorisation (the quoted path of the installed tool), for
+    /// the error that says the Keychain would have to ask.
+    keychain_command: Option<String>,
 }
 
 impl Connector {
@@ -488,7 +491,21 @@ impl Connector {
             known_hosts: crate::platform::ssh_known_hosts_path(),
             settings_path: profile::default_settings_path(),
             session_passwords: SessionPasswords::default(),
+            keychain_command: None,
         }
+    }
+
+    /// The command that runs the Keychain authorisation in a terminal, as the error for a Keychain
+    /// that would have to ask should print it (absolute path, quoted for a shell).
+    #[must_use]
+    pub fn with_keychain_command(mut self, command: String) -> Self {
+        self.keychain_command = Some(command);
+        self
+    }
+
+    /// What to tell the user when [`CredentialError::InteractionNotAllowed`] stopped a read.
+    pub fn keychain_access_needed(&self) -> String {
+        credentials::keychain_access_needed(self.keychain_command.as_deref())
     }
 
     /// Connections that save no password connect with the one `passwords` holds for them.
@@ -1023,6 +1040,10 @@ impl AgentConnections {
 
     /// The error of an open whose credential store could not be read.
     fn credentials_unavailable(&self, error: &CredentialError) -> AgentError {
+        // The Keychain would have to ask the user: only the one-time authorisation fixes it.
+        if matches!(error, CredentialError::InteractionNotAllowed) {
+            return AgentError::driver("credentials.keychain_access_needed", self.connector.keychain_access_needed(), false);
+        }
         let mut text = format!(
             "the credential store could not be read ({error}), so the session was not opened"
         );
@@ -1200,7 +1221,7 @@ impl ConnectFailure {
     /// `list_connections` promises the model no host, port, login or path, so none reaches it here -
     /// not the bastion's `host:port`, the SSH login or key path, the SQLite file path or the driver
     /// store path, which the interactive messages (and the driver's own error text) carry. The
-    /// message names the connection, gives the typed code and says what to do in TableX, where the
+    /// message names the connection, gives the typed code and says what to do in tablex, where the
     /// full message is shown. The detailed text is dropped: it is not logged anywhere.
     fn agent_error(&self, connection: &ConnectionInfo) -> AgentError {
         let name = &connection.name;
@@ -1209,55 +1230,55 @@ impl ConnectFailure {
                 "tunnel.host_key_unknown",
                 format!(
                     "The SSH host key of the tunnel of `{name}` is not trusted yet. Connect to this \
-                     database once from TableX and trust the host there, then try again."
+                     database once from tablex and trust the host there, then try again."
                 ),
             ),
             ConnectFailure::HostKeyRejected(..) => (
                 "tunnel.host_key_mismatch",
                 format!(
                     "The SSH host key of the tunnel of `{name}` was refused (it changed or does not \
-                     match). Check the connection's SSH settings in TableX."
+                     match). Check the connection's SSH settings in tablex."
                 ),
             ),
             ConnectFailure::SecretNeeded(_) => (
                 "tunnel.secret_needed",
                 format!(
                     "The route of `{name}` (SSH tunnel, jump hosts or proxy) needs a password or key \
-                     passphrase. Save it in the connection's Tunnel / Proxy settings in TableX."
+                     passphrase. Save it in the connection's Tunnel / Proxy settings in tablex."
                 ),
             ),
             ConnectFailure::Tunnel { code, .. } => (
                 *code,
                 format!(
                     "The SSH tunnel of `{name}` could not be opened. Open the connection's SSH \
-                     settings in TableX and use Test tunnel."
+                     settings in tablex and use Test tunnel."
                 ),
             ),
             ConnectFailure::Driver(DriverLoadError::NotInstalled { driver_id }) => (
                 "connect.driver",
                 format!(
                     "The `{driver_id}` driver needed by `{name}` is not installed. Install it in \
-                     TableX (Driver Manager), then try again."
+                     tablex (Driver Manager), then try again."
                 ),
             ),
             ConnectFailure::Driver(DriverLoadError::Disabled { driver_id }) => (
                 "connect.driver",
                 format!(
-                    "The `{driver_id}` driver needed by `{name}` is disabled. Enable it in TableX \
+                    "The `{driver_id}` driver needed by `{name}` is disabled. Enable it in tablex \
                      (Driver Manager), then try again."
                 ),
             ),
             ConnectFailure::Driver(_) => (
                 "connect.driver",
                 format!(
-                    "The database driver needed by `{name}` could not be loaded. Check it in TableX \
+                    "The database driver needed by `{name}` could not be loaded. Check it in tablex \
                      (Driver Manager), then try again."
                 ),
             ),
             ConnectFailure::Message(_) => (
                 "connect.failed",
                 format!(
-                    "Could not connect to `{name}`. Open the connection in TableX, check its \
+                    "Could not connect to `{name}`. Open the connection in tablex, check its \
                      settings and use Test connection there, then try again."
                 ),
             ),
@@ -2073,6 +2094,25 @@ mod tests {
     }
 
     #[test]
+    fn a_keychain_that_would_ask_the_user_is_its_own_agent_error_with_the_fix() {
+        let rig = rig(Scripted::default());
+        let hinted = AgentConnections::new(rig.connector.clone(), rig.dyn_prompts());
+        let error = hinted.credentials_unavailable(&CredentialError::InteractionNotAllowed);
+        assert_eq!(error.code(), "credentials.keychain_access_needed");
+        let bare = error.to_string();
+        assert!(bare.contains("Allow Keychain access") && bare.contains("login keychain is locked"), "{bare}");
+        assert!(bare.contains("`tablex-mcp --authorize-keychain`"), "{bare}");
+        // The front end knows where the tool is: the command names that path, and the generic
+        // credential hint (about the master key) is not appended.
+        let command = "'/Users/a b/tablex-mcp' --authorize-keychain";
+        let located = AgentConnections::new(rig.connector.clone().with_keychain_command(command.into()), rig.dyn_prompts())
+            .with_credential_hint("the master key hint".into());
+        let text = located.credentials_unavailable(&CredentialError::InteractionNotAllowed).to_string();
+        assert!(text.contains(&format!("run {command} in a terminal")), "{text}");
+        assert!(!text.contains("master key hint"), "{text}");
+    }
+
+    #[test]
     fn a_failed_agent_open_names_the_connection_and_no_address_detail() {
         use crate::drivers::DriverLoadError;
         let info = ConnectionInfo {
@@ -2146,7 +2186,7 @@ mod tests {
                 text.contains("Billing replica"),
                 "names the connection: {text}"
             );
-            assert!(text.contains("TableX"), "says what to do: {text}");
+            assert!(text.contains("tablex"), "says what to do: {text}");
             for detail in [
                 "fixture-host",
                 "bastion",

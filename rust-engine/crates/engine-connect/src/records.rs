@@ -173,7 +173,7 @@ impl SavedConnection {
 }
 
 /// Every persisted record, in the store's pinned-then-name order. The error is the store's own
-/// (a database that is damaged, from a newer TableX, or an old file that cannot be moved in and
+/// (a database that is damaged, from a newer tablex, or an old file that cannot be moved in and
 /// cannot be used either): a front end says it instead of showing an empty list as if it were true.
 pub fn try_load_saved_records() -> Result<Vec<SavedConnectionRecord>, String> {
     connection::list_connections().map_err(|error| error.to_string())

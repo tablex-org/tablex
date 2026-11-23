@@ -257,7 +257,7 @@ fn from_uri(kind: ConnectionKind, uri: &str) -> Result<String, String> {
             if lower == "ca_cert" || !SHAREABLE_OPTIONS.contains(&lower.as_str()) {
                 let shown: String = key.chars().take(40).collect();
                 return Err(format!(
-                    "the `uri` option `{shown}` is not accepted here; options are limited to routing and TLS choices ({}), set the rest in the TableX app",
+                    "the `uri` option `{shown}` is not accepted here; options are limited to routing and TLS choices ({}), set the rest in the tablex app",
                     SHAREABLE_OPTIONS.iter().filter(|option| **option != "ca_cert").copied().collect::<Vec<_>>().join(", ")
                 ));
             }

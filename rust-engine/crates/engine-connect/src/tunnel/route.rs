@@ -143,7 +143,7 @@ impl ProxyType {
         }
     }
 
-    /// The names TableX writes (`socks5`, `http`) and the ones the first versions wrote
+    /// The names tablex writes (`socks5`, `http`) and the ones the first versions wrote
     /// (`SOCKS5`, `HTTP CONNECT`).
     fn from_persisted(text: &str) -> Option<Self> {
         match text.trim().to_ascii_lowercase().as_str() {

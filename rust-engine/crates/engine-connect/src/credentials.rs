@@ -90,7 +90,26 @@ pub enum CredentialError {
         secrets: usize,
         file: std::path::PathBuf,
     },
+    /// The OS would have to ask the user before it hands the secret over, and this process turned
+    /// that off (`tablex-mcp` while serving: a dialog nobody sees would hang the agent), or the
+    /// login keychain is locked. The fix is the one-time authorisation, not a retry.
+    InteractionNotAllowed,
+    /// The user answered the OS's question with Deny or Cancel (the macOS Keychain dialog).
+    UserRefused,
     Platform(String),
+}
+
+/// What an agent is told when [`CredentialError::InteractionNotAllowed`] stops an open (its code is
+/// `credentials.keychain_access_needed`). `command` is how to run the authorisation from a
+/// terminal: the absolute, shell-quoted path of the installed tool when the front end knows it (a
+/// tool installed by the Driver Manager is not on `PATH`).
+pub fn keychain_access_needed(command: Option<&str>) -> String {
+    format!(
+        "tablex cannot read the saved password without asking macOS (or the login keychain is \
+         locked). Open tablex \u{2192} Driver Manager \u{2192} Tools \u{2192} tablex-mcp \u{2192} Allow \
+         Keychain access (or run {} in a terminal), then restart the MCP client.",
+        command.unwrap_or("`tablex-mcp --authorize-keychain`"),
+    )
 }
 
 impl std::fmt::Display for CredentialError {
@@ -107,6 +126,11 @@ impl std::fmt::Display for CredentialError {
                  palette) and enter the passwords again.",
                 if *secrets == 1 { "secret" } else { "secrets" },
             ),
+            // Short: also shown by `--authorize-keychain`, which is what the user just ran.
+            Self::InteractionNotAllowed => f.write_str(
+                "macOS would have to ask before it hands the item over (or the login keychain is locked)",
+            ),
+            Self::UserRefused => f.write_str("access to the item was refused"),
             Self::Platform(message) => f.write_str(message),
         }
     }
@@ -114,8 +138,40 @@ impl std::fmt::Display for CredentialError {
 
 impl std::error::Error for CredentialError {}
 
+/// The Security.framework result code behind a platform error, when it is one.
+#[cfg(target_os = "macos")]
+fn os_status(source: &(dyn std::error::Error + 'static)) -> Option<i32> {
+    source
+        .downcast_ref::<security_framework::base::Error>()
+        .map(|error| error.code())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn os_status(_: &(dyn std::error::Error + 'static)) -> Option<i32> {
+    None
+}
+
+/// `errSecInteractionNotAllowed`: asking is switched off (or the login keychain is locked).
+const INTERACTION_NOT_ALLOWED: i32 = -25308;
+/// `errSecUserCanceled` and `errSecAuthFailed`: the answer to the dialog was Cancel / Deny.
+const USER_REFUSED: [i32; 2] = [-128, -25293];
+
+/// The typed error of a Security.framework result code (`None`: not one of the typed ones).
+fn typed_status(code: i32) -> Option<CredentialError> {
+    match code {
+        INTERACTION_NOT_ALLOWED => Some(CredentialError::InteractionNotAllowed),
+        code if USER_REFUSED.contains(&code) => Some(CredentialError::UserRefused),
+        _ => None,
+    }
+}
+
 impl From<keyring::Error> for CredentialError {
     fn from(error: keyring::Error) -> Self {
+        if let keyring::Error::PlatformFailure(source) | keyring::Error::NoStorageAccess(source) = &error {
+            if let Some(typed) = os_status(&**source).and_then(typed_status) {
+                return typed;
+            }
+        }
         match error {
             keyring::Error::NoDefaultStore => Self::NoKeyring,
             other => Self::Platform(other.to_string()),
@@ -176,16 +232,17 @@ pub trait CredentialStore {
             .into_iter()
             .map(|kind| (kind, account.to_owned()))
             .chain(jumps)
-            .filter_map(|(kind, account)| {
-                self.delete(kind, &account)
-                    .err()
-                    .map(|error| format!("{kind:?}: {error}"))
-            })
+            .filter_map(|(kind, account)| self.delete(kind, &account).err().map(|error| (kind, error)))
             .collect();
+        // One cause that needs the user stays typed: the caller says what to do about it.
+        if !failures.is_empty() && failures.iter().all(|(_, error)| *error == CredentialError::InteractionNotAllowed) {
+            return Err(CredentialError::InteractionNotAllowed);
+        }
         if failures.is_empty() {
             Ok(())
         } else {
-            Err(CredentialError::Platform(failures.join("; ")))
+            let texts: Vec<_> = failures.iter().map(|(kind, error)| format!("{kind:?}: {error}")).collect();
+            Err(CredentialError::Platform(texts.join("; ")))
         }
     }
 }
@@ -283,7 +340,7 @@ impl CredentialStore for SystemStore {
         match found {
             Ok(items) => Ok(!items.is_empty()),
             Err(error) if error.code() == NOT_FOUND => Ok(false),
-            Err(error) => Err(CredentialError::Platform(error.to_string())),
+            Err(error) => Err(typed_status(error.code()).unwrap_or_else(|| CredentialError::Platform(error.to_string()))),
         }
     }
 
@@ -410,6 +467,54 @@ mod tests {
                 .as_deref(),
             Some("sk-test")
         );
+    }
+
+    #[test]
+    fn an_interaction_not_allowed_keychain_error_is_typed_and_names_the_fix() {
+        // Only error values are built: the Keychain is not touched.
+        #[cfg(target_os = "macos")]
+        {
+            let status = |code| {
+                keyring::Error::PlatformFailure(Box::new(security_framework::base::Error::from_code(code)))
+            };
+            assert_eq!(CredentialError::from(status(-25308)), CredentialError::InteractionNotAllowed);
+            // Cancel and Deny are the user's answer, not a failure of the store.
+            assert_eq!(CredentialError::from(status(-128)), CredentialError::UserRefused);
+            assert_eq!(CredentialError::from(status(-25293)), CredentialError::UserRefused);
+            assert!(matches!(CredentialError::from(status(-25299)), CredentialError::Platform(_)));
+        }
+        // What an agent is told: the way to authorise, the locked keychain, the command given.
+        let text = keychain_access_needed(None);
+        assert!(text.contains("Allow Keychain access") && text.contains("login keychain is locked"), "{text}");
+        assert!(text.contains("`tablex-mcp --authorize-keychain`"), "{text}");
+        assert!(keychain_access_needed(Some("'/x y/tablex-mcp' --authorize-keychain"))
+            .contains("run '/x y/tablex-mcp' --authorize-keychain in a terminal"));
+        // The error's own text is short: `--authorize-keychain` prints it to the user who just ran it.
+        let short = CredentialError::InteractionNotAllowed.to_string();
+        assert!(!short.contains("Driver Manager") && short.contains("login keychain is locked"), "{short}");
+    }
+
+    #[test]
+    fn delete_all_keeps_an_interaction_error_typed_and_flattens_mixed_failures() {
+        struct Asks(bool);
+        impl CredentialStore for Asks {
+            fn load(&self, _: SecretKind, _: &str) -> Result<Option<String>, CredentialError> {
+                Ok(None)
+            }
+            fn write(&self, _: SecretKind, _: &str, _: &str) -> Result<(), CredentialError> {
+                Ok(())
+            }
+            fn delete(&self, kind: SecretKind, _: &str) -> Result<(), CredentialError> {
+                if self.0 && kind == SecretKind::Proxy {
+                    Err(CredentialError::Platform("keychain locked".into()))
+                } else {
+                    Err(CredentialError::InteractionNotAllowed)
+                }
+            }
+        }
+        assert_eq!(Asks(false).delete_all("id"), Err(CredentialError::InteractionNotAllowed));
+        let mixed = Asks(true).delete_all("id").unwrap_err();
+        assert!(matches!(&mixed, CredentialError::Platform(text) if text.contains("Proxy: keychain locked")), "{mixed}");
     }
 
     #[test]

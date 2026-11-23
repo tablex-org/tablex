@@ -1,4 +1,4 @@
-//! The local channel between the TableX app and `tablex-mcp`: a Unix domain socket in the app data
+//! The local channel between the tablex app and `tablex-mcp`: a Unix domain socket in the app data
 //! dir (`<app data dir>/app.sock`, mode 0600, so only this user) over which the MCP server asks the
 //! running app to show something (open a table, put a query in an editor tab) or to reload the
 //! saved connections.
@@ -33,7 +33,7 @@ pub const MAX_REQUEST_BYTES: usize = 1 << 20;
 pub const SOCKET_FILE: &str = "app.sock";
 
 /// Where the running app listens: `<app data dir>/app.sock` (`TABLEX_DATA_DIR` moves it with every
-/// other TableX file).
+/// other tablex file).
 pub fn socket_path() -> Option<PathBuf> {
     platform::app_data_dir().map(|dir| socket_path_in(&dir))
 }
@@ -130,7 +130,7 @@ pub fn handle_line(line: &[u8], handler: &dyn Fn(Request) -> Reply) -> Reply {
         Ok(Request::Ping { protocol }) => Reply {
             ok: false,
             error: Some(format!(
-                "unsupported protocol {protocol}: this TableX speaks protocol {PROTOCOL}"
+                "unsupported protocol {protocol}: this tablex speaks protocol {PROTOCOL}"
             )),
             protocol: Some(PROTOCOL),
         },
@@ -141,8 +141,8 @@ pub fn handle_line(line: &[u8], handler: &dyn Fn(Request) -> Reply) -> Reply {
 
 #[derive(Debug, thiserror::Error)]
 pub enum BindError {
-    /// Another TableX answers on the socket: it keeps it.
-    #[error("another TableX is already listening on {0}")]
+    /// Another tablex answers on the socket: it keeps it.
+    #[error("another tablex is already listening on {0}")]
     InUse(PathBuf),
     #[error("{0}")]
     Io(#[from] std::io::Error),
@@ -152,15 +152,15 @@ pub enum BindError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
-    #[error("TableX is not running. Open TableX and try again.")]
+    #[error("tablex is not running. Open tablex and try again.")]
     NotRunning,
-    #[error("TableX cannot be reached from a program on this platform: the app channel is not supported here")]
+    #[error("tablex cannot be reached from a program on this platform: the app channel is not supported here")]
     Unsupported,
     /// The channel broke (an I/O error, a reply that is not one, another protocol version).
-    #[error("could not talk to TableX: {0}")]
+    #[error("could not talk to tablex: {0}")]
     Failed(String),
-    /// TableX understood the request and said no.
-    #[error("TableX could not do it: {0}")]
+    /// tablex understood the request and said no.
+    #[error("tablex could not do it: {0}")]
     Refused(String),
 }
 
@@ -300,7 +300,7 @@ mod imp {
     impl Listener {
         /// Starts listening on `path` and returns at once; the accepting runs on its own thread.
         ///
-        /// A socket another TableX answers on is left alone ([`BindError::InUse`]); a file nobody
+        /// A socket another tablex answers on is left alone ([`BindError::InUse`]); a file nobody
         /// answers on (a crashed run) is replaced; a file that is not a socket is never touched.
         /// The socket is made in a private (0700) folder, set to 0600 and then moved into place, so
         /// no other user can connect at any moment.
@@ -376,7 +376,7 @@ mod imp {
             if active.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
                 active.fetch_sub(1, Ordering::SeqCst);
                 let _ = stream.set_write_timeout(Some(WRITE_TIMEOUT));
-                let _ = write_reply(&mut stream, &Reply::error("TableX is busy: try again"));
+                let _ = write_reply(&mut stream, &Reply::error("tablex is busy: try again"));
                 continue;
             }
             let (handler, active) = (Arc::clone(handler), Arc::clone(&active));
@@ -398,7 +398,7 @@ mod imp {
     impl Drop for Listener {
         fn drop(&mut self) {
             self.stop.store(true, Ordering::SeqCst);
-            // Only the file this listener made is its to remove or to knock on (another TableX may
+            // Only the file this listener made is its to remove or to knock on (another tablex may
             // have replaced it since: then it is not touched, and this listener's thread, which
             // nothing can reach any more, ends with the process).
             let ours = std::fs::symlink_metadata(&self.path)
@@ -431,7 +431,7 @@ mod imp {
             socket_path().map(Self::new)
         }
 
-        /// Sends `request` (after a ping that checks the protocol) and returns TableX's answer.
+        /// Sends `request` (after a ping that checks the protocol) and returns tablex's answer.
         pub fn send(&self, request: &Request) -> Result<Reply, ClientError> {
             let mut stream = UnixStream::connect(&self.path).map_err(|error| match error.kind() {
                 io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => {
@@ -457,7 +457,7 @@ mod imp {
                 let line = lines
                     .next(CLIENT_TIMEOUT)
                     .map_err(|error| ClientError::Failed(format!("{error:?}")))?
-                    .ok_or_else(|| ClientError::Failed("TableX closed the connection".into()))?;
+                    .ok_or_else(|| ClientError::Failed("tablex closed the connection".into()))?;
                 serde_json::from_slice(&line)
                     .map_err(|error| ClientError::Failed(format!("unreadable reply: {error}")))
             };
@@ -465,7 +465,7 @@ mod imp {
             if !hello.ok || hello.protocol != Some(PROTOCOL) {
                 return Err(ClientError::Failed(hello.error.unwrap_or_else(|| {
                     format!(
-                        "TableX speaks protocol {:?}, this program protocol {PROTOCOL}: update the older one",
+                        "tablex speaks protocol {:?}, this program protocol {PROTOCOL}: update the older one",
                         hello.protocol
                     )
                 })));
@@ -707,7 +707,7 @@ mod tests {
                 Err(ClientError::NotRunning)
             ));
             let message = ClientError::NotRunning.to_string();
-            assert!(message.contains("Open TableX and try again"), "{message}");
+            assert!(message.contains("Open tablex and try again"), "{message}");
         }
 
         #[test]

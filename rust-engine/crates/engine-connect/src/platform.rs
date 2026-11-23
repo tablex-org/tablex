@@ -1,10 +1,10 @@
-//! Where TableX keeps its files and what the OS calls its credential store. The app's
+//! Where tablex keeps its files and what the OS calls its credential store. The app's
 //! `platform` module re-exports these next to its own UI-only conventions (shortcut labels,
 //! default folders of dialogs), so `tablex-mcp` and the app agree on every path.
 
 use std::path::PathBuf;
 
-/// Directory under the platform data dir that holds every TableX file.
+/// Directory under the platform data dir that holds every tablex file.
 pub(crate) const APP_DIR: &str = "tablex";
 
 /// `~/Library/Application Support/tablex` on macOS, `$XDG_DATA_HOME/tablex`
@@ -12,7 +12,7 @@ pub(crate) const APP_DIR: &str = "tablex";
 /// `TABLEX_DATA_DIR`, when set to an absolute path, replaces the platform data dir
 /// (`$TABLEX_DATA_DIR/tablex`), the same switch (and the same reader,
 /// `engine_storage::paths::data_dir_override`) the connection store uses, so one variable moves
-/// every TableX file; an empty or relative value is ignored.
+/// every tablex file; an empty or relative value is ignored.
 pub fn app_data_dir() -> Option<PathBuf> {
     engine_storage::paths::data_dir_override()
         .or_else(dirs::data_dir)

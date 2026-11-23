@@ -25,12 +25,12 @@
 //!   create the key, to re-check a stale one, or to see that a legacy item still exists; never
 //!   while a Rust mutex is held. Reads are plain `SELECT`s (a WAL reader sees one consistent
 //!   snapshot and never blocks a writer). A connection lives for one operation, so there is no
-//!   cache to keep fresh. A database that is damaged or from a newer TableX is an error naming
+//!   cache to keep fresh. A database that is damaged or from a newer tablex is an error naming
 //!   it, never replaced.
 //! * Secrets the one-item-per-secret [`SystemStore`](crate::credentials::SystemStore) holds
 //!   (written by earlier versions) are copied in lazily: a `load` that finds nothing in the table
 //!   asks that store and a hit is inserted unless a row appeared meanwhile. The item is **not**
-//!   deleted by the copy, and a `write` leaves it too: an older TableX that may still run reads
+//!   deleted by the copy, and a `write` leaves it too: an older tablex that may still run reads
 //!   only those items, and must keep working. Removing legacy items that were copied is for a
 //!   later release. The one exception is [`delete`](CredentialStore::delete): when the user
 //!   removes a password (or its connection) the legacy item goes with it, or the next `load`
@@ -74,6 +74,22 @@ fn db_error(path: &Path, what: &str, source: rusqlite::Error) -> CredentialError
 
 fn open_error(source: AppDbError) -> CredentialError {
     error(source.to_string())
+}
+
+/// What [`EncryptedStore::copy_legacy_items`] came to, one count per secret (no text of any).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LegacyCopy {
+    /// Moved into the table now.
+    pub copied: usize,
+    /// Already a row of the table (or one appeared meanwhile): nothing was read from the OS.
+    pub already_there: usize,
+    /// No item of an earlier version, nothing to copy.
+    pub none: usize,
+    /// The OS or the database refused: the item is untouched and the next run tries again.
+    pub failed: usize,
+    /// The user answered an OS question with Deny or Cancel: the pass stopped there instead of
+    /// asking about every item left (the next run asks again).
+    pub stopped: bool,
 }
 
 /// One sealed row.
@@ -393,7 +409,7 @@ impl EncryptedStore {
 
     /// Whether a `load` that finds a secret only as an item of an earlier version copies it into
     /// the table: in the app, once it moved the connections into the database (see
-    /// `engine_storage::legacy`). Until then the older TableX that may still run beside is the one
+    /// `engine_storage::legacy`). Until then the older tablex that may still run beside is the one
     /// that owns those items, and a reader that is not the app must not touch the table or the key.
     fn copies_legacy_items(&self) -> bool {
         engine_storage::legacy::import_allowed()
@@ -401,6 +417,130 @@ impl EncryptedStore {
                 .path
                 .as_deref()
                 .is_some_and(|path| engine_storage::legacy::is_imported(path, "connections"))
+    }
+
+    /// Copies every secret that earlier versions kept as an item of its own into the table in one
+    /// pass: all kinds of every saved connection (jump hosts included) and the AI keys. The same
+    /// rules as the lazy copy in `load`: only where [`Self::copies_legacy_items`] (the app, once it
+    /// moved the connections in; anywhere else this does nothing), the items are never deleted, a
+    /// row that is there already wins, and the master key is made only by the write of a first
+    /// copy. A secret that has a row is not read from the OS again, so a second run asks the OS
+    /// nothing about data (only whether an item exists, which never prompts). The OS may ask the
+    /// user once per item read: that is the point of running this deliberately. An error is a
+    /// master key that cannot be read (or is missing while secrets are in the table, which is
+    /// found before any item is read), or a database that cannot be listed; one secret that fails
+    /// is counted and the pass goes on, except that a refusal by the user ends it (`stopped`).
+    ///
+    /// Items of connections that are gone are left alone: the OS store is shared by every data
+    /// directory of the user, so an item no connection here knows may still be another's.
+    pub fn copy_legacy_items(&self) -> Result<LegacyCopy, CredentialError> {
+        use std::collections::HashSet;
+        let mut report = LegacyCopy::default();
+        if !self.copies_legacy_items() {
+            return Ok(report);
+        }
+        let path = self.path()?;
+        let at = |what: &'static str| move |source| db_error(path, what, source);
+        let Some(conn) = Self::open_existing(path)? else {
+            return Ok(report);
+        };
+        let connections = conn
+            .prepare("SELECT id, network_settings_json FROM saved_connections")
+            .and_then(|mut stmt| {
+                stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .map_err(at("read"))?;
+        let stored = real_count(&conn).map_err(at("read"))?;
+        let present = conn
+            .prepare("SELECT name FROM secrets")
+            .and_then(|mut stmt| {
+                stmt.query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<HashSet<_>>>()
+            })
+            .map_err(at("read"))?;
+        // The OS may be asked next: nothing of the database stays open.
+        drop(conn);
+
+        // Every secret: its kind and the spellings of its account, in the order `load` tries them.
+        let mut slots: Vec<(SecretKind, Vec<String>)> = Vec::new();
+        for (id, network) in &connections {
+            let accounts = crate::connect::accounts_of(id);
+            let jumps = crate::tunnel::ssh::SshSettings::parse(network)
+                .map_or(engine_net::MAX_JUMPS, |ssh| ssh.jumps.len().min(engine_net::MAX_JUMPS));
+            for kind in SecretKind::ALL {
+                slots.push((kind, accounts.clone()));
+            }
+            for index in 0..jumps {
+                for kind in [SecretKind::SshPassword, SecretKind::SshPassphrase] {
+                    let of_hop = accounts.iter().map(|a| crate::credentials::jump_account(a, index));
+                    slots.push((kind, of_hop.collect()));
+                }
+            }
+        }
+        for account in crate::credentials::AI_API_KEY_ACCOUNTS {
+            slots.push((SecretKind::AiApiKey, vec![account.to_owned()]));
+        }
+
+        let mut key_read = false;
+        'slots: for (kind, accounts) in slots {
+            if accounts.iter().any(|account| present.contains(&entry_name(kind, account))) {
+                report.already_there += 1;
+                continue;
+            }
+            let mut item = None;
+            let mut refused = false;
+            for account in &accounts {
+                match self.os.contains(kind, account) {
+                    Ok(true) => {
+                        item = Some(account);
+                        break;
+                    }
+                    Ok(false) => {}
+                    Err(_) => refused = true,
+                }
+            }
+            let Some(account) = item else {
+                if refused {
+                    report.failed += 1;
+                } else {
+                    report.none += 1;
+                }
+                continue;
+            };
+            // The master key is read (the app's own item) before the first item, and a key that
+            // cannot be read stops the pass: each copy would fail the same way. Secrets in the
+            // table with no key to open them are the same: nothing could be copied, and the user
+            // would answer a question for every item for nothing.
+            if !key_read {
+                if self.key()?.is_none() && stored > 0 {
+                    return Err(Self::missing_key(path, stored));
+                }
+                key_read = true;
+            }
+            let copied = match self.os.load(kind, account) {
+                Ok(Some(password)) => self.write_row(kind, account, &password, true),
+                Ok(None) => {
+                    report.none += 1;
+                    continue;
+                }
+                Err(error) => Err(error),
+            };
+            match copied {
+                Ok(true) => report.copied += 1,
+                // A row appeared meanwhile, or the item went: nothing to copy.
+                Ok(false) => report.already_there += 1,
+                // The key is not the table's (a reset elsewhere): every item would fail alike.
+                Err(error @ CredentialError::MasterKeyMissing { .. }) => return Err(error),
+                Err(CredentialError::UserRefused) => {
+                    report.failed += 1;
+                    report.stopped = true;
+                    break 'slots;
+                }
+                Err(_) => report.failed += 1,
+            }
+        }
+        Ok(report)
     }
 
     /// Removes the row when it is there (no master key needed).
@@ -458,7 +598,7 @@ impl EncryptedStore {
     /// Forgets every saved secret in the table and makes a fresh master key ("Reset Saved
     /// Passwords", see [`RESET_ACTION`]). Nothing else in the database is touched. The
     /// passwords must be entered again; secrets still held as items of their own (earlier
-    /// versions) are unaffected. Other running TableX processes pick the new key up on their next
+    /// versions) are unaffected. Other running tablex processes pick the new key up on their next
     /// read. A damaged or newer database is an error, not repaired: the file holds more than the
     /// secrets.
     pub fn reset(&self) -> Result<Vec<String>, CredentialError> {
@@ -565,7 +705,7 @@ impl CredentialStore for EncryptedStore {
     fn write(&self, kind: SecretKind, account: &str, password: &str) -> Result<(), CredentialError> {
         reserved(kind)?;
         // The table answers first from now on. An old item that stays is left alone (see the
-        // module docs): an older TableX may still read it.
+        // module docs): an older tablex may still read it.
         self.write_row(kind, account, password, false)?;
         Ok(())
     }
@@ -605,6 +745,9 @@ mod tests {
         legacy_reads: AtomicUsize,
         key_writes: AtomicUsize,
         deny_key_read: AtomicBool,
+        /// The user answers every question about a legacy item with Deny.
+        refuse_legacy: AtomicBool,
+        refused_loads: AtomicUsize,
         fail_delete: AtomicBool,
         fail_key_write: AtomicBool,
         /// Runs once, after a legacy (non master key) item was read: another process acting
@@ -639,6 +782,10 @@ mod tests {
                 .unwrap()
                 .get(&(kind, account.to_owned()))
                 .cloned();
+            if kind != SecretKind::MasterKey && found.is_some() && self.refuse_legacy.load(Ordering::SeqCst) {
+                self.refused_loads.fetch_add(1, Ordering::SeqCst);
+                return Err(CredentialError::UserRefused);
+            }
             if kind != SecretKind::MasterKey && found.is_some() {
                 self.legacy_reads.fetch_add(1, Ordering::SeqCst);
                 let hook = self.after_legacy_read.lock().unwrap().take();
@@ -1011,7 +1158,7 @@ mod tests {
         assert!(store.reset().is_err());
         assert_eq!(fs::read(fx.path()).unwrap(), b"{ not json");
 
-        // A database from a newer TableX: turned away by every operation, rows kept.
+        // A database from a newer tablex: turned away by every operation, rows kept.
         let newer = Fixture::new();
         newer.store().write(DB, "a", "pw").unwrap();
         raw(&newer)
@@ -1033,7 +1180,7 @@ mod tests {
             store.reset().map(drop),
         ] {
             let message = result.unwrap_err().to_string();
-            assert!(message.contains("newer TableX"), "{message}");
+            assert!(message.contains("newer tablex"), "{message}");
             assert!(message.contains(&newer.path().display().to_string()), "{message}");
         }
         let version: u32 = raw(&newer).pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
@@ -1302,6 +1449,189 @@ mod tests {
         assert_eq!(store.load(DB, "a").unwrap().as_deref(), Some("newer"));
         assert!(fx.os.has(DB, "a"), "the file's entry is newer: the old item is left alone");
         assert_eq!(fx.store().load(DB, "a").unwrap().as_deref(), Some("newer"));
+    }
+
+    const C1: &str = "7A1B2C3D-0000-4000-8000-000000000001";
+    const C2: &str = "7A1B2C3D-0000-4000-8000-000000000002";
+
+    /// The app's database with two saved connections; the first has two jump hosts.
+    fn saved_connections(fx: &Fixture) {
+        fx.app_moved_in();
+        raw(fx)
+            .execute_batch(&format!(
+                "INSERT INTO saved_connections VALUES ('{C1}','One','u','postgres','#fff',1,0,
+                   '{{\"ssh\":{{\"isEnabled\":true,\"jumps\":[{{}},{{}}]}}}}',0,NULL,1,1,'','');
+                 INSERT INTO saved_connections VALUES ('{C2}','Two','u','postgres','#fff',1,0,'{{}}',0,NULL,1,1,'','');"
+            ))
+            .unwrap();
+    }
+
+    #[test]
+    fn the_bulk_copy_moves_every_legacy_secret_of_every_connection_and_keeps_the_items() {
+        use crate::credentials::jump_account;
+        let fx = Fixture::new();
+        saved_connections(&fx);
+        // The upper-case spelling `connections.db` kept, every kind, jump hosts, the AI keys.
+        let items = [
+            (DB, C1.to_owned()),
+            (SecretKind::Proxy, C1.to_owned()),
+            (SecretKind::SshPassword, C1.to_owned()),
+            (SecretKind::SshPassphrase, C1.to_owned()),
+            (SecretKind::SshPassword, jump_account(C1, 0)),
+            (SecretKind::SshPassphrase, jump_account(C1, 1)),
+            (DB, C2.to_lowercase()),
+            (SecretKind::AiApiKey, "anthropic".to_owned()),
+            (SecretKind::AiApiKey, "ollama".to_owned()),
+        ];
+        for (kind, account) in &items {
+            fx.os.put(*kind, account, &format!("legacy-{account}"));
+        }
+        let report = fx.store().copy_legacy_items().unwrap();
+        assert_eq!(report.copied, items.len());
+        assert_eq!(report.failed, 0);
+        assert_eq!(fx.os.legacy_reads.load(Ordering::SeqCst), items.len(), "one read per item");
+        // 2 connections x 4 kinds + 2 jump hosts x 2 kinds + 4 AI providers, minus the copied.
+        assert_eq!(report.copied + report.none, 2 * 4 + 2 * 2 + 4);
+        for (kind, account) in &items {
+            assert!(fx.os.has(*kind, account), "{kind:?} {account}: the legacy item stays");
+        }
+        // Another process reads them from the file alone.
+        let reads = fx.os.legacy_reads.load(Ordering::SeqCst);
+        for (kind, account) in &items {
+            assert_eq!(fx.store().load(*kind, account).unwrap().as_deref(), Some(format!("legacy-{account}").as_str()));
+        }
+        assert_eq!(fx.os.legacy_reads.load(Ordering::SeqCst), reads);
+    }
+
+    #[test]
+    fn the_bulk_copy_skips_rows_that_are_there_and_a_second_run_reads_no_item() {
+        let fx = Fixture::new();
+        saved_connections(&fx);
+        fx.os.put(DB, C1, "old-one");
+        fx.os.put(DB, C2, "old-two");
+        let store = fx.store();
+        // A newer secret of the first connection: it wins and its item is not read.
+        store.write(DB, C1, "newer").unwrap();
+        let first = store.copy_legacy_items().unwrap();
+        assert_eq!((first.copied, first.failed), (1, 0));
+        assert!(first.already_there >= 1);
+        assert_eq!(fx.os.legacy_reads.load(Ordering::SeqCst), 1, "only the second connection's item");
+        assert_eq!(store.load(DB, C1).unwrap().as_deref(), Some("newer"));
+        assert_eq!(store.load(DB, C2).unwrap().as_deref(), Some("old-two"));
+
+        let reads = fx.os.legacy_reads.load(Ordering::SeqCst);
+        let second = fx.store().copy_legacy_items().unwrap();
+        assert_eq!((second.copied, second.failed), (0, 0));
+        assert_eq!(second.already_there, first.already_there + 1);
+        assert_eq!(fx.os.legacy_reads.load(Ordering::SeqCst), reads, "a second run reads no item");
+    }
+
+    #[test]
+    fn the_bulk_copy_does_nothing_outside_the_app_and_makes_no_master_key() {
+        // The connections are not moved in yet: an older tablex beside still owns the items.
+        let fx = Fixture::new();
+        fx.store().write(DB, "seed", "x").unwrap();
+        raw(&fx).execute("DELETE FROM secrets", []).unwrap();
+        fx.os.items.lock().unwrap().remove(&(SecretKind::MasterKey, MASTER_KEY_ACCOUNT.to_owned()));
+        fx.os.key_writes.store(0, Ordering::SeqCst);
+        raw(&fx)
+            .execute_batch(&format!(
+                "INSERT INTO saved_connections VALUES ('{C1}','One','u','postgres','#fff',1,0,'{{}}',0,NULL,1,1,'','')"
+            ))
+            .unwrap();
+        fx.os.put(DB, C1, "legacy");
+        fx.os.put(DB, "GONE-9", "orphan");
+        let report = fx.store().copy_legacy_items().unwrap();
+        assert_eq!(report, LegacyCopy::default());
+        assert!(fx.os.has(DB, "GONE-9"), "an older tablex beside may still own it");
+        assert_eq!(fx.os.legacy_reads.load(Ordering::SeqCst), 0);
+        assert_eq!(fx.os.key_writes.load(Ordering::SeqCst), 0);
+        assert!(!fx.os.has(SecretKind::MasterKey, MASTER_KEY_ACCOUNT));
+    }
+
+    #[test]
+    fn the_bulk_copy_with_nothing_to_copy_creates_no_key_and_reads_nothing() {
+        let fx = Fixture::new();
+        saved_connections(&fx);
+        let report = fx.store().copy_legacy_items().unwrap();
+        assert_eq!((report.copied, report.already_there, report.failed), (0, 0, 0));
+        assert_eq!(fx.os.loads.load(Ordering::SeqCst), 0, "not even the master key");
+        assert_eq!(fx.os.key_writes.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn the_bulk_copy_counts_a_failed_secret_and_goes_on_and_a_dead_key_stops_it() {
+        let fx = Fixture::new();
+        saved_connections(&fx);
+        fx.os.put(DB, C1, "one");
+        fx.os.put(SecretKind::AiApiKey, "openai", "key");
+        // A stored key that is not a key: nothing can be sealed.
+        fx.os.put(SecretKind::MasterKey, MASTER_KEY_ACCOUNT, "not-a-key");
+        assert!(matches!(fx.store().copy_legacy_items(), Err(CredentialError::Platform(_))));
+        assert_eq!(fx.os.legacy_reads.load(Ordering::SeqCst), 0);
+        assert!(fx.os.has(DB, C1));
+
+        // A key that is fine but a table that refuses the row: counted, the pass goes on.
+        let fx = Fixture::new();
+        saved_connections(&fx);
+        fx.os.put(DB, C1, "one");
+        fx.os.put(DB, C2, "two");
+        raw(&fx)
+            .execute_batch(&format!(
+                "CREATE TRIGGER refuse BEFORE INSERT ON secrets WHEN NEW.name = '{}'
+                 BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+                entry_name(DB, C1)
+            ))
+            .unwrap();
+        let report = fx.store().copy_legacy_items().unwrap();
+        assert_eq!((report.copied, report.failed), (1, 1));
+        assert_eq!(fx.store().load(DB, C2).unwrap().as_deref(), Some("two"));
+    }
+
+    #[test]
+    fn the_bulk_copy_with_secrets_in_the_table_and_no_key_asks_about_no_item() {
+        let fx = Fixture::new();
+        saved_connections(&fx);
+        fx.store().write(DB, "seed", "x").unwrap();
+        fx.os.items.lock().unwrap().remove(&(SecretKind::MasterKey, MASTER_KEY_ACCOUNT.to_owned()));
+        fx.os.put(DB, C1, "one");
+        fx.os.put(DB, C2, "two");
+        let error = fx.store().copy_legacy_items().unwrap_err();
+        assert!(matches!(error, CredentialError::MasterKeyMissing { secrets: 1, .. }), "{error:?}");
+        assert_eq!(fx.os.legacy_reads.load(Ordering::SeqCst), 0, "no question before the key is known");
+        assert_eq!(fx.os.key_writes.load(Ordering::SeqCst), 1, "only the seed's key was ever made");
+    }
+
+    #[test]
+    fn the_bulk_copy_stops_at_the_first_stale_key_instead_of_reading_every_item() {
+        let fx = Fixture::new();
+        saved_connections(&fx);
+        fx.store().write(DB, "seed", "x").unwrap();
+        // The key was reset elsewhere: a valid key, but not the table's.
+        fx.os.put(SecretKind::MasterKey, MASTER_KEY_ACCOUNT, &STANDARD.encode([7u8; KEY_LEN]));
+        fx.os.put(DB, C1, "one");
+        fx.os.put(DB, C2, "two");
+        let error = fx.store().copy_legacy_items().unwrap_err();
+        assert!(matches!(error, CredentialError::MasterKeyMissing { .. }), "{error:?}");
+        assert_eq!(fx.os.legacy_reads.load(Ordering::SeqCst), 1, "the first item only");
+    }
+
+    #[test]
+    fn the_bulk_copy_stops_when_the_user_refuses_and_the_next_run_asks_again() {
+        let fx = Fixture::new();
+        saved_connections(&fx);
+        fx.os.put(DB, C1, "one");
+        fx.os.put(DB, C2, "two");
+        fx.os.put(SecretKind::AiApiKey, "openai", "key");
+        fx.os.refuse_legacy.store(true, Ordering::SeqCst);
+        let report = fx.store().copy_legacy_items().unwrap();
+        assert_eq!((report.copied, report.failed, report.stopped), (0, 1, true));
+        assert_eq!(fx.os.refused_loads.load(Ordering::SeqCst), 1, "one question, not three");
+        assert!(fx.os.has(DB, C1) && fx.os.has(DB, C2), "nothing was touched");
+
+        fx.os.refuse_legacy.store(false, Ordering::SeqCst);
+        let report = fx.store().copy_legacy_items().unwrap();
+        assert_eq!((report.copied, report.failed, report.stopped), (3, 0, false));
     }
 
     /// Every row of the table (check row included) opens with the key the OS holds now.

@@ -1370,7 +1370,7 @@ pub fn known_hosts_of(access: &TunnelAccess) -> Result<&Path, ConnectFailure> {
 pub fn no_known_hosts(path: Option<&Path>) -> Result<&Path, ConnectFailure> {
     path.ok_or_else(|| ConnectFailure::Tunnel {
         code: "tunnel.config",
-        message: "SSH tunnel: cannot determine the app data directory, so TableX cannot record SSH host keys".into(),
+        message: "SSH tunnel: cannot determine the app data directory, so tablex cannot record SSH host keys".into(),
     })
 }
 
@@ -1803,10 +1803,10 @@ pub mod fake {
                     .lock()
                     .unwrap()
                     .push(("Verification code:".into(), false));
-                // What a hostile bastion would try: a title and instructions that pass for TableX.
+                // What a hostile bastion would try: a title and instructions that pass for tablex.
                 *opener.ki_text.lock().unwrap() = (
-                    "TableX".into(),
-                    "TableX needs your macOS login password to continue.".into(),
+                    "tablex".into(),
+                    "tablex needs your macOS login password to continue.".into(),
                 );
             }
             _ => {}

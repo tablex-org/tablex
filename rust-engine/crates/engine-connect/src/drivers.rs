@@ -13,7 +13,7 @@ use engine_driver_host::{
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// Production manifest: the fixed `drivers-catalog` release of the TableX
+/// Production manifest: the fixed `drivers-catalog` release of the tablex
 /// repository, which `release-drivers.yml` refreshes after every driver
 /// release (the artifacts stay on their versioned `drivers-v*` release).
 /// Not `releases/latest`: app releases share the repository and would take
@@ -63,7 +63,7 @@ pub fn trusted_manifest_keys(
 }
 
 /// Team ID that "Import local driver" accepts outside developer mode.
-/// TODO(release): set to the TableX signing Team ID; empty means no local
+/// TODO(release): set to the tablex signing Team ID; empty means no local
 /// import is possible in strict mode (the verifier refuses an unpinned team).
 pub const PINNED_DRIVER_TEAM_ID: &str = "";
 
@@ -159,7 +159,7 @@ pub struct DriverDataDir {
 }
 
 /// The base directory of the driver store: `TABLEX_DRIVER_DATA_DIR` when set, else
-/// `<data dir>/tablex` (the folder every other TableX file is in, `TABLEX_DATA_DIR` honoured).
+/// `<data dir>/tablex` (the folder every other tablex file is in, `TABLEX_DATA_DIR` honoured).
 ///
 /// Releases up to 0.1.0 kept the store in `<platform data dir>/Drivers/v2`; unless one of the two
 /// variables is set (then the run is isolated and must not take the real store along) a store of

@@ -1,10 +1,10 @@
-//! Opening a saved TableX connection without a window: the logic the GPUI app and the standalone
+//! Opening a saved tablex connection without a window: the logic the GPUI app and the standalone
 //! `tablex-mcp` binary share, so a second front end cannot fork security-critical code.
 //!
 //! | module | what |
 //! |---|---|
 //! | [`app_channel`] | the local socket from `tablex-mcp` to the running app: open a table, show a query, reload connections |
-//! | [`platform`] | where TableX keeps its files; the OS credential store's name |
+//! | [`platform`] | where tablex keeps its files; the OS credential store's name |
 //! | [`records`] | the saved connection model, kinds, URI helpers, export / duplicate redaction |
 //! | [`new_connection`] | the record of a connection made from plain values (`tablex-mcp`'s `add_connection`) |
 //! | [`credentials`] | the secret store trait, the OS store (legacy items) and [`credentials::default_store`] |

@@ -2,7 +2,7 @@
 name = "engine-connect"
 version = "0.1.0"
 edition = "2021"
-description = "UI-free \"open a saved connection\" for TableX: records, credentials, SSH tunnel rules, driver trust and loading, connection profile and the Connector shared by the app and tablex-mcp"
+description = "UI-free \"open a saved connection\" for tablex: records, credentials, SSH tunnel rules, driver trust and loading, connection profile and the Connector shared by the app and tablex-mcp"
 
 [features]
 # Test doubles (in-memory credential store, scripted tunnel opener, record fixtures) for the
