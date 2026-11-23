@@ -8356,7 +8356,7 @@ dependencies = [
 
 [[package]]
 name = "tablex-gpui"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "aes 0.8.4",
  "aes-gcm 0.10.3",
@@ -8413,7 +8413,7 @@ dependencies = [
 
 [[package]]
 name = "tablex-mcp"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "engine-agent",
  "engine-connect",

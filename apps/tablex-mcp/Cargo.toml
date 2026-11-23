@@ -1,14 +1,14 @@
 [package]
 name = "tablex-mcp"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 publish = false
-description = "Standalone MCP server (stdio) for TableX: the engine-agent tool layer over the saved connections, shipped as a separate download"
+description = "Standalone MCP server (stdio) for tablex: the engine-agent tool layer over the saved connections, shipped as a separate download"
 
 
-# The oldest TableX this build works with (the catalog's minAppVersion; the Driver Manager of an
-# older app shows "Needs TableX >= …" and does not install it): it reads tablex.db and the
-# encrypted credential store, which TableX 0.1.7 introduced. Raise it when a build needs a newer app.
+# The oldest tablex this build works with (the catalog's minAppVersion; the Driver Manager of an
+# older app shows "Needs tablex >= …" and does not install it): it reads tablex.db and the
+# encrypted credential store, which tablex 0.1.7 introduced. Raise it when a build needs a newer app.
 [package.metadata.tablex]
 min-app-version = "0.1.7"
 [lib]
