@@ -302,7 +302,7 @@ impl AppRoot {
                 .iter()
                 .any(|saved| saved.matches_id(&tab.connection_id))
         {
-            self.sidebar.locate_error = Some("Active tab has no saved connection".into());
+            self.sidebar.locate_error = Some(t!("sidebar.locate_no_connection").into_owned());
             self.notify_chrome(cx);
             return;
         }
@@ -319,7 +319,7 @@ impl AppRoot {
             && (tab.database.is_empty() || tab.collection.is_empty())
         {
             self.sidebar.locate_error =
-                Some("MongoDB tab has no database and collection target".into());
+                Some(t!("sidebar.locate_mongo_target").into_owned());
             self.notify_chrome(cx);
             return;
         }
@@ -350,7 +350,7 @@ impl AppRoot {
                 }
             } else if !tab.collection.is_empty() {
                 self.sidebar.locate_error =
-                    Some("Cannot locate SQL object without a schema".into());
+                    Some(t!("sidebar.locate_no_schema").into_owned());
                 self.notify_chrome(cx);
                 return;
             }
@@ -478,7 +478,7 @@ impl AppRoot {
             }
             if index == 0 {
                 self.sidebar.locate_error =
-                    Some("Connection is hidden or filtered from the sidebar".into());
+                    Some(t!("sidebar.locate_hidden_connection").into_owned());
                 self.notify_chrome(cx);
                 return;
             }
@@ -489,7 +489,7 @@ impl AppRoot {
                 .and_then(|index| self.navigator.visible_row_at(index))
             else {
                 self.sidebar.locate_error =
-                    Some("Clear sidebar search to locate the active tab".into());
+                    Some(t!("sidebar.locate_clear_search").into_owned());
                 self.notify_chrome(cx);
                 return;
             };
@@ -537,7 +537,7 @@ impl AppRoot {
                 return;
             }
             self.sidebar.locate_error = Some(
-                "Target is not in the loaded catalog; refresh the connection and retry".into(),
+                t!("sidebar.locate_not_in_catalog").into_owned(),
             );
             self.notify_chrome(cx);
             return;
@@ -577,7 +577,7 @@ impl AppRoot {
             self.notify_chrome(cx);
         } else {
             self.sidebar.locate_error =
-                Some("Target is hidden by the current sidebar filter".into());
+                Some(t!("sidebar.locate_hidden_by_filter").into_owned());
             self.notify_chrome(cx);
         }
     }
@@ -603,7 +603,7 @@ impl AppRoot {
                 .and_then(|index| self.navigator.visible_row_at(index))
             else {
                 self.sidebar.locate_error =
-                    Some("Target is hidden by the current sidebar filter".into());
+                    Some(t!("sidebar.locate_hidden_by_filter").into_owned());
                 self.notify_chrome(cx);
                 return;
             };
@@ -626,7 +626,7 @@ impl AppRoot {
                     self.sidebar.pending_locate = Some(pending);
                     self.continue_sidebar_locate(cx);
                 } else {
-                    self.sidebar.locate_error = Some("Provider node cannot be expanded".into());
+                    self.sidebar.locate_error = Some(t!("sidebar.locate_not_expandable").into_owned());
                     self.notify_chrome(cx);
                 }
                 return;
@@ -652,10 +652,9 @@ impl AppRoot {
                 return;
             }
             self.sidebar.locate_error = Some(if pending.pages >= 32 {
-                "Locate stopped after 32 provider pages; narrow the target or browse manually"
-                    .into()
+                t!("sidebar.locate_stopped").into_owned()
             } else {
-                "Target is not in the loaded provider catalog".into()
+                t!("sidebar.locate_not_in_provider_catalog").into_owned()
             });
             self.notify_chrome(cx);
             return;
@@ -680,18 +679,18 @@ impl AppRoot {
     ) -> Result<String, String> {
         let result = (|| {
             if self.scenario_ui.service.is_some() {
-                return Err("Cannot duplicate connections in a UI scenario".into());
+                return Err(t!("sidebar.duplicate_in_scenario").into_owned());
             }
             let storage_id = crate::connections::storage_connection_id(id);
             let record = engine_storage::connection::get_connection(&storage_id)
                 .map_err(|error| format!("Could not read connection: {error}"))?
-                .ok_or("Saved connection not found")?;
+                .ok_or_else(|| t!("sidebar.saved_connection_not_found").into_owned())?;
             let (id, copy) = Self::duplicated_record(&record)?;
             engine_storage::connection::upsert_connection(&copy)
                 .map_err(|error| format!("Could not duplicate connection: {error}"))?;
             self.refresh_saved_connections(cx);
             if self.sidebar.notice.is_none() {
-                self.sidebar.notice = Some("Duplicated redacted connection; SSH/proxy disabled and credentials omitted. Review options before connecting".into());
+                self.sidebar.notice = Some(t!("sidebar.duplicated_redacted").into_owned());
             }
             Ok::<_, String>(id)
         })();
@@ -869,7 +868,7 @@ impl AppRoot {
             .iter()
             .any(|connection| connection.matches_id(id))
         {
-            return Err("Saved connection not found".into());
+            return Err(t!("sidebar.saved_connection_not_found").into_owned());
         }
         self.change_sidebar_preferences(|prefs| prefs.move_connection(id, group, position), cx)
     }
@@ -885,7 +884,7 @@ impl AppRoot {
             .iter()
             .any(|connection| connection.matches_id(id))
         {
-            return Err("Saved connection not found".into());
+            return Err(t!("sidebar.saved_connection_not_found").into_owned());
         }
         self.change_sidebar_preferences(|prefs| prefs.set_hidden(id, hidden), cx)
     }
@@ -902,7 +901,7 @@ impl AppRoot {
             .iter()
             .any(|connection| connection.matches_id(id))
         {
-            return Err("Saved connection not found".into());
+            return Err(t!("sidebar.saved_connection_not_found").into_owned());
         }
         self.change_sidebar_preferences(|prefs| prefs.set_color(id, color), cx)
     }

@@ -337,6 +337,18 @@ impl FilterEnumerationState {
     }
 }
 
+/// How a connection's menu offers Create Database.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(super) enum CreateDatabaseEntry {
+    /// The kind has no databases to create (SQLite, Redis): no entry.
+    #[default]
+    Hidden,
+    /// Enabled; choosing it connects first when the connection is not connected.
+    Ready,
+    /// Greyed out; the text says why.
+    Unavailable(String),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CopyInfo {
     ConnectionUrl,
@@ -722,6 +734,8 @@ impl super::AppRoot {
         )
     }
 
+    /// Whether the dialog of Create Database may open now: the connection is connected, and its
+    /// driver can (the cached capabilities say so; while they are unknown, what its kind can).
     pub(super) fn can_create_database(&self, connection_id: &str) -> bool {
         let Some(saved) = self
             .saved_connections
@@ -735,8 +749,30 @@ impl super::AppRoot {
         }
         // Cached capabilities: a session busy with navigator I/O must not
         // hide "Create Database".
-        self.driver_capabilities(connection_id, saved.kind.driver_id())
-            .is_some_and(|capabilities| capabilities.has(Capability::DatabaseCreate))
+        match self.driver_capabilities(connection_id, saved.kind.driver_id()) {
+            Some(capabilities) => capabilities.has(Capability::DatabaseCreate),
+            None => super::sidebar_names::kind_creates_databases(saved.kind),
+        }
+    }
+
+    /// The "Create Database" entry of a connection's menu. A kind that cannot create databases
+    /// (SQLite, Redis) has none. Otherwise it is offered whether or not the connection is connected
+    /// (choosing it connects first); only a connected driver that says it cannot, or a disabled
+    /// connection, greys it out, with the reason as its tooltip.
+    pub(super) fn create_database_entry(&self, connection_id: &str) -> CreateDatabaseEntry {
+        let Some(saved) = self.saved_connections.iter().find(|saved| saved.matches_id(connection_id)) else {
+            return CreateDatabaseEntry::Hidden;
+        };
+        if !super::sidebar_names::kind_creates_databases(saved.kind) {
+            return CreateDatabaseEntry::Hidden;
+        }
+        if saved.disabled {
+            return CreateDatabaseEntry::Unavailable(t!("menu.create_database_disabled").into_owned());
+        }
+        if self.sessions.is_connected(connection_id) && !self.can_create_database(connection_id) {
+            return CreateDatabaseEntry::Unavailable(t!("menu.create_database_unsupported").into_owned());
+        }
+        CreateDatabaseEntry::Ready
     }
 
     pub(super) fn copy_connection_info(

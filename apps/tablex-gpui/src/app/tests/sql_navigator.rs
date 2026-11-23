@@ -59,6 +59,10 @@ fn object_node(key: &str, database: &str, schema: &str, object: &str) -> Navigat
     }
 }
 
+fn folder_node(key: &str, object: &str, folder: crate::navigator::TableFolder) -> NavigatorNodeId {
+    object_node(key, "main", "main", object).table_folder(folder).expect("a table")
+}
+
 /// Clicks the measured bounds of `part` (`sidebar-row` or `nav-disclosure`)
 /// of the row showing `id`.
 fn click_node_part(
@@ -179,11 +183,128 @@ fn the_sidebar_expands_databases_schemas_tables_and_columns_through_the_driver(
 
     let items = object_node(&key, "main", "main", "items");
     rig.expand(&items);
-    assert_eq!(rig.tree_children(&items), ["id", "name"]);
+    // The dialect's table folders (SQLite reports keys too), and nothing is loaded yet.
+    assert_eq!(rig.tree_children(&items), ["Columns", "Indexes", "Constraints", "Foreign Keys", "Triggers"]);
+    let columns = folder_node(&key, "items", crate::navigator::TableFolder::Columns);
+    rig.expand(&columns);
+    assert_eq!(rig.tree_children(&columns), ["id", "name"]);
     assert!(rig.navigator_errors().is_empty(), "{:?}", rig.navigator_errors());
     rig.app.read_with(rig.visual, |this, _| {
         assert!(this.driver_runtime.sessions.contains_key(&key), "served by the driver session");
     });
+}
+
+// The real SQLite driver: a table's index, foreign key and trigger folders are filled by its
+// `describe_object` when opened (not before), and a refresh loads them again.
+#[gpui::test]
+fn a_sqlite_table_lists_its_indexes_foreign_keys_and_triggers_when_their_folders_open(cx: &mut TestAppContext) {
+    use crate::navigator::TableFolder;
+    let db = SqliteDb::new(
+        "CREATE TABLE owners(id INTEGER PRIMARY KEY); \
+         CREATE TABLE pets(id INTEGER PRIMARY KEY, name TEXT, owner INTEGER REFERENCES owners(id)); \
+         CREATE UNIQUE INDEX pets_name ON pets(name); \
+         CREATE TRIGGER pets_audit AFTER INSERT ON pets BEGIN SELECT 1; END;",
+    );
+    let mut rig = nav_rig_sqlite(cx, &db);
+    let key = rig.key.clone();
+    rig.expand_to_tables("main", "main");
+    let pets = object_node(&key, "main", "main", "pets");
+    rig.expand(&pets);
+    let folder = |kind| folder_node(&key, "pets", kind);
+    // Nothing is asked until a folder opens.
+    rig.app.read_with(rig.visual, |this, _| {
+        for kind in [TableFolder::Columns, TableFolder::Indexes, TableFolder::ForeignKeys, TableFolder::Triggers] {
+            assert!(this.navigator.load_state(&folder(kind)).is_none(), "{kind:?}");
+        }
+    });
+    rig.expand(&folder(TableFolder::Indexes));
+    rig.expand(&folder(TableFolder::Constraints));
+    rig.expand(&folder(TableFolder::ForeignKeys));
+    rig.expand(&folder(TableFolder::Triggers));
+    // One `describe_object` for the four folders (it was one per folder).
+    rig.app.read_with(rig.visual, |this, _| assert_eq!(this.table_folder_describes.fetches, 1));
+    assert!(!rig.tree_children(&folder(TableFolder::Constraints)).is_empty(), "SQLite reports its primary key");
+    assert_eq!(rig.tree_children(&folder(TableFolder::Indexes)), ["pets_name"]);
+    assert_eq!(rig.tree_children(&folder(TableFolder::ForeignKeys)), ["fk_pets_0"]);
+    assert_eq!(rig.tree_children(&folder(TableFolder::Triggers)), ["pets_audit"]);
+    rig.app.read_with(rig.visual, |this, _| {
+        let detail = |kind| {
+            let child = this.navigator.loaded_children(&folder(kind)).unwrap()[0].clone();
+            this.navigator.table_item(&child).unwrap().clone()
+        };
+        let index = detail(TableFolder::Indexes);
+        assert_eq!(index.detail, "(name) \u{00B7} unique");
+        assert!(index.definition.as_deref().is_some_and(|sql| sql.starts_with("CREATE UNIQUE INDEX pets_name")));
+        assert_eq!(detail(TableFolder::ForeignKeys).detail, "\u{2192} owners(id)");
+        assert_eq!(detail(TableFolder::Triggers).detail, "AFTER INSERT");
+    });
+    assert!(rig.navigator_errors().is_empty(), "{:?}", rig.navigator_errors());
+
+    // A refresh forgets what the folders listed; opening them again reads the database anew.
+    db.sql("CREATE INDEX pets_owner ON pets(owner);");
+    let connection = rig.app.read_with(rig.visual, |this, _| this.navigator.visible_rows()[0].clone());
+    rig.app.update(rig.visual, |this, cx| this.refresh_connection(&connection, cx));
+    settle(rig.visual);
+    rig.app.read_with(rig.visual, |this, _| assert!(this.navigator.load_state(&folder(TableFolder::Indexes)).is_none()));
+    rig.wait_children(&connection_node(&key));
+    rig.expand(&database_node(&key, "main"));
+    rig.expand(&schema_node(&key, "main", "main"));
+    rig.expand(&group_node(&key, "main", "main", ObjectGroup::Tables));
+    rig.expand(&pets);
+    rig.expand(&folder(TableFolder::Indexes));
+    rig.app.read_with(rig.visual, |this, _| assert_eq!(this.table_folder_describes.fetches, 2, "the refresh asks again, once"));
+    // The driver's order, whichever it is: both indexes are there, the new one included.
+    let mut indexes = rig.tree_children(&folder(TableFolder::Indexes));
+    indexes.sort();
+    assert_eq!(indexes, ["pets_name", "pets_owner"]);
+}
+
+// The folders of a table share one description: a second folder opened while it is in flight waits
+// for it, a later one reads it, and a refresh or a structure change makes the next opening ask again.
+#[test]
+fn the_folders_of_a_table_share_one_description_until_it_is_invalidated() {
+    use super::navigator_ui::{FolderDescribes, FolderJoin};
+    use crate::navigator::TableFolder;
+    let key = |object: &str, session| crate::properties_model::PropertiesKey {
+        connection: "c".into(),
+        database: "app".into(),
+        schema: "public".into(),
+        object: object.into(),
+        session,
+    };
+    let request = |folder| crate::navigator::LoadRequest::TableFolder {
+        connection: "c".into(),
+        database: "app".into(),
+        schema: "public".into(),
+        object: "orders".into(),
+        folder,
+    };
+    let described = || Some(std::rc::Rc::new(crate::catalog::TableProperties::default()));
+    let mut describes = FolderDescribes::default();
+    let orders = key("orders", 1);
+
+    assert!(matches!(describes.join(&orders, request(TableFolder::Indexes), 1), FolderJoin::Fetch));
+    assert!(matches!(describes.join(&orders, request(TableFolder::Triggers), 1), FolderJoin::Waiting));
+    assert_eq!(describes.fetches, 1, "two folders opened quickly: one request");
+    let waiting = describes.finish(&orders, described());
+    assert_eq!(waiting.len(), 2, "both folders are answered by it");
+    assert!(matches!(describes.join(&orders, request(TableFolder::ForeignKeys), 1), FolderJoin::Ready(_)));
+    assert_eq!(describes.fetches, 1);
+    // Another table has its own.
+    assert!(matches!(describes.join(&key("items", 1), request(TableFolder::Indexes), 1), FolderJoin::Fetch));
+    describes.finish(&key("items", 1), None);
+    assert!(matches!(describes.join(&key("items", 1), request(TableFolder::Indexes), 1), FolderJoin::Fetch), "a failure is not cached");
+
+    // A refresh (of the table or above it) or a structure change forgets it.
+    describes.forget(|other| other.covered_by("c", Some("app"), Some("public"), Some("orders")));
+    assert!(matches!(describes.join(&orders, request(TableFolder::Indexes), 1), FolderJoin::Fetch));
+    // Invalidated while in flight: the waiting folders are answered, the answer is not kept.
+    describes.forget(|other| other.covered_by("c", None, None, None));
+    assert_eq!(describes.finish(&orders, described()).len(), 1);
+    assert!(matches!(describes.join(&orders, request(TableFolder::Indexes), 1), FolderJoin::Fetch));
+    describes.finish(&orders, described());
+    // A reconnect is a new session: the old answer is not used.
+    assert!(matches!(describes.join(&key("orders", 2), request(TableFolder::Indexes), 1), FolderJoin::Fetch));
 }
 
 #[gpui::test]
@@ -548,7 +669,10 @@ fn live_navigator_smoke(
     assert!(rig.tree_children(&tables).contains(&table.to_string()), "{:?}", rig.tree_children(&tables));
     let object = object_node(&key, &database, &schema, table);
     rig.expand(&object);
-    assert_eq!(rig.tree_children(&object), ["id", "name"]);
+    assert_eq!(rig.tree_children(&object), ["Columns", "Indexes", "Constraints", "Foreign Keys", "Triggers"]);
+    let columns = object.table_folder(crate::navigator::TableFolder::Columns).expect("a table");
+    rig.expand(&columns);
+    assert_eq!(rig.tree_children(&columns), ["id", "name"]);
 
     // Create Database through the menu's reviewed path, then the sidebar lists it. The scratch
     // database goes whatever happens.

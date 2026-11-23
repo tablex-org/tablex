@@ -199,7 +199,7 @@ impl AppRoot {
                             div()
                                 .text_size(px(12.0))
                                 .text_color(theme::text_muted())
-                                .child("Enter the passphrase chosen when the file was exported."),
+                                .child(t!("sidebar.import_passphrase_hint")),
                         )
                         .child(
                             div()
@@ -439,7 +439,7 @@ impl AppRoot {
                                 div()
                                     .text_size(px(11.0))
                                     .text_color(theme::text_muted())
-                                    .child(format!("Not supported by TableX: {skipped}")),
+                                    .child(format!("Not supported by tablex: {skipped}")),
                             )
                         })
                         .when_some(note, |this, note| {
@@ -471,7 +471,7 @@ impl AppRoot {
                     DialogFooter::new()
                         .child(
                             Button::new("import-select-all")
-                                .label("Select all")
+                                .label(t!("sidebar.import_select_all"))
                                 .compact()
                                 .ghost()
                                 .debug_selector(|| "import-select-all".into())
@@ -484,7 +484,7 @@ impl AppRoot {
                         )
                         .child(
                             Button::new("import-select-none")
-                                .label("Select none")
+                                .label(t!("sidebar.import_select_none"))
                                 .compact()
                                 .ghost()
                                 .debug_selector(|| "import-select-none".into())

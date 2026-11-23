@@ -372,7 +372,7 @@ impl PropertyTable {
 /// Everything a fetched `TableProperties` depends on. Table metadata does not
 /// change when the result is paged, sorted, filtered or auto-refreshed, so the
 /// result generation is deliberately NOT part of the key.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PropertiesKey {
     pub connection: String,
     pub database: String,

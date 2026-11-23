@@ -232,7 +232,7 @@ static DEFS: &[ShortcutDef] = &[
     ShortcutDef::new(
         "app.hide",
         "General",
-        "Hide TableX",
+        "Hide tablex",
         ANY,
         &["secondary-h"],
         bind!(Hide),
@@ -530,6 +530,20 @@ static DEFS: &[ShortcutDef] = &[
         bind!(gpui_component::input::Search),
     )
     .scoped_override(),
+    // Opens the completion menu by hand, also after an empty word; a single proposal is inserted
+    // without the menu. The SQL and the Mongo script editors are code editors (`mode=editor`);
+    // the single-line inputs have no menu to open. Control+Space on macOS (Cmd+Space is Spotlight),
+    // plus Cmd+I: macOS takes Control+Space to switch input sources when more than one is set up.
+    // Ctrl+Space elsewhere.
+    ShortcutDef::new(
+        "editor.complete",
+        "Editor",
+        "Show Completions",
+        &[Some("Input && mode == editor")],
+        &[],
+        bind!(gpui_component::input::ShowCompletions),
+    )
+    .per_platform(&["ctrl-space", "secondary-i"], &["secondary-space"]),
     ShortcutDef::new(
         "sidebar.copy_connection_name",
         "Sidebar",
@@ -553,6 +567,41 @@ static DEFS: &[ShortcutDef] = &[
         SIDEBAR,
         &["f5"],
         bind!(RefreshConnection),
+    ),
+    // Advanced copy: the qualified, quoted name of the selected objects.
+    ShortcutDef::new(
+        "sidebar.copy_qualified_name",
+        "Sidebar",
+        "Copy Qualified Name",
+        SIDEBAR,
+        &["secondary-shift-c"],
+        bind!(CopyNavigatorQualifiedName),
+    ),
+    ShortcutDef::new(
+        "sidebar.rename_selection",
+        "Sidebar",
+        "Rename Selected Object",
+        SIDEBAR,
+        &["f2"],
+        bind!(RenameNavigatorSelection),
+    ),
+    // Always asks first: a confirmation (connection, group) or the review dialog (object).
+    ShortcutDef::new(
+        "sidebar.delete_selection",
+        "Sidebar",
+        "Delete Selected Object",
+        SIDEBAR,
+        &["delete", "secondary-backspace"],
+        bind!(DeleteNavigatorSelection),
+    )
+    .per_platform(&["delete", "secondary-backspace", "backspace"], &["delete", "backspace"]),
+    ShortcutDef::new(
+        "sidebar.open_selection",
+        "Sidebar",
+        "Open Selected Object",
+        SIDEBAR,
+        &["f4"],
+        bind!(OpenNavigatorSelection),
     ),
     ShortcutDef::new(
         "diagram.find",
@@ -1154,6 +1203,18 @@ mod tests {
                 !stroke.modifiers.control && !stroke.modifiers.platform && !stroke.modifiers.shift
             );
         }
+    }
+
+    #[test]
+    fn show_completions_is_listed_and_rebindable_for_the_code_editors_only() {
+        let def = find("editor.complete").expect("listed in Settings");
+        assert_eq!((def.mac, def.other), (&["ctrl-space", "secondary-i"][..], &["secondary-space"][..]));
+        assert!(!def.default_chords().is_empty());
+        assert!(def.editable);
+        assert_eq!(def.contexts, [Some("Input && mode == editor")]);
+        let mut overrides = Overrides::new();
+        assign(&mut overrides, def, "alt-space".into(), Some(0)).unwrap();
+        assert_eq!(def.effective(&overrides)[0], "alt-space");
     }
 
     #[test]

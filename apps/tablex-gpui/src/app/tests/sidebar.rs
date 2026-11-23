@@ -2091,6 +2091,166 @@ fn remote_search_filters_expanded_groups_server_side_and_restores_them(cx: &mut 
     assert_eq!(group_children(&app, visual).len(), table_count);
 }
 
+fn connect_mongo_fixture(app: &gpui::Entity<AppRoot>, visual: &mut gpui::VisualTestContext) {
+    app.update(visual, |this, cx| {
+        let id = crate::ui_fixture::MONGO_ID;
+        let epoch = this.sessions.begin_connect(id).unwrap();
+        this.sessions.finish_connect(id, epoch, Ok(()));
+        this.navigator.enable_provider(id);
+        this.sync_sidebar_connections(cx);
+    });
+}
+
+fn finish_remote_search(app: &gpui::Entity<AppRoot>, visual: &mut gpui::VisualTestContext) {
+    settle_search(visual);
+    app.read_with(visual, |this, _| assert!(!this.sidebar.remote.loading, "search finished"));
+}
+
+fn load_state_of(
+    app: &gpui::Entity<AppRoot>,
+    visual: &mut gpui::VisualTestContext,
+    id: &NavigatorNodeId,
+) -> Option<crate::navigator::NodeLoadState> {
+    app.read_with(visual, |this, _| this.navigator.load_state(id).cloned())
+}
+
+#[gpui::test]
+fn remote_search_finds_a_mongodb_collection_in_a_collapsed_database_and_restores_the_tree(
+    cx: &mut TestAppContext,
+) {
+    let (app, visual) = sidebar_test_app(cx);
+    connect_mongo_fixture(&app, visual);
+    let collapsed = visible_labels(&app, visual);
+    app.update(visual, |this, cx| this.set_sidebar_local_search(false, cx));
+
+    search_query(&app, visual, "collection_17");
+    finish_remote_search(&app, visual);
+    let labels = visible_labels(&app, visual);
+    let found = labels.iter().filter(|label| *label == "fixture_collection_17").count();
+    assert_eq!(found, 8, "one match under each of the 8 databases: {labels:?}");
+    for index in 0..8 {
+        assert!(labels.contains(&format!("fixture_db_{index}")), "{labels:?}");
+    }
+    assert!(!labels.contains(&"fixture_collection_16".to_string()), "{labels:?}");
+    app.read_with(visual, |this, _| {
+        assert!(this.sidebar.remote.filter.is_some());
+        assert!(!this.navigator.has_filtered_groups(), "the driver has no name filter");
+        assert!(this.remote_unsearched_notice().is_none());
+    });
+
+    search_query(&app, visual, "");
+    settle_search(visual);
+    assert_eq!(visible_labels(&app, visual), collapsed, "the tree is as before");
+    app.read_with(visual, |this, _| {
+        assert!(this.sidebar.remote.filter.is_none());
+        assert!(this.remote_unsearched_notice().is_none());
+    });
+}
+
+#[gpui::test]
+fn remote_search_looks_into_a_limited_number_of_databases_and_says_how_many_it_left_out(
+    cx: &mut TestAppContext,
+) {
+    let (app, visual) = sidebar_test_app(cx);
+    connect_mongo_fixture(&app, visual);
+    app.update(visual, |this, cx| {
+        this.navigator.set_search_database_limit(3);
+        this.set_sidebar_local_search(false, cx);
+    });
+    search_query(&app, visual, "collection_17");
+    finish_remote_search(&app, visual);
+    let labels = visible_labels(&app, visual);
+    assert_eq!(
+        labels.iter().filter(|label| *label == "fixture_collection_17").count(),
+        3,
+        "{labels:?}"
+    );
+    app.read_with(visual, |this, _| {
+        assert_eq!(this.remote_unsearched_notice().as_deref(), Some("5 more databases not searched"));
+    });
+    // The notice is drawn in the sidebar without disturbing the list.
+    visual.update(|window, _| window.refresh());
+    visual.run_until_parked();
+
+    search_query(&app, visual, "");
+    settle_search(visual);
+    app.read_with(visual, |this, _| assert!(this.remote_unsearched_notice().is_none()));
+}
+
+#[gpui::test]
+fn remote_search_finds_a_table_in_collapsed_databases_and_schemas_and_restores_the_tree(
+    cx: &mut TestAppContext,
+) {
+    let (app, visual) = sidebar_test_app(cx);
+    connect_postgres_fixture(&app, visual);
+    let collapsed = visible_labels(&app, visual);
+    app.update(visual, |this, cx| this.set_sidebar_local_search(false, cx));
+
+    search_query(&app, visual, "daily_sum");
+    finish_remote_search(&app, visual);
+    let labels = visible_labels(&app, visual);
+    // The fixture lists the same views in both schemas of both databases.
+    assert_eq!(labels.iter().filter(|label| *label == "daily_summary").count(), 4, "{labels:?}");
+    for label in ["warehouse", "reporting", "public", "analytics", "Views"] {
+        assert!(labels.contains(&label.to_string()), "{label}: {labels:?}");
+    }
+    assert!(!labels.contains(&"orders".to_string()), "{labels:?}");
+    app.read_with(visual, |this, _| assert_eq!(this.navigator.loading_count(), 0));
+
+    search_query(&app, visual, "");
+    settle_search(visual);
+    app.read_with(visual, |this, _| {
+        assert!(!this.navigator.has_filtered_groups(), "the filtered groups are unfiltered again");
+        assert!(!this.sidebar.remote.loading);
+    });
+    assert_eq!(visible_labels(&app, visual), collapsed, "the tree is as before");
+}
+
+#[gpui::test]
+fn remote_search_never_loads_a_connection_that_is_not_connected(cx: &mut TestAppContext) {
+    let (app, visual) = sidebar_test_app(cx);
+    app.update(visual, |this, cx| this.set_sidebar_local_search(false, cx));
+    search_query(&app, visual, "daily_sum");
+    finish_remote_search(&app, visual);
+    app.read_with(visual, |this, _| assert_eq!(this.navigator.loading_count(), 0));
+    for connection in [
+        crate::ui_fixture::POSTGRES_ID,
+        crate::ui_fixture::MONGO_ID,
+        crate::ui_fixture::SQLITE_ID,
+    ] {
+        let root = NavigatorNodeId::Connection { connection: connection.into() };
+        assert_eq!(load_state_of(&app, visual, &root), None, "{connection}");
+    }
+}
+
+#[gpui::test]
+fn a_one_character_query_starts_no_remote_loads(cx: &mut TestAppContext) {
+    let (app, visual) = sidebar_test_app(cx);
+    connect_postgres_fixture(&app, visual);
+    app.update(visual, |this, cx| this.set_sidebar_local_search(false, cx));
+    let root = NavigatorNodeId::Connection { connection: crate::ui_fixture::POSTGRES_ID.into() };
+
+    search_query(&app, visual, "d");
+    settle_search(visual);
+    assert_eq!(load_state_of(&app, visual, &root), None, "one character: nothing is asked");
+    app.read_with(visual, |this, _| assert!(this.sidebar.remote.filter.is_none()));
+
+    search_query(&app, visual, "da");
+    finish_remote_search(&app, visual);
+    assert_eq!(
+        load_state_of(&app, visual, &root),
+        Some(crate::navigator::NodeLoadState::Loaded),
+        "two characters search"
+    );
+    // Back to one character: the search ends and the filtered groups are restored.
+    search_query(&app, visual, "d");
+    settle_search(visual);
+    app.read_with(visual, |this, _| {
+        assert!(this.sidebar.remote.filter.is_none());
+        assert!(!this.navigator.has_filtered_groups());
+    });
+}
+
 #[gpui::test]
 fn turning_local_search_back_on_restores_the_tree(cx: &mut TestAppContext) {
     let (app, visual) = sidebar_test_app(cx);

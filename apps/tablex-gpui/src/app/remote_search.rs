@@ -1,23 +1,30 @@
 //! Sidebar "global" (remote) search: with
-//! the Local-search switch off and a non-empty query, every EXPANDED
-//! container of a connected connection has its object groups (Tables/Views)
-//! reloaded through the driver's server-side name filter
-//! (case-insensitive substring, capped at `REMOTE_FILTER_LIMIT`). Collapsed containers are left alone. Clearing the
-//! query (or turning Local search back on) restores the unfiltered children.
+//! the Local-search switch off and a query of at least `MIN_QUERY_CHARS`
+//! characters, every CONNECTED connection is searched on the server, expanded
+//! or not (never connecting a disconnected one):
+//! - SQL: the databases and schemas not loaded yet are loaded, then every
+//!   object group (Tables/Views) is reloaded through the driver's server-side
+//!   name filter (case-insensitive substring, capped at `REMOTE_FILTER_LIMIT`);
+//! - MongoDB: the database list and the collection list of each database are
+//!   loaded (the driver has no name filter; the tree matches them locally).
+//!
+//! At most `navigator::SEARCH_DATABASE_LIMIT` databases per connection are
+//! searched; a notice counts the others. Levels loaded for the search stay
+//! cached and collapsed, so clearing the query (or turning Local search back
+//! on) only restores the filtered groups to their unfiltered children.
 //!
 //! Bounded and cancellable: 250ms debounce, `MAX_IN_FLIGHT` concurrent loads,
 //! a generation counter that drops stale timers and pumps. All driver
 //! calls run off the UI thread. SQL drivers receive the filter as the
 //! navigator request's `payload.filter` (`navigator::sql_driver`).
-//!
-//! Not covered: MongoDB lists its catalog through provider nodes, which have no
-//! name-filter parameter, so it is skipped by remote search.
 
 use super::*;
 use std::time::Duration;
 
 pub(super) const DEBOUNCE: Duration = Duration::from_millis(250);
 pub(super) const MAX_IN_FLIGHT: usize = 4;
+/// Shorter queries match too much to be worth a server round trip.
+pub(super) const MIN_QUERY_CHARS: usize = 2;
 
 #[derive(Default)]
 pub(super) struct RemoteSearch {
@@ -32,10 +39,10 @@ pub(super) struct RemoteSearch {
     repump: bool,
 }
 
-/// Remote search needs a query, regex off and the Local-search
-/// switch off.
+/// Remote search needs a query of `MIN_QUERY_CHARS`, regex off and the
+/// Local-search switch off.
 pub(super) fn remote_search_wanted(query: &str, regex: bool, local_search: bool) -> bool {
-    !query.trim().is_empty() && !regex && !local_search
+    query.trim().chars().count() >= MIN_QUERY_CHARS && !regex && !local_search
 }
 
 impl AppRoot {
@@ -93,8 +100,14 @@ impl AppRoot {
             if !self.sidebar.remote.loading {
                 break;
             }
-            let connected: HashSet<String> =
-                self.sessions.connected().map(str::to_string).collect();
+            // Connected with a live driver session: a search never connects.
+            let scenario = self.scenario_ui.service.is_some();
+            let connected: HashSet<String> = self
+                .sessions
+                .connected()
+                .filter(|id| scenario || self.driver_runtime.sessions.contains_key(*id))
+                .map(str::to_string)
+                .collect();
             let budget = MAX_IN_FLIGHT.saturating_sub(self.navigator.loading_count());
             let step = match self.sidebar.remote.filter.clone() {
                 Some(filter) => self.navigator.filter_step(&connected, &filter, budget),
@@ -112,6 +125,16 @@ impl AppRoot {
         }
         self.sidebar.remote.pumping = false;
         self.notify_chrome(cx);
+    }
+
+    /// Notice for the databases a remote search left out (over the limit).
+    pub(super) fn remote_unsearched_notice(&self) -> Option<String> {
+        self.sidebar.remote.filter.as_ref()?;
+        match self.navigator.unsearched_database_count() {
+            0 => None,
+            1 => Some(t!("sidebar.databases_not_searched_one").into_owned()),
+            count => Some(t!("sidebar.databases_not_searched_other", count = count).into_owned()),
+        }
     }
 
     /// The server-side filter a catalog load must carry, if a remote search is
@@ -185,5 +208,8 @@ mod tests {
         assert!(!remote_search_wanted("orders", true, false), "regex disables it");
         assert!(!remote_search_wanted("   ", false, false), "blank query");
         assert!(!remote_search_wanted("", false, false));
+        assert!(!remote_search_wanted("o", false, false), "one character");
+        assert!(!remote_search_wanted(" o ", false, false), "one character once trimmed");
+        assert!(remote_search_wanted("or", false, false));
     }
 }

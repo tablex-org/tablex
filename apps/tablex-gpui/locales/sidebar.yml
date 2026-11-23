@@ -7,14 +7,20 @@ sidebar:
     en: "Delete %{count} selected connections"
     vi: "Xoá %{count} kết nối đã chọn"
   regex_tip:
-    en: "Match sidebar names, comments, and aliases with regular expressions."
-    vi: "Khớp tên, ghi chú và bí danh trên thanh bên bằng biểu thức chính quy."
+    en: "Match sidebar names with regular expressions."
+    vi: "Khớp tên trên thanh bên bằng biểu thức chính quy."
   local_search_regex_tip:
     en: Local search is unavailable in regular expression mode.
     vi: Không dùng được tìm cục bộ ở chế độ biểu thức chính quy.
   local_search_tip:
     en: Search only currently loaded sidebar objects without remote requests.
     vi: "Chỉ tìm trong các đối tượng thanh bên đã tải, không gửi yêu cầu đến máy chủ."
+  databases_not_searched_one:
+    en: 1 more database not searched
+    vi: 1 cơ sở dữ liệu nữa chưa được tìm
+  databases_not_searched_other:
+    en: "%{count} more databases not searched"
+    vi: "%{count} cơ sở dữ liệu nữa chưa được tìm"
   sort_manual:
     en: Manual
     vi: Thủ công
@@ -79,8 +85,8 @@ sidebar:
     en: Export Connections
     vi: Xuất kết nối
   import_tablex_file:
-    en: Import TableX file…
-    vi: Nhập tệp TableX…
+    en: Import tablex file…
+    vi: Nhập tệp tablex…
   collapse_all:
     en: Collapse all
     vi: Thu gọn tất cả
@@ -174,6 +180,24 @@ sidebar:
   open:
     en: Open
     vi: Mở
+  folder_columns:
+    en: Columns
+    vi: Cột
+  folder_indexes:
+    en: Indexes
+    vi: Chỉ mục
+  folder_constraints:
+    en: Constraints
+    vi: Ràng buộc
+  folder_foreign_keys:
+    en: Foreign Keys
+    vi: Khoá ngoại
+  folder_triggers:
+    en: Triggers
+    vi: Trigger
+  copy_definition:
+    en: Copy Definition
+    vi: Sao chép định nghĩa
   copy_sql:
     en: Copy SQL
     vi: Sao chép SQL
@@ -198,3 +222,123 @@ sidebar:
   hide_selected_connections:
     en: Hide selected connections
     vi: Ẩn các kết nối đã chọn
+  drag_move:
+    en: "Move %{label}"
+    vi: "Di chuyển %{label}"
+  drag_objects:
+    en: "%{count} objects"
+    vi: "%{count} đối tượng"
+  copy_qualified_name:
+    en: "Copy Qualified Name"
+    vi: "Sao chép tên đầy đủ"
+  name_failed:
+    en: "Could not use the name: %{error}"
+    vi: "Không dùng được tên: %{error}"
+  ask_assistant_about_table:
+    en: "Ask the assistant about this table"
+    vi: "Hỏi trợ lý về bảng này"
+  import_dbx:
+    en: "Import DBX Config"
+    vi: "Nhập cấu hình DBX"
+  import_navicat:
+    en: "Import Navicat NCX"
+    vi: "Nhập Navicat NCX"
+  import_dbeaver:
+    en: "Import DBeaver"
+    vi: "Nhập từ DBeaver"
+  import_datagrip:
+    en: "Import DataGrip"
+    vi: "Nhập từ DataGrip"
+  locate_no_connection:
+    en: "Active tab has no saved connection"
+    vi: "Tab đang mở không có kết nối đã lưu"
+  locate_mongo_target:
+    en: "MongoDB tab has no database and collection target"
+    vi: "Tab MongoDB không có cơ sở dữ liệu và collection đích"
+  locate_no_schema:
+    en: "Cannot locate SQL object without a schema"
+    vi: "Không thể định vị đối tượng SQL khi không có schema"
+  locate_not_expandable:
+    en: "Provider node cannot be expanded"
+    vi: "Không thể mở rộng nút của nhà cung cấp"
+  group_selected_title:
+    en: "Group %{count} Selected Connections"
+    vi: "Gom nhóm %{count} kết nối đã chọn"
+  group_selection_changed:
+    en: "Selection changed; retry creating the group"
+    vi: "Vùng chọn đã thay đổi; hãy thử tạo nhóm lại"
+  selected_connections:
+    en: "%{count} selected connections"
+    vi: "%{count} kết nối đã chọn"
+  delete_selected_connections:
+    en: "Delete %{count} selected connections…"
+    vi: "Xoá %{count} kết nối đã chọn…"
+  copy_selected_configs:
+    en: "Copy %{count} connection configs"
+    vi: "Sao chép cấu hình của %{count} kết nối"
+  export_selected_configs:
+    en: "Export %{count} connection configs…"
+    vi: "Xuất cấu hình của %{count} kết nối…"
+  saved_connection_not_found:
+    en: "Saved connection not found"
+    vi: "Không tìm thấy kết nối đã lưu"
+  duplicate_in_scenario:
+    en: "Cannot duplicate connections in a UI scenario"
+    vi: "Không thể nhân bản kết nối trong kịch bản giao diện"
+  duplicated_redacted:
+    en: "Duplicated redacted connection; SSH/proxy disabled and credentials omitted. Review options before connecting"
+    vi: "Đã nhân bản kết nối đã ẩn thông tin; SSH/proxy bị tắt và thông tin đăng nhập bị bỏ. Hãy xem lại tuỳ chọn trước khi kết nối"
+  group_not_found:
+    en: "Connection group not found"
+    vi: "Không tìm thấy nhóm kết nối"
+  drag_node_gone:
+    en: "Dragged sidebar node is no longer visible"
+    vi: "Mục đang kéo không còn hiển thị trên thanh bên"
+  drag_selection_changed:
+    en: "Sidebar selection changed during drag"
+    vi: "Vùng chọn trên thanh bên đã thay đổi khi kéo"
+  drag_no_roots:
+    en: "Drag contains no visible connection or group roots"
+    vi: "Mục kéo không chứa kết nối hoặc nhóm nào đang hiển thị"
+  drag_mixed:
+    en: "Select only groups or only connections to drag"
+    vi: "Chỉ chọn nhóm hoặc chỉ chọn kết nối để kéo"
+  drop_invalid_target:
+    en: "Invalid sidebar drop target"
+    vi: "Đích thả trên thanh bên không hợp lệ"
+  batch_select_connections:
+    en: "Select connections to use a batch action"
+    vi: "Hãy chọn kết nối để dùng thao tác hàng loạt"
+  batch_connection_gone:
+    en: "Selected connection is no longer available"
+    vi: "Kết nối đã chọn không còn tồn tại"
+  batch_selection_changed:
+    en: "Selection changed; reopen the confirmation"
+    vi: "Vùng chọn đã thay đổi; hãy mở lại hộp xác nhận"
+  locate_hidden_connection:
+    en: "Connection is hidden or filtered from the sidebar"
+    vi: "Kết nối đang bị ẩn hoặc bị lọc khỏi thanh bên"
+  locate_clear_search:
+    en: "Clear sidebar search to locate the active tab"
+    vi: "Hãy xoá tìm kiếm trên thanh bên để định vị tab đang mở"
+  locate_not_in_catalog:
+    en: "Target is not in the loaded catalog; refresh the connection and retry"
+    vi: "Đích không có trong danh mục đã tải; hãy làm mới kết nối rồi thử lại"
+  locate_hidden_by_filter:
+    en: "Target is hidden by the current sidebar filter"
+    vi: "Đích đang bị ẩn bởi bộ lọc hiện tại của thanh bên"
+  locate_stopped:
+    en: "Locate stopped after 32 provider pages; narrow the target or browse manually"
+    vi: "Việc định vị dừng sau 32 trang; hãy thu hẹp đích hoặc tự duyệt"
+  locate_not_in_provider_catalog:
+    en: "Target is not in the loaded provider catalog"
+    vi: "Đích không có trong danh mục nhà cung cấp đã tải"
+  import_passphrase_hint:
+    en: "Enter the passphrase chosen when the file was exported."
+    vi: "Nhập cụm mật khẩu đã chọn khi xuất tệp."
+  import_select_all:
+    en: "Select all"
+    vi: "Chọn tất cả"
+  import_select_none:
+    en: "Select none"
+    vi: "Bỏ chọn tất cả"

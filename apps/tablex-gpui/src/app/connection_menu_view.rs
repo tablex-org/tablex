@@ -33,7 +33,7 @@ fn history_menu_contents(
         return submenu.item(PopupMenuItem::new(t!("menu.loading")).disabled(true));
     }
     if let Some(error) = error {
-        return submenu.item(PopupMenuItem::new(format!("Error: {error}")).disabled(true));
+        return submenu.item(PopupMenuItem::new(t!("menu.error_detail", error = error)).disabled(true));
     }
     if entries.is_empty() {
         return submenu.item(PopupMenuItem::new(t!("menu.no_saved_queries")).disabled(true));
@@ -265,7 +265,7 @@ impl AppRoot {
             .iter()
             .find(|saved| saved.matches_id(connection_id))
         else {
-            self.sidebar.notice = Some("Could not copy name: saved connection not found".into());
+            self.sidebar.notice = Some(t!("menu.copy_name_not_found").into_owned());
             self.report_error(Area::Connect, Some(connection_id), "Could not copy name: saved connection not found");
             cx.notify();
             return;
@@ -356,7 +356,7 @@ impl AppRoot {
         cx: &mut Context<Self>,
     ) {
         if !self.can_create_database(connection_id) {
-            self.sidebar.notice = Some("Create Database is unavailable for this connection".into());
+            self.sidebar.notice = Some(t!("menu.create_database_unsupported").into_owned());
             cx.notify();
             return;
         }
@@ -370,6 +370,47 @@ impl AppRoot {
         } else {
             self.open_driver_create_database_dialog(connection_id, window, cx);
         }
+    }
+
+    /// Create Database chosen on `connection_id`'s menu. A connection that is not connected connects
+    /// first (the password prompt and the missing-driver prompt included) and the dialog opens once
+    /// it is; a connect that fails or is cancelled opens nothing.
+    pub(super) fn request_create_database(
+        &mut self,
+        connection_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.create_database_entry(connection_id) {
+            super::connection_menu::CreateDatabaseEntry::Ready => {}
+            super::connection_menu::CreateDatabaseEntry::Hidden => return,
+            super::connection_menu::CreateDatabaseEntry::Unavailable(reason) => {
+                self.sidebar.notice = Some(reason);
+                cx.notify();
+                return;
+            }
+        }
+        if self.sessions.is_connected(connection_id) {
+            self.open_create_database_dialog(connection_id, window, cx);
+            return;
+        }
+        // Recorded after the call: starting a connect over a failed session releases it, which forgets the wish.
+        self.ensure_connected(connection_id.to_owned(), None, cx);
+        if matches!(self.sessions.status(connection_id), ConnectionStatus::Connecting) {
+            self.navigator_ui.create_database_after_connect.insert(connection_id.to_owned());
+        }
+    }
+
+    /// The connect `request_create_database` started succeeded: its dialog opens (once the update that
+    /// finished the connect is done).
+    pub(super) fn connected_for_create_database(&mut self, connection_id: &str, cx: &mut Context<Self>) {
+        if !self.navigator_ui.create_database_after_connect.remove(connection_id) {
+            return;
+        }
+        let (root, connection) = (cx.entity().downgrade(), connection_id.to_owned());
+        self.with_ui_window(cx, move |window, app| {
+            let _ = root.update(app, |this, cx| this.open_create_database_dialog(&connection, window, cx));
+        });
     }
 
     /// The name dialog of a Create Database that goes to the driver.
@@ -503,7 +544,7 @@ impl AppRoot {
             .iter()
             .any(|saved| saved.matches_id(connection_id))
         {
-            self.sidebar.notice = Some("Could not move connection: not found".into());
+            self.sidebar.notice = Some(t!("menu.move_connection_not_found").into_owned());
             self.report_error(Area::Connect, Some(connection_id), "Could not move connection: not found");
             cx.notify();
             return;
@@ -632,7 +673,7 @@ impl AppRoot {
             .find(|saved| saved.matches_id(connection_id) && !saved.disabled)
             .map(|saved| saved.kind)
         else {
-            self.sidebar.notice = Some("Visible Object Filter is unavailable".into());
+            self.sidebar.notice = Some(t!("menu.visible_filter_unavailable").into_owned());
             cx.notify();
             return;
         };
@@ -1118,7 +1159,7 @@ pub(super) fn build_connection_menu(
     // a click can never double-fire through both paths.
     let snapshot = menu_root
         .update(cx, |this, _| {
-            let can_create = this.can_create_database(&connection_id);
+            let can_create = this.create_database_entry(&connection_id);
             let (loading, entries, error) = this.saved_query_history(&connection_id);
             (
                 can_create,
@@ -1216,17 +1257,17 @@ pub(super) fn build_connection_menu(
         let mut built = submenu;
         for (label, item, action) in [
             (
-                "Connection URL",
+                t!("menu.copy_connection_url"),
                 CopyInfo::ConnectionUrl,
                 Box::new(CopyConnectionUrl) as Box<dyn gpui::Action>,
             ),
             (
-                "Connection URL (with password)",
+                t!("menu.copy_connection_url_with_password"),
                 CopyInfo::ConnectionUrlWithPassword,
                 Box::new(CopyConnectionUrlWithPassword) as Box<dyn gpui::Action>,
             ),
             (
-                "Host:Port",
+                t!("menu.copy_host_port"),
                 CopyInfo::HostPort,
                 Box::new(CopyConnectionHostPort) as Box<dyn gpui::Action>,
             ),
@@ -1300,25 +1341,36 @@ pub(super) fn build_connection_menu(
         )
     });
 
-    // Create Database with truthful capability gating.
-    let create_root = menu_root.clone();
-    let create_id = connection_id.clone();
-    let create_label = if can_create {
-        t!("menu.create_database").into_owned()
-    } else {
-        t!("menu.create_database_unavailable").into_owned()
+    // Create Database: offered for every kind that has databases to create. Disconnected, it connects
+    // first; only a connected driver that cannot (or a disabled connection) greys it out, and says why.
+    let menu = match can_create {
+        super::connection_menu::CreateDatabaseEntry::Hidden => menu,
+        entry => {
+            let create_root = menu_root.clone();
+            let create_id = connection_id.clone();
+            let disabled = match entry {
+                super::connection_menu::CreateDatabaseEntry::Unavailable(reason) => Some(reason.into()),
+                _ => None,
+            };
+            menu.item(
+                super::mongo_admin_view::entry_item(
+                    super::mongo_admin_view::Entry {
+                        selector: "connection-menu-create-database",
+                        label: t!("menu.create_database"),
+                        icon: menu_icon(navigator_ui::SidebarGlyph::Database),
+                        disabled,
+                        destructive: false,
+                    },
+                    move |window, app| {
+                        let _ = create_root.update(app, |this, cx| {
+                            this.request_create_database(&create_id, window, cx);
+                        });
+                    },
+                )
+                .action(Box::new(CreateDatabase)),
+            )
+        }
     };
-    let menu = menu.item(
-        PopupMenuItem::new(create_label)
-            .icon(menu_icon(navigator_ui::SidebarGlyph::Database))
-            .action(Box::new(CreateDatabase))
-            .disabled(!can_create)
-            .on_click(move |_, window, app| {
-                let _ = create_root.update(app, |this, cx| {
-                    this.open_create_database_dialog(&create_id, window, cx);
-                });
-            }),
-    );
 
     // Run SQL File: a script of any size, streamed from disk on a session of its own.
     let run_file_root = menu_root.clone();

@@ -90,14 +90,22 @@ fn scenario_tree_handler_loads_connection_to_columns_sequentially(cx: &mut TestA
     let object = find_row(&app, "orders", cx);
     app.update(cx, |this, cx| this.handle_navigator_disclosure(&object, cx));
     cx.run_until_parked();
-    let columns = app.update(cx, |this, _| {
-        this.navigator
-            .visible_rows()
-            .into_iter()
-            .filter(|row| row.depth == 5)
-            .count()
-    });
-    assert_eq!(columns, 8);
+    let at_depth = |app: &gpui::Entity<AppRoot>, depth: usize, cx: &mut TestAppContext| {
+        app.update(cx, |this, _| {
+            this.navigator
+                .visible_rows()
+                .into_iter()
+                .filter(|row| row.depth == depth)
+                .count()
+        })
+    };
+    // A table lists its five folders at once; its columns load when the Columns folder opens.
+    assert_eq!(at_depth(&app, 5, cx), 5);
+    assert_eq!(at_depth(&app, 6, cx), 0);
+    let folder = find_row(&app, "Columns", cx);
+    app.update(cx, |this, cx| this.handle_navigator_disclosure(&folder, cx));
+    cx.run_until_parked();
+    assert_eq!(at_depth(&app, 6, cx), 8);
 
     app.update(cx, |this, _| {
         let update = crate::staged_sql::UpdateCellRequest {
@@ -350,4 +358,195 @@ fn single_click_on_a_table_selects_without_opening_or_toggling(cx: &mut TestAppC
         assert!(matches!(this.navigator.selected(), Some(NavigatorNodeId::Object { object, .. }) if object == "orders"));
     });
     assert!(!nav_row_state(&app, visual, "orders").1, "single click does not expand the table");
+}
+
+// The Postgres fixture's `orders` table: five folders at once, each filled from the table's
+// description when it is opened and not before; a leaf opens the Properties at its sub-tab.
+#[gpui::test]
+fn a_fixture_table_shows_its_five_folders_each_loaded_when_opened(cx: &mut TestAppContext) {
+    use crate::columns_panel::PropertiesTab;
+    use crate::navigator::TableFolder;
+    cx.update(|cx| {
+        gpui_component::init(cx);
+        theme::init(cx);
+    });
+    let scenario = UiScenario {
+        kind: crate::ui_scenario::ScenarioKind::ConnectionTree,
+        fixture: FixtureKind::Sample,
+        delay: Duration::ZERO,
+        timeout_delay: Duration::ZERO,
+    };
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        let app = cx.new(|cx| AppRoot::new_for_scenario(scenario, cx));
+        gpui_component::Root::new(app, window, cx)
+    });
+    let app = cx.cx.read(|cx| root.read(cx).view().clone().downcast::<AppRoot>().unwrap());
+    let row_of = |app: &gpui::Entity<AppRoot>, id: &NavigatorNodeId, cx: &mut TestAppContext| {
+        app.update(cx, |this, _| {
+            this.navigator.visible_rows().into_iter().find(|row| &row.id == id).expect("a visible row")
+        })
+    };
+    let open = |app: &gpui::Entity<AppRoot>, id: &NavigatorNodeId, cx: &mut TestAppContext| {
+        let row = row_of(app, id, cx);
+        app.update(cx, |this, cx| this.handle_navigator_disclosure(&row, cx));
+        cx.run_until_parked();
+    };
+    let key = crate::ui_fixture::POSTGRES_ID;
+    let table_id = NavigatorNodeId::Object {
+        connection: key.into(),
+        database: "warehouse".into(),
+        schema: "public".into(),
+        object: "orders".into(),
+    };
+    for id in [
+        NavigatorNodeId::Connection { connection: key.into() },
+        NavigatorNodeId::Database { connection: key.into(), database: "warehouse".into() },
+        NavigatorNodeId::Schema { connection: key.into(), database: "warehouse".into(), schema: "public".into() },
+        crate::navigator::object_group_id(key, "warehouse", "public", crate::navigator::ObjectGroup::Tables),
+        table_id.clone(),
+    ] {
+        open(&app, &id, cx);
+    }
+
+    // Opening the table listed its folders and asked for nothing.
+    let folders = app.update(cx, |this, _| this.navigator.loaded_children(&table_id).unwrap().to_vec());
+    let titles: Vec<String> = app.update(cx, |this, _| {
+        folders
+            .iter()
+            .map(|id| this.navigator.visible_rows().into_iter().find(|row| &row.id == id).unwrap().label)
+            .collect()
+    });
+    assert_eq!(titles, ["Columns", "Indexes", "Constraints", "Foreign Keys", "Triggers"]);
+    app.update(cx, |this, _| {
+        for folder in &folders {
+            assert!(this.navigator.load_state(folder).is_none(), "{folder:?} is not loaded yet");
+        }
+    });
+
+    let expected: [(TableFolder, &[&str]); 4] = [
+        (TableFolder::Indexes, &["orders_pkey", "orders_name_key", "orders_payload_idx"]),
+        (TableFolder::Constraints, &["orders_pkey", "orders_name_key", "orders_score_check"]),
+        (TableFolder::ForeignKeys, &["orders_customer_fk", "orders_region_fk"]),
+        (TableFolder::Triggers, &["orders_audit", "orders_touch"]),
+    ];
+    for (folder, names) in expected {
+        let id = table_id.table_folder(folder).unwrap();
+        open(&app, &id, cx);
+        let (labels, depths) = app.update(cx, |this, _| {
+            let rows = this.navigator.visible_rows();
+            let at = rows.iter().position(|row| row.id == id).unwrap();
+            let leaves: Vec<_> = rows[at + 1..].iter().take_while(|row| row.depth > rows[at].depth).collect();
+            (
+                leaves.iter().map(|row| row.label.clone()).collect::<Vec<_>>(),
+                leaves.iter().map(|row| row.depth - rows[at].depth).collect::<Vec<_>>(),
+            )
+        });
+        assert_eq!(labels, names, "{folder:?}");
+        assert!(depths.iter().all(|depth| *depth == 1));
+    }
+    app.update(cx, |this, _| {
+        let detail_of = |folder: TableFolder, index: usize| {
+            let id = table_id.table_folder(folder).unwrap();
+            let child = this.navigator.loaded_children(&id).unwrap()[index].clone();
+            this.navigator.table_item(&child).unwrap().detail.clone()
+        };
+        assert_eq!(detail_of(TableFolder::Indexes, 1), "(name) \u{00B7} unique");
+        assert_eq!(detail_of(TableFolder::Constraints, 2), "Check (score)");
+        assert_eq!(detail_of(TableFolder::ForeignKeys, 1), "\u{2192} public.regions(id, country)");
+        assert_eq!(detail_of(TableFolder::Triggers, 1), "BEFORE UPDATE \u{00B7} disabled");
+    });
+
+    // A leaf: its bare name to copy, its definition, and Open shows the matching Properties sub-tab.
+    let fk = app.update(cx, |this, _| {
+        this.navigator.loaded_children(&table_id.table_folder(TableFolder::ForeignKeys).unwrap()).unwrap()[0].clone()
+    });
+    app.update(cx, |this, _| {
+        assert_eq!(this.navigator_name_text(&fk, crate::app::sidebar_names::NameStyle::Plain), Ok(Some("orders_customer_fk".into())));
+        assert!(this.navigator.supports_action(&fk, true, crate::navigator::NavigatorAction::Open));
+    });
+    let row = row_of(&app, &fk, cx);
+    app.update(cx, |this, cx| this.handle_navigator_open(&row, cx));
+    cx.run_until_parked();
+    app.update(cx, |this, _| {
+        let tab = this.workspace.active_tab().expect("the table opened").id;
+        let panel = &this.workspace.runtime(tab).unwrap().columns_panel;
+        assert_eq!(panel.properties_tab, PropertiesTab::ForeignKeys);
+        assert_eq!(panel.presentation, crate::columns_panel::Presentation::Columns);
+    });
+    let trigger = app.update(cx, |this, _| {
+        this.navigator.loaded_children(&table_id.table_folder(TableFolder::Triggers).unwrap()).unwrap()[0].clone()
+    });
+    app.update(cx, |this, _| {
+        let item = this.navigator.table_item(&trigger).unwrap();
+        assert!(item.definition.as_deref().is_some_and(|text| text.starts_with("CREATE TRIGGER orders_audit")));
+    });
+}
+
+// An index leaf's name has priority over its right-edge detail: in a narrow sidebar the detail
+// narrows (and may vanish) while the name keeps its width; in a wide one both are shown whole.
+// Returns the widths of the name, the detail and the row of `orders_payload_idx` in a sidebar
+// that is `sidebar_width` wide from its first frame (the resizable panel keeps its size after).
+fn index_row_widths(cx: &mut TestAppContext, sidebar_width: f32) -> (f32, f32, f32) {
+    cx.update(|app| {
+        gpui_component::init(app);
+        theme::init(app);
+    });
+    let scenario = UiScenario {
+        kind: crate::ui_scenario::ScenarioKind::ConnectionTree,
+        fixture: FixtureKind::Sample,
+        delay: Duration::ZERO,
+        timeout_delay: Duration::ZERO,
+    };
+    let (root, visual) = cx.add_window_view(|window, cx| {
+        let app = cx.new(|cx| {
+            let mut app = AppRoot::new_for_scenario(scenario, cx);
+            app.shell.sidebar_width = sidebar_width;
+            app
+        });
+        gpui_component::Root::new(app, window, cx)
+    });
+    let app = visual.cx.read(|cx| root.read(cx).view().clone().downcast::<AppRoot>().unwrap());
+    visual.simulate_resize(gpui::size(gpui::px(1400.0), gpui::px(850.0)));
+    visual.update(|window, _| window.refresh());
+    visual.run_until_parked();
+    for label in ["Postgres fixture", "warehouse", "public", "Tables", "orders", "Indexes"] {
+        let row = app.update(visual, |this, _| {
+            this.navigator.visible_rows().into_iter().find(|row| row.label == label).unwrap()
+        });
+        app.update(visual, |this, cx| this.handle_navigator_disclosure(&row, cx));
+        visual.run_until_parked();
+    }
+    settle(visual);
+    let index = app.read_with(visual, |this, _| {
+        this.navigator.visible_rows().iter().position(|row| row.label == "orders_payload_idx").unwrap()
+    });
+    let width_of = |visual: &mut gpui::VisualTestContext, kind: &str| {
+        let selector: &'static str = Box::leak(format!("sidebar-{kind}-{index}").into_boxed_str());
+        f32::from(visual.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is drawn")).size.width)
+    };
+    (width_of(visual, "label"), width_of(visual, "detail"), width_of(visual, "row"))
+}
+
+#[gpui::test]
+fn an_index_row_keeps_its_name_when_the_sidebar_is_narrow(cx: &mut TestAppContext) {
+    // Too narrow for the name beside its detail: the detail narrows, the name keeps its width.
+    let (label, detail, _row) = index_row_widths(cx, 430.0);
+    assert!(label >= 130.0, "the name (18 characters) keeps its full width: {label}");
+    assert!(label > detail, "the name outweighs the detail: {label} vs {detail}");
+    assert!(detail > 0.0 && detail < 70.0, "the detail gave way but stays: {detail}");
+}
+
+#[gpui::test]
+fn an_index_row_gives_its_whole_width_to_the_name_in_the_default_sidebar(cx: &mut TestAppContext) {
+    // Not even the name fits: it takes everything, the detail is gone.
+    let (label, detail, _row) = index_row_widths(cx, 250.0);
+    assert!(label >= 40.0, "the name has the room: {label}");
+    assert!(detail < 1.0, "the detail yields everything: {detail}");
+}
+
+#[gpui::test]
+fn an_index_row_shows_its_detail_when_the_sidebar_is_wide(cx: &mut TestAppContext) {
+    let (label, detail, _row) = index_row_widths(cx, 700.0);
+    assert!(label >= 130.0, "the name is whole: {label}");
+    assert!(detail > 40.0, "the detail is shown: {detail}");
 }

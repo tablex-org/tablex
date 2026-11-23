@@ -1435,3 +1435,176 @@ fn ephemeral_mongo_filter_hides_server_database_without_deleting_cached_node(
         handle.shutdown().unwrap();
     });
 }
+
+// Create Database on a connection menu: offered for every kind that has databases to create,
+// connected or not (choosing it connects first); never for SQLite or Redis; greyed out only when a
+// connected driver cannot, with the reason as its tooltip.
+
+fn cd_row_of(app: &gpui::Entity<AppRoot>, visual: &mut gpui::VisualTestContext, id: &str) -> usize {
+    app.read_with(visual, |this, _| this.navigator.visible_index(&NavigatorNodeId::Connection { connection: id.into() })).expect("the connection row")
+}
+
+#[gpui::test]
+fn create_database_is_offered_on_a_disconnected_connection_and_connects_before_opening_its_dialog(cx: &mut TestAppContext) {
+    cx.dispatcher.allow_parking();
+    let (app, visual) = sidebar_test_app(cx);
+    visual.update(|_, cx| cx.set_reduce_motion(true));
+    visual.simulate_resize(gpui::size(gpui::px(1280.0), gpui::px(900.0)));
+    let id = crate::ui_fixture::POSTGRES_ID;
+    app.update(visual, |this, _| {
+        this.seed_connection_tree_scenario();
+        this.navigator.collapse_all();
+        assert!(!this.sessions.is_connected(id), "the fixture starts disconnected");
+        assert_eq!(this.create_database_entry(id), super::connection_menu::CreateDatabaseEntry::Ready);
+    });
+    settle(visual);
+    let index = cd_row_of(&app, visual, id);
+    right_click_row(visual, index);
+    assert!(visual.debug_bounds("connection-menu-create-database").is_some(), "the entry is in the menu of a disconnected connection");
+    click_debug_button(visual, "connection-menu-create-database");
+    let waiting = app.clone();
+    wait_until(visual, "the connect and the dialog", |visual| visual.debug_bounds("object-name-input").is_some() && waiting.read_with(visual, |this, _| this.sessions.is_connected(id)));
+    app.read_with(visual, |this, _| {
+        assert!(this.sessions.is_connected(id), "it connected first");
+        assert!(!this.navigator_ui.create_database_after_connect.contains(id), "the wish was consumed");
+    });
+    visual.simulate_keystrokes("escape");
+    settle(visual);
+    app.read_with(visual, |this, _| assert!(this.object_action.is_none(), "cancel sends nothing"));
+}
+
+#[gpui::test]
+fn a_cancelled_connect_opens_no_create_database_dialog_and_leaves_no_wish_behind(cx: &mut TestAppContext) {
+    // The fixture connect takes a minute here: the connection stays `Connecting`.
+    let (app, visual) = ns_app(cx);
+    visual.update(|_, cx| cx.set_reduce_motion(true));
+    let id = crate::ui_fixture::POSTGRES_ID;
+    app.update(visual, |this, _| this.seed_connection_tree_scenario());
+    settle(visual);
+    visual.update(|window, cx| app.update(cx, |this, cx| this.request_create_database(id, window, cx)));
+    settle(visual);
+    app.update(visual, |this, cx| {
+        assert!(matches!(this.sessions.status(id), ConnectionStatus::Connecting), "the connect is under way");
+        assert!(this.navigator_ui.create_database_after_connect.contains(id), "the dialog waits for it");
+        // (`cancel_pending_connect` is a no-op in a scenario; it releases the session like this.)
+        this.release_dead_session(id, cx);
+        assert!(!this.navigator_ui.create_database_after_connect.contains(id), "a cancelled connect drops the wish");
+    });
+    settle(visual);
+    assert!(visual.debug_bounds("object-name-input").is_none());
+}
+
+#[gpui::test]
+fn the_entry_follows_the_kind_the_connection_state_and_the_cached_capabilities(cx: &mut TestAppContext) {
+    use super::connection_menu::CreateDatabaseEntry::{Hidden, Ready, Unavailable};
+    let (app, visual) = sidebar_test_app(cx);
+    let id = crate::ui_fixture::POSTGRES_ID;
+    app.update(visual, |this, _| {
+        this.seed_connection_tree_scenario();
+        // Static: PostgreSQL, MySQL, MariaDB, ClickHouse and MongoDB create databases; SQLite and Redis do not.
+        for (kind, expected) in [
+            (ConnectionKind::Postgres, Ready),
+            (ConnectionKind::Mysql, Ready),
+            (ConnectionKind::Mariadb, Ready),
+            (ConnectionKind::Clickhouse, Ready),
+            (ConnectionKind::Mongodb, Ready),
+            (ConnectionKind::Sqlite, Hidden),
+            (ConnectionKind::Redis, Hidden),
+        ] {
+            this.saved_connections.iter_mut().find(|saved| saved.matches_id(id)).unwrap().kind = kind;
+            assert_eq!(this.create_database_entry(id), expected, "{kind:?} while disconnected");
+        }
+        this.saved_connections.iter_mut().find(|saved| saved.matches_id(id)).unwrap().kind = ConnectionKind::Postgres;
+        // Connected with the capabilities not known yet: still offered (the kind supports it).
+        let epoch = this.sessions.begin_connect(id).unwrap();
+        this.sessions.finish_connect(id, epoch, Ok(()));
+        assert!(!this.driver_runtime.capabilities.contains_key(id));
+        assert_eq!(this.create_database_entry(id), Ready);
+        assert!(this.can_create_database(id), "and the dialog may open");
+        // Connected, the driver advertises features and `database.create` is not among them: greyed out, with a reason.
+        let capabilities = serde_json::from_value(serde_json::json!({
+            "abi_version": 2, "driver": "postgresql", "display_name": "PostgreSQL", "uri_schemes": ["postgres"],
+            "features": [], "editors": [], "navigator_kinds": [], "single_connection_pool": false,
+        }))
+        .expect("capabilities parse");
+        this.driver_runtime.capabilities.insert(id.into(), std::sync::Arc::new(capabilities));
+        assert!(matches!(this.create_database_entry(id), Unavailable(reason) if !reason.contains("(unavailable)") && !reason.is_empty()));
+        assert!(!this.can_create_database(id));
+        fake_create_database_capability(this, id);
+        assert_eq!(this.create_database_entry(id), Ready);
+    });
+}
+
+#[gpui::test]
+fn the_menu_of_a_sqlite_connection_has_no_create_database_and_a_greyed_one_keeps_its_label(cx: &mut TestAppContext) {
+    cx.dispatcher.allow_parking();
+    let (app, visual) = sidebar_test_app(cx);
+    visual.simulate_resize(gpui::size(gpui::px(1280.0), gpui::px(900.0)));
+    app.update(visual, |this, _| {
+        this.seed_connection_tree_scenario();
+        this.navigator.collapse_all();
+    });
+    settle(visual);
+    let sqlite = crate::ui_fixture::SQLITE_ID;
+    let index = cd_row_of(&app, visual, sqlite);
+    right_click_row(visual, index);
+    assert!(visual.debug_bounds("connection-menu-create-database").is_none(), "SQLite has no database to create");
+    visual.simulate_keystrokes("escape");
+    settle(visual);
+
+    // A connected PostgreSQL driver that cannot: the entry is still there, labelled "Create Database".
+    let postgres = crate::ui_fixture::POSTGRES_ID;
+    app.update(visual, |this, _| {
+        let epoch = this.sessions.begin_connect(postgres).unwrap();
+        this.sessions.finish_connect(postgres, epoch, Ok(()));
+        let capabilities = serde_json::from_value(serde_json::json!({
+            "abi_version": 2, "driver": "postgresql", "display_name": "PostgreSQL", "uri_schemes": ["postgres"],
+            "features": [], "editors": [], "navigator_kinds": [], "single_connection_pool": false,
+        }))
+        .expect("capabilities parse");
+        this.driver_runtime.capabilities.insert(postgres.into(), std::sync::Arc::new(capabilities));
+    });
+    settle(visual);
+    let index = cd_row_of(&app, visual, postgres);
+    right_click_row(visual, index);
+    assert!(visual.debug_bounds("connection-menu-create-database").is_some(), "greyed out, not hidden");
+    assert_eq!(t!("menu.create_database"), "Create Database");
+}
+
+#[gpui::test]
+fn the_sidebar_literals_that_moved_to_the_locale_files_render_in_vietnamese(cx: &mut TestAppContext) {
+    let (app, visual) = sidebar_test_app(cx);
+    crate::i18n::set(crate::i18n::Locale::Vi);
+    for (key, expected) in [
+        ("sidebar.import_dbx", "Nhập cấu hình DBX"),
+        ("sidebar.import_navicat", "Nhập Navicat NCX"),
+        ("sidebar.import_dbeaver", "Nhập từ DBeaver"),
+        ("sidebar.import_datagrip", "Nhập từ DataGrip"),
+        ("sidebar.ask_assistant_about_table", "Hỏi trợ lý về bảng này"),
+        ("sidebar.copy_qualified_name", "Sao chép tên đầy đủ"),
+        ("menu.copy_connection_url", "URL kết nối"),
+        ("menu.copy_host_port", "Máy chủ:Cổng"),
+        ("menu.create_database", "Tạo cơ sở dữ liệu"),
+        ("sidebar.regex_tip", "Khớp tên trên thanh bên bằng biểu thức chính quy."),
+    ] {
+        assert_eq!(crate::i18n::lookup(key), expected, "{key}");
+    }
+    assert_eq!(t!("sidebar.drag_move", label = "t"), "Di chuyển t");
+    assert_eq!(t!("sidebar.group_selected_title", count = 3), "Gom nhóm 3 kết nối đã chọn");
+    assert_eq!(t!("sidebar.delete_selected_connections", count = 2), "Xoá 2 kết nối đã chọn…");
+    assert_eq!(t!("menu.error_detail", error = "boom"), "Lỗi: boom");
+    // The locate errors, as the sidebar raises them, and the Create Database notice, in the running language.
+    app.update(visual, |this, cx| {
+        this.workspace.open_query_tab("Query");
+        this.locate_active_sidebar_tab(cx);
+        assert_eq!(this.sidebar.locate_error.as_deref(), Some("Tab đang mở không có kết nối đã lưu"));
+        this.sidebar.locate_error = None;
+        let id = crate::ui_fixture::SQLITE_ID;
+        this.sidebar.notice = None;
+        assert!(!this.can_create_database(id));
+        assert_eq!(this.create_database_entry(id), super::connection_menu::CreateDatabaseEntry::Hidden);
+    });
+    // The regex tip says what the search matches: names only (en and vi).
+    crate::i18n::set(crate::i18n::Locale::En);
+    assert_eq!(t!("sidebar.regex_tip"), "Match sidebar names with regular expressions.");
+}

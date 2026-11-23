@@ -64,6 +64,25 @@ pub enum NavigatorNodeId {
         object: String,
         column: String,
     },
+    /// A folder under a table or view (Columns, Indexes, ...): lazily loaded when opened.
+    TableFolder {
+        connection: String,
+        database: String,
+        schema: String,
+        object: String,
+        folder: TableFolder,
+    },
+    /// An index, constraint, foreign key or trigger of a table. `item` is unique within its
+    /// folder (the item's name, suffixed when a driver lists a name twice); what the row shows
+    /// beside the name and its definition are kept beside the tree ([`NavigatorState::table_item`]).
+    TableItem {
+        connection: String,
+        database: String,
+        schema: String,
+        object: String,
+        folder: TableFolder,
+        item: String,
+    },
     Provider {
         connection: String,
         node: String,
@@ -167,6 +186,53 @@ impl ObjectGroup {
     }
 }
 
+/// The folders under a table or view. A folder is always shown where
+/// its dialect has the kind (see [`Self::for_kind`]) and, like an [`ObjectGroup`], expands to
+/// nothing when it is empty. Everything but Columns is the driver's `describe_object` answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TableFolder {
+    Columns,
+    Indexes,
+    /// Primary key, unique and check constraints (SQLite: primary key and unique).
+    Constraints,
+    ForeignKeys,
+    Triggers,
+}
+
+impl TableFolder {
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Columns => "Columns",
+            Self::Indexes => "Indexes",
+            Self::Constraints => "Constraints",
+            Self::ForeignKeys => "Foreign Keys",
+            Self::Triggers => "Triggers",
+        }
+    }
+
+    /// The folders a table (`view`: a view, a materialized view or a sequence, which have
+    /// columns only) shows for a database kind, in order. Kinds without them (MongoDB, Redis)
+    /// have no SQL tables: nothing.
+    pub fn for_kind(kind: Option<ConnectionKind>, view: bool) -> &'static [TableFolder] {
+        use TableFolder::*;
+        match kind {
+            Some(
+                ConnectionKind::Postgres | ConnectionKind::Mysql | ConnectionKind::Mariadb | ConnectionKind::Sqlite,
+            ) if !view => &[Columns, Indexes, Constraints, ForeignKeys, Triggers],
+            // Data-skipping indexes; no foreign keys, constraints or triggers to list.
+            Some(ConnectionKind::Clickhouse) if !view => &[Columns, Indexes],
+            Some(
+                ConnectionKind::Postgres
+                | ConnectionKind::Mysql
+                | ConnectionKind::Mariadb
+                | ConnectionKind::Sqlite
+                | ConnectionKind::Clickhouse,
+            ) => &[Columns],
+            _ => &[],
+        }
+    }
+}
+
 /// What a lazy node is waiting for. Only `Loading` blocks re-dispatch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NodeLoadState {
@@ -210,6 +276,14 @@ pub enum LoadRequest {
         schema: String,
         object: String,
     },
+    /// The Indexes, Constraints, Foreign Keys or Triggers folder of a table (never Columns).
+    TableFolder {
+        connection: String,
+        database: String,
+        schema: String,
+        object: String,
+        folder: TableFolder,
+    },
     Provider {
         connection: String,
         parent: Option<String>,
@@ -222,6 +296,8 @@ pub enum LoadRequest {
 pub const PROVIDER_PAGE_SIZE: u64 = 200;
 /// Per-call cap of a server-side filtered object listing.
 pub const REMOTE_FILTER_LIMIT: usize = 500;
+/// Databases per connection a remote search looks into (the rest are counted, not searched).
+pub const SEARCH_DATABASE_LIMIT: usize = 50;
 const LOAD_MORE_PREFIX: &str = "__tablex_load_more__:";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -290,6 +366,11 @@ pub struct NavigatorState {
     /// The object kinds each connected driver advertises (`navigator_kinds`): a schema shows
     /// only the groups its driver can list. A connection without an entry shows its dialect's.
     driver_kinds: HashMap<String, HashSet<String>>,
+    /// Connections whose driver cannot describe a table (no `metadata.table_properties`): their
+    /// tables show the Columns folder only. A connection without an entry shows every folder.
+    no_table_describe: HashSet<String>,
+    /// What each index, constraint, foreign key and trigger row shows and offers.
+    table_items: HashMap<NavigatorNodeId, TableItemInfo>,
     provider_nodes: HashMap<NavigatorNodeId, ProviderNode>,
     /// Connections that list only the database their address names (connection id -> database).
     only_databases: HashMap<String, String>,
@@ -308,6 +389,11 @@ pub struct NavigatorState {
     pending_filters: HashMap<NavigatorNodeId, String>,
     /// Filtered groups whose result hit the per-call limit.
     truncated_groups: HashSet<NavigatorNodeId>,
+    /// Remote search: databases of each connection it left out because of
+    /// [`SEARCH_DATABASE_LIMIT`].
+    unsearched_databases: HashMap<String, usize>,
+    /// Databases per connection a remote search looks into; `0` = [`SEARCH_DATABASE_LIMIT`].
+    search_database_limit: usize,
     /// Nodes started again by [`Self::reload_children`], with the load generation of that reload:
     /// when that load's answer lands, the rows it no longer lists go. (Any other load - a remote
     /// search narrowing a group included, even one that took the reload's place - keeps the state
@@ -348,6 +434,13 @@ impl KindOfObject {
     }
 }
 
+/// What a [`NavigatorNodeId::TableItem`] row says beside its name, and the driver's definition of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableItemInfo {
+    pub detail: String,
+    pub definition: Option<String>,
+}
+
 pub struct ExpansionOutcome {
     /// The load the expansion requires, if the node was not already loading.
     pub request: Option<LoadRequest>,
@@ -364,6 +457,8 @@ fn node_connection(id: &NavigatorNodeId) -> Option<&str> {
         | NavigatorNodeId::Object { connection, .. }
         | NavigatorNodeId::SchemaObject { connection, .. }
         | NavigatorNodeId::Column { connection, .. }
+        | NavigatorNodeId::TableFolder { connection, .. }
+        | NavigatorNodeId::TableItem { connection, .. }
         | NavigatorNodeId::Provider { connection, .. } => Some(connection),
     }
 }
@@ -508,7 +603,9 @@ impl NavigatorState {
         self.labels.retain(|id, _| !under(id));
         self.object_kinds.retain(|id, _| !under(id));
         self.schema_objects.retain(|id, _| !under(id));
+        self.table_items.retain(|id, _| !under(id));
         self.driver_kinds.remove(connection);
+        self.no_table_describe.remove(connection);
         self.provider_nodes.retain(|id, _| !under(id));
         self.next_cursors.retain(|id, _| !under(id));
         self.load_generations.retain(|id, _| !under(id));
@@ -574,6 +671,49 @@ impl NavigatorState {
                 self.driver_kinds.remove(connection);
             }
         }
+    }
+
+    /// Records whether the driver of `connection` can describe a table (the source of the Indexes,
+    /// Constraints, Foreign Keys and Triggers folders). Tables opened afterwards show those
+    /// folders only when it can.
+    pub fn set_table_describe(&mut self, connection: &str, describes: bool) {
+        if describes {
+            self.no_table_describe.remove(connection);
+        } else {
+            self.no_table_describe.insert(connection.to_string());
+        }
+    }
+
+    /// The folders a table of `connection` shows now.
+    fn table_folders(&self, connection: &str, object: &NavigatorNodeId) -> &'static [TableFolder] {
+        let kind = self.connection(connection).map(|saved| saved.kind);
+        let view = self
+            .object_kinds
+            .get(object)
+            .is_some_and(|kind| *kind != KindOfObject::Table);
+        let folders = TableFolder::for_kind(kind, view);
+        if self.no_table_describe.contains(connection) {
+            &folders[..folders.len().min(1)]
+        } else {
+            folders
+        }
+    }
+
+    /// A table lists its folders at once (no load); each folder loads when it is opened.
+    fn open_object(&mut self, id: &NavigatorNodeId) {
+        let NavigatorNodeId::Object { connection, .. } = id else {
+            return;
+        };
+        let folders: Vec<NavigatorNodeId> = self
+            .table_folders(connection, id)
+            .iter()
+            .filter_map(|folder| id.table_folder(*folder))
+            .collect();
+        for (folder, node) in self.table_folders(connection, id).iter().zip(&folders) {
+            self.labels.insert(node.clone(), folder.title().to_string());
+        }
+        self.children.insert(id.clone(), Some(folders));
+        self.load_states.insert(id.clone(), NodeLoadState::Loaded);
     }
 
     /// Whether a schema of `connection` shows `group`: tables and views always, the rest when
@@ -740,24 +880,15 @@ impl NavigatorState {
         );
         self.expanded.insert(id.clone());
 
-        if let NavigatorNodeId::Schema {
-            connection,
-            database,
-            schema,
-        } = id
-        {
-            let kind = self.connection(connection).map(|saved| saved.kind);
-            let groups: Vec<LoadedChild> = ObjectGroup::for_kind(kind)
-                .iter()
-                .filter(|group| self.driver_lists(connection, **group))
-                .map(|group| object_group_child(connection, database, schema, *group))
-                .collect();
-            let child_ids = groups.iter().map(|child| child.id.clone()).collect();
-            for child in groups {
-                self.labels.insert(child.id.clone(), child.label);
-            }
-            self.children.insert(id.clone(), Some(child_ids));
-            self.load_states.insert(id.clone(), NodeLoadState::Loaded);
+        if matches!(id, NavigatorNodeId::Schema { .. }) {
+            self.open_schema(id);
+            self.rebuild_visible();
+            return ExpansionOutcome {
+                request: None,
+            };
+        }
+        if matches!(id, NavigatorNodeId::Object { .. }) {
+            self.open_object(id);
             self.rebuild_visible();
             return ExpansionOutcome {
                 request: None,
@@ -780,6 +911,30 @@ impl NavigatorState {
         ExpansionOutcome {
             request,
         }
+    }
+
+    /// A schema lists the object groups its driver can list, at once (no load).
+    fn open_schema(&mut self, id: &NavigatorNodeId) {
+        let NavigatorNodeId::Schema {
+            connection,
+            database,
+            schema,
+        } = id
+        else {
+            return;
+        };
+        let kind = self.connection(connection).map(|saved| saved.kind);
+        let groups: Vec<LoadedChild> = ObjectGroup::for_kind(kind)
+            .iter()
+            .filter(|group| self.driver_lists(connection, **group))
+            .map(|group| object_group_child(connection, database, schema, *group))
+            .collect();
+        let child_ids = groups.iter().map(|child| child.id.clone()).collect();
+        for child in groups {
+            self.labels.insert(child.id.clone(), child.label);
+        }
+        self.children.insert(id.clone(), Some(child_ids));
+        self.load_states.insert(id.clone(), NodeLoadState::Loaded);
     }
 
     /// Applies a load result. `generation` guards against applying a result
@@ -841,6 +996,9 @@ impl NavigatorState {
                     self.labels.insert(child.id.clone(), child.label);
                     if let Some(kind) = child.object_kind {
                         self.object_kinds.insert(child.id.clone(), kind);
+                    }
+                    if let Some(item) = child.item {
+                        self.table_items.insert(child.id.clone(), item);
                     }
                     if let Some(reference) = child.schema_object {
                         self.schema_objects.insert(child.id, reference);
@@ -1160,6 +1318,16 @@ impl NavigatorState {
         self.object_kinds.get(id).copied()
     }
 
+    /// What an index, constraint, foreign key or trigger row shows beside its name.
+    pub fn table_item(&self, id: &NavigatorNodeId) -> Option<&TableItemInfo> {
+        self.table_items.get(id)
+    }
+
+    /// The name a loaded non-connection row shows.
+    pub fn label(&self, id: &NavigatorNodeId) -> Option<&str> {
+        self.labels.get(id).map(String::as_str)
+    }
+
     /// The driver's reference to a loaded function, sequence, trigger, ... row.
     pub fn schema_object(&self, id: &NavigatorNodeId) -> Option<&SchemaObjectRef> {
         self.schema_objects.get(id)
@@ -1294,12 +1462,21 @@ impl NavigatorState {
             .count()
     }
 
-    /// Remote search planning:
-    /// under every EXPANDED connection/database/schema of the `connected`
-    /// connections, each object group (Tables/Views) is reloaded with the
-    /// server-side name `filter`, whether or not the group itself is
-    /// expanded. Collapsed containers are left alone. Groups already loaded
-    /// with this filter, loading, or failed are not requested again.
+    /// Remote search planning, for the `connected` connections only (a
+    /// disconnected one is never connected for a search):
+    /// - SQL: the levels down to each object group (databases, schemas) that
+    ///   are not loaded yet are loaded, expanded or not, and every table-like
+    ///   group is (re)loaded with the server-side name `filter`;
+    /// - MongoDB: the database list, then the collection list of each database
+    ///   (the driver has no name filter, the tree matches them locally).
+    ///
+    /// At most [`SEARCH_DATABASE_LIMIT`] databases per connection are looked
+    /// into ([`Self::unsearched_database_count`] counts the others); hidden
+    /// connections and databases and those the user may not open are left
+    /// alone. Nothing is expanded: levels loaded for the search stay cached
+    /// and collapsed, and the search reveals the matches below them. Groups
+    /// already loaded with this filter, loading, or failed are not requested
+    /// again.
     pub fn filter_step(
         &mut self,
         connected: &HashSet<String>,
@@ -1307,59 +1484,182 @@ impl NavigatorState {
         budget: usize,
     ) -> FilterStep {
         let mut step = FilterStep::default();
-        let mut queue: std::collections::VecDeque<NavigatorNodeId> = self
-            .connections
-            .iter()
-            .map(|connection| connection.id.to_string())
-            .filter(|id| connected.contains(id) && !self.provider_connections.contains(id))
-            .map(|connection| NavigatorNodeId::Connection { connection })
-            .collect();
-        while let Some(id) = queue.pop_front() {
-            if !self.expanded.contains(&id) {
-                continue;
-            }
-            let Some(Some(children)) = self.children.get(&id).cloned() else {
-                continue;
-            };
-            for child in children {
-                let NavigatorNodeId::ObjectGroup { group, .. } = &child else {
-                    queue.push_back(child);
-                    continue;
-                };
-                // Functions, triggers and the rest are searched among what is loaded,
-                // never loaded for the search: a collapsed group costs no query.
-                let kind = self.connection(node_connection(&child).unwrap_or_default()).map(|saved| saved.kind);
-                if !group.has_data(kind) {
-                    continue;
-                }
-                match self.load_states.get(&child) {
-                    Some(NodeLoadState::Loading) => {
-                        step.in_flight += 1;
-                        continue;
-                    }
-                    Some(NodeLoadState::Failed(_)) => continue,
-                    Some(NodeLoadState::Loaded)
-                        if self.search_filters.get(&child).map(String::as_str) == Some(filter) =>
-                    {
-                        continue;
-                    }
-                    _ => {}
-                }
-                if step.started() >= budget {
-                    step.remaining += 1;
-                    continue;
-                }
-                if let Some(request) = child.load_request() {
-                    self.begin_group_load(&child, Some(filter));
-                    step.requests.push(request);
-                    step.in_flight += 1;
-                }
+        let before = self.generation;
+        self.unsearched_databases.clear();
+        if self.search.scope != SearchScope::Connections {
+            let targets: Vec<(String, ConnectionKind)> = self
+                .connections
+                .iter()
+                .map(|saved| (saved.id.to_string(), saved.kind))
+                .filter(|(id, kind)| {
+                    connected.contains(id)
+                        && if *kind == ConnectionKind::Mongodb {
+                            self.provider_connections.contains(id)
+                        } else {
+                            sql_driver::is_sql_kind(*kind)
+                        }
+                        && !self.connection(id).is_some_and(|saved| saved.disabled)
+                        && (self.search.show_hidden
+                            || !self.preferences.connections.iter().any(|item| item.id == *id && item.hidden))
+                })
+                .collect();
+            for (connection, kind) in targets {
+                self.search_connection(&connection, kind, filter, budget, &mut step);
             }
         }
-        if !step.requests.is_empty() {
+        if self.generation != before {
             self.rebuild_visible();
         }
         step
+    }
+
+    fn search_connection(
+        &mut self,
+        connection: &str,
+        kind: ConnectionKind,
+        filter: &str,
+        budget: usize,
+        step: &mut FilterStep,
+    ) {
+        let root = NavigatorNodeId::Connection { connection: connection.to_string() };
+        let Some(databases) = self.search_children(&root, budget, step) else {
+            return;
+        };
+        if self.search.scope == SearchScope::Databases {
+            return;
+        }
+        let limit = if self.search_database_limit == 0 {
+            SEARCH_DATABASE_LIMIT
+        } else {
+            self.search_database_limit
+        };
+        let mut searched = 0;
+        for database in databases {
+            if !self.visible_filter_allows(&database) || self.denied_databases.contains(&database) {
+                continue;
+            }
+            if searched >= limit {
+                *self.unsearched_databases.entry(connection.to_string()).or_default() += 1;
+                continue;
+            }
+            searched += 1;
+            if kind == ConnectionKind::Mongodb {
+                self.search_children(&database, budget, step);
+                continue;
+            }
+            let Some(schemas) = self.search_children(&database, budget, step) else {
+                continue;
+            };
+            for schema in schemas {
+                if !self.visible_filter_allows(&schema) {
+                    continue;
+                }
+                let Some(groups) = self.search_children(&schema, budget, step) else {
+                    continue;
+                };
+                for group in groups {
+                    self.search_group(&group, kind, filter, budget, step);
+                }
+            }
+        }
+    }
+
+    /// Reloads one object group with the server-side `filter`.
+    fn search_group(
+        &mut self,
+        group: &NavigatorNodeId,
+        kind: ConnectionKind,
+        filter: &str,
+        budget: usize,
+        step: &mut FilterStep,
+    ) {
+        let NavigatorNodeId::ObjectGroup { group: object_group, .. } = group else {
+            return;
+        };
+        // Functions, triggers and the rest are searched among what is loaded,
+        // never loaded for the search: a collapsed group costs no query.
+        if !object_group.has_data(Some(kind)) {
+            return;
+        }
+        match self.load_states.get(group) {
+            Some(NodeLoadState::Loading) => {
+                step.in_flight += 1;
+                return;
+            }
+            Some(NodeLoadState::Failed(_)) => return,
+            Some(NodeLoadState::Loaded)
+                if self.search_filters.get(group).map(String::as_str) == Some(filter) =>
+            {
+                return;
+            }
+            _ => {}
+        }
+        if step.started() >= budget {
+            step.remaining += 1;
+            return;
+        }
+        if let Some(request) = group.load_request() {
+            self.begin_group_load(group, Some(filter));
+            step.requests.push(request);
+            step.in_flight += 1;
+        }
+    }
+
+    /// The loaded children of `id` for a search. A node not loaded yet is
+    /// requested (within `budget`; a schema lists its groups at once) and has
+    /// none until the answer lands; a loading one is waited for, a failed one
+    /// is left alone.
+    fn search_children(
+        &mut self,
+        id: &NavigatorNodeId,
+        budget: usize,
+        step: &mut FilterStep,
+    ) -> Option<Vec<NavigatorNodeId>> {
+        match self.load_states.get(id) {
+            Some(NodeLoadState::Loaded) if !self.next_cursors.contains_key(id) => {
+                return self.children.get(id).cloned().flatten();
+            }
+            Some(NodeLoadState::Loaded) => {
+                // A provider listing that has more pages: a search needs all of it.
+                if step.started() >= budget {
+                    step.remaining += 1;
+                } else if let Some(request) = self.load_more(id) {
+                    step.requests.push(request);
+                    step.in_flight += 1;
+                }
+                return None;
+            }
+            Some(NodeLoadState::Loading) => {
+                step.in_flight += 1;
+                return None;
+            }
+            Some(NodeLoadState::Failed(_)) => return None,
+            None => {}
+        }
+        if matches!(id, NavigatorNodeId::Schema { .. }) {
+            self.open_schema(id);
+            self.generation += 1;
+            return self.children.get(id).cloned().flatten();
+        }
+        if step.started() >= budget {
+            step.remaining += 1;
+            return None;
+        }
+        if let Some(request) = self.begin_background_load(id) {
+            step.requests.push(request);
+            step.in_flight += 1;
+        }
+        None
+    }
+
+    /// Databases the last remote search left out (over the per-connection limit).
+    pub fn unsearched_database_count(&self) -> usize {
+        self.unsearched_databases.values().sum()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_search_database_limit(&mut self, limit: usize) {
+        self.search_database_limit = limit;
     }
 
     /// Undoes remote search once the query is cleared (or Local search is
@@ -1368,6 +1668,7 @@ impl NavigatorState {
     /// listing.
     pub fn restore_step(&mut self, budget: usize) -> FilterStep {
         let mut step = FilterStep::default();
+        self.unsearched_databases.clear();
         let mut groups: Vec<NavigatorNodeId> = self
             .search_filters
             .keys()
@@ -1465,6 +1766,7 @@ impl NavigatorState {
             self.labels.remove(&node);
             self.object_kinds.remove(&node);
             self.schema_objects.remove(&node);
+            self.table_items.remove(&node);
             self.provider_nodes.remove(&node);
             self.expanded.remove(&node);
             if self.selected.as_ref() == Some(&node) {
@@ -1497,6 +1799,7 @@ impl NavigatorState {
             self.labels.remove(&node);
             self.object_kinds.remove(&node);
             self.schema_objects.remove(&node);
+            self.table_items.remove(&node);
             self.provider_nodes.remove(&node);
             self.expanded.remove(&node);
             self.search_filters.remove(&node);
@@ -1540,6 +1843,7 @@ impl NavigatorState {
             self.labels.remove(&node);
             self.object_kinds.remove(&node);
             self.schema_objects.remove(&node);
+            self.table_items.remove(&node);
             self.provider_nodes.remove(&node);
             self.expanded.remove(&node);
             self.search_filters.remove(&node);
@@ -1644,6 +1948,8 @@ pub struct LoadedChild {
     pub schema_object: Option<SchemaObjectRef>,
     /// A database the connected user may not connect to (the driver said so).
     pub no_connect: bool,
+    /// An index, constraint, foreign key or trigger row's extras.
+    pub item: Option<TableItemInfo>,
 }
 
 /// Builds child ids from catalog data for each load type.
@@ -1658,6 +1964,7 @@ pub fn database_child(connection: &str, database: &str) -> LoadedChild {
         provider: None,
         schema_object: None,
         no_connect: false,
+        item: None,
     }
 }
 
@@ -1673,6 +1980,7 @@ pub fn schema_child(connection: &str, database: &str, schema: &str) -> LoadedChi
         provider: None,
         schema_object: None,
         no_connect: false,
+        item: None,
     }
 }
 
@@ -1689,6 +1997,7 @@ pub fn object_group_child(
         provider: None,
         schema_object: None,
         no_connect: false,
+        item: None,
     }
 }
 
@@ -1711,6 +2020,7 @@ pub fn object_child(
         provider: None,
         schema_object: None,
         no_connect: false,
+        item: None,
     }
 }
 
@@ -1733,6 +2043,7 @@ pub fn schema_object_child(
         provider: None,
         schema_object: Some(reference),
         no_connect: false,
+        item: None,
     }
 }
 
@@ -1772,7 +2083,37 @@ pub fn column_child(
         provider: None,
         schema_object: None,
         no_connect: false,
+        item: None,
     }
+}
+
+/// An index, constraint, foreign key or trigger row of the table folder `parent`. `item` is unique
+/// within the folder; `name` is what the row says.
+pub fn table_item_child(
+    parent: &NavigatorNodeId,
+    item: &str,
+    name: &str,
+    info: TableItemInfo,
+) -> Option<LoadedChild> {
+    let NavigatorNodeId::TableFolder { connection, database, schema, object, folder } = parent else {
+        return None;
+    };
+    Some(LoadedChild {
+        id: NavigatorNodeId::TableItem {
+            connection: connection.clone(),
+            database: database.clone(),
+            schema: schema.clone(),
+            object: object.clone(),
+            folder: *folder,
+            item: item.to_string(),
+        },
+        label: name.to_string(),
+        object_kind: None,
+        provider: None,
+        schema_object: None,
+        no_connect: false,
+        item: Some(info),
+    })
 }
 
 pub fn provider_child(connection: &str, node: engine_driver_api::NavigatorNode) -> LoadedChild {
@@ -1793,6 +2134,7 @@ pub fn provider_child(connection: &str, node: engine_driver_api::NavigatorNode) 
             actions: node.actions,
         }),
         no_connect: false,
+        item: None,
     }
 }
 
@@ -1814,8 +2156,24 @@ impl NavigatorNodeId {
     pub fn is_expandable(&self) -> bool {
         !matches!(
             self,
-            NavigatorNodeId::Column { .. } | NavigatorNodeId::SchemaObject { .. }
+            NavigatorNodeId::Column { .. }
+                | NavigatorNodeId::SchemaObject { .. }
+                | NavigatorNodeId::TableItem { .. }
         )
+    }
+
+    /// `folder` of the table or view this id names (`None` for any other node).
+    pub fn table_folder(&self, folder: TableFolder) -> Option<NavigatorNodeId> {
+        let NavigatorNodeId::Object { connection, database, schema, object } = self else {
+            return None;
+        };
+        Some(NavigatorNodeId::TableFolder {
+            connection: connection.clone(),
+            database: database.clone(),
+            schema: schema.clone(),
+            object: object.clone(),
+            folder,
+        })
     }
     fn load_request(&self) -> Option<LoadRequest> {
         match self {
@@ -1851,18 +2209,35 @@ impl NavigatorNodeId {
                 schema: schema.clone(),
                 group: *group,
             }),
-            NavigatorNodeId::Object {
+            NavigatorNodeId::TableFolder {
                 connection,
                 database,
                 schema,
                 object,
+                folder: TableFolder::Columns,
             } => Some(LoadRequest::Columns {
                 connection: connection.clone(),
                 database: database.clone(),
                 schema: schema.clone(),
                 object: object.clone(),
             }),
-            NavigatorNodeId::Column { .. }
+            NavigatorNodeId::TableFolder {
+                connection,
+                database,
+                schema,
+                object,
+                folder,
+            } => Some(LoadRequest::TableFolder {
+                connection: connection.clone(),
+                database: database.clone(),
+                schema: schema.clone(),
+                object: object.clone(),
+                folder: *folder,
+            }),
+            // A table lists its folders at once ([`NavigatorState::open_object`]).
+            NavigatorNodeId::Object { .. }
+            | NavigatorNodeId::Column { .. }
+            | NavigatorNodeId::TableItem { .. }
             | NavigatorNodeId::SchemaObject { .. }
             | NavigatorNodeId::Provider { .. } => None,
         }
@@ -1876,6 +2251,7 @@ impl LoadRequest {
             LoadRequest::Schemas { connection, .. } => connection.clone(),
             LoadRequest::Objects { connection, .. } => connection.clone(),
             LoadRequest::Columns { connection, .. } => connection.clone(),
+            LoadRequest::TableFolder { connection, .. } => connection.clone(),
             LoadRequest::Provider { connection, .. } => connection.clone(),
         }
     }
@@ -1908,11 +2284,25 @@ impl LoadRequest {
                 database,
                 schema,
                 object,
-            } => NavigatorNodeId::Object {
+            } => NavigatorNodeId::TableFolder {
                 connection: connection.clone(),
                 database: database.clone(),
                 schema: schema.clone(),
                 object: object.clone(),
+                folder: TableFolder::Columns,
+            },
+            LoadRequest::TableFolder {
+                connection,
+                database,
+                schema,
+                object,
+                folder,
+            } => NavigatorNodeId::TableFolder {
+                connection: connection.clone(),
+                database: database.clone(),
+                schema: schema.clone(),
+                object: object.clone(),
+                folder: *folder,
             },
             LoadRequest::Provider {
                 connection, parent, ..
@@ -1944,6 +2334,8 @@ fn default_label(id: &NavigatorNodeId) -> String {
             object.clone()
         }
         NavigatorNodeId::Column { column, .. } => column.clone(),
+        NavigatorNodeId::TableFolder { folder, .. } => folder.title().to_string(),
+        NavigatorNodeId::TableItem { item, .. } => item.clone(),
         NavigatorNodeId::Provider { node, .. } if node.starts_with(LOAD_MORE_PREFIX) => {
             "Load More".into()
         }
@@ -1981,6 +2373,15 @@ mod tests {
     }
 
     const CONN: &str = "11111111-1111-1111-1111-111111111111";
+
+    /// Opens a table and its Columns folder, answering the folder's load with `columns`.
+    fn open_columns(state: &mut NavigatorState, table: &NavigatorNodeId, columns: Vec<LoadedChild>) -> NavigatorNodeId {
+        state.toggle_expansion(table);
+        let folder = table.table_folder(TableFolder::Columns).expect("a table");
+        let request = state.toggle_expansion(&folder).request.expect("the folder loads");
+        state.apply_load(&request, state.generation(), Ok(columns));
+        folder
+    }
 
     #[test]
     fn search_reveals_loaded_descendant_path_without_dispatch_or_changing_expansion() {
@@ -2096,21 +2497,20 @@ mod tests {
         let orders = object_child(CONN, "app", "public", "orders", KindOfObject::Table);
         let customers = object_child(CONN, "app", "public", "customers", KindOfObject::Table);
         // `orders` is open with its columns.
-        let request = state.toggle_expansion(&orders.id).request.unwrap();
-        state.apply_load(&request, state.generation(), Ok(vec![column_child(CONN, "app", "public", "orders", "id")]));
-        assert!(state.has_loaded_children(&orders.id));
+        let orders_columns = open_columns(&mut state, &orders.id, vec![column_child(CONN, "app", "public", "orders", "id")]);
+        assert!(state.has_loaded_children(&orders_columns));
 
         // The search lists `customers` only: `orders` is hidden, not forgotten.
         let live = connected(&[CONN]);
         let step = state.filter_step(&live, "cust", 4);
         let request = step.requests.iter().find(|request| request.parent_id() == tables).unwrap();
         state.apply_load(request, state.load_generation(request).unwrap(), Ok(vec![customers.clone()]));
-        assert!(state.has_loaded_children(&orders.id), "the hidden table keeps its loaded columns");
+        assert!(state.has_loaded_children(&orders_columns), "the hidden table keeps its loaded columns");
         // Cleared: the group lists everything again and `orders` is still open with them.
         let restore = state.restore_step(4);
         let request = restore.requests.iter().find(|request| request.parent_id() == tables).unwrap();
         state.apply_load(request, state.load_generation(request).unwrap(), Ok(vec![orders.clone(), customers]));
-        assert!(state.has_loaded_children(&orders.id));
+        assert!(state.has_loaded_children(&orders_columns));
         let row = state.visible_rows().into_iter().find(|row| row.id == orders.id).unwrap();
         assert!(row.expanded, "and expanded");
     }
@@ -2122,8 +2522,7 @@ mod tests {
         let orders = object_child(CONN, "app", "public", "orders", KindOfObject::Table);
         let customers = object_child(CONN, "app", "public", "customers", KindOfObject::Table);
         for table in [&orders, &customers] {
-            let request = state.toggle_expansion(&table.id).request.unwrap();
-            state.apply_load(&request, state.generation(), Ok(vec![column_child(CONN, "app", "public", "x", "id")]));
+            open_columns(&mut state, &table.id, vec![column_child(CONN, "app", "public", "x", "id")]);
         }
         state.select(customers.id.clone());
         let request = state.reload_children(&tables).expect("a loaded group reloads");
@@ -2152,8 +2551,7 @@ mod tests {
         let (tables, _) = expanded_schema(&mut state);
         let orders = object_child(CONN, "app", "public", "orders", KindOfObject::Table);
         let customers = object_child(CONN, "app", "public", "customers", KindOfObject::Table);
-        let request = state.toggle_expansion(&orders.id).request.unwrap();
-        state.apply_load(&request, state.generation(), Ok(vec![column_child(CONN, "app", "public", "orders", "id")]));
+        let orders_columns = open_columns(&mut state, &orders.id, vec![column_child(CONN, "app", "public", "orders", "id")]);
 
         // A reload starts; before it answers, a remote search takes the group's load over.
         let reload = state.reload_children(&tables).unwrap();
@@ -2168,7 +2566,7 @@ mod tests {
         assert_ne!(search, reload_generation);
         state.apply_load(&reload, search, Ok(vec![customers.clone()]));
         assert_eq!(state.load_state(&tables), Some(&NodeLoadState::Loaded));
-        assert!(state.has_loaded_children(&orders.id), "the hidden table keeps its columns");
+        assert!(state.has_loaded_children(&orders_columns), "the hidden table keeps its columns");
         assert!(state.reloading.is_empty(), "the answer of the load that took over ends the reload");
         let restore = state.restore_step(4);
         let request = restore.requests.iter().find(|request| request.parent_id() == tables).unwrap();
@@ -2195,26 +2593,177 @@ mod tests {
     }
 
     #[test]
-    fn filter_step_leaves_collapsed_containers_and_other_connections_alone() {
+    fn filter_step_reaches_collapsed_containers_of_connected_connections_only() {
         let other = "22222222-2222-2222-2222-222222222222";
         let mut state = NavigatorState::new(vec![sqlite_conn(CONN, "One"), sqlite_conn(other, "Two")]);
         expanded_schema(&mut state);
-        // Collapse the schema: its groups are no longer search targets.
-        let schema = NavigatorNodeId::Schema {
-            connection: CONN.into(),
-            database: "app".into(),
-            schema: "public".into(),
-        };
-        state.toggle_expansion(&schema);
-        assert!(state.filter_step(&connected(&[CONN]), "x", 4).requests.is_empty());
-        state.toggle_expansion(&schema);
-        // Not connected -> untouched; connected but never expanded -> untouched.
-        assert!(state.filter_step(&connected(&[]), "x", 4).requests.is_empty());
-        assert!(state.filter_step(&connected(&[other]), "x", 4).finished());
-        // Budget caps started loads.
+        // Collapse the whole connection: its groups are still search targets.
+        let root = NavigatorNodeId::Connection { connection: CONN.into() };
+        state.toggle_expansion(&root);
+        // Not connected -> untouched, whether loaded or not.
+        assert!(state.filter_step(&connected(&[]), "x", 4).finished());
+        // `Two` is connected but never loaded: its database list is requested, nothing more.
+        let step = state.filter_step(&connected(&[other]), "x", 4);
+        assert!(matches!(step.requests.as_slice(), [LoadRequest::Databases { connection }] if connection == other));
+        assert!(state.visible_rows().iter().all(|row| !row.expanded), "nothing was expanded");
+        // `One`: the groups under the collapsed connection are reloaded with the filter.
         let step = state.filter_step(&connected(&[CONN]), "x", 1);
-        assert_eq!(step.requests.len(), 1);
+        assert_eq!(step.requests.len(), 1, "the budget caps started loads");
         assert_eq!(step.remaining, 1);
+        assert!(!state.visible_rows()[0].expanded);
+    }
+
+    #[test]
+    fn filter_step_loads_the_levels_above_the_groups_without_expanding_them() {
+        let mut state = NavigatorState::new(vec![sqlite_conn(CONN, "Workspace")]);
+        let live = connected(&[CONN]);
+        let step = state.filter_step(&live, "ord", 4);
+        assert!(matches!(step.requests.as_slice(), [LoadRequest::Databases { .. }]));
+        assert_eq!(state.filter_step(&live, "ord", 4).requests.len(), 0, "in flight: not asked again");
+        let request = &step.requests[0];
+        state.apply_load(request, state.load_generation(request).unwrap(), Ok(vec![database_child(CONN, "app")]));
+
+        let step = state.filter_step(&live, "ord", 4);
+        assert!(matches!(step.requests.as_slice(), [LoadRequest::Schemas { database, .. }] if database == "app"));
+        let request = &step.requests[0];
+        state.apply_load(request, state.load_generation(request).unwrap(), Ok(vec![schema_child(CONN, "app", "public")]));
+
+        // A schema lists its groups at once; both table-like groups load with the filter.
+        let step = state.filter_step(&live, "ord", 4);
+        assert_eq!(step.requests.len(), 2, "{step:?}");
+        for request in &step.requests {
+            assert_eq!(state.request_filter(request).as_deref(), Some("ord"));
+        }
+        // Everything stays collapsed: only the connection row is shown without a search.
+        assert_eq!(state.visible_rows().len(), 1);
+        assert!(!state.visible_rows()[0].expanded);
+        // The search reveals the loaded path to a match.
+        let tables = object_group_id(CONN, "app", "public", ObjectGroup::Tables);
+        let request = step.requests.iter().find(|request| request.parent_id() == tables).unwrap();
+        state.apply_load(
+            request,
+            state.load_generation(request).unwrap(),
+            Ok(vec![object_child(CONN, "app", "public", "orders", KindOfObject::Table)]),
+        );
+        let request = step.requests.iter().find(|request| request.parent_id() != tables).unwrap();
+        state.apply_load(request, state.load_generation(request).unwrap(), Ok(vec![]));
+        state
+            .set_search(SearchOptions { query: "ord".into(), ..Default::default() })
+            .unwrap();
+        let labels: Vec<_> = state.visible_rows().into_iter().map(|row| row.label).collect();
+        assert_eq!(labels, ["Workspace", "app", "public", "Tables", "orders"]);
+        // Cleared: the tree is as before, the filtered group is unloaded again.
+        state.set_search(SearchOptions::default()).unwrap();
+        assert_eq!(state.visible_rows().len(), 1);
+        state.restore_step(4);
+        assert!(!state.has_filtered_groups());
+    }
+
+    #[test]
+    fn filter_step_searches_a_limited_number_of_databases_and_counts_the_rest() {
+        let mut state = NavigatorState::new(vec![sqlite_conn(CONN, "Workspace")]);
+        let live = connected(&[CONN]);
+        let step = state.filter_step(&live, "ord", 100);
+        let request = &step.requests[0];
+        let names: Vec<String> = (0..SEARCH_DATABASE_LIMIT + 7).map(|index| format!("db{index:02}")).collect();
+        let children = names.iter().map(|name| database_child(CONN, name)).collect();
+        state.apply_load(request, state.load_generation(request).unwrap(), Ok(children));
+
+        let step = state.filter_step(&live, "ord", 1000);
+        assert_eq!(step.requests.len(), SEARCH_DATABASE_LIMIT);
+        assert!(step.requests.iter().all(|request| matches!(
+            request,
+            LoadRequest::Schemas { database, .. } if database.as_str() < "db50"
+        )));
+        assert_eq!(state.unsearched_database_count(), 7);
+        state.restore_step(4);
+        assert_eq!(state.unsearched_database_count(), 0);
+    }
+
+    #[test]
+    fn filter_step_leaves_hidden_denied_and_disabled_alone() {
+        let mut state = NavigatorState::new(vec![sqlite_conn(CONN, "Workspace")]);
+        let live = connected(&[CONN]);
+        let step = state.filter_step(&live, "ord", 100);
+        let request = &step.requests[0];
+        let mut denied = database_child(CONN, "locked");
+        denied.no_connect = true;
+        state.apply_load(
+            request,
+            state.load_generation(request).unwrap(),
+            Ok(vec![database_child(CONN, "app"), denied, database_child(CONN, "admin")]),
+        );
+        // `admin` is a system database: hidden by default.
+        state.hide_system_by_default = true;
+        let step = state.filter_step(&live, "ord", 100);
+        assert!(matches!(step.requests.as_slice(), [LoadRequest::Schemas { database, .. }] if database == "app"));
+
+        // A scope that cannot match below databases stops at the database list.
+        let mut state = NavigatorState::new(vec![sqlite_conn(CONN, "Workspace")]);
+        state.set_search(SearchOptions { query: "ord".into(), scope: SearchScope::Connections, ..Default::default() }).unwrap();
+        assert!(state.filter_step(&live, "ord", 100).finished());
+        state.set_search(SearchOptions { query: "ord".into(), scope: SearchScope::Databases, ..Default::default() }).unwrap();
+        let step = state.filter_step(&live, "ord", 100);
+        let request = &step.requests[0];
+        state.apply_load(request, state.load_generation(request).unwrap(), Ok(vec![database_child(CONN, "app")]));
+        assert!(state.filter_step(&live, "ord", 100).finished(), "databases only");
+
+        // A hidden connection is not searched.
+        let mut state = NavigatorState::new(vec![sqlite_conn(CONN, "Workspace")]);
+        let mut preferences = SidebarPreferences::default();
+        preferences.set_hidden(CONN, true).unwrap();
+        state.set_preferences(preferences).unwrap();
+        assert!(state.filter_step(&live, "ord", 100).finished());
+    }
+
+    #[test]
+    fn filter_step_lists_the_collections_of_every_mongodb_database() {
+        let mut state = NavigatorState::new(vec![mongo_conn(CONN, "Mongo")]);
+        let live = connected(&[CONN]);
+        // Not enabled as a provider connection yet: nothing to ask.
+        assert!(state.filter_step(&live, "keys", 4).finished());
+        state.enable_provider(CONN);
+        let step = state.filter_step(&live, "keys", 4);
+        let [LoadRequest::Provider { parent: None, .. }] = step.requests.as_slice() else {
+            panic!("{step:?}");
+        };
+        let request = &step.requests[0];
+        let page = |nodes: Vec<(&str, &str)>| engine_driver_api::NavigatorPage {
+            nodes: nodes
+                .into_iter()
+                .map(|(id, kind)| engine_driver_api::NavigatorNode {
+                    id: id.into(),
+                    kind: kind.into(),
+                    label: id.into(),
+                    subtitle: None,
+                    icon: None,
+                    has_children: kind == "database",
+                    payload: serde_json::json!({"database": id, "collection": id}),
+                    actions: Vec::new(),
+                })
+                .collect(),
+            next_cursor: None,
+        };
+        state.apply_provider_page(request, state.load_generation(request).unwrap(), Ok(page(vec![("a", "database"), ("b", "database")])));
+        let step = state.filter_step(&live, "keys", 1);
+        assert_eq!(step.requests.len(), 1, "the budget caps the listings");
+        assert_eq!(step.remaining, 1);
+        let request = &step.requests[0];
+        state.apply_provider_page(request, state.load_generation(request).unwrap(), Ok(page(vec![("api-keys", "collection")])));
+        let step = state.filter_step(&live, "keys", 1);
+        assert_eq!(step.requests.len(), 1);
+        let request = &step.requests[0];
+        state.apply_provider_page(request, state.load_generation(request).unwrap(), Ok(page(vec![("logs", "collection")])));
+        assert!(state.filter_step(&live, "keys", 1).finished());
+        assert!(!state.has_filtered_groups(), "a listing is never filtered on the server");
+
+        state
+            .set_search(SearchOptions { query: "api-keys".into(), ..Default::default() })
+            .unwrap();
+        let labels: Vec<_> = state.visible_rows().into_iter().map(|row| row.label).collect();
+        assert_eq!(labels, ["Mongo", "a", "api-keys"]);
+        state.set_search(SearchOptions::default()).unwrap();
+        assert_eq!(state.visible_rows().len(), 1, "still collapsed");
     }
 
     #[test]
@@ -4296,5 +4845,151 @@ mod tests {
             assert_eq!(NavigatorNodeId::from_pin_key(CONN, &id.pin_key().unwrap()), Some(id));
         }
         assert_eq!(NavigatorNodeId::Connection { connection: CONN.into() }.pin_key(), None);
+    }
+
+    /// `orders` of `app.public`, listed under Tables of a connection of `kind`.
+    fn table_of(kind: ConnectionKind) -> (NavigatorState, NavigatorNodeId) {
+        let mut state = NavigatorState::new(vec![SavedConnection { kind, ..sqlite_conn(CONN, "Workspace") }]);
+        expanded_schema(&mut state);
+        let orders = object_child(CONN, "app", "public", "orders", KindOfObject::Table).id;
+        (state, orders)
+    }
+
+    fn folder_titles(state: &NavigatorState, table: &NavigatorNodeId) -> Vec<&'static str> {
+        state
+            .loaded_children(table)
+            .expect("the table is open")
+            .iter()
+            .map(|id| match id {
+                NavigatorNodeId::TableFolder { folder, .. } => folder.title(),
+                other => panic!("{other:?} is not a folder"),
+            })
+            .collect()
+    }
+
+    fn index_item(folder: &NavigatorNodeId, name: &str, columns: &str, definition: Option<&str>) -> LoadedChild {
+        let info = TableItemInfo { detail: columns.into(), definition: definition.map(str::to_owned) };
+        table_item_child(folder, name, name, info).expect("a folder")
+    }
+
+    #[test]
+    fn a_table_lists_the_folders_of_its_dialect_at_once_and_loads_none_until_one_opens() {
+        let all = ["Columns", "Indexes", "Constraints", "Foreign Keys", "Triggers"];
+        let matrix: [(ConnectionKind, &[&str]); 4] = [
+            (ConnectionKind::Postgres, &all),
+            (ConnectionKind::Mysql, &all),
+            (ConnectionKind::Sqlite, &all),
+            (ConnectionKind::Clickhouse, &["Columns", "Indexes"]),
+        ];
+        for (kind, expected) in matrix {
+            let (mut state, orders) = table_of(kind);
+            assert!(state.loaded_children(&orders).is_none(), "{kind:?}: nothing is listed before the table opens");
+            assert!(state.toggle_expansion(&orders).request.is_none(), "{kind:?}: opening a table asks the driver nothing");
+            assert_eq!(folder_titles(&state, &orders), expected, "{kind:?}");
+            assert_eq!(state.loading_count(), 0, "{kind:?}");
+            for folder in state.loaded_children(&orders).unwrap() {
+                assert!(state.load_state(folder).is_none(), "{kind:?}: {folder:?} is not loaded");
+            }
+        }
+        // A view, a materialized view or a sequence has columns only; MongoDB and Redis have no SQL tables.
+        for kind in [KindOfObject::View, KindOfObject::MaterializedView, KindOfObject::Sequence] {
+            let (mut state, orders) = table_of(ConnectionKind::Postgres);
+            state.object_kinds.insert(orders.clone(), kind);
+            state.toggle_expansion(&orders);
+            assert_eq!(folder_titles(&state, &orders), ["Columns"], "{kind:?}");
+        }
+        for kind in [ConnectionKind::Mongodb, ConnectionKind::Redis] {
+            assert!(TableFolder::for_kind(Some(kind), false).is_empty(), "{kind:?}");
+        }
+        // A driver that cannot describe a table has the Columns folder only.
+        let (mut state, orders) = table_of(ConnectionKind::Postgres);
+        state.set_table_describe(CONN, false);
+        state.toggle_expansion(&orders);
+        assert_eq!(folder_titles(&state, &orders), ["Columns"]);
+    }
+
+    #[test]
+    fn a_folder_loads_when_opened_is_cached_and_a_refresh_loads_it_again() {
+        let (mut state, orders) = table_of(ConnectionKind::Postgres);
+        state.toggle_expansion(&orders);
+        let indexes = orders.table_folder(TableFolder::Indexes).unwrap();
+        let columns = orders.table_folder(TableFolder::Columns).unwrap();
+
+        // Columns keep their own load; the other folders ask for the table's description.
+        let request = state.toggle_expansion(&columns).request.unwrap();
+        assert!(matches!(request, LoadRequest::Columns { .. }));
+        assert_eq!(request.parent_id(), columns);
+        let request = state.toggle_expansion(&indexes).request.unwrap();
+        assert_eq!(
+            request,
+            LoadRequest::TableFolder {
+                connection: CONN.into(),
+                database: "app".into(),
+                schema: "public".into(),
+                object: "orders".into(),
+                folder: TableFolder::Indexes,
+            }
+        );
+        assert_eq!(request.parent_id(), indexes);
+        assert_eq!(state.load_state(&indexes), Some(&NodeLoadState::Loading));
+        let constraints = orders.table_folder(TableFolder::Constraints).unwrap();
+        assert!(state.load_state(&constraints).is_none(), "the other folders wait for their own opening");
+
+        let pkey = index_item(&indexes, "orders_pkey", "(id) \u{00B7} primary", Some("CREATE UNIQUE INDEX orders_pkey ..."));
+        let item = pkey.id.clone();
+        state.apply_load(&request, state.generation(), Ok(vec![pkey]));
+        let rows = state.visible_rows();
+        let at = rows.iter().position(|row| row.id == orders).unwrap();
+        let below: Vec<(&str, usize)> = rows[at + 1..]
+            .iter()
+            .take_while(|row| row.depth > rows[at].depth)
+            .map(|row| (row.label.as_str(), row.depth - rows[at].depth))
+            .collect();
+        assert_eq!(
+            below,
+            [("Columns", 1), ("Indexes", 1), ("orders_pkey", 2), ("Constraints", 1), ("Foreign Keys", 1), ("Triggers", 1)]
+        );
+        assert_eq!(state.table_item(&item).unwrap().definition.as_deref(), Some("CREATE UNIQUE INDEX orders_pkey ..."));
+        assert!(!NavigatorNodeId::is_expandable(&item), "an index has nothing below it");
+
+        // Collapsing and opening again does not ask again.
+        state.toggle_expansion(&indexes);
+        assert!(state.toggle_expansion(&indexes).request.is_none());
+        assert_eq!(state.loaded_children(&indexes).unwrap(), std::slice::from_ref(&item));
+
+        // A refresh of the table forgets the folders and what they listed; opening it again reloads.
+        state.reset_node(&orders);
+        assert!(state.table_item(&item).is_none());
+        assert!(state.load_state(&indexes).is_none() && state.loaded_children(&indexes).is_none());
+        state.toggle_expansion(&orders);
+        assert!(state.toggle_expansion(&indexes).request.is_some());
+    }
+
+    #[test]
+    fn the_search_matches_folder_rows_by_their_names_not_their_titles() {
+        let (mut state, orders) = table_of(ConnectionKind::Postgres);
+        state.toggle_expansion(&orders);
+        state.toggle_expansion(&orders);
+        let indexes = orders.table_folder(TableFolder::Indexes).unwrap();
+        let request = state.toggle_expansion(&indexes).request.unwrap();
+        let children = vec![index_item(&indexes, "orders_pkey", "(id)", None), index_item(&indexes, "orders_name_idx", "(name)", None)];
+        state.apply_load(&request, state.generation(), Ok(children));
+        state.toggle_expansion(&indexes);
+        let labels = |state: &NavigatorState| state.visible_rows().into_iter().map(|row| row.label).collect::<Vec<_>>();
+
+        // A loaded leaf is found with the path to it, like a column.
+        state.set_search(SearchOptions { query: "name_idx".into(), ..Default::default() }).unwrap();
+        let found = labels(&state);
+        assert!(found.ends_with(&["orders".to_string(), "Indexes".into(), "orders_name_idx".into()]), "{found:?}");
+        assert!(!found.contains(&"orders_pkey".to_string()));
+        // A folder's title is not a name: "Index" finds no row below the table.
+        state.set_search(SearchOptions { query: "Indexes".into(), ..Default::default() }).unwrap();
+        assert!(labels(&state).is_empty(), "{:?}", labels(&state));
+        // Matching the table itself keeps its folders and what they list.
+        state.set_search(SearchOptions { query: "orders".into(), ..Default::default() }).unwrap();
+        assert!(labels(&state).contains(&"Indexes".to_string()));
+        // Cleared, the tree is as it was: the table is collapsed.
+        state.set_search(SearchOptions::default()).unwrap();
+        assert!(!labels(&state).contains(&"orders_pkey".to_string()));
     }
 }

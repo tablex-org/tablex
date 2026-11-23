@@ -193,6 +193,9 @@ pub struct ColumnsPanelState {
     pub presentation: Presentation,
     /// Selected Properties sub-tab (per result tab).
     pub properties_tab: PropertiesTab,
+    /// A sub-tab asked for (a sidebar index, key or trigger row) before the properties that
+    /// list it arrived: shown when they do.
+    pub pending_tab: Option<PropertiesTab>,
     /// Selected row, as a display column index.
     pub selected: Option<usize>,
     pub filter: String,
@@ -214,11 +217,33 @@ pub struct ColumnsPanelState {
     pub props: crate::properties_model::PropertiesState,
 }
 
+impl ColumnsPanelState {
+    /// Shows `tab` now when the fetched properties list it, else as soon as they arrive.
+    pub fn show_tab_when_listed(&mut self, tab: PropertiesTab) {
+        self.pending_tab = Some(tab);
+        if self.props.data.is_some() {
+            self.apply_pending_tab();
+        }
+    }
+
+    /// Switches to the sub-tab asked for, if the properties now list it.
+    pub fn apply_pending_tab(&mut self) {
+        let Some(tab) = self.pending_tab.take() else {
+            return;
+        };
+        if self.properties_tab != tab && self.props.visible_tabs().any(|listed| listed == tab) {
+            self.properties_tab = tab;
+            self.filter.clear();
+        }
+    }
+}
+
 impl Default for ColumnsPanelState {
     fn default() -> Self {
         Self {
             presentation: Presentation::Grid,
             properties_tab: PropertiesTab::default(),
+            pending_tab: None,
             selected: None,
             filter: String::new(),
             key: None,

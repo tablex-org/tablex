@@ -1,7 +1,10 @@
 use super::object_actions::append_object_items;
+use super::sidebar_names::{self, NameStyle};
 use super::*;
+use crate::catalog::TableProperties;
 use crate::connection_import::ImportSource;
 use crate::navigator::NavigatorAction;
+use crate::properties_model::PropertiesKey;
 use crate::sidebar_preferences::ConnectionSort;
 use gpui::img;
 use gpui::Rgba;
@@ -148,6 +151,13 @@ pub(super) struct SidebarDrag {
     pub(super) ids: Option<Arc<[NavigatorNodeId]>>,
 }
 
+/// Native drag payload of object rows (tables, views, columns, schemas, collections): dropped on a
+/// query editor they insert their names (see `sidebar_names`). Dropping anywhere else does nothing.
+#[derive(Clone)]
+pub(super) struct ObjectDrag {
+    pub(super) ids: Arc<[NavigatorNodeId]>,
+}
+
 struct SidebarDragGhost {
     label: String,
 }
@@ -163,7 +173,7 @@ impl Render for SidebarDragGhost {
             .border_color(theme::border())
             .text_size(px(12.0))
             .text_color(theme::text())
-            .child(format!("Move {}", self.label))
+            .child(self.label.clone())
     }
 }
 
@@ -201,6 +211,8 @@ pub(super) fn row_connection_id(id: &NavigatorNodeId) -> Option<&str> {
         | NavigatorNodeId::Object { connection, .. }
         | NavigatorNodeId::SchemaObject { connection, .. }
         | NavigatorNodeId::Column { connection, .. }
+        | NavigatorNodeId::TableFolder { connection, .. }
+        | NavigatorNodeId::TableItem { connection, .. }
         | NavigatorNodeId::Provider { connection, .. } => Some(connection),
     }
 }
@@ -288,6 +300,18 @@ fn row_glyph(
             _ => icon(SidebarGlyph::Table, theme::icon_table()),
         },
         NavigatorNodeId::Column { .. } => component(IconName::Frame, theme::text_muted()),
+        NavigatorNodeId::TableFolder { folder, .. } | NavigatorNodeId::TableItem { folder, .. } => {
+            let color = if matches!(row.id, NavigatorNodeId::TableFolder { .. }) {
+                theme::icon_folder()
+            } else {
+                theme::text_muted()
+            };
+            Icon::empty()
+                .path(table_folder_icon(*folder))
+                .size(px(theme::SIDEBAR_ICON_SIZE))
+                .text_color(color)
+                .into_any_element()
+        }
         NavigatorNodeId::Provider { .. } => match provider_kind {
             Some("database") => icon(SidebarGlyph::Database, theme::icon_database()),
             Some("collection") => icon(SidebarGlyph::Table, theme::icon_collection()),
@@ -314,6 +338,36 @@ fn row_glyph(
             }
             _ => component(IconName::File, theme::text_muted()),
         },
+    }
+}
+
+/// Flex shrink of a table item's detail: far above the name's 1, so the detail narrows first.
+const DETAIL_SHRINK: f32 = 1000.0;
+
+fn table_folder_icon(folder: crate::navigator::TableFolder) -> &'static str {
+    use crate::navigator::TableFolder;
+    match folder {
+        TableFolder::Columns => "icons/columns-3.svg",
+        TableFolder::Indexes => "icons/list-ordered.svg",
+        TableFolder::Constraints => "icons/key-round.svg",
+        TableFolder::ForeignKeys => "icons/link.svg",
+        TableFolder::Triggers => "icons/zap.svg",
+    }
+}
+
+/// The text of a sidebar row: a table folder's title in the interface language, the model's label otherwise.
+fn row_label(row: &NavigatorRow) -> String {
+    use crate::navigator::TableFolder;
+    match &row.id {
+        NavigatorNodeId::TableFolder { folder, .. } => match folder {
+            TableFolder::Columns => t!("sidebar.folder_columns"),
+            TableFolder::Indexes => t!("sidebar.folder_indexes"),
+            TableFolder::Constraints => t!("sidebar.folder_constraints"),
+            TableFolder::ForeignKeys => t!("sidebar.folder_foreign_keys"),
+            TableFolder::Triggers => t!("sidebar.folder_triggers"),
+        }
+        .into_owned(),
+        _ => row.label.clone(),
     }
 }
 
@@ -363,9 +417,91 @@ pub(super) fn list_driver_nav_nodes(
     Ok(session.list_nav_nodes(&json)?)
 }
 
+/// What the folders of one table (Indexes, Constraints, Foreign Keys, Triggers) share: the table's
+/// `describe_object` answer, asked when the first of its folders opens and cached until the table
+/// (or something above it) is refreshed or its structure changes (`forget`). A second folder
+/// opened while the request is in flight waits for it; nothing is asked before a folder opens.
+/// Only what the folders list is kept (no columns, references or DDL).
+#[derive(Default)]
+pub(super) struct FolderDescribes {
+    tables: HashMap<PropertiesKey, FolderDescribe>,
+    /// `describe_object` requests made for folders (tests count them).
+    #[cfg(test)]
+    pub(super) fetches: usize,
+}
+
+enum FolderDescribe {
+    /// In flight: the folder loads waiting for it. `stale`: invalidated meanwhile, so the answer
+    /// is delivered to them but not cached.
+    Loading { stale: bool, waiters: Vec<(LoadRequest, u64)> },
+    Ready(std::rc::Rc<TableProperties>),
+}
+
+/// What opening a folder has to do.
+pub(super) enum FolderJoin {
+    Ready(std::rc::Rc<TableProperties>),
+    /// Another folder of the table already asked.
+    Waiting,
+    Fetch,
+}
+
+impl FolderDescribes {
+    pub(super) fn join(&mut self, key: &PropertiesKey, request: LoadRequest, generation: u64) -> FolderJoin {
+        match self.tables.get_mut(key) {
+            Some(FolderDescribe::Ready(properties)) => return FolderJoin::Ready(properties.clone()),
+            Some(FolderDescribe::Loading { waiters, .. }) => {
+                waiters.push((request, generation));
+                return FolderJoin::Waiting;
+            }
+            None => {}
+        }
+        // A reconnect (new session) leaves the old session's answers behind: drop them.
+        self.tables.retain(|other, entry| {
+            other.connection != key.connection || other.session == key.session || matches!(entry, FolderDescribe::Loading { .. })
+        });
+        self.tables.insert(key.clone(), FolderDescribe::Loading { stale: false, waiters: vec![(request, generation)] });
+        #[cfg(test)]
+        {
+            self.fetches += 1;
+        }
+        FolderJoin::Fetch
+    }
+
+    /// The answer arrived: caches it (unless invalidated meanwhile) and returns the waiting loads.
+    pub(super) fn finish(&mut self, key: &PropertiesKey, properties: Option<std::rc::Rc<TableProperties>>) -> Vec<(LoadRequest, u64)> {
+        let Some(FolderDescribe::Loading { stale, waiters }) = self.tables.remove(key) else {
+            return Vec::new();
+        };
+        if let (false, Some(properties)) = (stale, properties) {
+            self.tables.insert(key.clone(), FolderDescribe::Ready(properties));
+        }
+        waiters
+    }
+
+    /// Drops what is cached for the tables `covered` selects; a request in flight still answers
+    /// its waiters but is not cached.
+    pub(super) fn forget(&mut self, covered: impl Fn(&PropertiesKey) -> bool) {
+        self.tables.retain(|key, entry| {
+            if !covered(key) {
+                return true;
+            }
+            match entry {
+                FolderDescribe::Ready(_) => false,
+                FolderDescribe::Loading { stale, .. } => {
+                    *stale = true;
+                    true
+                }
+            }
+        });
+    }
+}
+
 #[derive(Default)]
 pub(super) struct NavigatorUiState {
     pub(super) pending_loads: HashMap<String, Vec<(LoadRequest, u64)>>,
+    /// Connections whose "Create Database" waits for the connect it started: the dialog opens when
+    /// they are connected, and the wish is dropped when the connect fails or is cancelled.
+    pub(super) create_database_after_connect: HashSet<String>,
     /// Bumped whenever visible navigator rows change; captured by load tasks.
     pub(super) generation: u64,
     /// Row currently hovered by a native sidebar drag for drop highlighting.
@@ -527,12 +663,45 @@ impl AppRoot {
                     }
                 }
             }
+        } else if let NavigatorNodeId::TableItem { connection, database, schema, object, folder, .. } = &row.id {
+            self.open_table_item(connection, database, schema, object, *folder, cx);
         } else if matches!(row.id, NavigatorNodeId::SchemaObject { .. }) {
             // A function, trigger, sequence, ... has no data: its source opens.
             self.open_schema_object_source(&row.id, &row.label, cx);
         } else if matches!(row.id, NavigatorNodeId::Provider { .. }) {
             self.open_redis_key_node(&row.id, cx);
         }
+    }
+
+    /// An index, constraint, foreign key or trigger row opens its table's Properties at the
+    /// sub-tab that lists it.
+    fn open_table_item(
+        &mut self,
+        connection: &str,
+        database: &str,
+        schema: &str,
+        object: &str,
+        folder: crate::navigator::TableFolder,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::columns_panel::PropertiesTab;
+        use crate::navigator::TableFolder;
+        self.open_sql_object_tab(object, connection, database, schema, object, cx);
+        let Some(tab_id) = self.workspace.active_tab().map(|tab| tab.id) else {
+            return;
+        };
+        self.show_columns_presentation(tab_id, cx);
+        let tab = match folder {
+            TableFolder::Columns => PropertiesTab::Columns,
+            TableFolder::Indexes => PropertiesTab::Indexes,
+            TableFolder::Constraints => PropertiesTab::Keys,
+            TableFolder::ForeignKeys => PropertiesTab::ForeignKeys,
+            TableFolder::Triggers => PropertiesTab::Triggers,
+        };
+        if let Some(runtime) = self.workspace.runtime_mut(tab_id) {
+            runtime.columns_panel.show_tab_when_listed(tab);
+        }
+        self.notify_tab(tab_id, cx);
     }
 
     /// Opens (or reuses) the table-data tab of a loaded SQL table / view.
@@ -970,13 +1139,13 @@ impl AppRoot {
                         // Element items carry a debug selector so tests click
                         // the real rows; they render like plain items.
                         let import_item = |selector: &'static str,
-                                           label: &'static str,
+                                           label: std::borrow::Cow<'static, str>,
                                            source: ImportSource| {
                             let root = import_root.clone();
                             PopupMenuItem::element(move |_, _| {
                                 div()
                                     .debug_selector(move || selector.to_string())
-                                    .child(label)
+                                    .child(label.clone())
                             })
                             .icon(Icon::new(SidebarGlyph::Download).size(px(14.0)))
                             .on_click(move |_, window, app| {
@@ -986,10 +1155,10 @@ impl AppRoot {
                             })
                         };
                         menu
-                            .item(import_item("import-menu-dbx", "Import DBX Config", ImportSource::Dbx))
-                            .item(import_item("import-menu-navicat", "Import Navicat NCX", ImportSource::Navicat))
-                            .item(import_item("import-menu-dbeaver", "Import DBeaver", ImportSource::Dbeaver))
-                            .item(import_item("import-menu-datagrip", "Import DataGrip", ImportSource::DataGrip))
+                            .item(import_item("import-menu-dbx", t!("sidebar.import_dbx"), ImportSource::Dbx))
+                            .item(import_item("import-menu-navicat", t!("sidebar.import_navicat"), ImportSource::Navicat))
+                            .item(import_item("import-menu-dbeaver", t!("sidebar.import_dbeaver"), ImportSource::Dbeaver))
+                            .item(import_item("import-menu-datagrip", t!("sidebar.import_datagrip"), ImportSource::DataGrip))
                             .separator()
                             .item(
                                 PopupMenuItem::new(t!("sidebar.export_connections"))
@@ -1637,6 +1806,15 @@ impl AppRoot {
                         .into_boxed_slice(),
                 )
             });
+        // The selected rows a drag onto an editor carries along (only those that have a name to insert).
+        let selected_object_ids: Option<Arc<[NavigatorNodeId]>> =
+            (self.navigator.selected_ids().len() > 1).then(|| {
+                self.navigator
+                    .selection_in_visible_order()
+                    .into_iter()
+                    .filter(|id| self.object_drag_supported(id))
+                    .collect()
+            });
         let list = uniform_list(
             "navigator-tree",
             self.navigator.visible_row_count(),
@@ -1759,7 +1937,10 @@ impl AppRoot {
                             .child(div().w(px(6.0)).flex_shrink_0())
                             .child(
                                 div()
-                                    .flex_1()
+                                    .debug_selector(move || format!("sidebar-label-{index}"))
+                                    // Content-sized, then grown: a row too narrow for the name and a
+                                    // right-edge detail shrinks the detail first (see its shrink).
+                                    .flex_auto()
                                     .min_w_0()
                                     .overflow_hidden()
                                     .whitespace_nowrap()
@@ -1767,7 +1948,7 @@ impl AppRoot {
                                     .child(if navigator::NavigatorState::is_load_more(&row.id) {
                                         t!("sidebar.load_more").into_owned()
                                     } else {
-                                        row.label.clone()
+                                        row_label(&row)
                                     }),
                             );
                         // A pinned row carries a small pin after its name.
@@ -1802,6 +1983,29 @@ impl AppRoot {
                                         .child(type_name),
                                 );
                             }
+                        }
+                        // An index, constraint, foreign key or trigger: its columns, type or target.
+                        // The name has priority: the detail gives up its width first (shrink factor
+                        // far above the label's) and can shrink to nothing; its padding sits on an
+                        // inner box so the outer one has no minimum width.
+                        if let Some(item) = this.navigator.table_item(&row.id) {
+                            let mut detail = div()
+                                .debug_selector(move || format!("sidebar-detail-{index}"))
+                                .min_w_0()
+                                .max_w(px(180.0))
+                                .overflow_hidden()
+                                .child(
+                                    div()
+                                        .px(px(8.0))
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .text_size(px(10.0))
+                                        .text_color(theme::text_faint())
+                                        .child(item.detail.clone()),
+                                );
+                            detail.style().flex_shrink = Some(DETAIL_SHRINK);
+                            element = element.child(detail);
                         }
                         if this.navigator_ui.drop_target.as_ref() == Some(&row.id) {
                             element = element.border_1().border_color(theme::accent());
@@ -1914,7 +2118,7 @@ impl AppRoot {
                                     None
                                 },
                             };
-                            let ghost_label = row.label.clone();
+                            let ghost_label = t!("sidebar.drag_move", label = row.label.clone()).into_owned();
                             base = base.on_drag(drag, move |_, _, _, cx| {
                                 cx.new(|_| SidebarDragGhost {
                                     label: ghost_label.clone(),
@@ -1935,6 +2139,22 @@ impl AppRoot {
                                         this.drop_sidebar_drag(drag, &drop_target, cx);
                                     });
                                 });
+                        } else if this.object_drag_supported(&row_id) {
+                            // A table, view, column, schema or collection drags its name onto a query editor.
+                            let ids: Arc<[NavigatorNodeId]> = match &selected_object_ids {
+                                Some(selected) if selected.contains(&row_id) => selected.clone(),
+                                _ => Arc::from([row_id.clone()]),
+                            };
+                            let ghost_label = if ids.len() > 1 {
+                                t!("sidebar.drag_objects", count = ids.len()).into_owned()
+                            } else {
+                                row.label.clone()
+                            };
+                            base = base.on_drag(ObjectDrag { ids }, move |_, _, _, cx| {
+                                cx.new(|_| SidebarDragGhost {
+                                    label: ghost_label.clone(),
+                                })
+                            });
                         }
 
                         // Group rows: subgroup creation, rename, move, delete.
@@ -2085,15 +2305,23 @@ impl AppRoot {
                             let (source_root, source_row) = (menu_root.clone(), row.clone());
                             return base
                                 .context_menu(move |menu, _, _| {
+                                    let copy_root = source_root.clone();
                                     let (source_root, source_row) =
                                         (source_root.clone(), source_row.clone());
-                                    menu.item(PopupMenuItem::new(t!("sidebar.view_source")).on_click(
+                                    let copy_id = source_row.id.clone();
+                                    let menu = menu.item(PopupMenuItem::new(t!("sidebar.view_source")).on_click(
                                         move |_, _, app| {
                                             let _ = source_root.update(app, |this, cx| {
                                                 this.handle_navigator_open(&source_row, cx);
                                             });
                                         },
-                                    ))
+                                    ));
+                                    sidebar_names::append_copy_name_items(
+                                        menu.separator(),
+                                        copy_root,
+                                        &copy_id,
+                                        &[NameStyle::Plain, NameStyle::Qualified],
+                                    )
                                 })
                                 .into_any_element();
                         }
@@ -2108,6 +2336,56 @@ impl AppRoot {
                             return base
                                 .context_menu(move |menu, window, cx| {
                                     append_object_items(menu, group_root.clone(), &group_id, false, window, cx)
+                                })
+                                .into_any_element();
+                        }
+
+                        // An index, constraint, foreign key or trigger: Open, its name and its definition.
+                        if let NavigatorNodeId::TableItem { .. } = &row_id {
+                            let definition = this
+                                .navigator
+                                .table_item(&row_id)
+                                .and_then(|item| item.definition.clone())
+                                .filter(|definition| !definition.is_empty());
+                            let (item_root, item_row) = (menu_root.clone(), row.clone());
+                            return base
+                                .context_menu(move |menu, _, _| {
+                                    let (open_root, open_row) = (item_root.clone(), item_row.clone());
+                                    let menu = menu.item(PopupMenuItem::new(t!("sidebar.open")).on_click(move |_, _, app| {
+                                        let _ = open_root.update(app, |this, cx| this.handle_navigator_open(&open_row, cx));
+                                    }));
+                                    let menu = sidebar_names::append_copy_name_items(
+                                        menu.separator(),
+                                        item_root.clone(),
+                                        &item_row.id,
+                                        &[NameStyle::Plain],
+                                    );
+                                    match definition.clone() {
+                                        Some(definition) => menu.item(
+                                            PopupMenuItem::element(move |_, _| {
+                                                div().debug_selector(|| "sidebar-menu-copy-definition".to_string()).child(t!("sidebar.copy_definition"))
+                                            })
+                                            .on_click(move |_, _, app| {
+                                                app.write_to_clipboard(gpui::ClipboardItem::new_string(definition.clone()));
+                                            }),
+                                        ),
+                                        None => menu,
+                                    }
+                                })
+                                .into_any_element();
+                        }
+
+                        // A column: its name.
+                        if let NavigatorNodeId::Column { .. } = &row_id {
+                            let (copy_root, copy_id) = (menu_root.clone(), row_id.clone());
+                            return base
+                                .context_menu(move |menu, _, _| {
+                                    sidebar_names::append_copy_name_items(
+                                        menu,
+                                        copy_root.clone(),
+                                        &copy_id,
+                                        &[NameStyle::Plain, NameStyle::Qualified],
+                                    )
                                 })
                                 .into_any_element();
                         }
@@ -2196,7 +2474,7 @@ impl AppRoot {
                                             .item(new_query_item())
                                             .item(
                                                 PopupMenuItem::new(
-                                                    "Ask the assistant about this table",
+                                                    t!("sidebar.ask_assistant_about_table"),
                                                 )
                                                 .on_click({
                                                     let (ask_root, ask_id) = (ask_root.clone(), ask_id.clone());
@@ -2209,6 +2487,12 @@ impl AppRoot {
                                                     }
                                                 }),
                                             );
+                                        let menu = sidebar_names::append_copy_name_items(
+                                            menu.separator(),
+                                            ask_root.clone(),
+                                            &ask_id,
+                                            &[NameStyle::Plain, NameStyle::Qualified],
+                                        );
                                         append_object_items(menu, ask_root, &ask_id, true, window, cx)
                                     })
                                     .into_any_element();
@@ -2257,11 +2541,18 @@ impl AppRoot {
                                             let menu = super::sidebar_pins::pin_menu_head(
                                                 menu, &target_root, &pin_id, cx,
                                             );
-                                            super::mongo_admin_view::build_mongo_node_menu(
+                                            let menu = super::mongo_admin_view::build_mongo_node_menu(
                                                 menu,
                                                 target_root.clone(),
                                                 target.clone(),
                                                 cx,
+                                            );
+                                            // "Copy Name" is the menu's own entry.
+                                            sidebar_names::append_copy_name_items(
+                                                menu,
+                                                target_root.clone(),
+                                                &target.id,
+                                                &[NameStyle::Qualified],
                                             )
                                         })
                                         .into_any_element();
@@ -2356,6 +2647,12 @@ impl AppRoot {
                                         }
                                         None => menu,
                                     };
+                                    let menu = sidebar_names::append_copy_name_items(
+                                        menu.separator(),
+                                        diagram_root.clone(),
+                                        &object_id,
+                                        &[NameStyle::Plain, NameStyle::Qualified],
+                                    );
                                     append_object_items(menu, diagram_root.clone(), &object_id, true, window, cx)
                                 })
                                 .into_any_element();
@@ -2594,16 +2891,54 @@ impl AppRoot {
                 if !this.sidebar.focus.is_focused(window) {
                     return;
                 }
+                let selection = this.navigator.selection_in_visible_order();
+                if selection.len() > 1 {
+                    // One name per line.
+                    this.copy_navigator_names(&selection, NameStyle::Plain, cx);
+                    return;
+                }
                 match this.navigator.selected().cloned() {
                     Some(NavigatorNodeId::Connection { connection }) => {
                         this.copy_connection_name(&connection, cx);
                     }
-                    // MongoDB database / collection rows copy their own name.
-                    Some(id @ NavigatorNodeId::Provider { .. }) => {
-                        this.copy_mongo_node_name(&id, cx);
+                    // Any other row (MongoDB, Redis, tables, columns, ...) copies its own name.
+                    Some(id) => {
+                        this.copy_navigator_names(&[id], NameStyle::Plain, cx);
                     }
-                    _ => {}
+                    None => {}
                 }
+            }))
+            .on_action(cx.listener(|this, _: &CopyNavigatorQualifiedName, window, cx| {
+                if !this.sidebar.focus.is_focused(window) {
+                    cx.propagate();
+                    return;
+                }
+                let mut selection = this.navigator.selection_in_visible_order();
+                if selection.is_empty() {
+                    selection.extend(this.navigator.selected().cloned());
+                }
+                this.copy_navigator_names(&selection, NameStyle::Qualified, cx);
+            }))
+            .on_action(cx.listener(|this, _: &RenameNavigatorSelection, window, cx| {
+                if !this.sidebar.focus.is_focused(window) {
+                    cx.propagate();
+                    return;
+                }
+                this.rename_selected_sidebar_node(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &DeleteNavigatorSelection, window, cx| {
+                if !this.sidebar.focus.is_focused(window) {
+                    cx.propagate();
+                    return;
+                }
+                this.delete_selected_sidebar_node(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenNavigatorSelection, window, cx| {
+                if !this.sidebar.focus.is_focused(window) {
+                    cx.propagate();
+                    return;
+                }
+                this.open_selected_sidebar_node(cx);
             }))
             .on_action(cx.listener(|this, _: &EditConnection, window, cx| {
                 if !this.sidebar.focus.is_focused(window) {
@@ -2679,6 +3014,11 @@ impl AppRoot {
                             .iter()
                             .map(|notice| (notice, theme::text_muted())),
                     )
+                    .chain(
+                        self.remote_unsearched_notice()
+                            .iter()
+                            .map(|notice| (notice, theme::text_muted())),
+                    )
                     .map(|(text, color)| {
                         div()
                             .px(px(10.0))
@@ -2715,6 +3055,7 @@ impl AppRoot {
         self.continue_sidebar_locate(cx);
         self.pump_remote_search(cx);
         self.continue_schema_diagrams(cx);
+        self.completion_node_loaded(&request.parent_id(), cx);
     }
 
     /// Loads one level of a driver session's catalog: the typed SQL tree for
@@ -2747,6 +3088,7 @@ impl AppRoot {
                 Err("driver session is not connected".into()),
             );
             self.navigator_ui.generation = self.navigator.generation();
+            self.pump_remote_search(cx);
             cx.notify();
             return;
         };
@@ -2777,6 +3119,9 @@ impl AppRoot {
                     this.after_provider_collections_loaded(&request, cx);
                 }
                 this.continue_sidebar_locate(cx);
+                this.completion_node_loaded(&request.parent_id(), cx);
+                // A remote search waits on these loads too.
+                this.pump_remote_search(cx);
                 cx.notify();
             });
         });
@@ -2791,6 +3136,49 @@ impl AppRoot {
         let Some(generation) = self.navigator.load_generation(&request) else {
             return;
         };
+        if let LoadRequest::TableFolder { database, schema, object, .. } = &request {
+            // Indexes, constraints, foreign keys and triggers: what the Properties view describes,
+            // once per table for all of its folders (`FolderDescribes`).
+            if !self.driver_describes_tables(&connection) {
+                self.apply_navigator_load(&request, generation, Ok(Vec::new()), cx);
+                cx.notify();
+                return;
+            }
+            let key = PropertiesKey {
+                connection: connection.clone(),
+                database: database.clone(),
+                schema: schema.clone(),
+                object: object.clone(),
+                session: self.driver_runtime.connection_ids.get(&connection).copied().unwrap_or(0),
+            };
+            match self.table_folder_describes.join(&key, request.clone(), generation) {
+                FolderJoin::Ready(properties) => {
+                    let children = navigator::sql_driver::table_folder_children(&request.parent_id(), &properties);
+                    self.apply_navigator_load(&request, generation, Ok(children), cx);
+                    cx.notify();
+                }
+                FolderJoin::Waiting => {}
+                FolderJoin::Fetch => {
+                    let described = key.clone();
+                    self.describe_table(key, cx, move |this, result, cx| {
+                        // The folders list indexes, keys, foreign keys and triggers only.
+                        let shared = result.map(|properties| {
+                            let TableProperties { keys, foreign_keys, indexes, triggers, .. } = properties;
+                            std::rc::Rc::new(TableProperties { keys, foreign_keys, indexes, triggers, ..Default::default() })
+                        });
+                        for (waiting, generation) in this.table_folder_describes.finish(&described, shared.as_ref().ok().cloned()) {
+                            let children = shared
+                                .as_ref()
+                                .map(|properties| navigator::sql_driver::table_folder_children(&waiting.parent_id(), properties))
+                                .map_err(Clone::clone);
+                            this.apply_navigator_load(&waiting, generation, children, cx);
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+            return;
+        }
         let Some(session) = self.driver_runtime.sessions.get(&connection).cloned() else {
             self.apply_navigator_load(
                 &request,

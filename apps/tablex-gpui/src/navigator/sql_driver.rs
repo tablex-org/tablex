@@ -6,11 +6,12 @@
 //! The driver is never asked for it.
 
 use super::{
-    column_child, database_child, object_child, schema_child, schema_object_child, KindOfObject,
-    LoadRequest, LoadedChild, ObjectGroup, SchemaObjectRef,
+    column_child, database_child, object_child, schema_child, schema_object_child, table_item_child,
+    KindOfObject, LoadRequest, LoadedChild, NavigatorNodeId, ObjectGroup, SchemaObjectRef, TableFolder,
+    TableItemInfo,
 };
 use crate::connections::ConnectionKind;
-use engine_driver_api::sql::TableColumn;
+use engine_driver_api::sql::{ConstraintKind, TableColumn, TableProperties};
 use engine_driver_api::{NavigatorNode, NavigatorPage, NavigatorRequest};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -102,7 +103,10 @@ pub fn catalog_request(
             }
             (None, Some(database.clone()), Some(payload))
         }
-        LoadRequest::Schemas { .. } | LoadRequest::Provider { .. } => return None,
+        // A table folder is the driver's `describe_object`, not a navigator listing.
+        LoadRequest::Schemas { .. } | LoadRequest::TableFolder { .. } | LoadRequest::Provider { .. } => {
+            return None
+        }
     };
     Some(NavigatorRequest {
         parent,
@@ -216,7 +220,94 @@ pub fn catalog_children(load: &LoadRequest, nodes: &[NavigatorNode]) -> Vec<Load
             } => (node.kind == "column").then(|| {
                 column_child(&connection, database, schema, object, name_of(node, "column"))
             }),
-            LoadRequest::Provider { .. } => None,
+            LoadRequest::TableFolder { .. } | LoadRequest::Provider { .. } => None,
+        })
+        .collect()
+}
+
+/// The rows of the table folder `parent` (Indexes, Constraints, Foreign Keys or Triggers) from
+/// what the driver described. A list the driver cannot report (`None`) is an empty folder.
+pub fn table_folder_children(parent: &NavigatorNodeId, properties: &TableProperties) -> Vec<LoadedChild> {
+    let NavigatorNodeId::TableFolder { folder, .. } = parent else {
+        return Vec::new();
+    };
+    let join = |list: &[String]| list.join(", ");
+    // (name, detail, definition) of each row.
+    let rows: Vec<(&str, String, Option<&str>)> = match folder {
+        TableFolder::Columns => Vec::new(),
+        TableFolder::Indexes => properties
+            .indexes
+            .iter()
+            .flatten()
+            .map(|index| {
+                let badge = match (index.primary, index.unique) {
+                    (true, _) => " \u{00B7} primary",
+                    (false, true) => " \u{00B7} unique",
+                    (false, false) => "",
+                };
+                (index.name.as_str(), format!("({}){badge}", join(&index.columns)), index.definition.as_deref())
+            })
+            .collect(),
+        TableFolder::Constraints => properties
+            .keys
+            .iter()
+            .flatten()
+            .map(|key| {
+                let kind = match key.kind {
+                    ConstraintKind::PrimaryKey => "PK",
+                    ConstraintKind::Unique => "Unique",
+                    ConstraintKind::Check => "Check",
+                    ConstraintKind::Exclusion => "Exclusion",
+                    ConstraintKind::Other => "Other",
+                };
+                let detail = match key.columns.is_empty() {
+                    true => kind.to_string(),
+                    false => format!("{kind} ({})", join(&key.columns)),
+                };
+                (key.name.as_str(), detail, key.definition.as_deref())
+            })
+            .collect(),
+        TableFolder::ForeignKeys => properties
+            .foreign_keys
+            .iter()
+            .flatten()
+            .map(|fk| {
+                let detail = format!("\u{2192} {}({})", fk.referenced_table, join(&fk.referenced_columns));
+                (fk.name.as_str(), detail, fk.definition.as_deref())
+            })
+            .collect(),
+        TableFolder::Triggers => properties
+            .triggers
+            .iter()
+            .flatten()
+            .map(|trigger| {
+                let mut detail = format!(
+                    "{} {}",
+                    trigger.timing.as_deref().unwrap_or_default(),
+                    trigger.events.join(", ")
+                )
+                .trim()
+                .to_string();
+                if trigger.enabled == Some(false) {
+                    detail.push_str(" \u{00B7} disabled");
+                }
+                (trigger.name.as_str(), detail, trigger.definition.as_deref())
+            })
+            .collect(),
+    };
+    let mut taken: HashSet<String> = HashSet::with_capacity(rows.len());
+    rows.into_iter()
+        .enumerate()
+        .filter_map(|(position, (name, detail, definition))| {
+            // The id is unique within the folder even when a driver lists a name twice (or none).
+            let mut item = name.to_string();
+            if name.is_empty() || !taken.insert(item.clone()) {
+                item = format!("{name}#{}", position + 1);
+                taken.insert(item.clone());
+            }
+            let shown = if name.is_empty() { detail.clone() } else { name.to_string() };
+            let info = TableItemInfo { detail, definition: definition.map(str::to_owned) };
+            table_item_child(parent, &item, &shown, info)
         })
         .collect()
 }
@@ -485,6 +576,80 @@ mod tests {
             columns,
             [crate::navigator::column_child("c", "app", "public", "orders", "id")]
         );
+    }
+
+    #[test]
+    fn table_folders_list_what_the_driver_described() {
+        use engine_driver_api::sql::{TableConstraint, TableForeignKey, TableIndex, TableTrigger};
+        let properties = TableProperties {
+            keys: Some(vec![
+                TableConstraint { name: "orders_pkey".into(), kind: ConstraintKind::PrimaryKey, columns: vec!["id".into()], definition: Some("PRIMARY KEY (id)".into()) },
+                TableConstraint { name: "positive".into(), kind: ConstraintKind::Check, columns: vec![], definition: None },
+            ]),
+            foreign_keys: Some(vec![TableForeignKey {
+                name: "orders_customer_fk".into(),
+                table: "orders".into(),
+                columns: vec!["customer_id".into()],
+                referenced_table: "customers".into(),
+                referenced_columns: vec!["id".into()],
+                on_update: None,
+                on_delete: None,
+                definition: None,
+            }]),
+            indexes: Some(vec![
+                TableIndex { name: "orders_pkey".into(), columns: vec!["id".into()], unique: true, primary: true, method: None, definition: None },
+                TableIndex { name: "by_name".into(), columns: vec!["name".into(), "status".into()], unique: true, primary: false, method: None, definition: Some("CREATE UNIQUE INDEX by_name".into()) },
+                TableIndex { name: "by_status".into(), columns: vec!["status".into()], unique: false, primary: false, method: None, definition: None },
+                // A name listed twice, and none at all: both rows stay, with distinct ids.
+                TableIndex { name: "by_status".into(), columns: vec!["status".into()], unique: false, primary: false, method: None, definition: None },
+                TableIndex { name: String::new(), columns: vec!["name".into()], unique: false, primary: false, method: None, definition: None },
+            ]),
+            triggers: Some(vec![
+                TableTrigger { name: "audit".into(), timing: Some("AFTER".into()), events: vec!["INSERT".into(), "UPDATE".into()], enabled: Some(true), definition: Some("CREATE TRIGGER audit".into()) },
+                TableTrigger { name: "touch".into(), timing: None, events: vec!["UPDATE".into()], enabled: Some(false), definition: None },
+            ]),
+            ..TableProperties::default()
+        };
+        let folder = |folder| {
+            let table = NavigatorNodeId::Object { connection: "c".into(), database: "app".into(), schema: "public".into(), object: "orders".into() };
+            table.table_folder(folder).unwrap()
+        };
+        let rows = |folder_kind| {
+            let parent = folder(folder_kind);
+            table_folder_children(&parent, &properties)
+                .into_iter()
+                .map(|child| {
+                    let info = child.item.clone().unwrap();
+                    (child.label, info.detail, info.definition)
+                })
+                .collect::<Vec<_>>()
+        };
+        let text = |name: &str, detail: &str, definition: Option<&str>| (name.to_string(), detail.to_string(), definition.map(str::to_string));
+        assert_eq!(
+            rows(TableFolder::Indexes),
+            [
+                text("orders_pkey", "(id) \u{00B7} primary", None),
+                text("by_name", "(name, status) \u{00B7} unique", Some("CREATE UNIQUE INDEX by_name")),
+                text("by_status", "(status)", None),
+                text("by_status", "(status)", None),
+                text("(name)", "(name)", None),
+            ]
+        );
+        let ids: HashSet<_> = table_folder_children(&folder(TableFolder::Indexes), &properties).into_iter().map(|child| child.id).collect();
+        assert_eq!(ids.len(), 5, "every row has its own id");
+        assert_eq!(
+            rows(TableFolder::Constraints),
+            [text("orders_pkey", "PK (id)", Some("PRIMARY KEY (id)")), text("positive", "Check", None)]
+        );
+        assert_eq!(rows(TableFolder::ForeignKeys), [text("orders_customer_fk", "\u{2192} customers(id)", None)]);
+        assert_eq!(
+            rows(TableFolder::Triggers),
+            [text("audit", "AFTER INSERT, UPDATE", Some("CREATE TRIGGER audit")), text("touch", "UPDATE \u{00B7} disabled", None)]
+        );
+        // Columns load their own way; a list the driver cannot report is an empty folder.
+        assert!(rows(TableFolder::Columns).is_empty());
+        let bare = TableProperties::default();
+        assert!(table_folder_children(&folder(TableFolder::Triggers), &bare).is_empty());
     }
 
     #[test]

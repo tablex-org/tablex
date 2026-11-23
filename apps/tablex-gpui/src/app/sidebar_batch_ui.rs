@@ -17,7 +17,7 @@ impl AppRoot {
             let snapshot = snapshot.clone();
             let input = input.clone();
             dialog
-                .title(format!("Group {} Selected Connections", snapshot.len()))
+                .title(t!("sidebar.group_selected_title", count = snapshot.len()))
                 .child(Input::new(&input))
                 .button_props(
                     gpui_component::dialog::DialogButtonProps::default().ok_text(t!("sidebar.create_group")),
@@ -28,7 +28,7 @@ impl AppRoot {
                     root.update(app, |this, cx| {
                         if !this.selected_sidebar_snapshot_matches(&snapshot) {
                             this.sidebar.notice =
-                                Some("Selection changed; retry creating the group".into());
+                                Some(t!("sidebar.group_selection_changed").into_owned());
                             cx.notify();
                             return false;
                         }
@@ -81,7 +81,7 @@ pub(super) fn append_selected_connection_menu(
     let select_root = root.clone();
     let exit_root = root.clone();
     menu.separator()
-        .label(format!("{count} selected connections"))
+        .label(t!("sidebar.selected_connections", count = count))
         .item(
             PopupMenuItem::new(t!("sidebar.group_selected")).on_click(move |_, window, app| {
                 let _ = group_root.update(app, |this, cx| {
@@ -130,7 +130,7 @@ pub(super) fn append_selected_connection_menu(
             }),
         )
         .item(
-            PopupMenuItem::new(format!("Delete {count} selected connections…")).on_click(
+            PopupMenuItem::new(t!("sidebar.delete_selected_connections", count = count)).on_click(
                 move |_, window, app| {
                     let _ = delete_root.update(app, |this, cx| {
                         if this.selected_sidebar_snapshot_matches(&snapshot) {
@@ -141,7 +141,7 @@ pub(super) fn append_selected_connection_menu(
             ),
         )
         .item(
-            PopupMenuItem::new(format!("Copy {count} connection configs")).on_click(
+            PopupMenuItem::new(t!("sidebar.copy_selected_configs", count = count)).on_click(
                 move |_, _, app| {
                     let _ = copy_root.update(app, |this, cx| {
                         if this.selected_sidebar_snapshot_matches(&copy_ids) {
@@ -152,7 +152,7 @@ pub(super) fn append_selected_connection_menu(
             ),
         )
         .item(
-            PopupMenuItem::new(format!("Export {count} connection configs…")).on_click(
+            PopupMenuItem::new(t!("sidebar.export_selected_configs", count = count)).on_click(
                 move |_, window, app| {
                     let _ = export_root.update(app, |this, cx| {
                         if this.selected_sidebar_snapshot_matches(&export_ids) {

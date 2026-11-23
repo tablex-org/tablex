@@ -39,9 +39,6 @@ menu:
   quit:
     en: "Quit %{name}"
     vi: "Thoát %{name}"
-  create_database_unavailable:
-    en: Create Database (unavailable)
-    vi: Tạo cơ sở dữ liệu (không khả dụng)
   tab:
     show_full_tab_titles:
       en: Show Full Tab Titles
@@ -427,3 +424,30 @@ menu:
   help:
     en: Help
     vi: Trợ giúp
+  error_detail:
+    en: "Error: %{error}"
+    vi: "Lỗi: %{error}"
+  copy_connection_url:
+    en: "Connection URL"
+    vi: "URL kết nối"
+  copy_connection_url_with_password:
+    en: "Connection URL (with password)"
+    vi: "URL kết nối (kèm mật khẩu)"
+  copy_host_port:
+    en: "Host:Port"
+    vi: "Máy chủ:Cổng"
+  copy_name_not_found:
+    en: "Could not copy name: saved connection not found"
+    vi: "Không sao chép được tên: không tìm thấy kết nối đã lưu"
+  move_connection_not_found:
+    en: "Could not move connection: not found"
+    vi: "Không di chuyển được kết nối: không tìm thấy"
+  visible_filter_unavailable:
+    en: "Visible Object Filter is unavailable"
+    vi: "Bộ lọc đối tượng hiển thị không khả dụng"
+  create_database_unsupported:
+    en: "Create Database is unavailable for this connection"
+    vi: "Kết nối này không hỗ trợ tạo cơ sở dữ liệu"
+  create_database_disabled:
+    en: "Enable this connection to create a database"
+    vi: "Hãy bật kết nối này để tạo cơ sở dữ liệu"

@@ -448,7 +448,9 @@ impl NavigatorState {
             NavigatorAction::Open => {
                 matches!(
                     id,
-                    NavigatorNodeId::Object { .. } | NavigatorNodeId::SchemaObject { .. }
+                    NavigatorNodeId::Object { .. }
+                        | NavigatorNodeId::SchemaObject { .. }
+                        | NavigatorNodeId::TableItem { .. }
                 ) || self.provider_collection_can_open(id)
             }
             _ => self.available_actions(id, connected).contains(&action),
@@ -552,6 +554,7 @@ impl NavigatorState {
             NavigatorNodeId::SchemaObject { .. } => {
                 vec![NavigatorAction::Open, NavigatorAction::ViewSource]
             }
+            NavigatorNodeId::TableItem { .. } => vec![NavigatorAction::Open],
             NavigatorNodeId::Provider { .. } => {
                 if self.provider_collection_can_open(id) {
                     vec![NavigatorAction::Open, NavigatorAction::NewQuery]
@@ -901,7 +904,7 @@ impl NavigatorState {
             .is_some_and(|only| only != database)
     }
 
-    fn visible_filter_allows(&self, id: &NavigatorNodeId) -> bool {
+    pub(super) fn visible_filter_allows(&self, id: &NavigatorNodeId) -> bool {
         if self.scoped_out(id) {
             return false;
         }
@@ -966,11 +969,14 @@ impl NavigatorState {
 
     fn matches(&self, id: &NavigatorNodeId, label: &str) -> bool {
         let scope = match id {
+            // A folder's title is not a name: only what is inside it is searched.
+            NavigatorNodeId::TableFolder { .. } => return false,
             NavigatorNodeId::Connection { .. } => SearchScope::Connections,
             NavigatorNodeId::Database { .. } => SearchScope::Databases,
             NavigatorNodeId::Object { .. }
             | NavigatorNodeId::SchemaObject { .. }
-            | NavigatorNodeId::Column { .. } => SearchScope::Objects,
+            | NavigatorNodeId::Column { .. }
+            | NavigatorNodeId::TableItem { .. } => SearchScope::Objects,
             NavigatorNodeId::Provider { .. } => {
                 match self.provider_node(id).map(|node| node.kind.as_str()) {
                     Some("database") => SearchScope::Databases,

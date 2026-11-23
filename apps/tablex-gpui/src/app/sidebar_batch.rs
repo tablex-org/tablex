@@ -9,7 +9,7 @@ impl AppRoot {
     ) -> Result<usize, String> {
         let prefs = self.navigator.preferences();
         if !prefs.groups.iter().any(|item| item.id == group) {
-            return Err("Connection group not found".into());
+            return Err(t!("sidebar.group_not_found").into_owned());
         }
         let members: Vec<_> = self
             .saved_connections
@@ -139,12 +139,12 @@ impl AppRoot {
         if self.navigator.action_target(anchor).is_none()
             || self.navigator.action_target(target).is_none()
         {
-            return Err("Dragged sidebar node is no longer visible".into());
+            return Err(t!("sidebar.drag_node_gone").into_owned());
         }
         let selected = if let Some(snapshot) = snapshot {
             if !snapshot.contains(anchor) || self.navigator.selection_in_visible_order() != snapshot
             {
-                return Err("Sidebar selection changed during drag".into());
+                return Err(t!("sidebar.drag_selection_changed").into_owned());
             }
             snapshot.to_vec()
         } else {
@@ -195,7 +195,7 @@ impl AppRoot {
                 .iter()
                 .any(|node| self.navigator.action_target(node).is_none())
         {
-            return Err("Drag contains no visible connection or group roots".into());
+            return Err(t!("sidebar.drag_no_roots").into_owned());
         }
         let group_roots: Vec<_> = roots
             .iter()
@@ -212,7 +212,7 @@ impl AppRoot {
             })
             .collect();
         if !group_roots.is_empty() && !connection_roots.is_empty() {
-            return Err("Select only groups or only connections to drag".into());
+            return Err(t!("sidebar.drag_mixed").into_owned());
         }
         let root_set: HashSet<_> = roots.iter().collect();
         if root_set.contains(target) {
@@ -269,7 +269,7 @@ impl AppRoot {
                                 .ok_or("Drop target was removed")?,
                         )
                     }
-                    _ => return Err("Invalid sidebar drop target".into()),
+                    _ => return Err(t!("sidebar.drop_invalid_target").into_owned()),
                 };
                 if !group_roots.is_empty() {
                     prefs.move_groups(&group_roots, group.as_deref(), position)
@@ -286,7 +286,7 @@ impl AppRoot {
 
     pub(super) fn selected_sidebar_connection_ids(&self) -> Result<Vec<String>, String> {
         if !self.navigator.connection_multi_mode() {
-            return Err("Select connections to use a batch action".into());
+            return Err(t!("sidebar.batch_select_connections").into_owned());
         }
         let ids = self
             .navigator
@@ -300,7 +300,7 @@ impl AppRoot {
                 .is_none()
                 || self.navigator.connection(id).is_none()
         }) {
-            return Err("Selected connection is no longer available".into());
+            return Err(t!("sidebar.batch_connection_gone").into_owned());
         }
         Ok(ids)
     }
@@ -475,7 +475,7 @@ impl AppRoot {
     ) -> Result<usize, String> {
         let current = self.selected_sidebar_connection_ids()?;
         if current != snapshot || snapshot.is_empty() {
-            return Err("Selection changed; reopen the confirmation".into());
+            return Err(t!("sidebar.batch_selection_changed").into_owned());
         }
         let storage_ids: Vec<_> = snapshot
             .iter()

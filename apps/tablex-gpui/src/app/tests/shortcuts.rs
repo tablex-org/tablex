@@ -66,6 +66,11 @@ fn old_binding_table(cx: &gpui::App) -> Vec<gpui::KeyBinding> {
         shortcuts::key_binding(cx, "secondary-c", CopyConnectionName, Some("sidebar")),
         shortcuts::key_binding(cx, "secondary-e", EditConnection, Some("sidebar")),
         shortcuts::key_binding(cx, "f5", RefreshConnection, Some("sidebar")),
+        shortcuts::key_binding(cx, "secondary-shift-c", CopyNavigatorQualifiedName, Some("sidebar")),
+        shortcuts::key_binding(cx, "f2", RenameNavigatorSelection, Some("sidebar")),
+        shortcuts::key_binding(cx, "delete", DeleteNavigatorSelection, Some("sidebar")),
+        shortcuts::key_binding(cx, "backspace", DeleteNavigatorSelection, Some("sidebar")),
+        shortcuts::key_binding(cx, "f4", OpenNavigatorSelection, Some("sidebar")),
         shortcuts::key_binding(cx, "secondary-s", SaveActiveSql, None),
         shortcuts::key_binding(cx, "secondary-shift-e", ExplainPlan, None),
         shortcuts::key_binding(cx, "secondary-w", CloseActiveTab, None),
@@ -135,6 +140,7 @@ fn old_binding_table(cx: &gpui::App) -> Vec<gpui::KeyBinding> {
         ));
     }
     if cfg!(target_os = "macos") {
+        table.push(shortcuts::key_binding(cx, "secondary-backspace", DeleteNavigatorSelection, Some("sidebar")));
         table.extend([
             // The editor's own Cmd+Enter runs too; Ctrl+Enter is the other clients' chord.
             shortcuts::key_binding(cx, "ctrl-enter", RunActiveQuery, None),
