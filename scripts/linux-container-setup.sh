@@ -44,7 +44,9 @@ chmod +x /tmp/rustup-init
 /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain stable
 export PATH="${CARGO_HOME}/bin:${PATH}"
 rustc --version
-ldd --version | head -n 1
+# sed reads to the end: `head` would close the pipe early, and under pipefail ldd's SIGPIPE (141)
+# failed the step whenever ldd was still writing.
+ldd --version | sed -n 1p
 
 "$(dirname "${BASH_SOURCE[0]}")/build-static-openssl.sh" /opt/openssl
 
