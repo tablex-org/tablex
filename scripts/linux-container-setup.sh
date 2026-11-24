@@ -22,12 +22,11 @@ packages=(
     libx11-dev libx11-xcb-dev libxcb1-dev libxcb-xkb-dev   # X11
     libvulkan-dev                            # rendering (wgpu)
 )
-# Bullseye is no longer on the main mirrors once its long term support has ended: use the archive then.
-apt-get update || {
-    sed -i -E 's#https?://(deb|security)\.debian\.org#http://archive.debian.org#; /bullseye-updates/d' \
-        /etc/apt/sources.list /etc/apt/sources.list.d/* 2>/dev/null || true
-    apt-get -o Acquire::Check-Valid-Until=false update
-}
+# Bullseye's support has ended: the main mirrors still list its security updates but no longer
+# serve them (404), so every source is the archive, one consistent, signed snapshot.
+sed -i -E 's#https?://(deb|security)\.debian\.org#http://archive.debian.org#; /bullseye-updates/d' \
+    /etc/apt/sources.list /etc/apt/sources.list.d/* 2>/dev/null || true
+apt-get -o Acquire::Check-Valid-Until=false update
 apt-get install -y --no-install-recommends "${packages[@]}" "$@"
 
 # rustup, pinned to a release whose installer is checked against a known hash; the toolchain is `stable`,
