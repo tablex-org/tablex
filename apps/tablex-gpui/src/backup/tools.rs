@@ -492,12 +492,33 @@ mod tests {
         use super::*;
         use std::os::unix::fs::PermissionsExt as _;
 
+        /// Writes an executable script. Tests run in parallel and each spawns programs: a child forked
+        /// by another test while this file is open for writing keeps that descriptor until its own
+        /// `exec`, and running the script meanwhile fails with ETXTBSY (Linux). Running it once here,
+        /// until that stops, makes the later probe see a file nobody can still be writing.
+        pub(super) fn script(path: &Path, body: &str) {
+            std::fs::write(path, body).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            for _ in 0..200 {
+                let started = std::process::Command::new(path)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+                match started {
+                    Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    _ => return,
+                }
+            }
+        }
+
         /// A program that prints `answer` for `--version`.
         pub(super) fn fake(dir: &Path, name: &str, answer: &str) -> PathBuf {
             std::fs::create_dir_all(dir).unwrap();
             let path = dir.join(name);
-            std::fs::write(&path, format!("#!/bin/sh\necho '{answer}'\n")).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            script(&path, &format!("#!/bin/sh\necho '{answer}'\n"));
             path
         }
 
@@ -580,7 +601,7 @@ mod tests {
         fn a_wrapper_whose_child_keeps_the_pipe_open_does_not_hang_the_search() {
             let tree = tempfile::tempdir().unwrap();
             let wrapper = fake(tree.path(), "pg_dump", "pg_dump (PostgreSQL) 17.4");
-            std::fs::write(&wrapper, "#!/bin/sh\nsleep 30 &\necho 'pg_dump (PostgreSQL) 17.4'\n").unwrap();
+            script(&wrapper, "#!/bin/sh\nsleep 30 &\necho 'pg_dump (PostgreSQL) 17.4'\n");
             let started = Instant::now();
             assert_eq!(probe(Tool::PgDump, &wrapper).unwrap().version.major, 17);
             assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
@@ -591,8 +612,7 @@ mod tests {
             // Not slept for 5 s: a probe of a program that exits at once, with no answer, is unreadable.
             let tree = tempfile::tempdir().unwrap();
             let silent = tree.path().join("pg_dump");
-            std::fs::write(&silent, "#!/bin/sh\nexit 0\n").unwrap();
-            std::fs::set_permissions(&silent, std::fs::Permissions::from_mode(0o755)).unwrap();
+            script(&silent, "#!/bin/sh\nexit 0\n");
             assert!(matches!(probe(Tool::PgDump, &silent), Err(ProbeError::Unreadable)));
         }
     }

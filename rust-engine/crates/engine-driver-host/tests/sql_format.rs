@@ -47,6 +47,33 @@ fn done(text: &str) -> String {
 }
 
 /// A directory kept for the test; scripts are executable files in it.
+/// Writes an executable script. Tests run in parallel and each forks: a child forked by another
+/// test while this file is open for writing keeps that descriptor until its own `exec`, and
+/// spawning the script meanwhile fails with ETXTBSY (Linux). Spawning it here (and stopping it
+/// again) until that stops leaves a file nobody can still be writing.
+fn write_script(path: &std::path::Path, body: &str) {
+    std::fs::write(path, body).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for _ in 0..200 {
+        let probe = std::process::Command::new(path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        match probe {
+            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Ok(mut child) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return;
+            }
+            Err(_) => return,
+        }
+    }
+}
+
 struct Scripts(PathBuf);
 
 impl Scripts {
@@ -58,8 +85,7 @@ impl Scripts {
 
     fn tool(&self, body: &str) -> SqlFormatTool {
         let path = self.0.join("tool.sh");
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_script(&path, &format!("#!/bin/sh\n{body}\n"));
         SqlFormatTool::new(path)
     }
 }

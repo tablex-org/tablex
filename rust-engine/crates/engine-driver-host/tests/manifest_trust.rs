@@ -6,7 +6,7 @@ use common::{mock_dylib, mock_entry};
 use ed25519_dalek::{Signer, SigningKey};
 use engine_driver_host::{
     public_key_from_base64, DriverCatalogState, DriverCategory, DriverInstaller, DriverManifest,
-    DriverTarget, DriverVerificationError, InstallError, InstalledDriverStore, ManifestFetcher,
+    DriverTarget, InstalledDriverStore, ManifestFetcher,
     ManifestTrust, ManifestTrustError, RegistryError, RegistryService, TrustPolicy,
 };
 use engine_driver_host::{TargetArch, TargetOs};
@@ -346,19 +346,23 @@ fn an_ad_hoc_signature_installs_when_the_signed_manifest_pins_no_team_id() {
     let (_temp, store) = store();
     let adhoc_entry = mock_entry("1.0.0", "");
 
-    // A manifest that pins a Team ID still requires it, under either policy.
-    let pinned = DriverInstaller::new(DriverTarget::current(), &store)
-        .install_from_file(&mock_entry("1.0.0", "ABCDE12345"), mock_dylib());
-    assert!(
-        matches!(
-            pinned,
-            Err(InstallError::Verification(
-                DriverVerificationError::TeamIdMismatch { .. }
-            ))
-        ),
-        "{pinned:?}"
-    );
-    assert!(store.record("mock").unwrap().is_none());
+    // A manifest that pins a Team ID still requires it, under either policy. Only
+    // macOS code signing carries a Team ID; Linux and Windows check the SHA-256 alone.
+    #[cfg(target_os = "macos")]
+    {
+        let pinned = DriverInstaller::new(DriverTarget::current(), &store)
+            .install_from_file(&mock_entry("1.0.0", "ABCDE12345"), mock_dylib());
+        assert!(
+            matches!(
+                pinned,
+                Err(engine_driver_host::InstallError::Verification(
+                    engine_driver_host::DriverVerificationError::TeamIdMismatch { .. }
+                ))
+            ),
+            "{pinned:?}"
+        );
+        assert!(store.record("mock").unwrap().is_none());
+    }
 
     let strict = DriverInstaller::new(DriverTarget::current(), &store)
         .install_from_file(&adhoc_entry, mock_dylib())

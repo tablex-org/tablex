@@ -215,6 +215,10 @@ fn verified_load_does_not_reuse_a_different_artifact_generation() {
         .expect("load original artifact");
 
     let replacement = build_mock_driver_with_features(Some("readonly"));
+    // A new file, not a rewrite in place: the loaded library stays mapped from the old one, and
+    // overwriting a mapped file crashes the process on Linux. The old file is renamed away, not
+    // removed: Windows cannot delete a mapped library, but it can rename one.
+    fs::rename(&staged, temp.path().join("replaced-artifact")).expect("move the staged artifact away");
     fs::copy(replacement, &staged).expect("replace staged artifact");
     let replacement_sha256 = sha256(&staged);
     let error = match DriverLoader.load_verified(&staged, &replacement_sha256) {

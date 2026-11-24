@@ -2,6 +2,9 @@
 // right-click menu and selecting text inside one value, all through real input
 // on the Mongo fixture (document 1).
 
+/// The platform copy chord: Cmd+C on macOS, Ctrl+C elsewhere.
+const COPY: &str = if cfg!(target_os = "macos") { "cmd-c" } else { "ctrl-c" };
+
 fn tree_app(
     cx: &mut TestAppContext,
 ) -> (gpui::Entity<AppRoot>, &mut gpui::VisualTestContext, u64) {
@@ -106,7 +109,7 @@ fn cmd_c_copies_the_selected_tree_rows_value(cx: &mut TestAppContext) {
     let copied = |visual: &mut gpui::VisualTestContext, path: &str| {
         visual.cx.write_to_clipboard(gpui::ClipboardItem::new_string("before".into()));
         click_tree_row(&app, visual, tab_id, path);
-        visual.simulate_keystrokes("cmd-c");
+        visual.simulate_keystrokes(COPY);
         clipboard_text(visual)
     };
     assert_eq!(copied(visual, "/name"), "mongo-customer-001", "a string without its quotes");
@@ -210,7 +213,7 @@ fn dragging_inside_a_value_selects_its_text_without_toggling_the_row(cx: &mut Te
     drag_select(visual, gpui::point(text.origin.x + gpui::px(1.0), y), gpui::point(text.origin.x + text.size.width / 2.0, y));
     // The press selects the row (the highlight follows the pointer), the release does not toggle.
     assert_eq!(tree_selected(&app, visual, tab_id).as_deref(), Some("/name"));
-    visual.simulate_keystrokes("cmd-c");
+    visual.simulate_keystrokes(COPY);
     let copied = clipboard_text(visual);
     let shown = "name: \"mongo-customer-001\"";
     assert!(!copied.is_empty() && shown.starts_with(&copied) && copied.len() < shown.len(), "part of the line: {copied:?}");
@@ -260,7 +263,7 @@ fn dragging_across_rows_copies_the_lines_as_the_tree_shows_them(cx: &mut TestApp
         gpui::point(first.origin.x + gpui::px(1.0), first.center().y),
         gpui::point(last.origin.x + last.size.width / 2.0, last.center().y),
     );
-    visual.simulate_keystrokes("cmd-c");
+    visual.simulate_keystrokes(COPY);
     let copied = clipboard_text(visual);
     let lines: Vec<&str> = copied.lines().collect();
     assert_eq!(lines.len(), 3, "{copied:?}");
@@ -298,7 +301,7 @@ fn a_text_selection_survives_scrolling_while_its_rows_stay_in_view(cx: &mut Test
     let a = tree_text_bounds(visual, 2);
     let b = tree_text_bounds(visual, 4);
     drag_select(visual, gpui::point(a.origin.x + gpui::px(1.0), a.center().y), gpui::point(b.right() - gpui::px(1.0), b.center().y));
-    visual.simulate_keystrokes("cmd-c");
+    visual.simulate_keystrokes(COPY);
     let before = clipboard_text(visual);
     assert_eq!(before.lines().count(), 3, "{before:?}");
     assert!(before.contains("sku: \"SKU-0000\"") && before.contains("qty: 0") && before.contains("ok: true"), "{before:?}");
@@ -312,7 +315,7 @@ fn a_text_selection_survives_scrolling_while_its_rows_stay_in_view(cx: &mut Test
     settle(visual);
     assert!(tree_text_bounds(visual, 2).origin.y < y_before, "the rows moved up");
     visual.cx.write_to_clipboard(gpui::ClipboardItem::new_string("cleared".into()));
-    visual.simulate_keystrokes("cmd-c");
+    visual.simulate_keystrokes(COPY);
     assert_eq!(clipboard_text(visual), before, "the same lines are still selected after the scroll");
     app.update(visual, |this, cx| {
         this.view(tab_id).mongo_detail_scroll.scroll_to_item_strict(300, gpui::ScrollStrategy::Top);
@@ -320,7 +323,7 @@ fn a_text_selection_survives_scrolling_while_its_rows_stay_in_view(cx: &mut Test
     });
     settle(visual);
     visual.cx.write_to_clipboard(gpui::ClipboardItem::new_string("cleared".into()));
-    visual.simulate_keystrokes("cmd-c");
+    visual.simulate_keystrokes(COPY);
     // Scrolled so far that the selection's end rows are gone, the text selection ends (a
     // per-row participant leaves with its row) and Cmd+C copies the selected row's value.
     assert_eq!(clipboard_text(visual), "SKU-0000");

@@ -82,6 +82,9 @@ impl<'a> UpdateRig<'a> {
     /// A release build of `current`, whose latest release is `releases`.
     fn new(cx: &'a mut TestAppContext, releases: std::sync::Arc<FakeReleases>, current: &str) -> Self {
         let (app, visual) = sidebar_test_app(cx);
+        // The checks run on `smol::unblock` threads that wake the scheduler whenever they finish, which
+        // may be before the first `wait_until`: parking is allowed from the start.
+        visual.dispatcher.allow_parking();
         visual.simulate_resize(gpui::size(gpui::px(1400.0), gpui::px(850.0)));
         visual.update(|window, cx| {
             actions::bind_keys(cx);

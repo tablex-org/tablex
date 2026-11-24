@@ -310,7 +310,6 @@ fn a_missing_executable_is_a_typed_spawn_error() {
 #[cfg(unix)]
 mod broken_plugins {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     /// `printf` octal escapes of a frame: 4-byte big-endian length, then the JSON.
     fn frame(json: &str) -> String {
@@ -319,10 +318,37 @@ mod broken_plugins {
         bytes.iter().map(|b| format!("\\{:03o}", b)).collect()
     }
 
+    /// Writes an executable script. Tests run in parallel and each forks: a child forked by another
+    /// test while this file is open for writing keeps that descriptor until its own `exec`, and
+    /// spawning the script meanwhile fails with ETXTBSY (Linux). Spawning it here (and stopping it
+    /// again) until that stops leaves a file nobody can still be writing.
+    fn write_script(path: &std::path::Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::write(path, body).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for _ in 0..200 {
+            let probe = std::process::Command::new(path)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+            match probe {
+                Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Ok(mut child) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return;
+                }
+                Err(_) => return,
+            }
+        }
+    }
+
     fn plugin(dir: &tempdir::Dir, body: &str) -> MongoShell {
         let path = dir.0.join("plugin.sh");
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_script(&path, &format!("#!/bin/sh\n{body}\n"));
         MongoShell::new(path)
     }
 

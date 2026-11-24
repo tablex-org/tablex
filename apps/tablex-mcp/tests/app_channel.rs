@@ -184,8 +184,11 @@ async fn the_default_layer_reaches_the_socket_in_the_data_dir() {
     // `build_layer` resolves the socket of `<TABLEX_DATA_DIR>/tablex` (in the data dir, or for a
     // deep temp dir like this test's, a short one named after it); the fixture's data dir is private
     // to this test binary, and this is the only test that listens there.
+    // The fixture goes first: it points `TABLEX_DATA_DIR` at the private dir, and without that the
+    // path below would be the real user's socket.
+    let data_dir = support::shared().data_dir();
     let path = engine_connect::app_channel::socket_path().expect("a data dir");
-    let in_data_dir = path.starts_with(support::shared().data_dir());
+    let in_data_dir = path.starts_with(data_dir);
     let named_after_it = path.file_name().is_some_and(|name| name.to_string_lossy().starts_with("tablex-"));
     assert!(in_data_dir || named_after_it, "{path:?}");
     let seen = Arc::new(Mutex::new(Vec::new()));

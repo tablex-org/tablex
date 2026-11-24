@@ -485,8 +485,9 @@ fn u_and_ctrl_r_and_cmd_z_undo_and_redo_in_normal_mode(cx: &mut TestAppContext) 
     vim_chord(visual, "secondary-z");
     assert_eq!(editor_text(&app, visual, tab), "one\ntwo\nthree", "Cmd-Z undoes in Normal mode");
     assert!(!editable(&app, visual));
-    vim_chord(visual, "secondary-shift-z");
-    assert_eq!(editor_text(&app, visual, tab), "one\nthree", "Cmd-Shift-Z redoes");
+    // The editor's redo: Cmd+Shift+Z on macOS, Ctrl+Y elsewhere (gpui-base's input bindings).
+    vim_chord(visual, if cfg!(target_os = "macos") { "secondary-shift-z" } else { "ctrl-y" });
+    assert_eq!(editor_text(&app, visual, tab), "one\nthree", "the platform redo chord redoes");
     assert!(!editable(&app, visual));
     // Typing still goes nowhere in Normal mode.
     vim_press(visual, "zz");

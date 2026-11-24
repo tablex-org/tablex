@@ -69,17 +69,8 @@ fn built_driver(package: &'static str, features: &'static str) -> std::path::Pat
 /// process goes through `load_verified`: the host caches handles per path, and
 /// a checksum-less first load would make the later verified load fail.
 fn driver_sha256(dylib: &std::path::Path) -> String {
-    let output = std::process::Command::new("shasum")
-        .args(["-a", "256"])
-        .arg(dylib)
-        .output()
-        .expect("shasum");
-    String::from_utf8(output.stdout)
-        .unwrap()
-        .split_whitespace()
-        .next()
-        .unwrap()
-        .to_string()
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(std::fs::read(dylib).expect("read the driver")))
 }
 
 /// A scratch SQLite file; the `sqlite3` CLI seeds and inspects it from

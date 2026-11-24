@@ -748,9 +748,10 @@ fn the_relaunch_waits_for_the_process_to_exit_then_opens_the_bundle() {
     use std::os::unix::fs::PermissionsExt as _;
     let scratch = Scratch::new();
     let marker = scratch.0.join("opened");
-    // Stands in for `/usr/bin/open`: records its arguments.
+    // Stands in for `/usr/bin/open`: records its arguments (`printf`, since `echo -n` is a flag in
+    // some `sh`s).
     let open = scratch.0.join("fake-open");
-    std::fs::write(&open, format!("#!/bin/sh\necho \"$@\" > '{}'\n", marker.display())).unwrap();
+    std::fs::write(&open, format!("#!/bin/sh\nprintf '%s %s\\n' \"$@\" > '{}'\n", marker.display())).unwrap();
     std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o755)).unwrap();
     // A process that is still alive for a moment.
     let mut sleeper = Command::new("/bin/sleep").arg("1").spawn().unwrap();

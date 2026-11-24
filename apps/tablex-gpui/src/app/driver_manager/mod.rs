@@ -33,9 +33,10 @@ pub(super) use tools::{addon_actions, installable_entry, AddonNeed, FormatterSee
 use tools::ToolsUi;
 #[cfg(test)]
 pub(super) use tools::{
-    client_config_json, code_span, run_keychain_authorization, tool_actions, tool_version_lines, ClientTextError, ShellQuoting,
-    MCP_CAPABILITY_NOTE,
+    client_config_json, code_span, tool_actions, tool_version_lines, ClientTextError, ShellQuoting, MCP_CAPABILITY_NOTE,
 };
+#[cfg(all(test, target_os = "macos"))]
+pub(super) use tools::run_keychain_authorization;
 
 /// How long an uninstall waits for sessions that were just disconnected to
 /// let go of the driver (their disconnect runs on a blocking thread).

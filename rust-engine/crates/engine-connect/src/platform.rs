@@ -58,8 +58,13 @@ pub const CREDENTIAL_STORE_LABEL: &str = if cfg!(target_os = "macos") {
 mod tests {
     use super::*;
 
+    /// The data-dir variable is process-wide: the test that sets it and the one that compares two
+    /// reads of it must not interleave.
+    static DATA_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn data_paths_are_platform_dirs_under_the_app_folder() {
+        let _env = DATA_DIR_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         assert!(app_data_dir()
             .expect("a data dir exists")
             .ends_with("tablex"));
@@ -82,9 +87,10 @@ mod tests {
     #[test]
     fn data_dir_env_is_ignored_when_empty_or_relative_and_moves_every_file_when_absolute() {
         use engine_storage::paths::DATA_DIR_ENV;
+        let _env = DATA_DIR_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let platform_default = app_data_dir();
         let absolute = std::env::temp_dir().join("tablex-platform-env-test");
-        // The only test that sets the variable; the others only look at path suffixes.
+        // The only test that sets the variable.
         for ignored in ["", "relative/dir", "."] {
             std::env::set_var(DATA_DIR_ENV, ignored);
             assert_eq!(app_data_dir(), platform_default, "{ignored:?} is unset");

@@ -97,16 +97,19 @@ pub fn merge_search_paths(login: Option<&OsStr>, inherited: Option<&OsStr>) -> O
 /// How long the login shell may take to answer.
 const LOGIN_SHELL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// After a failed ask, how long before the next format asks again (Settings › Editor asks sooner).
+#[cfg(target_os = "macos")]
 const LOGIN_SHELL_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// What the login shell said, kept only when it answered: a shell that hung or failed is asked
 /// again later instead of costing every format its PATH for the rest of the session.
+#[cfg(any(target_os = "macos", test))]
 #[derive(Default)]
 struct LoginPathCache {
     path: Option<OsString>,
     failed_at: Option<std::time::Instant>,
 }
 
+#[cfg(any(target_os = "macos", test))]
 impl LoginPathCache {
     /// The cached PATH, else `ask`'s answer (cached when there is one). After a failure `ask` is
     /// not called again before `retry_after` has passed.
@@ -225,11 +228,14 @@ fn shell_program() -> PathBuf {
     std::env::var_os("SHELL").filter(|shell| !shell.is_empty()).map_or_else(|| PathBuf::from("/bin/zsh"), PathBuf::from)
 }
 
+#[cfg(any(target_os = "macos", test))]
 const PATH_START: &str = "__TABLEX_PATH_START__";
+#[cfg(any(target_os = "macos", test))]
 const PATH_END: &str = "__TABLEX_PATH_END__";
 
 /// The PATH between the markers of the output of the script below; whatever a shell's startup files
 /// print before or after it is ignored.
+#[cfg(any(target_os = "macos", test))]
 pub fn parse_path_output(output: &str) -> Option<OsString> {
     let after = output.split_once(PATH_START)?.1;
     let path = after.split_once(PATH_END)?.0;

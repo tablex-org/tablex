@@ -928,15 +928,42 @@ mod tests {
         }
     }
 
+    /// Writes an executable script. Tests run in parallel and each forks: a child forked by another
+    /// test while this file is open for writing keeps that descriptor until its own `exec`, and
+    /// spawning the script meanwhile fails with ETXTBSY (Linux). Spawning it here (and stopping it
+    /// again) until that stops leaves a file nobody can still be writing.
+    #[cfg(unix)]
+    fn write_script(path: &std::path::Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::write(path, body).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for _ in 0..200 {
+            let probe = std::process::Command::new(path)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+            match probe {
+                Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Ok(mut child) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return;
+                }
+                Err(_) => return,
+            }
+        }
+    }
+
     /// An executable that never says hello: the run blocks until it is stopped.
     #[cfg(unix)]
     fn silent_plugin() -> (PathBuf, PathBuf) {
-        use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("tablex-shell-cancel-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos())));
         std::fs::create_dir_all(&dir).unwrap();
         let exe = dir.join("plugin.sh");
-        std::fs::write(&exe, "#!/bin/sh\nexec sleep 60\n").unwrap();
-        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_script(&exe, "#!/bin/sh\nexec sleep 60\n");
         (dir, exe)
     }
 
