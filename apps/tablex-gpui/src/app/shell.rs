@@ -701,6 +701,7 @@ pub(crate) fn open_with_scenario(scenario: Option<UiScenario>, cx: &mut gpui::Ap
         gpui::WindowOptions {
             window_bounds: scenario.as_ref().map(|_| {
                 gpui::WindowBounds::centered(
+                    None,
                     gpui::Size {
                         width: px(scenario_size.0),
                         height: px(scenario_size.1),

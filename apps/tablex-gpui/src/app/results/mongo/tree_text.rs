@@ -10,7 +10,7 @@
 
 use gpui::{
     App, BorderStyle, Bounds, Corners, Edges, Element, ElementId, GlobalElementId, HighlightStyle,
-    Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement, LayoutId, PaintQuad, Pixels,
+    Hitbox, HitboxBehavior, Hsla, InspectorElementId, LayoutId, PaintQuad, Pixels,
     SharedString, StyledText, Window, transparent_black,
 };
 use gpui_base::{TextSelectionHandle, TextSelectionRegistration, TextSelectionRun};
@@ -40,14 +40,6 @@ impl TreeRowText {
             StyledText::new(text.clone()).with_highlights([(key, HighlightStyle::color(key_color))])
         };
         Self { id: id.into(), text, styled_text, document_order }
-    }
-}
-
-impl IntoElement for TreeRowText {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
     }
 }
 

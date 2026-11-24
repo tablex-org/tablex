@@ -59,11 +59,11 @@ percent-encoding = "2"
 uuid = { version = "0.8", features = ["v4"] }
 
 dirs = "5"
-gpui = { package = "gpui-pre", version = "=0.3.12", optional = true }
-gpui_platform = { package = "gpui-pre-platform", version = "=0.3.12", optional = true, features = ["font-kit"] }
-gpui-component = { version = "=0.10.0", optional = true }
+gpui = { package = "gpui-pre", version = "=0.3.14", optional = true }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.14", optional = true, features = ["font-kit"] }
+gpui-component = { version = "=0.11.0", optional = true }
 # SelectableText: plain text the window-level text selection can select (not re-exported by gpui-component).
-gpui-base = { version = "=0.10.0", optional = true }
+gpui-base = { version = "=0.11.0", optional = true }
 # The app's own translations (`locales/`), by the crate gpui-component uses for its strings (shared locale and
 # an `extend!` of its keys). `sys-locale` reads the macOS preferred language (already in the tree through gpui).
 rust-i18n = { version = "4.2.2", optional = true }
@@ -101,12 +101,12 @@ libc = "0.2"
 # Linux windowing backends: the platform crate pulls `gpui_linux` without default
 # features, so Wayland and X11 have to be requested here.
 [target.'cfg(target_os = "linux")'.dependencies]
-gpui_platform = { package = "gpui-pre-platform", version = "=0.3.12", optional = true, features = ["wayland", "x11"] }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.14", optional = true, features = ["wayland", "x11"] }
 
 [dev-dependencies]
 arrow-array = "53"
 arrow-schema = "53"
-gpui = { package = "gpui-pre", version = "=0.3.12", features = ["test-support"] }
+gpui = { package = "gpui-pre", version = "=0.3.14", features = ["test-support"] }
 image = { version = "=0.25.10", default-features = false, features = ["png"] }
 # Live DDL tests (`sql_ddl::live`, ignored without TABLEX_TEST_*_URI): the same
 # harness the driver crates use to load a driver and talk to a test server.

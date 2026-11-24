@@ -64,14 +64,6 @@ impl BlockCaret {
     }
 }
 
-impl IntoElement for BlockCaret {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 impl Element for BlockCaret {
     type RequestLayoutState = ();
     /// The box, laid out at its place, and the editor's text area that clips it.

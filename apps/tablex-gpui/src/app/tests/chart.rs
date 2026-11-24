@@ -48,8 +48,15 @@ fn chart_state<R>(app: &gpui::Entity<AppRoot>, visual: &mut gpui::VisualTestCont
     app.read_with(visual, |this, _| read(&this.av().chart))
 }
 
+/// The quads of the last frame. A rounded or bordered quad is painted as its interior (square corners, no border)
+/// plus four strips (each the whole quad masked to a strip), in an order that other quads can interleave with. The
+/// strips of a quad that has an interior piece are left out, so one quad counts once.
 fn painted_quads(visual: &mut gpui::VisualTestContext) -> Vec<gpui::Quad> {
-    visual.update(|window, _| window.painted_quads())
+    let quads = visual.update(|window, _| window.painted_quads());
+    let square = gpui::Corners::default();
+    let interiors: Vec<(gpui::Bounds<gpui::ScaledPixels>, gpui::Background)> =
+        quads.iter().filter(|q| q.corner_radii == square).map(|q| (q.bounds, q.background)).collect();
+    quads.into_iter().filter(|q| q.corner_radii == square || !interiors.contains(&(q.bounds, q.background))).collect()
 }
 
 fn spec_of(app: &gpui::Entity<AppRoot>, visual: &mut gpui::VisualTestContext) -> cd::ChartSpec {

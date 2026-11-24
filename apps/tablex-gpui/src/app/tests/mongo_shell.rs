@@ -692,7 +692,7 @@ fn long_text_and_output_lines_scroll_sideways(cx: &mut TestAppContext) {
     let tab = rig.tab_id;
     for (selector, scroll) in [("shell-text", false), ("shell-output", true)] {
         let bounds = rig.visual.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is shown"));
-        rig.visual.simulate_event(gpui::ScrollWheelEvent {
+        rig.visual.simulate_event(gpui::ScrollEvent {
             position: bounds.center(),
             delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(-300.0), gpui::px(0.0))),
             ..Default::default()
