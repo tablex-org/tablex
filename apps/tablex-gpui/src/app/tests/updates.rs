@@ -343,6 +343,8 @@ fn app_manifest(size: u64, sha256: &str) -> serde_json::Value {
 struct Restarts {
     armed: std::rc::Rc<std::cell::RefCell<Vec<std::path::PathBuf>>>,
     quits: std::rc::Rc<std::cell::Cell<usize>>,
+    /// The bundles the install asked LaunchServices to refresh.
+    refreshed: std::sync::Arc<std::sync::Mutex<Vec<std::path::PathBuf>>>,
 }
 
 #[cfg_attr(not(unix), allow(dead_code))]
@@ -351,12 +353,15 @@ impl UpdateRig<'_> {
     fn install_env(&mut self, exe: Option<std::path::PathBuf>) -> (std::sync::Arc<fixtures::Fake>, Restarts) {
         let fake = std::sync::Arc::new(fixtures::Fake::default());
         let restarts = Restarts::default();
+        let refreshed = restarts.refreshed.clone();
         let (source, seen, quits) = (fake.clone(), restarts.armed.clone(), restarts.quits.clone());
         self.app.update(self.visual, move |this, _| {
             this.update_ui.source = source;
             this.update_ui.trust = Some(fixtures::trust(&fixtures::key(1)));
             this.update_ui.exe = exe;
             this.update_ui.target = INSTALL_TARGET;
+            // Never LaunchServices: the bundles of a test are temporary ones.
+            this.update_ui.refresh = std::sync::Arc::new(move |bundle| refreshed.lock().unwrap().push(bundle.to_owned()));
             this.update_ui.restart = Box::new(move |_, bundle| seen.borrow_mut().push(bundle.to_owned()));
             this.update_ui.quit = Box::new(move |_| quits.set(quits.get() + 1));
         });
@@ -445,6 +450,7 @@ fn install_and_restart_downloads_verifies_swaps_the_bundle_and_restarts(cx: &mut
         .unwrap();
     assert_eq!(String::from_utf8_lossy(&version.stdout).trim(), "0.2.0");
     assert!(scratch.0.join("TableX.app.old-0.1.0/Contents/Info.plist").is_file(), "the old app waits beside it");
+    assert_eq!(*restarts.refreshed.lock().unwrap(), std::slice::from_ref(&running), "the new bundle is registered once, after the swap");
     let leftovers: Vec<_> = std::fs::read_dir(&scratch.0)
         .unwrap()
         .flatten()

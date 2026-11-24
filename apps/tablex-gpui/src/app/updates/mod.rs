@@ -67,6 +67,9 @@ pub(super) struct UpdateUi {
     pub(in crate::app) target: &'static str,
     pub(in crate::app) restart: Restarter,
     pub(in crate::app) quit: Quitter,
+    /// Called with the bundle an install has put in place, to refresh what LaunchServices shows of it.
+    /// Tests stand in for it: they must not register their temporary bundles.
+    pub(in crate::app) refresh: Arc<dyn Fn(&std::path::Path) + Send + Sync>,
     /// The version that is installed and waits for a restart. This process runs from the previous
     /// bundle, which is moved aside: no further check or install until it has been restarted.
     pending_restart: Option<check::Version>,
@@ -115,6 +118,7 @@ impl UpdateUi {
                 .detach();
             }),
             quit: Box::new(|cx| cx.dispatch_action(&super::menus::Quit)),
+            refresh: Arc::new(install::refresh_launch_services),
             pending_restart: None,
             install: None,
             center: center::UpdateCenter::new(),
@@ -152,8 +156,8 @@ impl AppRoot {
         }
     }
 
-    /// On a launch: what an earlier update left beside the app (the previous bundle, unpacked or
-    /// downloaded files) goes, now that this version runs.
+    /// On a launch: unpacked or downloaded files of an earlier update go at once; the previous bundle
+    /// (the way back if this version had not started) goes once this version has run for a moment.
     fn clean_up_after_update(&self, cx: &mut Context<Self>) {
         let Ok(bundle) = install::locate_bundle(self.update_ui.exe.as_deref(), self.update_ui.debug_build) else {
             return;
@@ -162,12 +166,9 @@ impl AppRoot {
         let executor = cx.background_executor().clone();
         cx.background_executor()
             .spawn(async move {
-                let clean = || install::clean_up(&bundle, downloads.as_deref(), Duration::from_secs(60 * 60), SystemTime::now());
-                clean();
-                // The previous bundle is kept for a while (another instance may run from it): once more
-                // when it is old enough.
-                executor.timer(install::BACKUP_MIN_AGE + Duration::from_secs(30)).await;
-                clean();
+                install::clean_up(&bundle, downloads.as_deref(), Duration::from_secs(60 * 60), SystemTime::now());
+                executor.timer(install::STARTED_OK_AFTER).await;
+                install::remove_backups(&bundle, &install::running_executables);
             })
             .detach();
     }
@@ -350,11 +351,12 @@ impl AppRoot {
         }
 
         let source = Arc::clone(&self.update_ui.source);
+        let refresh = Arc::clone(&self.update_ui.refresh);
         let (version, target, current) = (offer.release.version.clone(), self.update_ui.target, self.update_ui.current.clone());
         // Everything, the swap of the bundles included, runs off the UI thread.
         let work = cx.background_executor().spawn(smol::unblock(move || {
             let staged = install::download_and_stage(&*source, &artifact, &bundle, &version, target, &downloads, &cancel, &progress)?;
-            install::install_staged(&bundle, staged, &current, &cancel).map(|()| bundle)
+            install::install_staged(&bundle, staged, &current, &cancel, &*refresh).map(|()| bundle)
         }));
         let offer = offer.clone();
         self.update_ui.install_task = Some(cx.spawn(async move |this, cx| {

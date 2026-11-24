@@ -36,6 +36,9 @@ const DITTO: &str = "/usr/bin/ditto";
 const CODESIGN: &str = "/usr/bin/codesign";
 const PLUTIL: &str = "/usr/bin/plutil";
 const OPEN: &str = "/usr/bin/open";
+const PS: &str = "/bin/ps";
+const LSREGISTER: &str =
+    "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
 /// The suffix of the previous bundle, kept beside the new one until the new version has launched.
 const BACKUP_INFIX: &str = ".old-";
 /// Prefix of the directory next to the bundle the new bundle is unpacked into.
@@ -684,11 +687,12 @@ pub(in crate::app) fn backup_path(bundle: &Bundle, current_version: &str) -> Pat
 
 /// Written inside a backup when it is made: the pid of the process that runs from it.
 const BACKUP_MARKER: &str = ".tablex-update-pid";
-/// A backup younger than this is kept, whatever its marker says.
-pub(in crate::app) const BACKUP_MIN_AGE: Duration = Duration::from_secs(10 * 60);
+/// How long a new version must have run before the backup it came from goes: the first launch that
+/// gets this far is the proof that the update works. Until then the backup is the way back.
+pub(in crate::app) const STARTED_OK_AFTER: Duration = Duration::from_secs(30);
 
 /// Whether the process that wrote `backup`'s marker is alive (a backup without a readable marker is
-/// not "in use": only its age protects it).
+/// not "in use").
 fn backup_in_use(backup: &Path) -> bool {
     std::fs::read_to_string(backup.join(BACKUP_MARKER))
         .ok()
@@ -746,44 +750,91 @@ pub(in crate::app) fn swap(
 }
 
 /// The last step of an install, off the UI thread: the swap, unless the install was cancelled meanwhile.
+/// After a swap `refresh` is called with the installed bundle (production: [`refresh_launch_services`]).
 /// The staging directory does not outlive a failure.
 pub(in crate::app) fn install_staged(
     bundle: &Bundle,
     staged: Staged,
     current_version: &str,
     cancel: &AtomicBool,
+    refresh: &dyn Fn(&Path),
 ) -> Result<(), InstallError> {
     let result = if cancel.load(Ordering::Acquire) {
         Err(InstallError::Cancelled)
     } else {
         swap(bundle, &staged, current_version, &|from, to| std::fs::rename(from, to)).map(drop)
     };
-    if result.is_err() {
-        let _ = std::fs::remove_dir_all(&staged.staging_dir);
+    match &result {
+        Ok(()) => refresh(&bundle.path),
+        Err(_) => {
+            let _ = std::fs::remove_dir_all(&staged.staging_dir);
+        }
     }
     result
 }
 
-/// Removes what an update leaves behind, on a launch: a `<name>.app.old-*` beside the running bundle
-/// that is at least `BACKUP_MIN_AGE` old and that no live process runs from (a second instance may
-/// still run from one), and staging directories and downloads older than `min_age` (an install in
-/// another instance is younger). Best effort.
+/// Makes the Dock and Finder show the icon of the bundle that has just been put in place (they keep the
+/// previous release's until LaunchServices looks again): the bundle's modification time moves to now and
+/// LaunchServices registers it again. Best effort, a failure never fails the update. macOS only.
+pub(in crate::app) fn refresh_launch_services(bundle: &Path) {
+    if cfg!(target_os = "macos") {
+        refresh_with(bundle, LSREGISTER);
+    }
+}
+
+fn refresh_with(bundle: &Path, lsregister: &str) {
+    let results = [touch(bundle), register_with(bundle, lsregister, LSREGISTER_TIMEOUT)];
+    for error in results.into_iter().filter_map(Result::err) {
+        if cfg!(debug_assertions) {
+            eprintln!("update: refreshing {} failed: {error}", bundle.display());
+        }
+    }
+}
+
+/// Sets the modification time of `path` (a directory too) to now.
+fn touch(path: &Path) -> io::Result<()> {
+    std::fs::File::open(path)?.set_modified(SystemTime::now())
+}
+
+/// How long `lsregister` may take before it is killed.
+const LSREGISTER_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// `<lsregister> -f <bundle>`: registers the bundle again, as it is on disk now. A run that outlasts
+/// `timeout` is killed.
+fn register_with(bundle: &Path, lsregister: &str, timeout: Duration) -> io::Result<()> {
+    let mut child = Command::new(lsregister)
+        .arg("-f")
+        .arg(bundle)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return status.success().then_some(()).ok_or_else(|| io::Error::other(format!("lsregister: {status}")));
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(io::Error::other("lsregister timed out"));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Removes what an update leaves behind, on a launch: staging directories beside the running bundle and
+/// downloads older than `min_age` (an install in another instance is younger). Best effort. The
+/// previous bundle is not touched here, see [`remove_backups`].
 pub(in crate::app) fn clean_up(bundle: &Bundle, downloads: Option<&Path>, min_age: Duration, now: SystemTime) {
     let age_at_least = |path: &Path, age: Duration| {
         std::fs::metadata(path)
             .and_then(|metadata| metadata.modified())
             .is_ok_and(|modified| now.duration_since(modified).unwrap_or_default() >= age)
     };
-    let backup_prefix = format!("{}{BACKUP_INFIX}", bundle.name().to_string_lossy());
     for entry in std::fs::read_dir(bundle.parent()).into_iter().flatten().flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
         let path = entry.path();
-        let removable = if name.starts_with(&backup_prefix) {
-            age_at_least(&path, BACKUP_MIN_AGE) && !backup_in_use(&path)
-        } else {
-            name.starts_with(STAGING_PREFIX) && age_at_least(&path, min_age)
-        };
-        if removable {
+        if entry.file_name().to_string_lossy().starts_with(STAGING_PREFIX) && age_at_least(&path, min_age) {
             let _ = std::fs::remove_dir_all(&path);
         }
     }
@@ -792,6 +843,45 @@ pub(in crate::app) fn clean_up(bundle: &Bundle, downloads: Option<&Path>, min_ag
         if age_at_least(&path, min_age) {
             let _ = std::fs::remove_file(&path);
         }
+    }
+}
+
+/// The executable of every live process (`ps` prints full paths for `comm`); none when they cannot be listed.
+pub(in crate::app) fn running_executables() -> Option<Vec<PathBuf>> {
+    let output = Command::new(PS).args(["-axo", "comm="]).stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
+    output.status.success().then(|| {
+        String::from_utf8_lossy(&output.stdout).lines().map(|line| PathBuf::from(line.trim())).collect()
+    })
+}
+
+/// Removes the previous bundles an update left beside the running one, once this version has started
+/// successfully: each `<name>.app.old-*` directory with this app's bundle identifier that no live process
+/// runs from (by its marker, or by the executables of the running processes, listed by `running`; a
+/// backup is kept when they cannot be listed, and the next launch tries again). Nothing else is touched.
+pub(in crate::app) fn remove_backups(bundle: &Bundle, running: &dyn Fn() -> Option<Vec<PathBuf>>) {
+    let Ok(identifier) = plist_string(&bundle.info_plist(), "CFBundleIdentifier") else {
+        return;
+    };
+    let prefix = format!("{}{BACKUP_INFIX}", bundle.name().to_string_lossy());
+    let mut executables = None;
+    for entry in std::fs::read_dir(bundle.parent()).into_iter().flatten().flatten() {
+        let path = entry.path();
+        let is_backup = entry.file_name().to_string_lossy().starts_with(&prefix)
+            && entry.file_type().is_ok_and(|kind| kind.is_dir());
+        if !is_backup
+            || backup_in_use(&path)
+            || !plist_string(&path.join("Contents/Info.plist"), "CFBundleIdentifier").is_ok_and(|id| id == identifier)
+        {
+            continue;
+        }
+        let Some(executables) = executables.get_or_insert_with(running) else {
+            return;
+        };
+        let real = path.canonicalize().unwrap_or_else(|_| path.clone());
+        if executables.iter().any(|exe| exe.starts_with(&path) || exe.starts_with(&real)) {
+            continue;
+        }
+        let _ = std::fs::remove_dir_all(&path);
     }
 }
 

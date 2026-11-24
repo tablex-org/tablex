@@ -637,19 +637,11 @@ fn a_failure_to_move_the_old_bundle_aside_changes_nothing() {
 // --- clean-up -----------------------------------------------------------------------------------
 
 #[test]
-fn a_launch_removes_old_enough_unused_backups_and_old_leftovers_and_nothing_else() {
+fn a_launch_removes_old_leftovers_but_never_a_backup() {
     let scratch = Scratch::new();
     let bundle = Bundle { path: scratch.0.join("TableX.app") };
     let downloads = scratch.0.join("updates");
-    for dir in [
-        "TableX.app",
-        "TableX.app.old-0.1.4",
-        "TableX.app.old-0.1.3",
-        ".TableX-update-abc",
-        "Other.app",
-        "Other.app.old-1.0.0",
-        "notes",
-    ] {
+    for dir in ["TableX.app", "TableX.app.old-0.1.4", ".TableX-update-abc", "Other.app", "Other.app.old-1.0.0", "notes"] {
         std::fs::create_dir_all(scratch.0.join(dir)).unwrap();
     }
     std::fs::create_dir_all(&downloads).unwrap();
@@ -657,33 +649,136 @@ fn a_launch_removes_old_enough_unused_backups_and_old_leftovers_and_nothing_else
     let left = |name: &str| scratch.0.join(name).exists();
     let hour = Duration::from_secs(3600);
 
-    // Just made: a young backup, staging directory and download may belong to an install that runs.
+    // Just made: a staging directory and a download may belong to an install that runs.
     let now = SystemTime::now();
     clean_up(&bundle, Some(&downloads), hour, now);
-    assert!(left("TableX.app.old-0.1.4") && left("TableX.app.old-0.1.3"), "a backup is kept for a while");
-    assert!(left(".TableX-update-abc") && downloads.join("TableX-0.2.0-x.zip").exists());
-    assert!(left("TableX.app") && left("Other.app") && left("Other.app.old-1.0.0") && left("notes"));
-
-    // Old enough, no marker: the backups go; the staging directory and download wait for an hour.
-    clean_up(&bundle, Some(&downloads), hour, now + BACKUP_MIN_AGE + Duration::from_secs(1));
-    assert!(!left("TableX.app.old-0.1.4") && !left("TableX.app.old-0.1.3"));
     assert!(left(".TableX-update-abc") && downloads.join("TableX-0.2.0-x.zip").exists());
 
     clean_up(&bundle, Some(&downloads), hour, now + 2 * hour);
     assert!(!left(".TableX-update-abc") && !downloads.join("TableX-0.2.0-x.zip").exists(), "old ones go");
-    assert!(left("TableX.app") && left("Other.app") && left("Other.app.old-1.0.0") && left("notes"));
+    // The backup is the way back until this version has started: the clean-up of a launch keeps it.
+    assert!(left("TableX.app") && left("TableX.app.old-0.1.4") && left("Other.app") && left("Other.app.old-1.0.0") && left("notes"));
+}
+
+/// A bundle directory that has only an Info.plist with `identifier`.
+#[cfg(target_os = "macos")]
+fn plist_only_bundle(root: &Path, name: &str, identifier: &str) -> PathBuf {
+    let app = root.join(name);
+    std::fs::create_dir_all(app.join("Contents")).unwrap();
+    std::fs::write(
+        app.join("Contents/Info.plist"),
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict><key>CFBundleIdentifier</key><string>{identifier}</string></dict></plist>
+"#
+        ),
+    )
+    .unwrap();
+    app
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn the_backup_stays_until_the_new_version_has_started_and_then_only_backups_of_this_app_go() {
+    let scratch = Scratch::new();
+    let root = &scratch.0;
+    // The update: swap, then the new version's launch clean-up (which keeps the backup).
+    let running = plist_only_bundle(root, "TableX.app", "org.tablex.TableX");
+    std::fs::write(running.join("version"), "old").unwrap();
+    let staging = root.join(format!("{STAGING_PREFIX}1"));
+    plist_only_bundle(&staging, "TableX.app", "org.tablex.TableX");
+    std::fs::write(staging.join("TableX.app/version"), "new").unwrap();
+    let bundle = Bundle { path: running };
+    let staged = Staged { bundle: staging.join("TableX.app"), staging_dir: staging };
+    let backup = swap(&bundle, &staged, "0.1.4", &real_rename).unwrap();
+    // An older backup, one of another app, one that is not a bundle, a file and a symlink of the same name.
+    let older = plist_only_bundle(root, "TableX.app.old-0.1.3", "org.tablex.TableX");
+    let other_app = plist_only_bundle(root, "TableX.app.old-0.0.1", "com.example.Other");
+    let no_plist = root.join("TableX.app.old-notes");
+    std::fs::create_dir_all(&no_plist).unwrap();
+    std::fs::write(root.join("TableX.app.old-file"), b"x").unwrap();
+    let elsewhere = plist_only_bundle(&root.join("elsewhere"), "Target.app", "org.tablex.TableX");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&elsewhere, root.join("TableX.app.old-link")).unwrap();
+    let unrelated = plist_only_bundle(root, "Other.app.old-1.0.0", "org.tablex.TableX");
+    std::fs::create_dir_all(root.join("notes")).unwrap();
+
+    // Before the new version has started: the way back is intact.
+    clean_up(&bundle, None, Duration::from_secs(3600), SystemTime::now() + Duration::from_secs(86_400));
+    assert_eq!(version_of(&backup), "old");
+    assert_eq!(version_of(&bundle.path), "new");
+    std::fs::rename(&bundle.path, root.join("failed")).unwrap();
+    std::fs::rename(&backup, &bundle.path).unwrap();
+    assert_eq!(version_of(&bundle.path), "old", "a failed start can be rolled back to the backup");
+    std::fs::rename(&bundle.path, &backup).unwrap();
+    std::fs::rename(root.join("failed"), &bundle.path).unwrap();
+
+    // The new version has started (the process that made the backup has exited: its marker names a dead pid).
+    let mut child = Command::new("/usr/bin/true").spawn().unwrap();
+    std::fs::write(backup.join(BACKUP_MARKER), child.id().to_string()).unwrap();
+    child.wait().unwrap();
+    remove_backups(&bundle, &|| Some(Vec::new()));
+    assert!(!backup.exists() && !older.exists(), "the backups of this app go");
+    assert_eq!(version_of(&bundle.path), "new");
+    assert!(other_app.exists() && no_plist.exists() && unrelated.exists(), "nothing else is touched");
+    assert!(root.join("TableX.app.old-file").exists() && root.join("notes").exists());
+    assert!(elsewhere.exists(), "a link is not followed");
+    #[cfg(unix)]
+    assert!(root.join("TableX.app.old-link").symlink_metadata().is_ok());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_backup_with_the_executable_of_a_live_process_stays_and_so_does_everything_when_the_list_fails() {
+    let scratch = Scratch::new();
+    let bundle = Bundle { path: plist_only_bundle(&scratch.0, "TableX.app", "org.tablex.TableX") };
+    let running = plist_only_bundle(&scratch.0, "TableX.app.old-0.1.4", "org.tablex.TableX");
+    let idle = plist_only_bundle(&scratch.0, "TableX.app.old-0.1.3", "org.tablex.TableX");
+    let sibling = plist_only_bundle(&scratch.0, "TableX.app.old-0.1.4-extra", "org.tablex.TableX");
+
+    // The list cannot be made: nothing is removed.
+    remove_backups(&bundle, &|| None);
+    assert!(running.exists() && idle.exists() && sibling.exists());
+
+    // A process runs from `old-0.1.4` (another from the new bundle, another elsewhere).
+    let listed = vec![
+        bundle.path.join("Contents/MacOS/TableX"),
+        running.join("Contents/MacOS/TableX"),
+        PathBuf::from("/usr/bin/true"),
+    ];
+    remove_backups(&bundle, &|| Some(listed.clone()));
+    assert!(running.exists(), "a live process runs from it");
+    assert!(!idle.exists() && !sibling.exists(), "the others go (a longer name is not the same bundle)");
+
+    // The process has exited: the next launch removes it.
+    remove_backups(&bundle, &|| Some(Vec::new()));
+    assert!(!running.exists());
 }
 
 #[cfg(unix)]
 #[test]
+fn lsregister_is_killed_when_it_overruns_its_time() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let scratch = Scratch::new();
+    let pid_file = scratch.0.join("pid");
+    let slow = scratch.0.join("slow-lsregister");
+    std::fs::write(&slow, format!("#!/bin/sh\necho $$ > '{}'\nexec /bin/sleep 30\n", pid_file.display())).unwrap();
+    std::fs::set_permissions(&slow, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let started = std::time::Instant::now();
+    let error = register_with(&scratch.0, slow.to_str().unwrap(), Duration::from_millis(500)).unwrap_err();
+    assert!(error.to_string().contains("timed out"), "{error}");
+    assert!(started.elapsed() < Duration::from_secs(10));
+    let pid: u32 = std::fs::read_to_string(&pid_file).unwrap().trim().parse().unwrap();
+    assert!(!process_alive(pid), "the child is killed and reaped");
+}
+
+#[cfg(all(target_os = "macos", unix))]
+#[test]
 fn a_backup_that_a_live_process_runs_from_is_never_removed() {
     let scratch = Scratch::new();
-    let bundle = Bundle { path: scratch.0.join("TableX.app") };
-    let live = scratch.0.join("TableX.app.old-0.1.4");
-    let dead = scratch.0.join("TableX.app.old-0.1.3");
-    for dir in [&live, &dead] {
-        std::fs::create_dir_all(dir).unwrap();
-    }
+    let bundle = Bundle { path: plist_only_bundle(&scratch.0, "TableX.app", "org.tablex.TableX") };
+    let live = plist_only_bundle(&scratch.0, "TableX.app.old-0.1.4", "org.tablex.TableX");
+    let dead = plist_only_bundle(&scratch.0, "TableX.app.old-0.1.3", "org.tablex.TableX");
     std::fs::write(live.join(BACKUP_MARKER), std::process::id().to_string()).unwrap();
     // The pid of a process that has exited.
     let mut child = Command::new("/usr/bin/true").spawn().unwrap();
@@ -691,8 +786,7 @@ fn a_backup_that_a_live_process_runs_from_is_never_removed() {
     child.wait().unwrap();
     std::fs::write(dead.join(BACKUP_MARKER), gone.to_string()).unwrap();
 
-    let much_later = SystemTime::now() + 24 * Duration::from_secs(3600);
-    clean_up(&bundle, None, Duration::from_secs(3600), much_later);
+    remove_backups(&bundle, &|| Some(Vec::new()));
     assert!(live.exists(), "this process runs from it");
     assert!(!dead.exists());
 }
@@ -726,14 +820,20 @@ fn the_last_step_swaps_unless_cancelled_and_never_leaves_the_staging_directory_b
     let scratch = Scratch::new();
     let (bundle, staged) = swap_fixture(&scratch.0);
     let staging = staged.staging_dir.clone();
-    let error = install_staged(&bundle, staged, "0.1.4", &AtomicBool::new(true)).unwrap_err();
+    let error = install_staged(&bundle, staged, "0.1.4", &AtomicBool::new(true), &|_| panic!("nothing was installed")).unwrap_err();
     assert!(matches!(error, InstallError::Cancelled));
     assert!(!staging.exists(), "a cancelled install removes what it unpacked");
     assert_eq!(version_of(&bundle.path), "old");
 
     let (_, staged) = swap_fixture(&scratch.0);
-    install_staged(&bundle, staged, "0.1.4", &AtomicBool::new(false)).unwrap();
+    let refreshed = std::cell::RefCell::new(Vec::new());
+    install_staged(&bundle, staged, "0.1.4", &AtomicBool::new(false), &|path| {
+        // The new bundle is in place when the refresh runs.
+        refreshed.borrow_mut().push((path.to_owned(), version_of(path)));
+    })
+    .unwrap();
     assert_eq!(version_of(&bundle.path), "new");
+    assert_eq!(*refreshed.borrow(), [(bundle.path.clone(), "new".to_owned())], "refreshed once, after the swap");
 
     // A failing swap (the backup name is taken by a backup a live process runs from): the staging
     // directory still goes.
@@ -741,9 +841,51 @@ fn the_last_step_swaps_unless_cancelled_and_never_leaves_the_staging_directory_b
     let staging = staged.staging_dir.clone();
     std::fs::create_dir_all(scratch.0.join("TableX.app.old-9.9.9")).unwrap();
     std::fs::write(scratch.0.join("TableX.app.old-9.9.9").join(BACKUP_MARKER), std::process::id().to_string()).unwrap();
-    let error = install_staged(&bundle, staged, "9.9.9", &AtomicBool::new(false)).unwrap_err();
+    let error = install_staged(&bundle, staged, "9.9.9", &AtomicBool::new(false), &|_| panic!("the swap failed")).unwrap_err();
     assert!(matches!(error, InstallError::Swap(_)), "{error}");
     assert!(!staging.exists());
+}
+
+// --- the icon refresh -----------------------------------------------------------------------------
+
+// The icon refresh is macOS-only (LaunchServices); a directory cannot be opened for its mtime on Windows.
+#[cfg(unix)]
+#[test]
+fn touching_a_bundle_moves_its_modification_time_to_now() {
+    let scratch = Scratch::new();
+    let app = scratch.0.join("TableX.app");
+    std::fs::create_dir_all(&app).unwrap();
+    let long_ago = SystemTime::now() - Duration::from_secs(30 * 86_400);
+    std::fs::File::open(&app).unwrap().set_modified(long_ago).unwrap();
+    touch(&app).unwrap();
+    let modified = std::fs::metadata(&app).unwrap().modified().unwrap();
+    assert!(modified.duration_since(long_ago).unwrap() > Duration::from_secs(29 * 86_400));
+    assert!(SystemTime::now().duration_since(modified).unwrap_or_default() < Duration::from_secs(60));
+}
+
+#[cfg(unix)]
+#[test]
+fn the_refresh_touches_the_bundle_and_registers_it_with_lsregister_and_survives_its_failure() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let scratch = Scratch::new();
+    let app = scratch.0.join("Some App.app");
+    std::fs::create_dir_all(&app).unwrap();
+    let long_ago = SystemTime::now() - Duration::from_secs(86_400);
+    std::fs::File::open(&app).unwrap().set_modified(long_ago).unwrap();
+    // Stands in for `lsregister`: records its arguments.
+    let record = scratch.0.join("registered");
+    let fake = scratch.0.join("fake-lsregister");
+    std::fs::write(&fake, format!("#!/bin/sh\necho \"$@\" > '{}'\n", record.display())).unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    refresh_with(&app, fake.to_str().unwrap());
+    assert_eq!(std::fs::read_to_string(&record).unwrap().trim(), format!("-f {}", app.display()));
+    assert!(std::fs::metadata(&app).unwrap().modified().unwrap() > long_ago + Duration::from_secs(3600));
+
+    // A missing or failing lsregister, or a missing bundle, is no error to the caller.
+    refresh_with(&app, "/nonexistent/lsregister");
+    refresh_with(&app, "/usr/bin/false");
+    refresh_with(&scratch.0.join("gone.app"), fake.to_str().unwrap());
 }
 
 // --- the restart ----------------------------------------------------------------------------------
