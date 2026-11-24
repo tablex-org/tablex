@@ -697,7 +697,7 @@ pub(crate) fn open_with_scenario(scenario: Option<UiScenario>, cx: &mut gpui::Ap
         gpui::SharedString::from(format!("tablex UI Scenario: {}", scenario.name()))
     });
     actions::bind_keys(cx);
-    cx.open_window(
+    let opened = cx.open_window(
         gpui::WindowOptions {
             window_bounds: scenario.as_ref().map(|_| {
                 gpui::WindowBounds::centered(
@@ -789,8 +789,11 @@ pub(crate) fn open_with_scenario(scenario: Option<UiScenario>, cx: &mut gpui::Ap
             }
             root
         },
-    )
-    .expect("failed to open tablex window");
+    );
+    if let Err(error) = opened {
+        // No graphics backend: a panic would leave a double-click with no window and no word.
+        super::window_failure::report_and_exit(&error);
+    }
     // After the first window exists: install the menu bar and take the
     // foreground so the previous app's menus do not stay on screen.
     super::menus::finish_launch(cx, |cx| cx.activate(true));

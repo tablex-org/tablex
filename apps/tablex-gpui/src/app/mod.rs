@@ -118,6 +118,7 @@ mod tunnel_ui;
 mod updates;
 mod vim;
 mod vim_caret;
+mod window_failure;
 mod workspace;
 
 use actions::*;
