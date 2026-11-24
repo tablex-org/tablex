@@ -123,6 +123,8 @@ mod transaction_dialogs;
 mod tree_clipboard;
 mod tunnel_ui;
 mod updates;
+#[cfg(test)]
+mod upgrade_compat;
 mod vim;
 mod vim_caret;
 mod welcome;

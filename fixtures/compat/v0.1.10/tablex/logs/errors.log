@@ -1,0 +1,3 @@
+{"at_ms":1700000000000,"severity":"error","area":"query","connection_id":"aaaaaaaa-0000-4000-8000-000000000001","connection_name":"Shop (production)","code":"42P01","retryable":false,"message":"relation \"missing\" does not exist","details":"detail line","repeat":3}
+{"at_ms":1700000100000,"severity":"warning","area":"connect","connection_id":"aaaaaaaa-0000-4000-8000-000000000001","connection_name":"Shop (production)","code":"42P01","retryable":false,"message":"connection slow","details":"detail line","repeat":1}
+{"at_ms":1700000200000,"severity":"info","area":"app","connection_id":"aaaaaaaa-0000-4000-8000-000000000001","connection_name":"Shop (production)","code":"42P01","retryable":false,"message":"update check skipped","details":"detail line","repeat":1}

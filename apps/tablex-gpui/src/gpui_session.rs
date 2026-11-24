@@ -205,12 +205,27 @@ pub fn load(path: &Path) -> LoadOutcome {
     }
 }
 
-/// Moves an unusable file aside (best effort) so the next save does not
-/// destroy it silently. For files (`settings.json`); the session has [`quarantine_session`].
-pub fn quarantine(path: &Path) {
-    let mut name = path.as_os_str().to_owned();
-    name.push(".corrupt");
-    let _ = std::fs::rename(path, PathBuf::from(name));
+/// Moves an unusable file aside so the next save does not destroy it silently, and says where it
+/// went (`<name>.corrupt`, or `<name>.<unix seconds>-<n>.corrupt` when an earlier one is there:
+/// never over it). `Err`: it could not be moved and is still in place. For files
+/// (`settings.json`); the session has [`quarantine_session`].
+pub fn quarantine(path: &Path) -> std::io::Result<PathBuf> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    let with = |suffix: &str| {
+        let mut name = path.as_os_str().to_owned();
+        name.push(suffix);
+        PathBuf::from(name)
+    };
+    let mut target = with(".corrupt");
+    let mut attempt = 0;
+    while target.exists() {
+        target = with(&format!(".{stamp}-{attempt}.corrupt"));
+        attempt += 1;
+    }
+    std::fs::rename(path, &target)?;
+    Ok(target)
 }
 
 /// Moves an unusable session aside (best effort, under another name in the same table) so the

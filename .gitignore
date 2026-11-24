@@ -41,6 +41,7 @@ build/
 
 # Logs
 *.log
+!fixtures/compat/**/*.log
 
 # Benchmark
 *.profraw

@@ -150,6 +150,11 @@ pub fn load(path: &Path, legacy: &Legacy) -> Loaded {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return fresh(None),
+        // Not text (damaged): the same as text that is not JSON. Left in place, the next save
+        // would replace it.
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+            return set_aside(path, &error, fresh);
+        }
         Err(error) => {
             return Loaded {
                 notice: Some(format!("Could not read the settings: {error}")),
@@ -179,11 +184,25 @@ pub fn load(path: &Path, legacy: &Legacy) -> Loaded {
         Err(error) => {
             // Keep the unreadable file for the user; the next save must not
             // destroy it silently.
-            gpui_session::quarantine(path);
-            fresh(Some(format!(
-                "The settings file is corrupted and was set aside as settings.json.corrupt: {error}"
-            )))
+            set_aside(path, &error, fresh)
         }
+    }
+}
+
+/// An unreadable settings file is moved aside, and the notice says so only when that worked. When
+/// it did not, the file stays where it is and is not written over at once.
+fn set_aside(path: &Path, error: &dyn std::fmt::Display, fresh: impl FnOnce(Option<String>) -> Loaded) -> Loaded {
+    match gpui_session::quarantine(path) {
+        Ok(aside) => fresh(Some(format!(
+            "The settings file is corrupted and was set aside as {}: {error}",
+            aside.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned())
+        ))),
+        Err(moved) => Loaded {
+            needs_save: false,
+            ..fresh(Some(format!(
+                "The settings file is corrupted ({error}) and could not be set aside ({moved}); it was left as it is"
+            )))
+        },
     }
 }
 
@@ -620,6 +639,47 @@ mod tests {
         assert!(loaded.notice.is_some() && loaded.needs_save);
         assert!(!path.exists());
         assert!(dir.join("settings.json.corrupt").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_second_corrupt_file_never_replaces_the_first() {
+        let dir = temp_dir();
+        let path = dir.join(FILE_NAME);
+        std::fs::write(&path, "{ first").unwrap();
+        load(&path, &Legacy::default());
+        std::fs::write(&path, "{ second").unwrap();
+        let loaded = load(&path, &Legacy::default());
+        assert_eq!(std::fs::read(dir.join("settings.json.corrupt")).unwrap(), b"{ first");
+        let aside: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".corrupt") && name != "settings.json.corrupt")
+            .collect();
+        assert_eq!(aside.len(), 1, "{aside:?}");
+        assert_eq!(std::fs::read(dir.join(&aside[0])).unwrap(), b"{ second");
+        assert!(loaded.notice.unwrap().contains(&aside[0]), "the notice names the file it went to");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_that_cannot_be_set_aside_is_left_alone_and_not_claimed_to_be() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir();
+        let path = dir.join(FILE_NAME);
+        std::fs::write(&path, "{ not json").unwrap();
+        // A read-only directory: nothing can be renamed in it.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let blocked = std::fs::File::create(dir.join("probe")).is_err();
+        let loaded = load(&path, &Legacy::default());
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        if blocked {
+            assert!(path.exists(), "the original is still there");
+            assert!(!loaded.needs_save, "and is not written over at once");
+            let notice = loaded.notice.unwrap();
+            assert!(notice.contains("could not be set aside") && !notice.contains("was set aside"), "{notice}");
+        }
         std::fs::remove_dir_all(dir).unwrap();
     }
 

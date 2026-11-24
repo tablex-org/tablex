@@ -1,0 +1,179 @@
+{
+  "schema_version": 6,
+  "appearance": {
+    "theme": "system",
+    "language": "vi",
+    "ui_scale": 0.75,
+    "interface_font": "x",
+    "grid_font": "x",
+    "grid_font_size": 9.0,
+    "editor_font": "x",
+    "editor_font_size": 9.0,
+    "tab_group_by": "database",
+    "tab_rows": true,
+    "compact_tab_titles": true,
+    "show_fps": false,
+    "error_log_place": "tab"
+  },
+  "editor": {
+    "line_numbers": false,
+    "soft_wrap": true,
+    "tab_size": 1,
+    "auto_close": false,
+    "vim_mode": true,
+    "autocomplete_auto_trigger": false,
+    "autocomplete_insert_space": true,
+    "autocomplete_max_items": 5,
+    "highlight_current_statement": true,
+    "run_scope": "all",
+    "results_position": "right",
+    "on_script_error": "continue",
+    "parameters": false,
+    "max_result_tabs": 1,
+    "confirm_dangerous": false,
+    "confirm_unsaved_close": true,
+    "format_keyword_case": "keep",
+    "format_indent": 16,
+    "format_lines_between_statements": 0,
+    "formatter": "external",
+    "format_external_program": "x",
+    "format_external_args": "x",
+    "format_external_exit_codes": "0x",
+    "format_timeout": 1
+  },
+  "results": {
+    "page_size": 1,
+    "null_text": "NULLx",
+    "right_align_numbers": false,
+    "show_row_numbers": false,
+    "column_width_default": 40,
+    "column_width_min": 20,
+    "column_width_max": 40,
+    "auto_size_columns": true,
+    "boolean_display": "checkbox",
+    "datetime_format": "iso_millis",
+    "binary_display": "base64",
+    "binary_preview_max": 8,
+    "mongo_json_mode": "canonical",
+    "default_copy_format": "markdown",
+    "export": {
+      "delimiter": ",x",
+      "header": false,
+      "null_text": "x",
+      "folder": "x"
+    }
+  },
+  "query": {
+    "query_timeout_secs": 86400,
+    "connect_timeout_secs": 600,
+    "keep_alive_secs": 0,
+    "pg_dump_path": "x",
+    "pg_restore_path": "x",
+    "mysqldump_path": "x",
+    "mariadb_dump_path": "x"
+  },
+  "navigation": {
+    "connection_sort": "descending",
+    "global_search": true,
+    "show_system_objects": false,
+    "table_double_click": "diagram",
+    "single_click_opens": true,
+    "restore_tabs": "none",
+    "open_data_tabs_next_to_active": true,
+    "navigator_page_size": 10
+  },
+  "ai": {
+    "provider": "openai_compatible",
+    "providers": {
+      "anthropic": {
+        "model": "claude-example-1",
+        "base_url": "https://api.anthropic.com"
+      },
+      "openai": {
+        "model": "gpt-example",
+        "base_url": "https://api.openai.com/v1"
+      },
+      "openai_compatible": {
+        "model": "llm-example",
+        "base_url": "https://llm.example.com/v1"
+      },
+      "ollama": {
+        "model": "qwen-example",
+        "base_url": "http://localhost:11434/v1"
+      }
+    },
+    "effort": "high",
+    "fallback": false,
+    "keep_conversations": false,
+    "mcp_writes": true,
+    "agent_access": "read"
+  },
+  "updates": {
+    "check_automatically": false
+  },
+  "connection_types": [
+    {
+      "id": "development",
+      "name": "Development",
+      "color": "#22c55e",
+      "confirm_execute": false,
+      "confirm_data_change": false,
+      "read_only": false,
+      "auto_commit": true,
+      "smart_commit": false,
+      "smart_commit_recover": false,
+      "auto_close_idle_transactions": false,
+      "agent_access": "off"
+    },
+    {
+      "id": "test",
+      "name": "Test",
+      "color": "#3b82f6",
+      "confirm_execute": false,
+      "confirm_data_change": false,
+      "read_only": false,
+      "auto_commit": true,
+      "smart_commit": false,
+      "smart_commit_recover": false,
+      "auto_close_idle_transactions": false,
+      "agent_access": "off"
+    },
+    {
+      "id": "production",
+      "name": "Production",
+      "color": "#ef4444",
+      "confirm_execute": true,
+      "confirm_data_change": true,
+      "read_only": false,
+      "auto_commit": true,
+      "smart_commit": false,
+      "smart_commit_recover": false,
+      "auto_close_idle_transactions": false,
+      "agent_access": "off"
+    },
+    {
+      "id": "staging",
+      "name": "Staging",
+      "color": "#f59e0b",
+      "confirm_execute": true,
+      "confirm_data_change": false,
+      "read_only": true,
+      "auto_commit": false,
+      "smart_commit": true,
+      "smart_commit_recover": false,
+      "auto_close_idle_transactions": false,
+      "idle_transaction_secs": 120,
+      "agent_access": "schema"
+    }
+  ],
+  "shortcuts": {
+    "example.removed_action": [
+      "secondary-alt-k",
+      "f13"
+    ],
+    "workspace.close_tab": [
+      "secondary-shift-w"
+    ],
+    "workspace.toggle_assistant": []
+  }
+}
