@@ -200,6 +200,18 @@ impl ConnectionFormState {
         now: f64,
         original: Option<&SavedConnectionRecord>,
     ) -> Result<SavedConnectionRecord, String> {
+        self.to_record_saving(now, original, engine_connect::key_home::passwords_saved())
+    }
+
+    /// [`Self::to_record`] for a run that saves passwords (`saving`) or, after "Don't save
+    /// passwords", not (the process-wide switch, which tests do not flip).
+    #[allow(clippy::wrong_self_convention)]
+    pub fn to_record_saving(
+        &mut self,
+        now: f64,
+        original: Option<&SavedConnectionRecord>,
+        saving: bool,
+    ) -> Result<SavedConnectionRecord, String> {
         if self.password.is_empty() {
             if let Some(password) = self.password_from_uri() {
                 self.password = password;
@@ -249,8 +261,17 @@ impl ConnectionFormState {
         if let Some(color) = &self.color_hex {
             record.color_hex = color.clone();
         }
-        record.save_password =
-            self.save_password && (!self.password.is_empty() || reuses_saved_password);
+        // After "Don't save passwords" nothing is written: the connection asks when it connects,
+        // and what an earlier run saved stays (the flag with its secret) as long as the server is
+        // the same; a new server must not inherit the old one's secret.
+        record.save_password = if saving {
+            self.save_password && (!self.password.is_empty() || reuses_saved_password)
+        } else {
+            original.is_some_and(|original| {
+                original.save_password
+                    && connections::persisted_uris_match(self.kind, &original.uri, &record.uri)
+            })
+        };
         record.is_pinned = self.is_pinned;
         if let Some(profile) = &self.profile {
             record.connection_type = profile.type_id.clone();

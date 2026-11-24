@@ -37,6 +37,7 @@ impl From<CredentialError> for KeyStoreError {
             CredentialError::NoKeyring => Self::NoStore,
             CredentialError::Platform(message) => Self::Store(message),
             other @ (CredentialError::MasterKeyMissing { .. }
+            | CredentialError::KeyUnreachable { .. }
             | CredentialError::InteractionNotAllowed
             | CredentialError::UserRefused) => {
                 Self::Store(other.to_string())

@@ -227,6 +227,28 @@ fn probe(conn: &Connection) -> rusqlite::Result<Option<(String, Entry)>> {
     .optional()
 }
 
+/// How many secrets the app database at `path` holds (0 when there is no file yet): what tells a
+/// key that was never made from one that cannot be reached.
+pub fn saved_secrets(path: &Path) -> Result<usize, CredentialError> {
+    match EncryptedStore::open_existing(path)? {
+        Some(conn) => real_count(&conn).map_err(|source| db_error(path, "read", source)),
+        None => Ok(0),
+    }
+}
+
+/// Whether the master key `text` opens the app database at `path`, judged on the check row (else
+/// the first secret): `None` when nothing is sealed yet (no file, or an empty table), so no key can
+/// be told from another. A key that is damaged or does not match is `Some(false)`.
+pub fn key_opens_table(path: &Path, text: &str) -> Result<Option<bool>, CredentialError> {
+    let Some(conn) = EncryptedStore::open_existing(path)? else {
+        return Ok(None);
+    };
+    let Some((name, entry)) = probe(&conn).map_err(|source| db_error(path, "read", source))? else {
+        return Ok(None);
+    };
+    Ok(Some(decode_key(text).is_ok_and(|key| open(&key, &name, &entry).is_ok())))
+}
+
 /// The secrets of the table (all rows but the check row).
 fn real_count(conn: &Connection) -> rusqlite::Result<usize> {
     conn.query_row(
@@ -308,6 +330,12 @@ impl EncryptedStore {
         Ok(Some(self.state().key.get_or_insert(key).clone()))
     }
 
+    /// Drops the key kept in memory (the key moved to another home): the next operation reads it
+    /// from where it lives now.
+    pub fn forget_key(&self) {
+        self.state().key = None;
+    }
+
     /// Replaces the key in memory by `key` only if it still is `stale` (or empty): a newer key put
     /// there by someone else is never rolled back.
     fn install_key(&self, stale: Option<&Key>, key: &Key) {
@@ -346,9 +374,9 @@ impl EncryptedStore {
             Some(key) if opens(key) => key.clone(),
             _ => match self.read_key()? {
                 Some(fresh) if opens(&fresh) => fresh,
-                Some(_) => return Err(Self::missing_key(path, count)),
+                Some(_) => return Err(self.missing_key(path, count)),
                 None if count == 0 => self.create_key()?,
-                None => return Err(Self::missing_key(path, count)),
+                None => return Err(self.missing_key(path, count)),
             },
         };
         self.install_key(cached.as_ref(), &key);
@@ -356,10 +384,12 @@ impl EncryptedStore {
     }
 
     /// What a missing (or no longer matching) master key means for `count` secrets of the table.
-    fn missing_key(path: &Path, count: usize) -> CredentialError {
+    fn missing_key(&self, path: &Path, count: usize) -> CredentialError {
         CredentialError::MasterKeyMissing {
             secrets: count,
             file: path.to_owned(),
+            key_file: self.os.key_file(),
+            stray_key_file: self.os.stray_key_file(),
         }
     }
 
@@ -514,7 +544,7 @@ impl EncryptedStore {
             // would answer a question for every item for nothing.
             if !key_read {
                 if self.key()?.is_none() && stored > 0 {
-                    return Err(Self::missing_key(path, stored));
+                    return Err(self.missing_key(path, stored));
                 }
                 key_read = true;
             }
@@ -577,7 +607,7 @@ impl EncryptedStore {
         let count = real_count(&conn).map_err(at("read"))?;
         // The OS may be asked next: nothing of the database stays open.
         drop(conn);
-        let key = self.key()?.ok_or_else(|| Self::missing_key(path, count))?;
+        let key = self.key()?.ok_or_else(|| self.missing_key(path, count))?;
         match open(&key, name, &entry) {
             Ok(password) => Ok(Some(password)),
             Err(first) => {
@@ -1246,7 +1276,7 @@ mod tests {
         let store = fx.store();
         let typed = store.write(DB, "b", "two").unwrap_err();
         assert!(
-            matches!(&typed, CredentialError::MasterKeyMissing { secrets: 1, file } if *file == fx.path()),
+            matches!(&typed, CredentialError::MasterKeyMissing { secrets: 1, file, .. } if *file == fx.path()),
             "{typed:?}"
         );
         let write = typed.to_string();
@@ -1768,10 +1798,10 @@ mod tests {
             assert!(text.contains("not in those files") && text.contains("lost"), "what is lost is said: {text}");
             assert!(!text.to_lowercase().contains("delete"), "{text}");
         }
-        let mut texts = vec![
+        let texts = vec![
             CredentialError::NoKeyring.to_string(),
-            CredentialError::MasterKeyMissing { secrets: 1, file: path.clone() }.to_string(),
-            CredentialError::MasterKeyMissing { secrets: 5, file: path.clone() }.to_string(),
+            CredentialError::MasterKeyMissing { secrets: 1, file: path.clone(), key_file: None, stray_key_file: None }.to_string(),
+            CredentialError::MasterKeyMissing { secrets: 5, file: path.clone(), key_file: None, stray_key_file: None }.to_string(),
             CredentialError::Platform("anything".into()).to_string(),
             AppDbError::Io { path: path.clone(), source: std::io::Error::other("no space") }.to_string(),
             AppDbError::Newer { path: path.clone(), found: 99 }.to_string(),

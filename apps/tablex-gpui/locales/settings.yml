@@ -22,6 +22,9 @@ settings:
     shortcuts:
       en: Shortcuts
       vi: Phím tắt
+    security:
+      en: Security
+      vi: Bảo mật
     drivers:
       en: Drivers
       vi: Driver

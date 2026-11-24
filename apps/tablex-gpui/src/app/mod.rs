@@ -78,6 +78,7 @@ mod mongo_script;
 mod mongo_shell;
 mod navigator_status;
 mod navigator_ui;
+mod key_home_ui;
 mod object_actions;
 mod panes_ui;
 mod params;
@@ -396,6 +397,8 @@ impl AppRoot {
                 connection_policy::ConnectionPolicy::default(),
             )
         } else {
+            // "Don't save passwords" makes every connection ask: known before the records are read.
+            key_home_ui::apply_saved_choice();
             let records = crate::connections::try_load_saved_records().unwrap_or_else(|error| {
                 connection_load_error = Some(format!("Could not read the saved connections: {error}"));
                 Vec::new()
@@ -838,6 +841,7 @@ mod tests {
     include!("tests/session_password.rs");
     include!("tests/database_scope.rs");
     include!("tests/reset_passwords.rs");
+    include!("tests/key_home.rs");
     include!("tests/ssh_tunnel_live.rs");
     include!("tests/transactions.rs");
     include!("tests/transactions_smart.rs");

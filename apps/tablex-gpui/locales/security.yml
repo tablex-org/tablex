@@ -1,0 +1,77 @@
+_version: 2
+security:
+  dialog:
+    title:
+      en: "No system keyring found"
+      vi: "Không tìm thấy kho khoá hệ thống"
+    intro:
+      en: "tablex keeps saved passwords encrypted. The key to them normally lives in the system keyring (Secret Service), but none is running here. That is common with i3, sway or Hyprland, over SSH or in WSL."
+      vi: "tablex lưu mật khẩu đã mã hoá. Khoá của chúng thường nằm trong kho khoá hệ thống (Secret Service), nhưng ở đây không có kho nào đang chạy. Điều này hay gặp với i3, sway, Hyprland, qua SSH hoặc trong WSL."
+    file:
+      en: "Store the key in a local file: passwords are saved, and the key sits in a file only you can read. This is less secure: anyone who can read your files can decrypt the saved passwords."
+      vi: "Lưu khoá trong một tệp cục bộ: mật khẩu được lưu, còn khoá nằm trong một tệp chỉ bạn đọc được. Cách này kém an toàn hơn: bất kỳ ai đọc được tệp của bạn đều giải mã được các mật khẩu đã lưu."
+    none:
+      en: "Don't save passwords: tablex asks for the password each time you connect."
+      vi: "Không lưu mật khẩu: tablex hỏi mật khẩu mỗi lần bạn kết nối."
+    keyring:
+      en: "To get a keyring instead, install gnome-keyring, enable the Secret Service in KWallet, or turn on Secret Service integration in KeePassXC, then restart tablex. You can change this later in Settings > Security."
+      vi: "Muốn dùng kho khoá hệ thống, hãy cài gnome-keyring, bật Secret Service trong KWallet hoặc bật tích hợp Secret Service trong KeePassXC, rồi khởi động lại tablex. Bạn có thể đổi lại trong Cài đặt > Bảo mật."
+    unreachable_title:
+      en: "Your saved passwords are out of reach"
+      vi: "Không truy cập được các mật khẩu đã lưu"
+    unreachable:
+      en: "The saved passwords are encrypted with a key that is most likely in the system keyring of your desktop session, and no keyring is running here. Nothing was changed or lost. To use them, start or unlock the keyring (or run tablex in the desktop session) and restart tablex."
+      vi: "Các mật khẩu đã lưu được mã hoá bằng một khoá rất có thể nằm trong kho khoá hệ thống của phiên desktop, còn ở đây không có kho khoá nào đang chạy. Không có gì bị đổi hay mất. Để dùng chúng, hãy khởi động hoặc mở khoá kho khoá (hoặc chạy tablex trong phiên desktop) rồi khởi động lại tablex."
+    unreachable_session:
+      en: "Until then tablex saves nothing and connections ask for their password. This is not remembered: tablex asks again at the next start."
+      vi: "Cho đến lúc đó tablex không lưu gì và các kết nối sẽ hỏi mật khẩu. Lựa chọn này không được nhớ: tablex sẽ hỏi lại ở lần khởi động sau."
+    session_no_save:
+      en: "Don't save passwords for this session"
+      vi: "Không lưu mật khẩu trong phiên này"
+    use_file:
+      en: "Store the key in a local file"
+      vi: "Lưu khoá trong tệp cục bộ"
+    no_save:
+      en: "Don't save passwords"
+      vi: "Không lưu mật khẩu"
+  page:
+    heading:
+      en: "Saved passwords"
+      vi: "Mật khẩu đã lưu"
+    in_keyring:
+      en: "The key to your saved passwords is in the system keyring."
+      vi: "Khoá của các mật khẩu đã lưu nằm trong kho khoá hệ thống."
+    in_file:
+      en: "The key to your saved passwords is in a local file: %{path}. This is less secure: anyone who can read your files can decrypt them."
+      vi: "Khoá của các mật khẩu đã lưu nằm trong một tệp cục bộ: %{path}. Cách này kém an toàn hơn: bất kỳ ai đọc được tệp của bạn đều giải mã được chúng."
+    not_saving:
+      en: "Passwords are not saved: tablex asks for the password each time you connect."
+      vi: "Mật khẩu không được lưu: tablex hỏi mật khẩu mỗi lần bạn kết nối."
+    no_keyring:
+      en: "No system keyring is running. Install gnome-keyring, enable the Secret Service in KWallet, or turn on Secret Service integration in KeePassXC, then restart tablex."
+      vi: "Không có kho khoá hệ thống nào đang chạy. Hãy cài gnome-keyring, bật Secret Service trong KWallet hoặc bật tích hợp Secret Service trong KeePassXC, rồi khởi động lại tablex."
+    checking:
+      en: "Looking for a system keyring…"
+      vi: "Đang tìm kho khoá hệ thống…"
+    use_keyring:
+      en: "Move the key to the system keyring"
+      vi: "Chuyển khoá vào kho khoá hệ thống"
+    use_keyring_again:
+      en: "Use the system keyring"
+      vi: "Dùng kho khoá hệ thống"
+  changed:
+    file:
+      en: "The key is now stored in a local file."
+      vi: "Khoá hiện được lưu trong tệp cục bộ."
+    keyring:
+      en: "The key is now in the system keyring."
+      vi: "Khoá hiện nằm trong kho khoá hệ thống."
+    session:
+      en: "Passwords are not saved in this session. Connections ask for the password."
+      vi: "Mật khẩu không được lưu trong phiên này. Các kết nối sẽ hỏi mật khẩu."
+    none:
+      en: "Passwords are no longer saved. Connections ask for the password."
+      vi: "Mật khẩu không còn được lưu. Các kết nối sẽ hỏi mật khẩu."
+    failed:
+      en: "Could not change where the key is stored: %{error}"
+      vi: "Không đổi được nơi lưu khoá: %{error}"

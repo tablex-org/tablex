@@ -35,6 +35,8 @@ pub(super) struct ConnectionUiState {
     /// Every [`Connector`](engine_connect::connect::Connector) of the app reads them (see
     /// [`AppRoot::connector`]).
     pub(super) session_passwords: SessionPasswords,
+    /// Where the key of the saved passwords lives (Linux: a choice, see `key_home_ui`).
+    pub(super) key_home: super::key_home_ui::KeyHomeUi,
     /// A connect nobody asked for (a recovery) is running: it never opens a password prompt.
     pub(super) background_connect: bool,
     /// The New Connection / Edit dialog is open (its picker shows downloads, so progress repaints).
@@ -55,6 +57,7 @@ impl Default for ConnectionUiState {
             #[cfg(test)]
             credentials: Arc::new(MemoryCredentials::default()),
             session_passwords: SessionPasswords::default(),
+            key_home: Default::default(),
             background_connect: false,
             dialog_open: false,
         }
@@ -203,11 +206,13 @@ pub(super) fn runtime_uri_for_form(
     original_record: Option<&engine_storage::connection::SavedConnectionRecord>,
     session: &SessionPasswords,
 ) -> Result<RuntimeUri, String> {
+    // The box means nothing while passwords are not being saved (Settings > Security).
+    let save_password = form.save_password && engine_connect::key_home::passwords_saved();
     // Nothing typed, nothing saved, but typed earlier in this run for the same connection.
     if form.kind != ConnectionKind::Sqlite
         && form.password.is_empty()
         && form.password_from_uri().is_none_or(|password| password.is_empty())
-        && !form.save_password
+        && !save_password
     {
         if let Some(record) = original_record {
             if !record.save_password
@@ -223,7 +228,7 @@ pub(super) fn runtime_uri_for_form(
         && form.password.is_empty()
         && form
             .password_from_uri().is_none_or(|password| password.is_empty())
-        && form.save_password
+        && save_password
     {
         if let Some(record) = original_record {
             if record.save_password
@@ -316,15 +321,21 @@ impl ResultConnectionState {
     }
 }
 
-fn save_connection_record(
+/// Writes the record, then what the form says about its secrets. `saving`: the run saves passwords
+/// (see [`engine_connect::key_home::passwords_saved`]).
+pub(super) fn save_connection_record(
     form: &ConnectionFormState,
     record: engine_storage::connection::SavedConnectionRecord,
     original_record: Option<&engine_storage::connection::SavedConnectionRecord>,
     store: &Arc<dyn CredentialStore + Send + Sync>,
+    saving: bool,
 ) -> Result<(), String> {
     engine_storage::connection::upsert_connection(&record)
         .map_err(|error| format!("Could not save connection: {error}"))?;
-    {
+    // After "Don't save passwords" nothing is written, and what an earlier run saved stays unless
+    // the connection moved to another server (the record then lost its flag): a new server must not
+    // inherit the old one's secret. Only an uncheck while passwords are saved clears it otherwise.
+    if saving {
         if form.save_password && !form.password.is_empty() {
             store
                 .save(SecretKind::Database, &record.id, &form.password)
@@ -337,6 +348,11 @@ fn save_connection_record(
                 .delete(SecretKind::Database, &record.id)
                 .map_err(|error| format!("Could not clear connection password: {error}"))?;
         }
+    } else if original_record.is_some_and(|original| original.save_password && !record.save_password)
+    {
+        store
+            .delete(SecretKind::Database, &record.id)
+            .map_err(|error| format!("Could not clear connection password: {error}"))?;
     }
     if let Some(ssh) = &form.ssh {
         let old = original_record.map(|original| {
@@ -349,14 +365,20 @@ fn save_connection_record(
             crate::ssh_tunnel::clear_route_secrets(store, &record.id)
                 .map_err(|error| format!("Could not clear SSH secrets: {error}"))?;
         }
-        crate::ssh_tunnel::persist_secrets(
-            store,
-            &record.id,
-            old.as_ref(),
-            ssh,
-            &form.ssh_secrets,
-        )
-        .map_err(|error| format!("Could not save SSH secrets: {error}"))?;
+        if saving {
+            crate::ssh_tunnel::persist_secrets(
+                store,
+                &record.id,
+                old.as_ref(),
+                ssh,
+                &form.ssh_secrets,
+            )
+            .map_err(|error| format!("Could not save SSH secrets: {error}"))?;
+        } else if let Some(old) = &old {
+            // What was typed stays in memory for this run; only a moved hop loses its saved secret.
+            crate::ssh_tunnel::clear_moved_secrets(store, &record.id, old, ssh)
+                .map_err(|error| format!("Could not clear SSH secrets: {error}"))?;
+        }
     }
     Ok(())
 }
@@ -373,8 +395,9 @@ fn read_and_save_dialog_form(
     if require_password {
         form.validate_recovery()?;
     }
-    let record = form.to_record(current_time(), original_record)?;
-    save_connection_record(&form, record, original_record, store)?;
+    let saving = engine_connect::key_home::passwords_saved();
+    let record = form.to_record_saving(current_time(), original_record, saving)?;
+    save_connection_record(&form, record, original_record, store, saving)?;
     Ok(form)
 }
 
@@ -709,7 +732,7 @@ impl AppRoot {
         };
         // A password typed for an existing connection that does not save it is kept for this run.
         if let Some(record) = original_record.as_ref().filter(|record| {
-            !form.save_password
+            !(form.save_password && engine_connect::key_home::passwords_saved())
                 && !form.password.is_empty()
                 && form.persisted_uri().is_ok_and(|uri| {
                     crate::connections::persisted_uris_match(form.kind, &record.uri, &uri)
@@ -1939,7 +1962,7 @@ impl AppRoot {
                                 // is read from the credential store), after the refresh: an edit of
                                 // the address forgot the old one.
                                 let key = id.to_string();
-                                if form.save_password {
+                                if form.save_password && engine_connect::key_home::passwords_saved() {
                                     this.connection_ui.session_passwords.clear(&key);
                                 } else {
                                     this.connection_ui.session_passwords.set(&key, &form.password);

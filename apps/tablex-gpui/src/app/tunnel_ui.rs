@@ -1103,17 +1103,20 @@ impl AppRoot {
                                 .debug_selector(|| "password-prompt-input".into())
                                 .child(Input::new(&body_input).mask_toggle())
                                 .into_any_element(),
+                            // "Don't save passwords" was chosen: nothing to offer.
                             div()
                                 .debug_selector(|| "password-prompt-save".into())
-                                .child(
-                                    Checkbox::new("password-prompt-save-box")
-                                        .label(ts!("connection_dialog.save_password"))
-                                        .checked(keep.get())
-                                        .on_click(move |checked, _, cx| {
-                                            keep.set(*checked);
-                                            cx.refresh_windows();
-                                        }),
-                                )
+                                .when(engine_connect::key_home::passwords_saved(), |this| {
+                                    this.child(
+                                        Checkbox::new("password-prompt-save-box")
+                                            .label(ts!("connection_dialog.save_password"))
+                                            .checked(keep.get())
+                                            .on_click(move |checked, _, cx| {
+                                                keep.set(*checked);
+                                                cx.refresh_windows();
+                                            }),
+                                    )
+                                })
                                 .into_any_element(),
                         ])
                     }),

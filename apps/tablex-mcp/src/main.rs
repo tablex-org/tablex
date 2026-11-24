@@ -81,6 +81,9 @@ fn serve() -> ExitCode {
     for notice in setup::startup_notices() {
         eprintln!("tablex-mcp: {notice}");
     }
+    // After "Don't save passwords" in the app, saved-password connections ask for a password here
+    // too, as the app's do, instead of failing on a store that is not there.
+    engine_connect::credentials::apply_saved_choice();
     let (layer, audit) = match setup::production_layer() {
         Ok(parts) => parts,
         Err(error) => return fail(&error.to_string()),

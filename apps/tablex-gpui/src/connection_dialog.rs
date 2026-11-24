@@ -1052,7 +1052,8 @@ impl ConnectionDialogInputs {
     fn password_rows(&self) -> AnyElement {
         let save_password = Checkbox::new("save-password")
             .label(ts!("connection_dialog.save_password"))
-            .checked(self.save_password.get())
+            .checked(self.save_password.get() && engine_connect::key_home::passwords_saved())
+            .disabled(!engine_connect::key_home::passwords_saved())
             .on_click({
                 let save_password = self.save_password.clone();
                 move |checked, _, cx| {

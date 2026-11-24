@@ -90,6 +90,10 @@ fn removal_warning(error: &CredentialError) -> String {
     format!("the connection was removed, but its saved secrets could not be cleared: {error}")
 }
 
+/// Said when "Don't save passwords" is on and a password was given or would be copied: the
+/// connection is made without one, as the app's own dialog does.
+const NOT_SAVED: &str = "passwords are not being saved (Don't save passwords is on), so the connection has no saved password; tablex asks for it when connecting";
+
 fn now() -> f64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -280,7 +284,9 @@ impl ConnectionStore {
                     label(&record.name),
                     kind_type(record, type_name, *production),
                 );
-                message.push_str(&if password.is_some() {
+                message.push_str(&if password.is_some() && !engine_connect::key_home::passwords_saved() {
+                    "Password: one is given, but passwords are not being saved (Don't save passwords is on); the connection is added without one and tablex asks for it when connecting.\n\n".to_owned()
+                } else if password.is_some() {
                     "Password: one is given; it is saved in tablex's credential store and not shown here.\n\n".to_owned()
                 } else {
                     "Password: none is saved; tablex asks for it when connecting.\n\n".to_owned()
@@ -297,7 +303,9 @@ impl ConnectionStore {
                     label(&copy.name),
                     kind_type(copy, type_name, *production),
                 );
-                message.push_str(&if source.save_password {
+                message.push_str(&if source.save_password && !engine_connect::key_home::passwords_saved() {
+                    "Password: passwords are not being saved (Don't save passwords is on), so the copy has none and tablex asks for it when connecting.\n\n".to_owned()
+                } else if source.save_password {
                     "Password: the saved password of the original is copied; it is not shown here.\n\n".to_owned()
                 } else {
                     "Password: none (the original has none saved).\n\n".to_owned()
@@ -382,17 +390,22 @@ impl ConnectionAdmin for ConnectionStore {
         let plan = self.plan(change)?;
         let mut changed = match plan {
             Plan::Add { record, password, .. } => {
-                let record = self.store(record, password.as_deref())?;
+                let saves = engine_connect::key_home::passwords_saved();
+                let dropped = !saves && password.is_some();
+                let record = self.store(record, password.filter(|_| saves).as_deref())?;
                 ConnectionChanged {
                     connection_id: records::display_connection_id(&record.id),
                     password_saved: record.save_password,
                     app_notified: false,
-                    warning: self.driver_missing(&record.db_type),
+                    warning: dropped
+                        .then(|| NOT_SAVED.to_owned())
+                        .or_else(|| self.driver_missing(&record.db_type)),
                 }
             }
             Plan::Duplicate { source, copy, .. } => {
+                let saves = engine_connect::key_home::passwords_saved();
                 let mut password = None;
-                if source.save_password {
+                if source.save_password && saves {
                     // Under the spelling of the id the secret was saved with.
                     for account in accounts_of(&source.id) {
                         password = self
@@ -405,7 +418,8 @@ impl ConnectionAdmin for ConnectionStore {
                         }
                     }
                 }
-                let missing = source.save_password && password.is_none();
+                let missing = source.save_password && saves && password.is_none();
+                let dropped = source.save_password && !saves;
                 let record = self.store(*copy, password.as_deref())?;
                 ConnectionChanged {
                     connection_id: records::display_connection_id(&record.id),
@@ -413,6 +427,7 @@ impl ConnectionAdmin for ConnectionStore {
                     app_notified: false,
                     warning: missing
                         .then(|| "the original's saved password was not found, so the copy has none".to_owned())
+                        .or_else(|| dropped.then(|| NOT_SAVED.to_owned()))
                         .or_else(|| self.driver_missing(&record.db_type)),
                 }
             }

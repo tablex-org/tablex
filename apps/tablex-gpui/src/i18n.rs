@@ -352,7 +352,7 @@ mod tests {
                 keys
             })
             .chain(
-                ["appearance", "editor", "results", "query", "navigation", "ai", "shortcuts", "drivers", "about"]
+                ["appearance", "editor", "results", "query", "navigation", "ai", "shortcuts", "security", "drivers", "about"]
                     .map(|page| format!("settings.nav.{page}")),
             )
             .collect();

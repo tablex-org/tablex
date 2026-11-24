@@ -126,6 +126,8 @@ fn a_connection_that_fails_because_the_master_key_is_gone_offers_the_reset(cx: &
     let message = engine_connect::credentials::CredentialError::MasterKeyMissing {
         secrets: 3,
         file: std::path::PathBuf::from("/data/tablex.db"),
+        key_file: None,
+        stray_key_file: None,
     }
     .to_string();
     assert!(crate::credentials::suggests_reset(&message), "{message}");
@@ -174,4 +176,153 @@ fn a_warning_from_the_storage_layer_is_shown_once_without_blocking(cx: &mut Test
     // Nothing more to say the next frame, and no dialog was opened.
     assert!(!engine_storage::legacy::warnings_pending());
     assert!(!palette_is_open(visual));
+}
+
+#[gpui::test]
+fn a_reset_and_a_move_of_the_key_never_run_at_the_same_time(cx: &mut TestAppContext) {
+    let (app, visual, keys, id) = reset_rig(cx);
+    // A move of the key runs: the reset is refused and touches nothing.
+    app.update_in(visual, |this, window, cx| {
+        this.connection_ui.key_home.changing = true;
+        this.reset_saved_passwords(window, cx);
+    });
+    visual.run_until_parked();
+    assert_eq!(reset_secrets(&keys, &id), 4);
+    app.read_with(visual, |this, _| assert!(this.connection_ui.key_home.changing, "the move still owns the flag"));
+    // Nothing runs: the reset takes the flag (a move is refused meanwhile) and gives it back.
+    app.update_in(visual, |this, window, cx| {
+        this.connection_ui.key_home.changing = false;
+        this.reset_saved_passwords(window, cx);
+        assert!(this.connection_ui.key_home.changing, "held while the reset runs");
+    });
+    let waiting = keys.clone();
+    wait_until(visual, "the secrets to go", move |_| reset_secrets(&waiting, &id) == 0);
+    palette_settle(visual);
+    app.read_with(visual, |this, _| assert!(!this.connection_ui.key_home.changing));
+}
+
+#[gpui::test]
+fn choosing_a_key_home_while_the_key_is_being_moved_says_so_instead_of_returning_silently(cx: &mut TestAppContext) {
+    let (app, visual, _keys, _id) = reset_rig(cx);
+    let notifications = |visual: &mut gpui::VisualTestContext| visual.update(|window, cx| window.notifications(cx).len());
+    let before = notifications(visual);
+    app.update_in(visual, |this, window, cx| {
+        this.connection_ui.key_home.changing = true;
+        this.choose_key_home(engine_connect::key_home::Home::NoSave, window, cx);
+    });
+    visual.run_until_parked();
+    assert_eq!(notifications(visual), before + 1, "the refusal is said, as the reset says it");
+    app.read_with(visual, |this, _| assert!(this.connection_ui.key_home.changing, "the running move still owns the flag"));
+}
+
+/// A saved connection with a password in `keys`, and a form that edits it (rename, new colour and,
+/// with `moves`, the host), as the dialog builds them.
+fn saved_connection_edit(
+    keys: &std::sync::Arc<connection_ui::MemoryCredentials>,
+    save_password: bool,
+    moves: bool,
+) -> (
+    ConnectionFormState,
+    engine_storage::connection::SavedConnectionRecord,
+) {
+    use crate::credentials::{CredentialStore as _, SecretKind};
+    let id = uuid::Uuid::new_v4();
+    let mut form = ConnectionFormState {
+        id: Some(id),
+        name: "Before".into(),
+        kind: ConnectionKind::Postgres,
+        uri: "postgresql://u@127.0.0.1:1/db".into(),
+        use_uri: true,
+        save_password: true,
+        ..Default::default()
+    };
+    form.parse_uri_fields();
+    form.password = "db-pw".into();
+    let original = form.to_record_saving(1.0, None, true).unwrap();
+    form.password.clear();
+    engine_storage::connection::upsert_connection(&original).unwrap();
+    keys.write(SecretKind::Database, &original.id, "db-pw").unwrap();
+    assert!(original.save_password);
+    form.name = "After".into();
+    form.color_hex = Some("#ef4444".into());
+    form.use_uri = false;
+    if moves {
+        form.host = "other.invalid".into();
+    }
+    form.save_password = save_password;
+    (form, original)
+}
+
+fn edited_connection_keeps_password(saving: bool, form_saves: bool, moves: bool) -> (bool, bool) {
+    use crate::credentials::{CredentialStore as _, SecretKind};
+    let keys = std::sync::Arc::new(connection_ui::MemoryCredentials::default());
+    let (mut form, original) = saved_connection_edit(&keys, form_saves, moves);
+    let store: std::sync::Arc<dyn crate::credentials::CredentialStore + Send + Sync> = keys.clone();
+    let record = form.to_record_saving(2.0, Some(&original), saving).unwrap();
+    assert_eq!(record.name, "After");
+    connection_ui::save_connection_record(&form, record, Some(&original), &store, saving).unwrap();
+    let stored = engine_storage::connection::get_connection(&original.id).unwrap().unwrap();
+    (
+        stored.save_password,
+        keys.load(SecretKind::Database, &original.id).unwrap().is_some(),
+    )
+}
+
+#[test]
+fn editing_a_connection_while_passwords_are_not_saved_keeps_its_saved_password() {
+    // "Don't save passwords" (this session, or the saved choice: both read as `saving == false`):
+    // whatever the form says, an edit neither clears the secret nor the flag that points to it.
+    for form_saves in [true, false] {
+        assert_eq!(edited_connection_keeps_password(false, form_saves, false), (true, true), "form_saves={form_saves}");
+    }
+}
+
+#[test]
+fn moving_a_connection_while_passwords_are_not_saved_deletes_the_old_servers_password() {
+    // A new server must not inherit the secret of the old one when passwords are saved again.
+    for form_saves in [true, false] {
+        assert_eq!(edited_connection_keeps_password(false, form_saves, true), (false, false), "form_saves={form_saves}");
+    }
+}
+
+#[test]
+fn unchecking_save_password_while_passwords_are_saved_still_clears_the_secret() {
+    assert_eq!(edited_connection_keeps_password(true, false, true), (false, false));
+    // The host moved and nothing was typed: the old password is not sent to the new server.
+    assert_eq!(edited_connection_keeps_password(true, true, true), (false, false));
+}
+
+#[test]
+fn without_saving_ssh_secrets_are_neither_written_nor_cleared_unless_their_hop_moved() {
+    use crate::credentials::{CredentialStore as _, SecretKind};
+    use crate::ssh_tunnel::{SshAuthMethod, SshSecretInput, SshSettings};
+    let old = SshSettings {
+        enabled: true,
+        host: "bastion.example.com".into(),
+        port: "2222".into(),
+        user: "deploy".into(),
+        auth: SshAuthMethod::Password,
+        save_secrets: true,
+        ..SshSettings::default()
+    };
+    let run = |edit: &dyn Fn(&mut SshSettings)| -> Option<String> {
+        let keys = std::sync::Arc::new(connection_ui::MemoryCredentials::default());
+        let (mut form, mut original) = saved_connection_edit(&keys, true, false);
+        original.network_settings_json = old.write_into(&original.network_settings_json);
+        engine_storage::connection::upsert_connection(&original).unwrap();
+        keys.write(SecretKind::SshPassword, &original.id, "saved-ssh").unwrap();
+        let mut new = old.clone();
+        edit(&mut new);
+        form.ssh = Some(new);
+        form.ssh_secrets = SshSecretInput::new(engine_net::Secret::new("typed-ssh"), engine_net::Secret::default());
+        let store: std::sync::Arc<dyn crate::credentials::CredentialStore + Send + Sync> = keys.clone();
+        let record = form.to_record_saving(2.0, Some(&original), false).unwrap();
+        connection_ui::save_connection_record(&form, record, Some(&original), &store, false).unwrap();
+        keys.load(SecretKind::SshPassword, &original.id).unwrap()
+    };
+    // Unchanged route, "save" unchecked, a secret typed: the earlier run's secret stays as it was.
+    assert_eq!(run(&|new| new.save_secrets = false).as_deref(), Some("saved-ssh"));
+    assert_eq!(run(&|_| {}).as_deref(), Some("saved-ssh"));
+    // Another bastion: no secret for it, and the old server's is gone.
+    assert_eq!(run(&|new| new.host = "other.example.com".into()), None);
 }

@@ -29,12 +29,14 @@ fn default_font_label() -> SharedString {
 pub(super) enum Page {
     Section(Section),
     Shortcuts,
+    /// Where the key of the saved passwords lives; only where that is a choice.
+    Security,
     Drivers,
     About,
 }
 
 impl Page {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::Section(Section::Appearance),
         Self::Section(Section::Editor),
         Self::Section(Section::Results),
@@ -42,6 +44,7 @@ impl Page {
         Self::Section(Section::Navigation),
         Self::Section(Section::Ai),
         Self::Shortcuts,
+        Self::Security,
         Self::Drivers,
         Self::About,
     ];
@@ -50,6 +53,7 @@ impl Page {
         match self {
             Self::Section(section) => section.title_text(),
             Self::Shortcuts => t!("settings.nav.shortcuts"),
+            Self::Security => t!("settings.nav.security"),
             Self::Drivers => t!("settings.nav.drivers"),
             Self::About => t!("settings.nav.about"),
         }
@@ -59,6 +63,7 @@ impl Page {
         match self {
             Self::Section(section) => section.key(),
             Self::Shortcuts => "shortcuts",
+            Self::Security => "security",
             Self::Drivers => "drivers",
             Self::About => "about",
         }
@@ -282,7 +287,7 @@ impl SettingsPage {
         }
         match self.page {
             Page::Section(section) => registry::visible(section).collect(),
-            Page::Shortcuts | Page::Drivers | Page::About => Vec::new(),
+            Page::Shortcuts | Page::Security | Page::Drivers | Page::About => Vec::new(),
         }
     }
 }
@@ -1222,7 +1227,9 @@ impl AppRoot {
                     .flex()
                     .flex_col()
                     .gap(px(2.0))
-                    .children(Page::ALL.into_iter().map(|target| {
+                    .children(Page::ALL.into_iter().filter(|target| {
+                        *target != Page::Security || engine_connect::key_home::FALLBACK_SUPPORTED
+                    }).map(|target| {
                         let key = target.key();
                         Button::new(SharedString::from(format!("settings-nav-{key}")))
                             .debug_selector(move || format!("settings-nav-{key}"))
@@ -1411,6 +1418,10 @@ impl AppRoot {
                     }
                 }
                 Page::Shortcuts => content.extend(self.render_shortcuts_page(cx)),
+                Page::Security => {
+                    content.push(self.render_section_heading(t!("settings.nav.security"), None, cx));
+                    content.push(self.render_security_page(cx));
+                }
                 Page::Drivers => {
                     content.push(self.render_section_heading(t!("settings.nav.drivers"), None, cx));
                     content.push(self.render_drivers_page(cx));

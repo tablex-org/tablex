@@ -8,6 +8,7 @@
 //! | [`records`] | the saved connection model, kinds, URI helpers, export / duplicate redaction |
 //! | [`new_connection`] | the record of a connection made from plain values (`tablex-mcp`'s `add_connection`) |
 //! | [`credentials`] | the secret store trait, the OS store (legacy items) and [`credentials::default_store`] |
+//! | [`key_home`] | where the master key lives: the OS store, or on Linux a private file, or nowhere |
 //! | [`secret_store`] | the encrypted secrets table of the app database and its one master key in the OS store |
 //! | [`session_passwords`] | the passwords typed for connections that save none, in memory for this run |
 //! | [`tool_endpoint`] | the parts of a connection's URI a native client tool (`pg_dump`, `mysqldump`) connects with |
@@ -27,6 +28,7 @@ pub mod app_channel;
 pub mod connect;
 pub mod credentials;
 pub mod drivers;
+pub mod key_home;
 pub mod new_connection;
 pub mod platform;
 pub mod profile;

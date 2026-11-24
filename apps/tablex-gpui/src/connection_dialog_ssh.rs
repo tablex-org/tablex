@@ -887,8 +887,8 @@ impl SshTabInputs {
         };
         let save = Checkbox::new("ssh-save-secrets")
             .label(format!("Save {what}"))
-            .checked(self.save_secrets.get())
-            .disabled(off)
+            .checked(self.save_secrets.get() && engine_connect::key_home::passwords_saved())
+            .disabled(off || !engine_connect::key_home::passwords_saved())
             .on_click({
                 let save = self.save_secrets.clone();
                 move |checked, _, cx| {
@@ -1221,8 +1221,8 @@ impl SshTabInputs {
                     .child(
                         Checkbox::new("proxy-save-secrets")
                             .label(ts!("connection_dialog.save_password"))
-                            .checked(self.proxy_save.get())
-                            .disabled(off)
+                            .checked(self.proxy_save.get() && engine_connect::key_home::passwords_saved())
+                            .disabled(off || !engine_connect::key_home::passwords_saved())
                             .on_click({
                                 let save = self.proxy_save.clone();
                                 move |checked, _, cx| {

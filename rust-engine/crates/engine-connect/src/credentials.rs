@@ -89,6 +89,20 @@ pub enum CredentialError {
     MasterKeyMissing {
         secrets: usize,
         file: std::path::PathBuf,
+        /// The key file of the file home ([`crate::key_home::Home::File`]) when the key lives
+        /// there: the way out is then not [`RESET_ACTION`] but getting the key back.
+        key_file: Option<std::path::PathBuf>,
+        /// A key file that exists although the choice says the keyring (the choice file was
+        /// removed by hand): the key is most likely in it, and the way out is to switch to the
+        /// file home, not [`RESET_ACTION`].
+        stray_key_file: Option<std::path::PathBuf>,
+    },
+    /// The app database holds `secrets` saved secrets, no system keyring is running and the
+    /// key is not in a local file: it is most likely in the keyring of the desktop session, which
+    /// is out of reach now. Nothing is lost; the way out is a running (or unlocked) keyring, never
+    /// [`RESET_ACTION`], and the choices that would strand the key are refused.
+    KeyUnreachable {
+        secrets: usize,
     },
     /// The OS would have to ask the user before it hands the secret over, and this process turned
     /// that off (`tablex-mcp` while serving: a dialog nobody sees would hang the agent), or the
@@ -119,11 +133,47 @@ impl std::fmt::Display for CredentialError {
                 f,
                 "No {CREDENTIAL_STORE_LABEL} available; the password will not be saved"
             ),
-            Self::MasterKeyMissing { secrets, .. } => write!(
+            // The choice says keyring, a key file is there: the passwords may well be fine.
+            Self::MasterKeyMissing { secrets, key_file: None, stray_key_file: Some(stray), .. } => write!(
+                f,
+                "The master key of {secrets} saved {} is not in the {CREDENTIAL_STORE_LABEL}, but \
+                 the key file {} exists. Open Settings > Security and choose \"Store the key in a \
+                 local file\" to use it.",
+                if *secrets == 1 { "secret" } else { "secrets" },
+                stray.display(),
+            ),
+            Self::MasterKeyMissing { secrets, key_file: None, .. } => write!(
                 f,
                 "The master key of {secrets} saved {} is missing from the {CREDENTIAL_STORE_LABEL} \
-                 (or does not match), so they cannot be read. Use {RESET_ACTION} (command \
-                 palette) and enter the passwords again.",
+                 (or does not match), so they cannot be read.{} Use {RESET_ACTION} (command \
+                 palette) and enter the passwords again{}.",
+                if *secrets == 1 { "secret" } else { "secrets" },
+                // Where several keyrings exist, the key may be in the other one: not a reset yet.
+                if crate::key_home::FALLBACK_SUPPORTED {
+                    " If you use another keyring or desktop session (for example GNOME and KDE), \
+                     open tablex there first: the key is most likely in that one."
+                } else {
+                    ""
+                },
+                if crate::key_home::FALLBACK_SUPPORTED { " only as the last resort" } else { "" },
+            ),
+            // The key is meant to be in a file: the passwords may well be fine, so the reset is
+            // only the last resort.
+            Self::MasterKeyMissing { secrets, key_file: Some(key_file), .. } => write!(
+                f,
+                "The master key of {secrets} saved {} is missing from {} (or does not match), so \
+                 they cannot be read. If the key is still in the system keyring, open Settings > \
+                 Security and choose \"Move the key to the system keyring\"; otherwise put the key \
+                 file back, or, if it is gone for good, use {RESET_ACTION} (command palette) as the \
+                 last resort and enter the passwords again.",
+                if *secrets == 1 { "secret" } else { "secrets" },
+                key_file.display(),
+            ),
+            Self::KeyUnreachable { secrets } => write!(
+                f,
+                "The key of {secrets} saved {} is most likely in a system keyring that is not \
+                 running now. Start or unlock it (or run tablex in the desktop session) and \
+                 restart tablex; nothing was changed.",
                 if *secrets == 1 { "secret" } else { "secrets" },
             ),
             // Short: also shown by `--authorize-keychain`, which is what the user just ran.
@@ -211,6 +261,24 @@ pub trait CredentialStore {
         Ok(())
     }
 
+    /// Whether the store can be used at all: `false` when none runs (a Linux session without a
+    /// Secret Service). Not a read of any secret.
+    fn available(&self) -> bool {
+        true
+    }
+
+    /// The file that holds the master key, when the key lives in one
+    /// ([`crate::key_home::Home::File`]); `None` for every store that keeps it elsewhere.
+    fn key_file(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+
+    /// A key file that exists although the key is meant to be elsewhere (see
+    /// [`CredentialError::MasterKeyMissing`]); `None` for every store but the key homes.
+    fn stray_key_file(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+
     /// Stores `password`; an empty one clears the entry instead.
     fn save(&self, kind: SecretKind, account: &str, password: &str) -> Result<(), CredentialError> {
         if password.is_empty() {
@@ -267,16 +335,47 @@ impl<T: CredentialStore + ?Sized> CredentialStore for std::sync::Arc<T> {
     fn reset(&self) -> Result<Vec<String>, CredentialError> {
         (**self).reset()
     }
+    fn available(&self) -> bool {
+        (**self).available()
+    }
+    fn key_file(&self) -> Option<std::path::PathBuf> {
+        (**self).key_file()
+    }
+    fn stray_key_file(&self) -> Option<std::path::PathBuf> {
+        (**self).stray_key_file()
+    }
+}
+
+/// Where the master key lives: the OS credential store, or on Linux a file or nowhere when the
+/// user chose so ([`crate::key_home`]). One per process, shared by [`default_store`] and the
+/// front end's choice dialog and settings.
+pub fn key_store() -> std::sync::Arc<crate::key_home::KeyHomeStore<SystemStore>> {
+    static STORE: std::sync::OnceLock<std::sync::Arc<crate::key_home::KeyHomeStore<SystemStore>>> =
+        std::sync::OnceLock::new();
+    std::sync::Arc::clone(STORE.get_or_init(|| {
+        std::sync::Arc::new(crate::key_home::KeyHomeStore::new(
+            SystemStore::new(),
+            engine_storage::app_db::default_path().parent().map(std::path::Path::to_owned),
+            crate::key_home::FALLBACK_SUPPORTED,
+        ))
+    }))
+}
+
+/// Makes the process-wide "passwords saved" switch ([`crate::key_home::set_passwords_saved`]) follow
+/// the saved choice: after "Don't save passwords" every connection asks for its password. Every
+/// front end (the app, `tablex-mcp`) calls it at start, before it reads the saved connections.
+pub fn apply_saved_choice() {
+    crate::key_home::set_passwords_saved(key_store().saves_passwords());
 }
 
 /// The store every front end shares: the encrypted secrets table of the app database (`tablex.db` in the app data directory) with
-/// its master key in the OS credential store. One per process, so the key is read from the OS once.
+/// its master key in the OS credential store (or where [`key_store`] says). One per process, so the key is read once.
 pub fn default_store() -> std::sync::Arc<crate::secret_store::EncryptedStore> {
     static STORE: std::sync::OnceLock<std::sync::Arc<crate::secret_store::EncryptedStore>> =
         std::sync::OnceLock::new();
     std::sync::Arc::clone(STORE.get_or_init(|| {
         std::sync::Arc::new(crate::secret_store::EncryptedStore::new(
-            Box::new(SystemStore::new()),
+            Box::new(key_store()),
             Some(engine_storage::app_db::default_path()),
         ))
     }))
@@ -344,6 +443,12 @@ impl CredentialStore for SystemStore {
         }
     }
 
+    /// Whether a Secret Service (Linux), the Keychain or the Credential Manager is there: the
+    /// store was initialised (once per process: a provider started later needs a restart).
+    fn available(&self) -> bool {
+        keyring::Entry::store_status().is_ok()
+    }
+
     fn delete(&self, kind: SecretKind, account: &str) -> Result<(), CredentialError> {
         match self.entry(kind, account) {
             // No store running: nothing was ever saved here.
@@ -395,6 +500,10 @@ pub mod fake {
                 .borrow_mut()
                 .insert((kind, account.to_string()), password.to_string());
             Ok(())
+        }
+
+        fn available(&self) -> bool {
+            !self.unavailable
         }
 
         fn delete(&self, kind: SecretKind, account: &str) -> Result<(), CredentialError> {
@@ -533,6 +642,43 @@ mod tests {
             CredentialError::from(keyring::Error::NoDefaultStore),
             CredentialError::NoKeyring
         );
+    }
+
+    /// Real Credential Manager / Secret Service round trip against a unique service; run with
+    /// `cargo test -p engine-connect -- --ignored real_store_round_trip`. The item is deleted at the end.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    #[ignore = "touches the real credential store"]
+    fn real_store_round_trip() {
+        let store = SystemStore {
+            service_override: Some(format!("tablex.test.{}", uuid::Uuid::new_v4())),
+        };
+        assert!(store.available(), "a credential store runs");
+        let account = "ROUND-TRIP-ACCOUNT";
+        assert_eq!(store.load(SecretKind::Database, account).unwrap(), None);
+        store.save(SecretKind::Database, account, "p@ss wörd").unwrap();
+        assert_eq!(store.load(SecretKind::Database, account).unwrap().as_deref(), Some("p@ss wörd"));
+        store.save(SecretKind::Database, account, "second").unwrap();
+        assert_eq!(store.load(SecretKind::Database, account).unwrap().as_deref(), Some("second"));
+        store.delete(SecretKind::Database, account).unwrap();
+        assert_eq!(store.load(SecretKind::Database, account).unwrap(), None);
+        store.delete(SecretKind::Database, account).unwrap();
+    }
+
+    /// Where no Secret Service runs (no session bus, or a bus with nobody owning
+    /// `org.freedesktop.secrets`): `cargo test -p engine-connect -- --ignored real_store_without_service`
+    /// with `DBUS_SESSION_BUS_ADDRESS` pointing at such a bus.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    #[ignore = "needs a session with no Secret Service"]
+    fn real_store_without_service_is_no_keyring_not_another_error() {
+        let store = SystemStore {
+            service_override: Some(format!("tablex.test.{}", uuid::Uuid::new_v4())),
+        };
+        assert!(!store.available());
+        assert_eq!(store.load(SecretKind::Database, "a"), Err(CredentialError::NoKeyring));
+        assert_eq!(store.save(SecretKind::Database, "a", "pw"), Err(CredentialError::NoKeyring));
+        store.delete(SecretKind::Database, "a").unwrap();
     }
 
     /// Real Keychain round trip against a unique service; run with

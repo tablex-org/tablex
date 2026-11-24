@@ -12,6 +12,9 @@ pub(super) const RESET_WARNING: &str = "All saved connection passwords, SSH pass
     system credential store included), and you have to enter them again. \
     Your connections, query history and settings are kept. This cannot be undone.";
 
+/// Said when a reset or a move of the key is asked while one runs.
+pub(super) const KEY_BEING_MOVED: &str = "The key of the saved passwords is being moved. Try again in a moment.";
+
 impl AppRoot {
     /// Asks once; on confirmation resets the saved passwords.
     pub(super) fn confirm_reset_saved_passwords(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -32,7 +35,13 @@ impl AppRoot {
 
     /// Empties the secrets table (the OS may be asked for the new master key: not on the UI
     /// thread) and says how it went.
-    fn reset_saved_passwords(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn reset_saved_passwords(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A move of the key and a reset both rewrite what the key opens: never at the same time.
+        if self.connection_ui.key_home.changing {
+            window.push_notification(KEY_BEING_MOVED, cx);
+            return;
+        }
+        self.connection_ui.key_home.changing = true;
         let store = self.connection_ui.credentials.clone();
         let job = cx
             .background_executor()
@@ -50,6 +59,7 @@ impl AppRoot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.connection_ui.key_home.changing = false;
         match result {
             Ok(leftovers) if leftovers.is_empty() => {
                 self.sidebar.notice = Some("Saved passwords were reset. Enter the passwords again.".into());

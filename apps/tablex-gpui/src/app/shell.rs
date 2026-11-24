@@ -158,6 +158,7 @@ impl Render for AppRoot {
                 .map(|root| root.downgrade());
         }
         self.guard_window_close(window, cx);
+        self.check_key_home(window, cx);
         self.schedule_session_save(cx);
         // Tests share one process, and with it the storage layer's warnings: they ask for them.
         if !cfg!(test) {

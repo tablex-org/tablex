@@ -140,7 +140,8 @@ impl SavedConnection {
             name: record.name.clone(),
             uri: record.uri.clone(),
             kind: ConnectionKind::from_persisted(&record.db_type).unwrap_or(ConnectionKind::Sqlite),
-            save_password: record.save_password,
+            // After "Don't save passwords" no connection uses a saved one: each asks when connecting.
+            save_password: record.save_password && crate::key_home::passwords_saved(),
             is_pinned: record.is_pinned,
             disabled: ConnectionKind::from_persisted(&record.db_type)
                 .is_none_or(|kind| !kind.is_supported()),

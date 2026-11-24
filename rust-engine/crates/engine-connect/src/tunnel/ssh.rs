@@ -870,6 +870,30 @@ pub fn persist_secrets(
     Ok(())
 }
 
+/// What Save does to the credential store after "Don't save passwords": nothing is written and
+/// nothing saved earlier is cleared, except the secrets of a hop that moved to another server (a new
+/// server must not inherit the old one's secret, whenever passwords are saved again).
+pub fn clear_moved_secrets(
+    store: &impl CredentialStore,
+    account: &str,
+    old: &SshSettings,
+    new: &SshSettings,
+) -> Result<(), crate::credentials::CredentialError> {
+    let jumps = old.jumps.len().max(new.jumps.len());
+    let hops = [SecretHop::Bastion, SecretHop::Proxy]
+        .into_iter()
+        .chain((0..jumps).map(SecretHop::Jump));
+    for hop in hops.filter(|hop| SshSettings::hop_changed(old, new, *hop)) {
+        for need in [SecretNeed::Password, SecretNeed::Passphrase] {
+            if hop == SecretHop::Proxy && need == SecretNeed::Passphrase {
+                continue;
+            }
+            store.delete(hop.kind(need), &hop.account(account))?;
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------------------------
 // The seam over engine-net
 // ---------------------------------------------------------------------------------------------
@@ -2200,6 +2224,28 @@ mod tests {
         // With SSH the words are the SSH ones, proxy in front or not.
         let text = message(routed_settings(), ConnectionKind::Redis, "rediss://cache.example.com/0");
         assert!(text.starts_with("TLS to Redis through an SSH tunnel"), "{text}");
+    }
+
+    #[test]
+    fn without_saving_only_the_secrets_of_a_moved_hop_are_cleared() {
+        let store = MemoryStore::default();
+        let s = routed_settings();
+        let typed = SshSecretInput::new(Secret::new("pw-bastion"), Secret::default())
+            .with_jumps(vec![Secret::new("pw-jump0"), Secret::new("phrase-jump1")])
+            .with_proxy(Secret::new("pw-proxy"));
+        persist_secrets(&store, "ID", None, &s, &typed).unwrap();
+        clear_moved_secrets(&store, "ID", &s, &s).unwrap();
+        assert_eq!(store.items.borrow().len(), 4, "nothing moved: everything stays");
+        let mut moved = s.clone();
+        moved.save_secrets = false;
+        moved.jumps[0].host = "elsewhere.example.com".into();
+        moved.proxy.port = "9999".into();
+        clear_moved_secrets(&store, "ID", &s, &moved).unwrap();
+        let items = store.items.borrow();
+        assert!(!items.contains_key(&(SecretKind::SshPassword, "ID#jump0".to_string())));
+        assert!(!items.contains_key(&(SecretKind::Proxy, "ID".to_string())));
+        assert!(items.contains_key(&(SecretKind::SshPassword, "ID".to_string())));
+        assert!(items.contains_key(&(SecretKind::SshPassphrase, "ID#jump1".to_string())));
     }
 
     #[test]
