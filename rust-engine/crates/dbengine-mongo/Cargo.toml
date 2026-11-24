@@ -16,8 +16,8 @@ engine-driver-api = { path = "../engine-driver-api" }
 engine-ffi-util = { path = "../engine-ffi-util" }
 mongodb = "3.1"
 bson = "2.13"
-arrow = { version = "53", features = ["ffi"] }
-arrow-array = "53"
+arrow = { version = "60", features = ["ffi"] }
+arrow-array = "60"
 tokio = { version = "1.42", features = ["full"] }
 thiserror = "2.0"
 serde = { version = "1.0", features = ["derive"] }

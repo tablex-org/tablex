@@ -2310,7 +2310,7 @@ pub(crate) mod tests {
             Arc::new(BinaryArray::from(vec![&b"\x01\xff"[..]])),
             Arc::new(BinaryArray::from(vec![&b"\xff\xfe"[..]])),
         ];
-        let fields = UnionFields::new(
+        let fields = UnionFields::try_new(
             vec![0, 1, 2, 3, 4],
             vec![
                 Field::new("integer", DataType::Int64, true),
@@ -2319,7 +2319,8 @@ pub(crate) mod tests {
                 Field::new("blob", DataType::Binary, true),
                 Field::new("text_bytes", DataType::Binary, true),
             ],
-        );
+        )
+        .unwrap();
         Arc::new(
             UnionArray::try_new(
                 fields,

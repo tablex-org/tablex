@@ -8,14 +8,14 @@ crate-type = ["cdylib", "rlib"]
 name = "dbengine_clickhouse"
 
 [dependencies]
-arrow-array = { version = "53", features = ["ffi"] }
-arrow-buffer = "53"
-arrow-cast = "53"
+arrow-array = { version = "60", features = ["ffi"] }
+arrow-buffer = "60"
+arrow-cast = "60"
 # lz4: a server whose profile or proxy ignores `output_format_arrow_compression_method=none`
 # still answers in LZ4 frames (the ClickHouse default).
-arrow-ipc = { version = "53", features = ["lz4"] }
-arrow-schema = "53"
-arrow-select = "53"
+arrow-ipc = { version = "60", features = ["lz4"] }
+arrow-schema = "60"
+arrow-select = "60"
 dirs = "5"
 engine-driver-kit = { path = "../engine-driver-kit" }
 percent-encoding = "2"

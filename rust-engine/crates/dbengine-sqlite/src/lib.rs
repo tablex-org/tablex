@@ -909,7 +909,7 @@ pub const MIXED_TEXT_BYTES: i8 = 4;
 
 /// The union fields of a mixed column.
 fn mixed_fields() -> UnionFields {
-    UnionFields::new(
+    UnionFields::try_new(
         [
             MIXED_INTEGER,
             MIXED_REAL,
@@ -925,6 +925,7 @@ fn mixed_fields() -> UnionFields {
             Field::new("text_bytes", DataType::Binary, true),
         ],
     )
+    .expect("the mixed type ids are distinct and non-negative")
 }
 
 /// One Arrow column from the values of a result column.

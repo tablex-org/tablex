@@ -485,6 +485,100 @@ fn sqlite_driver_exports_and_imports_arrow_without_value_copy() {
     session.disconnect().expect("disconnect SQLite driver");
 }
 
+/// Cross-version proof: a SQLite driver built against another Arrow release
+/// (`TABLEX_FOREIGN_SQLITE_DYLIB=/path/to/libdbengine_sqlite.dylib`) still loads
+/// in this host and its C Data Interface export decodes to the same values.
+#[test]
+#[ignore = "needs TABLEX_FOREIGN_SQLITE_DYLIB, a SQLite driver built with another Arrow version"]
+fn foreign_arrow_sqlite_driver_decodes_every_column_kind() {
+    use arrow_array::{
+        BinaryArray, Float64Array, StringArray, UnionArray,
+    };
+    let source = std::env::var_os("TABLEX_FOREIGN_SQLITE_DYLIB").expect("TABLEX_FOREIGN_SQLITE_DYLIB");
+    let temp = TempDir::new().expect("temp directory");
+    let staged = temp.path().join(common::cdylib_file_name("dbengine_sqlite"));
+    fs::copy(source, &staged).expect("stage the foreign driver");
+    let handle = DriverLoader.load(&staged).expect("load the foreign driver");
+    assert!(handle
+        .capabilities()
+        .has(engine_driver_api::Capability::QueryArrowCData));
+    let mut session = handle
+        .connect(r#"{"uri":"sqlite://:memory:"}"#)
+        .expect("connect");
+    let mut import = |sql: &str| {
+        let request = serde_json::json!({
+            "kind": "sql", "operation_id": 1, "database": null, "object": null,
+            "offset": 0, "limit": 100, "payload": {"sql": sql},
+        });
+        let page = session.open_query(&request.to_string()).expect("open query");
+        let arrow = session
+            .acquire_arrow_page(page.page_id, 0, page.row_count)
+            .expect("acquire the Arrow page");
+        let imported = unsafe { arrow.into_record_batch() }.expect("import the Arrow page");
+        session.release_page(page.page_id).expect("release page");
+        imported
+    };
+
+    let typed = import(
+        "SELECT 7 AS i, 2.5 AS f, 'Ada' AS t, X'00ff' AS b, NULL AS n \
+         UNION ALL SELECT -9, -0.25, '', X'', NULL",
+    );
+    let batch = &typed.batch;
+    assert_eq!((batch.num_rows(), batch.num_columns()), (2, 5));
+    let ints = batch.column(0).as_any().downcast_ref::<Int64Array>().expect("int64");
+    assert_eq!((ints.value(0), ints.value(1)), (7, -9));
+    let reals = batch.column(1).as_any().downcast_ref::<Float64Array>().expect("float64");
+    assert_eq!((reals.value(0), reals.value(1)), (2.5, -0.25));
+    let texts = batch.column(2).as_any().downcast_ref::<StringArray>().expect("utf8");
+    assert_eq!((texts.value(0), texts.value(1)), ("Ada", ""));
+    let blobs = batch.column(3).as_any().downcast_ref::<BinaryArray>().expect("binary");
+    assert_eq!((blobs.value(0), blobs.value(1)), (&[0u8, 255][..], &[][..]));
+    assert_eq!(batch.column(4).null_count(), 2);
+    assert_eq!(batch.column(4).data_type(), &DataType::Utf8);
+
+    // A nullable column with real NULLs next to values keeps its validity bits.
+    let nullable = import("SELECT v FROM (SELECT 1 AS v UNION ALL SELECT NULL UNION ALL SELECT 3)");
+    let column = nullable.batch.column(0);
+    let values = column.as_any().downcast_ref::<Int64Array>().expect("int64");
+    assert_eq!(
+        (0..3).map(|row| values.is_valid(row).then(|| values.value(row))).collect::<Vec<_>>(),
+        [Some(1), None, Some(3)]
+    );
+
+    // Mixed storage classes arrive as a dense union (the children carry the class).
+    let mixed = import(
+        "SELECT v FROM (SELECT 1 AS v UNION ALL SELECT 'a' UNION ALL SELECT 1.5 \
+         UNION ALL SELECT X'01' UNION ALL SELECT NULL)",
+    );
+    let column = mixed.batch.column(0);
+    let union = column.as_any().downcast_ref::<UnionArray>().expect("dense union");
+    assert_eq!(union.len(), 5);
+    let classes: Vec<i8> = (0..5).map(|row| union.type_id(row)).collect();
+    assert_eq!(classes, [0, 2, 1, 3, 0], "integer, text, real, blob, NULL of the integer child");
+    let text = union.value(1);
+    assert_eq!(text.as_any().downcast_ref::<StringArray>().expect("text child").value(0), "a");
+    assert!(union.value(4).as_any().downcast_ref::<Int64Array>().expect("integer child").is_null(0));
+    drop(import);
+    session.disconnect().expect("disconnect");
+}
+
+/// A PostgreSQL driver built with another Arrow release loads and advertises the
+/// Arrow C Data export (`TABLEX_FOREIGN_POSTGRES_DYLIB`; no server is contacted).
+#[test]
+#[ignore = "needs TABLEX_FOREIGN_POSTGRES_DYLIB, a PostgreSQL driver built with another Arrow version"]
+fn foreign_arrow_postgres_driver_loads_with_the_arrow_table() {
+    let source = std::env::var_os("TABLEX_FOREIGN_POSTGRES_DYLIB").expect("TABLEX_FOREIGN_POSTGRES_DYLIB");
+    let temp = TempDir::new().expect("temp directory");
+    let staged = temp.path().join(common::cdylib_file_name("dbengine_postgres"));
+    fs::copy(source, &staged).expect("stage the foreign driver");
+    let handle = DriverLoader.load(&staged).expect("load the foreign driver");
+    assert_eq!(handle.capabilities().driver, "postgresql");
+    assert!(handle
+        .capabilities()
+        .has(engine_driver_api::Capability::QueryArrowCData));
+    assert!(handle.arrow_function_table().is_some());
+}
+
 fn stage_mock(temp: &TempDir) -> PathBuf {
     stage_mock_with_features(temp, &[])
 }

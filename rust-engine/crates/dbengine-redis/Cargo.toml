@@ -13,8 +13,8 @@ default = []
 abi-v2 = ["dep:engine-driver-kit", "dep:arrow-array", "dep:arrow-schema"]
 
 [dependencies]
-arrow-array = { version = "53", features = ["ffi"], optional = true }
-arrow-schema = { version = "53", optional = true }
+arrow-array = { version = "60", features = ["ffi"], optional = true }
+arrow-schema = { version = "60", optional = true }
 engine-driver-kit = { path = "../engine-driver-kit", optional = true }
 engine-ffi-util = { path = "../engine-ffi-util" }
 redis = { version = "0.32.2", features = ["tokio-comp", "tls-rustls", "tokio-rustls-comp", "sentinel", "cluster-async"] }
@@ -28,7 +28,7 @@ base64 = "0.22"
 futures-util = "0.3"
 
 [dev-dependencies]
-arrow-array = { version = "53", features = ["ffi"] }
+arrow-array = { version = "60", features = ["ffi"] }
 engine-driver-api = { path = "../engine-driver-api" }
 engine-driver-host = { path = "../engine-driver-host" }
 tempfile = "3.14"

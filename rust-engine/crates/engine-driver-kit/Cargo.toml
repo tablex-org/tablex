@@ -5,10 +5,10 @@ edition = "2021"
 description = "Shared ABI v2 FFI glue for tablex driver dylibs (session/page registries, Arrow leases, cancel, panic safety)"
 
 [dependencies]
-arrow-array = { version = "53", features = ["ffi"] }
-arrow-buffer = "53"
-arrow-cast = "53"
-arrow-schema = "53"
+arrow-array = { version = "60", features = ["ffi"] }
+arrow-buffer = "60"
+arrow-cast = "60"
+arrow-schema = "60"
 engine-driver-api = { path = "../engine-driver-api" }
 engine-ffi-util = { path = "../engine-ffi-util" }
 serde = { version = "1.0", features = ["derive"] }

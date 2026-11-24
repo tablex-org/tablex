@@ -15,8 +15,8 @@ engine-storage = { path = "../engine-storage" }
 engine-syntax = { path = "../engine-syntax" }
 mongodb = "3.1"
 bson = "2.13"
-arrow = { version = "53", features = ["ffi"] }
-arrow-array = "53"
+arrow = { version = "60", features = ["ffi"] }
+arrow-array = "60"
 tokio = { version = "1.42", features = ["full"] }
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-0_8"] }
 mysql_async = "0.34"

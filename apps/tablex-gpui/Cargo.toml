@@ -21,11 +21,11 @@ perf-diagnostics = ["ui", "gpui/profiler"]
 dev-keys = ["engine-connect/dev-keys"]
 
 [dependencies]
-arrow-array = "53"
+arrow-array = "60"
 # The grid's display fallback for the Arrow types it has no exact arm for (already linked
 # through engine-driver-kit: no new code in the binary).
-arrow-cast = "53"
-arrow-schema = "53"
+arrow-cast = "60"
+arrow-schema = "60"
 bson = "2.13"
 chrono = "0.4"
 regex = "1"
@@ -104,8 +104,8 @@ libc = "0.2"
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.14", optional = true, features = ["wayland", "x11"] }
 
 [dev-dependencies]
-arrow-array = "53"
-arrow-schema = "53"
+arrow-array = "60"
+arrow-schema = "60"
 gpui = { package = "gpui-pre", version = "=0.3.14", features = ["test-support"] }
 image = { version = "=0.25.10", default-features = false, features = ["png"] }
 # Live DDL tests (`sql_ddl::live`, ignored without TABLEX_TEST_*_URI): the same

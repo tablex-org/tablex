@@ -322,7 +322,7 @@ mod tests {
         use arrow_array::{BinaryArray, Float64Array};
         use arrow_buffer::ScalarBuffer;
         use arrow_schema::{Field, UnionFields};
-        let fields = UnionFields::new(
+        let fields = UnionFields::try_new(
             [0_i8, 1, 2, 3],
             [
                 Field::new("integer", DataType::Int64, true),
@@ -330,7 +330,8 @@ mod tests {
                 Field::new("text", DataType::Utf8, true),
                 Field::new("blob", DataType::Binary, true),
             ],
-        );
+        )
+        .unwrap();
         let children: Vec<ArrayRef> = vec![
             Arc::new(Int64Array::from(vec![Some(1), None])),
             Arc::new(Float64Array::from(vec![1.5])),

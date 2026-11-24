@@ -16,8 +16,8 @@ abi-v2 = ["dep:engine-driver-kit"]
 [dependencies]
 engine-driver-kit = { path = "../engine-driver-kit", optional = true }
 engine-ffi-util = { path = "../engine-ffi-util" }
-arrow = { version = "53", features = ["ffi"] }
-arrow-array = "53"
+arrow = { version = "60", features = ["ffi"] }
+arrow-array = "60"
 # TLS: rustls on the `ring` provider (one TLS stack for every driver; no OpenSSL,
 # no native-tls, no aws-lc/cmake). `flate2` uses its pure-Rust backend. 0.34's
 # rustls feature pulled aws-lc through rustls' default features; 0.37 lets the

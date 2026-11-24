@@ -1529,7 +1529,8 @@ mod tests {
             false
         ));
         let variant = DataType::Union(
-            arrow_schema::UnionFields::new([0], [Field::new("UInt8", DataType::UInt8, false)]),
+            arrow_schema::UnionFields::try_new([0], [Field::new("UInt8", DataType::UInt8, false)])
+                .unwrap(),
             arrow_schema::UnionMode::Dense,
         );
         let variants = schema(vec![Field::new("v", variant, false)]);

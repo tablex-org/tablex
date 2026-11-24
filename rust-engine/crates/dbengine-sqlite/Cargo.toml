@@ -8,9 +8,9 @@ crate-type = ["cdylib", "rlib"]
 name = "dbengine_sqlite"
 
 [dependencies]
-arrow-array = { version = "53", features = ["ffi"] }
-arrow-buffer = "53"
-arrow-schema = "53"
+arrow-array = { version = "60", features = ["ffi"] }
+arrow-buffer = "60"
+arrow-schema = "60"
 engine-driver-kit = { path = "../engine-driver-kit" }
 rusqlite = { version = "0.41", features = ["bundled", "hooks", "load_extension"] }
 serde_json = "1.0"
