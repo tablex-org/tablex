@@ -230,6 +230,47 @@ fn verified_load_does_not_reuse_a_different_artifact_generation() {
     first.shutdown().expect("shutdown original generation");
 }
 
+/// Whether the OS still has the library at `path` mapped in this process.
+fn is_mapped(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: RTLD_NOLOAD only looks the library up; a found one is released again.
+        let raw = unsafe { libc::dlopen(c_path.as_ptr(), libc::RTLD_NOLOAD | libc::RTLD_LAZY) };
+        if !raw.is_null() {
+            unsafe { libc::dlclose(raw) };
+        }
+        !raw.is_null()
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        // SAFETY: wide is a NUL-terminated path; GetModuleHandleW takes no reference.
+        !unsafe { windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(wide.as_ptr()) }
+            .is_null()
+    }
+}
+
+/// Drivers keep runtime threads that run driver code after `dbengine_shutdown` returns, so the
+/// library must stay mapped while any `Arc<DriverHandle>` lives, and only the last drop unmaps it.
+#[test]
+fn shutdown_keeps_the_library_mapped_until_the_last_owner_drops() {
+    let temp = TempDir::new().expect("temp directory");
+    let staged = stage_mock(&temp);
+    let handle = load_mock(&staged);
+    assert!(is_mapped(&staged), "the probe sees a loaded library");
+
+    handle.shutdown().expect("shutdown");
+    assert!(is_mapped(&staged), "shutdown must not unmap the library");
+
+    drop(handle);
+    // macOS never unloads a Rust cdylib (its thread-local destructors pin the image).
+    if !cfg!(target_os = "macos") {
+        assert!(!is_mapped(&staged), "the last owner unmaps it");
+    }
+}
+
 #[test]
 fn rejects_dylib_with_missing_abi_symbol() {
     let temp = TempDir::new().expect("temp directory");

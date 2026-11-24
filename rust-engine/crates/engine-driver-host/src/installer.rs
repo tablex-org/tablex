@@ -197,7 +197,7 @@ impl<'a> DriverInstaller<'a> {
             if kept || DriverLoader.is_loaded(&artifact) {
                 continue;
             }
-            std::fs::remove_dir_all(&directory)?;
+            self.store.discard(&directory)?;
             removed.push(directory);
         }
         Ok(removed)
@@ -262,11 +262,15 @@ impl<'a> DriverInstaller<'a> {
             }
         }
         let root = self.driver_root(id)?;
+        // From the first discard to the record's removal: a purge must not see the files moved
+        // aside while the record still names them (it would put them back). Park lock, then store
+        // lock, as the purge takes them.
+        let _park = self.store.park_lock()?;
         if root.exists() {
-            std::fs::remove_dir_all(&root)?;
+            self.store.discard(&root)?;
         }
         if !record.path.starts_with(&root) && record.path.exists() {
-            std::fs::remove_file(&record.path)?;
+            self.store.discard(&record.path)?;
         }
         self.store.remove_record(id)?;
         Ok(UninstallOutcome::Removed(record))
@@ -517,7 +521,13 @@ impl<'a> DriverInstaller<'a> {
         let result = (|| {
             std::fs::copy(artifact, &staging)?;
             crate::os_fs::sync_file(&staging)?;
-            std::fs::rename(&staging, destination)?;
+            if let Err(error) = std::fs::rename(&staging, destination) {
+                // Windows cannot replace a library a loaded driver maps, but can rename it away.
+                if !(cfg!(windows) && destination.exists()) {
+                    return Err(error.into());
+                }
+                self.store.replace_by_parking(&staging, destination)?;
+            }
             crate::os_fs::sync_directory(directory)?;
             Ok(())
         })();
@@ -592,4 +602,37 @@ use thiserror::Error;
 #[allow(dead_code)]
 pub(crate) fn debug_paths(base: &Path) -> PathBuf {
     base.to_path_buf()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn an_uninstall_holds_the_park_lock_until_the_record_is_gone() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = InstalledDriverStore::with_lock_timeout(temp.path(), Duration::from_millis(60));
+        let library = temp.path().join("Drivers").join("v2").join("mock").join("1").join("libmock.so");
+        std::fs::create_dir_all(library.parent().unwrap()).unwrap();
+        std::fs::write(&library, b"driver").unwrap();
+        store
+            .save(InstalledDriverRecord { id: "mock".into(), version: "1".into(), path: library.clone(), ..Default::default() })
+            .unwrap();
+        let installer = DriverInstaller::new(DriverTarget::current(), &store);
+
+        // A purge (or an install) of another process holds the park lock: nothing is touched.
+        let held = store.park_lock().unwrap();
+        assert!(matches!(
+            installer.try_uninstall("mock", None),
+            Err(InstallError::Store(crate::StoreError::LockTimeout { .. }))
+        ));
+        assert!(library.exists() && store.record("mock").unwrap().is_some());
+        drop(held);
+
+        assert!(matches!(installer.try_uninstall("mock", None), Ok(UninstallOutcome::Removed(_))));
+        assert!(!library.exists() && store.record("mock").unwrap().is_none());
+        // The lock is free again.
+        drop(store.park_lock().unwrap());
+    }
 }

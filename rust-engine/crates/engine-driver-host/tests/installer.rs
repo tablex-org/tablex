@@ -1,8 +1,8 @@
 mod common;
 
 use engine_driver_host::{
-    DriverArtifact, DriverInstaller, DriverManifestEntry, DriverTarget, DriverVerificationError,
-    InstallError, InstalledDriverStore,
+    DriverArtifact, DriverInstaller, DriverLoader, DriverManifestEntry, DriverTarget,
+    DriverVerificationError, InstallError, InstalledDriverStore,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -169,6 +169,78 @@ fn uninstalls_artifact_and_record() {
 
     assert!(!record.path.exists());
     assert!(store.record("mock").expect("read store").is_none());
+}
+
+/// Uninstall while the app still holds the loaded driver (its `Arc<DriverHandle>`): the library
+/// stays mapped. Unix deletes the file at once; Windows cannot, so it moves the file into the
+/// store's pending-delete directory, the install name is free for a reinstall right away, and the
+/// next store open deletes the moved file once the driver is dropped.
+#[test]
+fn uninstall_while_the_handle_is_held_removes_the_files() {
+    let source = build_mock_driver();
+    let temp = TempDir::new().expect("temp directory");
+    let staged = stage_source(&temp, &source);
+    let store = InstalledDriverStore::new(temp.path());
+    let size = fs::metadata(&staged).expect("metadata").len();
+    let entry = mock_entry(sha256_of(&staged), size);
+    let installer =
+        DriverInstaller::new(DriverTarget::current(), &store).with_signature_verification(false);
+    let record = installer.install_from_file(&entry, &staged).expect("install");
+    let handle = DriverLoader
+        .load_verified(&record.path, &record.sha256)
+        .expect("load the installed driver");
+
+    installer.uninstall("mock", None).expect("uninstall with the handle held");
+
+    assert!(!record.path.exists(), "the installed library is gone from its place");
+    assert!(!record.path.parent().unwrap().exists(), "so is its version directory");
+    assert!(store.record("mock").expect("read store").is_none());
+    let pending = store.pending_delete_directory();
+    if cfg!(windows) {
+        assert_eq!(fs::read_dir(&pending).expect("pending directory").count(), 1);
+        // The same id and version install again at once: the path is free.
+        let again = installer.install_from_file(&entry, &staged).expect("reinstall");
+        assert_eq!(again.path, record.path);
+        assert!(again.path.is_file());
+        installer.uninstall("mock", None).expect("uninstall the reinstall");
+    } else {
+        assert!(!pending.exists(), "a plain delete parks nothing");
+    }
+
+    // A pending entry is never taken for an installed driver.
+    assert!(store.load_all().expect("load store").is_empty());
+    drop(handle);
+    let reopened = InstalledDriverStore::new(temp.path());
+    assert_eq!(reopened.purge_pending_deletes(), 0);
+    assert!(!reopened.pending_delete_directory().exists(), "everything moved aside is deleted");
+}
+
+/// Installing the same version again over a library a loaded driver still maps (an update to
+/// the same file name) works on every OS; the old file goes on unlinked (Unix) or moved aside
+/// (Windows) while the loaded generation keeps running.
+#[test]
+fn reinstall_over_a_held_handle_replaces_the_library() {
+    let source = build_mock_driver();
+    let temp = TempDir::new().expect("temp directory");
+    let staged = stage_source(&temp, &source);
+    let store = InstalledDriverStore::new(temp.path());
+    let size = fs::metadata(&staged).expect("metadata").len();
+    let entry = mock_entry(sha256_of(&staged), size);
+    let installer =
+        DriverInstaller::new(DriverTarget::current(), &store).with_signature_verification(false);
+    let first = installer.install_from_file(&entry, &staged).expect("install");
+    let handle = DriverLoader
+        .load_verified(&first.path, &first.sha256)
+        .expect("load the installed driver");
+
+    let second = installer.install_from_file(&entry, &staged).expect("reinstall over the held library");
+
+    assert_eq!(second.path, first.path);
+    assert_eq!(sha256_of(&second.path), first.sha256);
+    assert_eq!(handle.capabilities().driver, "mock", "the held generation is intact");
+    drop(handle);
+    assert_eq!(store.purge_pending_deletes(), 0);
+    assert!(!store.pending_delete_directory().exists());
 }
 
 #[cfg(target_os = "macos")]

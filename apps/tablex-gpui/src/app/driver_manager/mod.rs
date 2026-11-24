@@ -829,7 +829,12 @@ impl AppRoot {
             let (store, tools, source) = (store.clone(), tools.clone(), source.clone());
             cx.background_executor().spawn(async move {
                 let migrating = store.clone();
-                let migration = smol::unblock(move || migrating.migrate_flat_installs()).await;
+                let migration = smol::unblock(move || {
+                    // Files an uninstall or update moved aside because Windows kept them mapped.
+                    migrating.purge_pending_deletes();
+                    migrating.migrate_flat_installs()
+                })
+                .await;
                 let due = crate::drivers::update_check_due(
                     crate::drivers::read_last_update_check(&store),
                     SystemTime::now(),

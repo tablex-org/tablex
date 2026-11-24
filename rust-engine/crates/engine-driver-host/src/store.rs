@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 
 const DEFAULT_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+const PENDING_DELETE: &str = ".pending-delete";
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(5);
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -360,6 +361,166 @@ impl InstalledDriverStore {
         Ok(self.remove_record(id)?.is_some())
     }
 
+    /// Where files that could not be deleted are moved to wait for [`Self::purge_pending_deletes`].
+    /// It is not an `<id>` directory (ids start with a letter, digit, `-` or `_`), so no scan of
+    /// the installed drivers sees it.
+    pub fn pending_delete_directory(&self) -> PathBuf {
+        self.driver_directory().join(PENDING_DELETE)
+    }
+
+    /// Delete a file or directory tree of the store. Windows cannot delete a library a loaded
+    /// driver still maps (the app keeps its `Arc<DriverHandle>` until the driver is dropped, and
+    /// a driver's own threads outlive its shutdown, so the library is never unloaded early) but it
+    /// can rename one: what cannot be deleted is moved into the pending-delete directory, which
+    /// frees its name, and the next [`Self::purge_pending_deletes`] removes it. Elsewhere this is a
+    /// plain delete.
+    pub(crate) fn discard(&self, path: &Path) -> std::io::Result<()> {
+        let result = if path.is_dir() {
+            fs::remove_dir_all(path)
+        } else {
+            fs::remove_file(path)
+        };
+        match result {
+            Err(_) if cfg!(windows) && path.exists() => {
+                self.park_files(path)?;
+                if path.is_dir() {
+                    fs::remove_dir_all(path)?;
+                }
+                Ok(())
+            }
+            other => other,
+        }
+    }
+
+    /// Move `path` (a file) into the pending-delete directory; returns where it went.
+    pub(crate) fn park(&self, path: &Path) -> std::io::Result<PathBuf> {
+        let directory = self.pending_delete_directory();
+        fs::create_dir_all(&directory)?;
+        let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("file");
+        let unique = format!(
+            "{}-{}-{}-{name}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |time| time.as_nanos()),
+            TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed),
+        );
+        let target = directory.join(unique);
+        fs::rename(path, &target)?;
+        Ok(target)
+    }
+
+    /// Park every file left under `path`; the empty directories stay for the caller to delete.
+    fn park_files(&self, path: &Path) -> std::io::Result<()> {
+        if !path.is_dir() {
+            return self.park(path).map(drop);
+        }
+        for entry in fs::read_dir(path)? {
+            self.park_files(&entry?.path())?;
+        }
+        Ok(())
+    }
+
+    /// The lock that keeps a purge and an install over a loaded library (park, then take the name)
+    /// from interleaving, across processes (`tablex-mcp` shares the store). Separate from the
+    /// store lock: [`Self::purge_pending_deletes`] reads the records while it holds this one.
+    pub(crate) fn park_lock(&self) -> Result<StoreLock, StoreError> {
+        fs::create_dir_all(self.driver_directory())?;
+        self.lock_at(self.driver_directory().join("installed-drivers.park.lock"), LockMode::Exclusive)
+    }
+
+    /// Puts `staging` at `destination`, moving what is there out of the way first (Windows cannot
+    /// replace a library a loaded driver maps, but can rename it). The old file is put back when
+    /// the rename fails. Under [`Self::park_lock`] from the park to the end, so a purge never sees
+    /// the name free, and never deletes the parked file, half-way.
+    pub(crate) fn replace_by_parking(&self, staging: &Path, destination: &Path) -> Result<(), StoreError> {
+        let _lock = self.park_lock()?;
+        let parked = self.park(destination)?;
+        if let Err(error) = fs::rename(staging, destination) {
+            let _ = fs::rename(&parked, destination);
+            return Err(error.into());
+        }
+        Ok(())
+    }
+
+    /// Delete what earlier uninstalls and updates moved aside ([`Self::discard`]). Best effort:
+    /// an entry still locked (its driver is loaded by another process) stays for the next time.
+    /// An entry that an installed record still points to, by its file name, with nothing at that
+    /// path (an install that moved the library aside and could not put it back) is put back, not
+    /// deleted, when its SHA-256 is the record's (`sha256` for `path`, `previous_sha256` for
+    /// `previous_path`): a parked copy of another version is deleted. Under [`Self::park_lock`]
+    /// (skipped, everything remaining, when an install holds it past the timeout). Run it at
+    /// startup, before any driver is loaded. Returns how many entries remain.
+    pub fn purge_pending_deletes(&self) -> usize {
+        let directory = self.pending_delete_directory();
+        if !directory.is_dir() {
+            return 0;
+        }
+        let Ok(_lock) = self.park_lock() else {
+            return fs::read_dir(&directory).map_or(0, |entries| entries.flatten().count());
+        };
+        let Ok(entries) = fs::read_dir(&directory) else {
+            return 0;
+        };
+        let entries: Vec<_> = entries.flatten().map(|entry| entry.path()).collect();
+        // Without the records nothing can be told from a library that is still in use: keep all.
+        let Ok(records) = self.load_all() else {
+            return entries.len();
+        };
+        // Where a record points, with nothing there, and the digest of what belongs there.
+        let mut missing: Vec<(PathBuf, String)> = records
+            .into_values()
+            .flat_map(|record| [(Some(record.path), Some(record.sha256)), (record.previous_path, record.previous_sha256)])
+            .filter_map(|(path, sha256)| Some((path?, sha256?)))
+            .filter(|(path, _)| !path.exists())
+            .collect();
+        let mut remaining = 0;
+        for path in entries {
+            if let Some(original) = Self::parked_name(&path) {
+                let named = |wanted: &Path| wanted.file_name().is_some_and(|name| name == original);
+                // Hashed only when a record could want it.
+                let digest = missing
+                    .iter()
+                    .any(|(wanted, _)| named(wanted))
+                    .then(|| crate::verifier::sha256_file(&path).ok())
+                    .flatten();
+                let at = digest.and_then(|digest| {
+                    missing
+                        .iter()
+                        .position(|(wanted, sha256)| named(wanted) && sha256.eq_ignore_ascii_case(&digest))
+                });
+                if let Some(at) = at {
+                    let (wanted, _) = missing.remove(at);
+                    let restored = wanted
+                        .parent()
+                        .map_or(Ok(()), fs::create_dir_all)
+                        .and_then(|()| fs::rename(&path, &wanted));
+                    if restored.is_err() {
+                        remaining += 1;
+                    }
+                    continue;
+                }
+            }
+            let removed = if path.is_dir() {
+                fs::remove_dir_all(&path)
+            } else {
+                fs::remove_file(&path)
+            };
+            if removed.is_err() {
+                remaining += 1;
+            }
+        }
+        if remaining == 0 {
+            let _ = fs::remove_dir(&directory);
+        }
+        remaining
+    }
+
+    /// The name a parked entry had before [`Self::park`] (`<pid>-<nanos>-<sequence>-<name>`).
+    fn parked_name(entry: &Path) -> Option<&str> {
+        entry.file_name()?.to_str()?.splitn(4, '-').nth(3)
+    }
+
     fn driver_directory(&self) -> PathBuf {
         self.base_directory.join("Drivers").join("v2")
     }
@@ -518,12 +679,158 @@ enum LockMode {
     Exclusive,
 }
 
-struct StoreLock {
+pub(crate) struct StoreLock {
     file: File,
 }
 
 impl Drop for StoreLock {
     fn drop(&mut self) {
         let _ = self.file.unlock();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record_at(path: PathBuf) -> InstalledDriverRecord {
+        let sha256 = crate::verifier::sha256_file(&path).unwrap_or_default();
+        InstalledDriverRecord { id: "mock".into(), version: "1".into(), path, sha256, ..Default::default() }
+    }
+
+    fn sha_of(bytes: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        crate::download::hex(&Sha256::digest(bytes))
+    }
+
+    #[test]
+    fn a_library_that_could_not_be_put_back_is_not_purged_while_a_record_points_to_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = InstalledDriverStore::new(temp.path());
+        let library = temp.path().join("Drivers").join("v2").join("mock").join("1").join("libmock.so");
+        std::fs::create_dir_all(library.parent().unwrap()).unwrap();
+        std::fs::write(&library, b"driver").unwrap();
+        store.save(record_at(library.clone())).unwrap();
+        // The install moved the library aside and its restore failed: the file sits in the pending
+        // directory and the record still names its old place.
+        store.park(&library).unwrap();
+        let stray = temp.path().join("libother.so");
+        std::fs::write(&stray, b"old").unwrap();
+        store.park(&stray).unwrap();
+        assert!(!library.exists());
+
+        assert_eq!(store.purge_pending_deletes(), 0);
+        assert_eq!(std::fs::read(&library).unwrap(), b"driver", "put back where the record points");
+        assert!(!store.pending_delete_directory().exists(), "the entry nobody points to is deleted");
+    }
+
+    #[test]
+    fn an_entry_is_deleted_when_the_record_finds_its_library() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = InstalledDriverStore::new(temp.path());
+        let library = temp.path().join("libmock.so");
+        std::fs::write(&library, b"new").unwrap();
+        store.save(record_at(library.clone())).unwrap();
+        let old = temp.path().join("old");
+        std::fs::create_dir_all(&old).unwrap();
+        let moved_aside = old.join("libmock.so");
+        std::fs::write(&moved_aside, b"old").unwrap();
+        store.park(&moved_aside).unwrap();
+
+        assert_eq!(store.purge_pending_deletes(), 0);
+        assert_eq!(std::fs::read(&library).unwrap(), b"new", "the installed file is not replaced");
+        assert!(!store.pending_delete_directory().exists());
+    }
+
+    /// Two versions of `libmock.so` parked under one name: each goes back to its own folder, the
+    /// copy a record does not describe is deleted.
+    #[test]
+    fn the_parked_copy_with_the_records_digest_is_the_one_put_back() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = InstalledDriverStore::new(temp.path());
+        let current = temp.path().join("2").join("libmock.so");
+        let previous = temp.path().join("1").join("libmock.so");
+        let mut record = record_at(current.clone());
+        record.sha256 = sha_of(b"version 2");
+        record.previous_path = Some(previous.clone());
+        record.previous_sha256 = Some(sha_of(b"version 1"));
+        store.save(record).unwrap();
+        let elsewhere = temp.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        // Parked in an order that does not match the records, plus a third unrelated version.
+        for content in [&b"version 1"[..], b"version 3", b"version 2"] {
+            let file = elsewhere.join("libmock.so");
+            std::fs::write(&file, content).unwrap();
+            store.park(&file).unwrap();
+        }
+
+        assert_eq!(store.purge_pending_deletes(), 0);
+        assert_eq!(std::fs::read(&current).unwrap(), b"version 2");
+        assert_eq!(std::fs::read(&previous).unwrap(), b"version 1");
+        assert!(!store.pending_delete_directory().exists(), "version 3 was deleted");
+    }
+
+    #[test]
+    fn a_parked_copy_that_is_not_the_previous_version_is_not_put_back_as_one() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = InstalledDriverStore::new(temp.path());
+        let current = temp.path().join("2").join("libmock.so");
+        std::fs::create_dir_all(current.parent().unwrap()).unwrap();
+        std::fs::write(&current, b"version 2").unwrap();
+        let previous = temp.path().join("1").join("libmock.so");
+        let mut record = record_at(current.clone());
+        record.previous_path = Some(previous.clone());
+        record.previous_sha256 = Some(sha_of(b"version 1"));
+        store.save(record).unwrap();
+        let stray = temp.path().join("libmock.so");
+        std::fs::write(&stray, b"some other build").unwrap();
+        store.park(&stray).unwrap();
+
+        assert_eq!(store.purge_pending_deletes(), 0);
+        assert!(!previous.exists(), "a file of another digest never stands in for the previous version");
+        assert!(!store.pending_delete_directory().exists());
+    }
+
+    #[test]
+    fn a_purge_skips_while_an_install_holds_the_park_lock_and_runs_after() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = InstalledDriverStore::with_lock_timeout(temp.path(), Duration::from_millis(60));
+        let stray = temp.path().join("libold.so");
+        std::fs::write(&stray, b"old").unwrap();
+        store.park(&stray).unwrap();
+        let install = store.park_lock().unwrap();
+        assert_eq!(store.purge_pending_deletes(), 1, "nothing is touched while the install is half-way");
+        assert_eq!(std::fs::read_dir(store.pending_delete_directory()).unwrap().count(), 1);
+        drop(install);
+        assert_eq!(store.purge_pending_deletes(), 0);
+        assert!(!store.pending_delete_directory().exists());
+    }
+
+    #[test]
+    fn replacing_by_parking_holds_the_park_lock_and_puts_the_old_file_back_on_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = InstalledDriverStore::with_lock_timeout(temp.path(), Duration::from_millis(60));
+        let destination = temp.path().join("libmock.so");
+        let staging = temp.path().join(".libmock.so.staging");
+        std::fs::write(&destination, b"old").unwrap();
+        std::fs::write(&staging, b"new").unwrap();
+
+        // A purge of another process holds the lock: the install waits, then gives up untouched.
+        let purge = store.park_lock().unwrap();
+        assert!(matches!(
+            store.replace_by_parking(&staging, &destination),
+            Err(StoreError::LockTimeout { .. })
+        ));
+        assert_eq!(std::fs::read(&destination).unwrap(), b"old");
+        drop(purge);
+
+        // The rename cannot happen (no staging file): the old file is back in its place.
+        let missing = temp.path().join("no-such-staging");
+        assert!(store.replace_by_parking(&missing, &destination).is_err());
+        assert_eq!(std::fs::read(&destination).unwrap(), b"old");
+
+        store.replace_by_parking(&staging, &destination).unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"new");
+        assert_eq!(std::fs::read_dir(store.pending_delete_directory()).unwrap().count(), 1, "the old file waits for the purge");
     }
 }

@@ -547,8 +547,11 @@ impl DriverHandle {
         })
     }
 
-    /// Mark this generation closed. Subsequent calls fail with `Shutdown`;
-    /// dlclose happens when the last Arc owner drops.
+    /// Mark this generation closed. Subsequent calls fail with `Shutdown`.
+    /// The library stays mapped until the last Arc owner drops: drivers keep
+    /// runtime threads that run driver code after `dbengine_shutdown` returns,
+    /// so unmapping earlier would crash them. A caller that must delete the
+    /// file while it is mapped (Windows) moves it aside instead.
     pub fn shutdown(&self) -> Result<(), LoaderError> {
         let entry = Arc::clone(&self.entry);
         let cached_handle = {
@@ -681,8 +684,8 @@ impl DriverHandle {
     pub fn active_operation_count(&self) -> usize {
         self.active_operations
             .lock()
-            .map(|operations| operations.len())
-            .unwrap_or(0)
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
     }
 
     fn touch_activity(&self, connection_id: u64) {
