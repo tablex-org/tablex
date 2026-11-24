@@ -258,6 +258,15 @@ impl InstalledDriverStore {
         if legacy.read_current_format()?.is_none() {
             return Ok(LegacyMigration::NotNeeded);
         }
+        // Windows cannot rename a directory that holds an open file, and a process waiting for the
+        // lock below holds its lock file open while it waits: so the movers queue on a lock file
+        // beside the new store, in the app's own folder (kept after the move: a delete-pending file
+        // refuses its next opener).
+        #[cfg(windows)]
+        let _queue = {
+            fs::create_dir_all(&self.base_directory)?;
+            self.lock_at(self.base_directory.join("Drivers.migrate.lock"), LockMode::Exclusive)?
+        };
         // A process that lost the race finds the directory gone (the lock file moved with it).
         let Some(lock) = legacy.acquire_lock_if_present(LockMode::Exclusive)? else {
             return Ok(LegacyMigration::NotNeeded);
@@ -370,7 +379,10 @@ impl InstalledDriverStore {
     }
 
     fn lock_file(&self, mode: LockMode) -> Result<StoreLock, StoreError> {
-        let path = self.lock_path();
+        self.lock_at(self.lock_path(), mode)
+    }
+
+    fn lock_at(&self, path: PathBuf, mode: LockMode) -> Result<StoreLock, StoreError> {
         let file = os_fs::open_private(
             OpenOptions::new().create(true).read(true).write(true),
             &path,

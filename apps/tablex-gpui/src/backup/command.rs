@@ -674,7 +674,8 @@ mod tests {
         let invocation = mysql_dump(&tool, ConnectionKind::Mysql, Some(8), &mysql_endpoint(), Path::new("/tmp/p/client.cnf"), &MysqlDumpOptions::default(), Path::new("/o.sql")).unwrap();
         assert_eq!(text(&invocation)[0], "--defaults-file=/tmp/p/client.cnf", "--defaults-extra-file would be read before ~/.my.cnf, which could override it");
         assert!(!text(&invocation).iter().any(|arg| arg.contains("defaults-extra-file")));
-        assert_eq!(env(&invocation, "MYSQL_TEST_LOGIN_FILE").as_deref(), Some("/tmp/p/no-login.cnf"), "~/.mylogin.cnf is read last and could override the host and the TLS mode");
+        let no_login_file = Path::new("/tmp/p").join("no-login.cnf").to_string_lossy().into_owned();
+        assert_eq!(env(&invocation, "MYSQL_TEST_LOGIN_FILE").as_deref(), Some(no_login_file.as_str()), "~/.mylogin.cnf is read last and could override the host and the TLS mode");
         for variable in ["MYSQL_HOME", "MYSQL_PWD", "MYSQL_HOST", "MYSQL_GROUP_SUFFIX"] {
             assert!(invocation.env_remove.contains(&variable), "{variable}");
         }

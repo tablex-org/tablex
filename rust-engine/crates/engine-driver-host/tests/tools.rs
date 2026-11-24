@@ -1036,8 +1036,9 @@ fn the_manifest_script_writes_what_the_host_reads() {
             .args(args)
             .output()
     };
-    if python(&["--help"]).is_err() {
-        eprintln!("python3 not found; skipped");
+    // On Windows `python3` may be the Microsoft Store shim: it starts, then fails.
+    if !python(&["--help"]).is_ok_and(|output| output.status.success()) {
+        eprintln!("python3 not found or not usable; skipped");
         return;
     }
     let temp = TempDir::new().unwrap();

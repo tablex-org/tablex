@@ -410,9 +410,8 @@ mod tests {
     #[test]
     fn csv_export_writes_headers_and_escaped_values() {
         let path = std::env::temp_dir().join(format!(
-            "tableleaf-export-test-{}-{}.csv",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("csv")
+            "tableleaf-export-test-{}.csv",
+            std::process::id()
         ));
         let mut exporter = TableExporter::create(
             &path,

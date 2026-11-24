@@ -303,14 +303,25 @@ fn publish_state(
         check(PublishStep::Rename)?;
         fs::rename(&temporary, path).map_err(|error| error.to_string())?;
         check(PublishStep::DirectorySync)?;
-        fs::File::open(dir)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|error| error.to_string())
+        sync_directory(dir).map_err(|error| error.to_string())
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+/// Makes a rename durable. Directories cannot be opened for fsync on Windows.
+fn sync_directory(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        fs::File::open(dir)?.sync_all()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        Ok(())
+    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -385,9 +396,7 @@ impl SnowflakeStore {
                 .and_then(|_| file.sync_all())
                 .map_err(|error| error.to_string())?;
             fs::rename(&temporary, dir.join("worker.json")).map_err(|error| error.to_string())?;
-            fs::File::open(dir)
-                .and_then(|directory| directory.sync_all())
-                .map_err(|error| error.to_string())
+            sync_directory(dir).map_err(|error| error.to_string())
         })();
         if result.is_err() {
             let _ = fs::remove_file(&temporary);

@@ -28,7 +28,8 @@ fn spec_for(port: u16) -> TunnelSpec {
     spec.system_known_hosts = None;
     spec.targets
         .push(Target::new("db.internal.example.com", 5432));
-    spec.timeouts.connect = Duration::from_secs(1);
+    // Windows takes about 2 s to refuse a connection to a closed port; none of these tests measures the timeout.
+    spec.timeouts.connect = Duration::from_secs(10);
     spec
 }
 
@@ -81,8 +82,10 @@ fn connection_refused_is_a_connect_error_without_the_secret() {
 fn a_server_that_never_speaks_times_out() {
     let silent = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = silent.local_addr().unwrap().port();
+    let mut spec = spec_for(port);
+    spec.timeouts.connect = Duration::from_secs(1);
     let started = Instant::now();
-    let error = expect_err(Tunnel::open(spec_for(port), Arc::new(NoPrompts)));
+    let error = expect_err(Tunnel::open(spec, Arc::new(NoPrompts)));
     assert!(matches!(error, TunnelError::Timeout { .. }), "{error:?}");
     assert_eq!(error.code(), "tunnel.timeout");
     assert!(

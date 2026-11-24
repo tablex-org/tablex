@@ -1,6 +1,6 @@
 // R4a: importing a file into a table, through the real navigator menu, the real file prompt (stubbed
 // answer), the wizard tab, the shared review dialog (new tables) and the REAL SQLite driver on a second
-// session. The database is read back with the `sqlite3` CLI.
+// session. The database is read back with rusqlite.
 //
 // * The live tests at the end are `#[ignore]`d (dedicated `tablex-test-*` containers only).
 

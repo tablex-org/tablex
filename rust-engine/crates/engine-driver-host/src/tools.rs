@@ -311,6 +311,7 @@ fn check_folder(path: &Path, meta: &fs::Metadata) -> Result<(), ToolError> {
 }
 
 fn folder_builder() -> fs::DirBuilder {
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
     {

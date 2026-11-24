@@ -251,10 +251,10 @@ fn a_proxy_that_never_answers_times_out_and_one_that_is_down_is_a_proxy_error() 
         .local_addr()
         .unwrap()
         .port();
-    let tunnel = open_route(route(
-        ProxySpec::new(ProxyKind::Socks5, "127.0.0.1", closed),
-        db(),
-    ));
+    let mut down = route(ProxySpec::new(ProxyKind::Socks5, "127.0.0.1", closed), db());
+    // Windows takes about 2 s to refuse a connection to a closed port.
+    down.timeouts.connect = Duration::from_secs(10);
+    let tunnel = open_route(down);
     let error = tunnel.probe(&db()).unwrap_err();
     assert_eq!(error.code(), "tunnel.proxy");
     assert!(

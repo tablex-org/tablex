@@ -83,6 +83,7 @@ impl PrivateDir {
 
     pub fn create_in(parent: &Path) -> std::io::Result<Self> {
         let path = parent.join(format!("tablex-tool-{}", uuid::Uuid::new_v4().to_simple()));
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
         std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);

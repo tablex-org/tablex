@@ -2133,6 +2133,8 @@ fn a_session_that_cannot_be_read_because_the_database_stays_busy_is_not_saved_ov
         );
     });
     held.rollback().unwrap();
+    // Windows cannot delete the folder while the connection of the lock holder is open.
+    drop(holder);
     // Whatever the window does now, the stored session is the old one.
     app.update(visual, |this, cx| {
         this.workspace.open_query_tab("Something else");

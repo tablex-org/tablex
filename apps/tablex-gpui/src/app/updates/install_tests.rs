@@ -166,6 +166,7 @@ impl Fake {
         self.serve(&url, body);
     }
 
+#[cfg_attr(not(unix), allow(dead_code))]
     fn asked(&self) -> usize {
         self.asked.lock().unwrap().len()
     }
@@ -243,6 +244,7 @@ fn the_manifest_and_its_signature_are_fetched_from_the_release_of_that_version()
 
 // --- where the app runs -------------------------------------------------------------------------
 
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(in crate::app) fn fake_app_layout(root: &Path, name: &str) -> PathBuf {
     let exe = root.join(name).join("Contents/MacOS/TableX");
     std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
@@ -250,6 +252,8 @@ pub(in crate::app) fn fake_app_layout(root: &Path, name: &str) -> PathBuf {
     exe
 }
 
+// Installing in place is macOS-only: directory_writable is false on Windows, so no Install is ever offered there.
+#[cfg(unix)]
 #[test]
 fn the_bundle_is_found_from_the_executable_and_dev_runs_and_debug_builds_are_not_installable() {
     let scratch = Scratch::new();
@@ -288,6 +292,8 @@ fn a_disk_image_or_a_translocated_launch_is_told_to_move_the_app() {
     assert!(note.contains("/Applications") && note.contains("not writable"), "{note}");
 }
 
+// Installing in place is macOS-only: directory_writable is false on Windows, so no Install is ever offered there.
+#[cfg(unix)]
 #[test]
 fn the_plan_is_install_only_with_a_verified_manifest_and_a_bundle_and_download_otherwise() {
     let scratch = Scratch::new();

@@ -8433,6 +8433,7 @@ dependencies = [
  "regex",
  "resvg 0.46.0",
  "roxmltree 0.21.1",
+ "rusqlite",
  "rust-i18n",
  "serde",
  "serde_json",

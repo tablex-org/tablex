@@ -320,6 +320,7 @@ pub struct AppRoot {
     /// The update check and its notice (see `updates`).
     update_ui: updates::UpdateUi,
     /// The local socket `tablex-mcp` shows things through (see `app_channel`).
+    #[cfg_attr(all(test, not(unix)), allow(dead_code))]
     app_channel: app_channel::ChannelUi,
 }
 

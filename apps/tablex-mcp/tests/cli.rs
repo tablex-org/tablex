@@ -3,6 +3,7 @@
 
 mod support;
 
+#[cfg(unix)]
 use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, Command, Output, Stdio};

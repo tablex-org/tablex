@@ -16,5 +16,5 @@ pub(in crate::app) mod view;
 
 pub(in crate::app) use model::Mode;
 pub(in crate::app) use tab::BackupViews;
-#[cfg(test)]
+#[cfg(any(all(test, unix), all(test, feature = "bench")))]
 pub(in crate::app) use view::BackupInit;

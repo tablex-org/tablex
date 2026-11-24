@@ -438,8 +438,8 @@ fn install_runs_the_script_by_itself_and_shows_grid_output_and_database(cx: &mut
 #[gpui::test]
 fn cancel_forgets_the_waiting_script_and_a_changed_script_never_runs_after_the_install(cx: &mut TestAppContext) {
     let mut rig = ShellRig::new(cx, Some("0.3.0"));
-    let mut slow = SlowArtifact::new(&rig.root, rig.plugin.clone());
-    let artifact = file_url(&slow.path);
+    let mut slow = SlowArtifact::new(rig.plugin.clone());
+    let artifact = slow.url.clone();
     rig.publish_with_url("0.1.0", PLUGIN_MIN_DRIVER, &artifact);
     rig.load_catalog();
 
@@ -1338,8 +1338,8 @@ fn the_reply_is_checked_and_its_page_built_off_the_ui_thread(cx: &mut TestAppCon
 #[gpui::test]
 fn a_waiting_script_does_not_run_after_the_tab_moved_to_another_database(cx: &mut TestAppContext) {
     let mut rig = ShellRig::new(cx, Some("0.3.0"));
-    let mut slow = SlowArtifact::new(&rig.root, rig.plugin.clone());
-    let artifact = file_url(&slow.path);
+    let mut slow = SlowArtifact::new(rig.plugin.clone());
+    let artifact = slow.url.clone();
     rig.publish_with_url("0.1.0", PLUGIN_MIN_DRIVER, &artifact);
     rig.load_catalog();
     rig.run_script("print(1)");

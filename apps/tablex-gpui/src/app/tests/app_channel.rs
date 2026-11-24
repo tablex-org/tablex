@@ -2,7 +2,9 @@
 // for one test, the real socket) and ends in the same tabs, editor text and Run path the user's own
 // clicks use. A temporary data dir and socket; never a running tablex.
 
-use engine_connect::app_channel::{AppClient, ClientError, Reply, Request};
+use engine_connect::app_channel::{Reply, Request};
+#[cfg(unix)]
+use engine_connect::app_channel::{AppClient, ClientError};
 
 fn channel_request(
     app: &gpui::Entity<AppRoot>,
@@ -329,6 +331,8 @@ fn connections_changed_reloads_the_saved_connections_from_the_store(cx: &mut Tes
     assert!(!listed(&app, visual), "the removed connection is gone");
 }
 
+// The app channel has no Windows implementation yet: there is no socket to bind.
+#[cfg(unix)]
 #[gpui::test]
 fn the_socket_hands_a_request_to_the_ui_and_the_reply_comes_back(cx: &mut TestAppContext) {
     cx.dispatcher.allow_parking();

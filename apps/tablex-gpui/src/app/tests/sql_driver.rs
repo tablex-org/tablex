@@ -73,8 +73,8 @@ fn driver_sha256(dylib: &std::path::Path) -> String {
     hex::encode(Sha256::digest(std::fs::read(dylib).expect("read the driver")))
 }
 
-/// A scratch SQLite file; the `sqlite3` CLI seeds and inspects it from
-/// outside the driver.
+/// A scratch SQLite file; an in-process SQLite (`rusqlite`, no `sqlite3` CLI to install) seeds
+/// and inspects it from outside the driver.
 struct SqliteDb(std::path::PathBuf);
 
 impl SqliteDb {
@@ -84,23 +84,10 @@ impl SqliteDb {
         db
     }
 
-    /// `sql` goes in on standard input: Linux caps one argument at 128 KiB, and a seed can be longer.
+    /// Runs the script on a connection of its own and returns what its queries print, the way the
+    /// `sqlite3` CLI does: one line per row, the columns joined by `|`, NULL as nothing.
     fn sql(&self, sql: &str) -> String {
-        use std::io::Write as _;
-        let mut child = std::process::Command::new("sqlite3")
-            .arg(&self.0)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .expect("the sqlite3 CLI");
-        let mut stdin = child.stdin.take().unwrap();
-        let script = sql.to_owned();
-        let writer = std::thread::spawn(move || stdin.write_all(script.as_bytes()));
-        let output = child.wait_with_output().expect("the sqlite3 CLI");
-        writer.join().unwrap().expect("the script reaches sqlite3");
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        String::from_utf8(output.stdout).unwrap().trim().to_string()
+        sqlite_script(&rusqlite::Connection::open(&self.0).expect("open the scratch database"), sql)
     }
 
     fn uri(&self) -> String {
@@ -112,6 +99,29 @@ impl Drop for SqliteDb {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
     }
+}
+
+/// The `sqlite3` CLI's output of `script` run on `conn` (see [`SqliteDb::sql`]).
+fn sqlite_script(conn: &rusqlite::Connection, script: &str) -> String {
+    use rusqlite::{fallible_iterator::FallibleIterator as _, types::ValueRef};
+    let mut lines = Vec::new();
+    let mut batch = rusqlite::Batch::new(conn, script);
+    while let Some(mut stmt) = batch.next().expect("the script prepares") {
+        let columns = stmt.column_count();
+        let mut rows = stmt.query([]).expect("the statement runs");
+        while let Some(row) = rows.next().expect("the statement runs") {
+            let cells: Vec<String> = (0..columns)
+                .map(|i| match row.get_ref_unwrap(i) {
+                    ValueRef::Null => String::new(),
+                    ValueRef::Integer(n) => n.to_string(),
+                    ValueRef::Real(f) => format!("{f:?}"),
+                    ValueRef::Text(t) | ValueRef::Blob(t) => String::from_utf8_lossy(t).into_owned(),
+                })
+                .collect();
+            lines.push(cells.join("|"));
+        }
+    }
+    lines.join("\n").trim().to_string()
 }
 
 const ITEMS_SEED: &str = "CREATE TABLE items(id INTEGER PRIMARY KEY, name TEXT); \

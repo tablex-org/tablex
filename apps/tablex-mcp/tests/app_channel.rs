@@ -2,6 +2,9 @@
 //! socket client, against a fake app listening on a temporary socket. Nothing here touches a
 //! running tablex or the user's data dir.
 
+// Windows has no app channel yet: the tests that need a listening fake app are unix only.
+#![cfg_attr(windows, allow(dead_code, unused_imports))]
+
 mod support;
 
 use engine_connect::app_channel::{AppClient, Listener, Reply, Request};
@@ -55,6 +58,8 @@ fn error_message(result: &rmcp::model::CallToolResult) -> String {
     body["error"]["message"].as_str().unwrap().to_owned()
 }
 
+// The app channel has no Windows implementation yet (no listener to fake).
+#[cfg(unix)]
 #[tokio::test]
 async fn open_table_sends_the_object_to_the_app_and_reports_its_answer() {
     let app = FakeApp::listening(Reply::ok());
@@ -87,6 +92,8 @@ async fn open_table_sends_the_object_to_the_app_and_reports_its_answer() {
     }
 }
 
+// The app channel has no Windows implementation yet (no listener to fake).
+#[cfg(unix)]
 #[tokio::test]
 async fn execute_and_show_sends_the_query_and_defaults_to_running_it() {
     let app = FakeApp::listening(Reply::ok());
@@ -127,6 +134,8 @@ async fn execute_and_show_sends_the_query_and_defaults_to_running_it() {
     assert_eq!(app.requests().len(), 2);
 }
 
+// The app channel has no Windows implementation yet (no listener to fake).
+#[cfg(unix)]
 #[tokio::test]
 async fn access_below_the_need_is_refused_before_the_app_is_asked() {
     let app = FakeApp::listening(Reply::ok());
@@ -163,10 +172,17 @@ async fn an_app_that_is_not_running_gives_a_clear_error() {
         let result = harness.call(tool, args).await;
         assert_eq!(result.is_error, Some(true));
         assert_eq!(code(&result), "agent.app_unavailable");
-        assert!(error_message(&result).contains("Open tablex and try again"));
+        let message = error_message(&result);
+        if cfg!(unix) {
+            assert!(message.contains("Open tablex and try again"), "{message}");
+        } else {
+            assert!(message.contains("not on Windows"), "{message}");
+        }
     }
 }
 
+// The app channel has no Windows implementation yet (no listener to fake).
+#[cfg(unix)]
 #[tokio::test]
 async fn what_the_app_refuses_is_reported_with_its_reason() {
     let app = FakeApp::listening(Reply::error("no saved connection `x` in tablex"));
@@ -179,6 +195,8 @@ async fn what_the_app_refuses_is_reported_with_its_reason() {
     assert!(error_message(&result).contains("no saved connection"));
 }
 
+// The app channel has no Windows implementation yet (no listener to fake).
+#[cfg(unix)]
 #[tokio::test]
 async fn the_default_layer_reaches_the_socket_in_the_data_dir() {
     // `build_layer` resolves the socket of `<TABLEX_DATA_DIR>/tablex` (in the data dir, or for a

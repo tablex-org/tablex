@@ -2769,21 +2769,16 @@ mod sql_sort_tests {
     }
 
     /// The `name` of the first row `sql` returns from a fresh in-memory SQLite
-    /// database holding the `orders` fixture (the `sqlite3` CLI, as the
-    /// driver-route tests use).
+    /// database holding the `orders` fixture (in-process, as the driver-route
+    /// tests do).
     fn first_name(sql: &str) -> String {
-        let script = format!(
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
             "CREATE TABLE orders (id INTEGER PRIMARY KEY, name TEXT); \
-             INSERT INTO orders VALUES (1, 'alpha'), (2, 'zulu'); {sql};"
-        );
-        let output = std::process::Command::new("sqlite3")
-            .arg(":memory:")
-            .arg(script)
-            .output()
-            .expect("the sqlite3 CLI");
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        let stdout = String::from_utf8(output.stdout).unwrap();
-        stdout.lines().next().unwrap().split('|').nth(1).unwrap().to_string()
+             INSERT INTO orders VALUES (1, 'alpha'), (2, 'zulu');",
+        )
+        .unwrap();
+        conn.query_row(sql, [], |row| row.get(1)).unwrap()
     }
 
     #[test]

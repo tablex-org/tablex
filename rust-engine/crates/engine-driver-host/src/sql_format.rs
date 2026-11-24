@@ -161,6 +161,7 @@ impl PrivateDir {
                 NEXT.fetch_add(1, Ordering::Relaxed)
             );
             let path = std::env::temp_dir().join(unique);
+            #[cfg_attr(not(unix), allow(unused_mut))]
             let mut builder = std::fs::DirBuilder::new();
             #[cfg(unix)]
             {

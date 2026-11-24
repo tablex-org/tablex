@@ -83,8 +83,8 @@ fn the_pie_lists_every_slice_with_its_share() {
 
 #[test]
 fn series_colors_follow_the_theme_then_tint() {
-    for i in 0..5 {
-        assert_eq!(series_color(&DARK.palette, DARK.background, i), DARK.palette[i]);
+    for (i, color) in DARK.palette.iter().enumerate().take(5) {
+        assert_eq!(series_color(&DARK.palette, DARK.background, i), *color);
     }
     let sixth = series_color(&DARK.palette, DARK.background, 5);
     assert_ne!(sixth, DARK.palette[0], "past five the palette is tinted");

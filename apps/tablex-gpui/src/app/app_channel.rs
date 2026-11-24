@@ -4,6 +4,9 @@
 //! rule of the app (confirmations, production and read-only connection types, smart commit)
 //! applies. Nothing here runs a statement on its own.
 
+// Windows has no app channel: only the (unix) tests reach most of this when testing.
+#![cfg_attr(all(test, not(unix)), allow(dead_code))]
+
 use super::*;
 use engine_connect::app_channel::{BindError, Handler, Listener, Reply, Request};
 use std::path::Path;

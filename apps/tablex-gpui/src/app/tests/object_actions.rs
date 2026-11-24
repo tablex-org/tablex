@@ -2,7 +2,7 @@
 // through the real context menus, name dialog, new-table form and the shared review dialog.
 //
 // * The SQLite tests run the REAL SQLite driver behind a real host session and apply on the REAL
-//   dedicated apply session, then read the file back with the `sqlite3` CLI.
+//   dedicated apply session, then read the file back with rusqlite.
 // * The fixture tests walk the Postgres fixture tree with the injected executor (it logs the
 //   statements instead of running them): CASCADE / RESTART IDENTITY, Production, read-only.
 // * The live tests at the end are `#[ignore]`d (dedicated `tablex-test-*` containers only).

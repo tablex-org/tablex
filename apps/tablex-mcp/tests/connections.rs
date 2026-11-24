@@ -28,7 +28,8 @@ struct FakeApp {
     _dir: tempfile::TempDir,
     path: PathBuf,
     seen: Arc<Mutex<Vec<Request>>>,
-    _listener: Listener,
+    /// `None` where the app channel has no implementation (Windows): the app is then unreachable.
+    listener: Option<Listener>,
 }
 
 impl FakeApp {
@@ -43,13 +44,28 @@ impl FakeApp {
                 log.lock().unwrap().push(request);
                 Reply::ok()
             }),
-        )
-        .unwrap();
-        Self { _dir: dir, path, seen, _listener: listener }
+        );
+        if cfg!(unix) {
+            listener.as_ref().unwrap();
+        }
+        Self { _dir: dir, path, seen, listener: listener.ok() }
     }
 
     fn client(&self) -> AppClient {
         AppClient::new(self.path.clone())
+    }
+
+    /// Whether a request can reach this app (and so whether a change is announced to it).
+    fn reachable(&self) -> bool {
+        self.listener.is_some()
+    }
+
+    /// The `ConnectionsChanged` notices received so far must be `expected` (nobody hears them where
+    /// the app is unreachable).
+    fn expect_changed(&self, expected: usize) {
+        if self.reachable() {
+            assert_eq!(self.changed(), expected);
+        }
     }
 
     fn changed(&self) -> usize {
@@ -128,10 +144,10 @@ async fn an_approved_add_stores_the_record_and_keeps_the_password_in_the_secret_
     let id = body["connection_id"].as_str().unwrap().to_owned();
     assert_eq!(body["password_saved"], true);
     assert_eq!(body["agent_access"], "off");
-    assert_eq!(body["app_notified"], true);
+    assert_eq!(body["app_notified"], rig.app.reachable());
     // The postgresql driver is not in the test driver store: said as a warning, not a failure.
     assert!(body["warning"].as_str().unwrap().contains("driver is not installed"), "{body}");
-    assert_eq!(rig.app.changed(), 1);
+    rig.app.expect_changed(1);
 
     let record = stored(&name).expect("the record is stored");
     assert_eq!(record.id, id.to_uppercase());
@@ -182,13 +198,15 @@ async fn an_approved_add_stores_the_record_and_keeps_the_password_in_the_secret_
 async fn an_add_without_a_password_saves_none_and_sqlite_takes_a_path() {
     let rig = approving().await;
     let name = unique("local-sqlite");
+    // Absolute on every OS (`/tmp/...` has no drive on Windows).
+    let path = std::env::temp_dir().join("shop-orders.db").to_string_lossy().into_owned();
     let result = rig
-        .add(json!({"name": name, "kind": "sqlite", "path": "/tmp/shop-orders.db"}))
+        .add(json!({"name": name, "kind": "sqlite", "path": path}))
         .await;
     let body = structured(&result);
     assert_eq!(body["password_saved"], false);
     let record = stored(&name).unwrap();
-    assert_eq!(record.uri, "sqlite:///tmp/shop-orders.db");
+    assert_eq!(record.uri, format!("sqlite://{path}"));
     assert_eq!(record.connection_type, "development");
     assert!(!record.save_password);
     assert_eq!(rig.secret(body["connection_id"].as_str().unwrap()), None);
@@ -224,7 +242,7 @@ async fn a_declined_dismissed_or_malformed_answer_changes_nothing() {
         assert_eq!(code(&result), "agent.write_refused");
         assert!(stored(&name).is_none());
         assert_eq!(rig.seen.asked().len(), 1);
-        assert_eq!(rig.app.changed(), 0);
+        rig.app.expect_changed(0);
         assert!(!rig.everything(&result).contains(PASSWORD));
         let entries = rig.harness.fixture.audit_entries();
         assert_ne!(entries[0].approval.as_deref(), Some("approved"));
@@ -456,7 +474,7 @@ async fn a_declined_copy_stores_nothing() {
     let result = rig.harness.call("duplicate_connection", json!({"connection_id": original.id, "name": name})).await;
     assert_eq!(code(&result), "agent.write_refused");
     assert!(stored(&name).is_none());
-    assert_eq!(rig.app.changed(), 0);
+    rig.app.expect_changed(0);
 }
 
 // ------------------------------------------------------------------------------------- remove
@@ -481,7 +499,7 @@ async fn a_removal_deletes_the_record_its_secrets_and_pins_and_closes_the_sessio
 
     let result = rig.harness.call("remove_connection", json!({"connection_id": conn.id})).await;
     let body = structured(&result);
-    assert_eq!(body, json!({"connection_id": conn.id, "app_notified": true}));
+    assert_eq!(body, json!({"connection_id": conn.id, "app_notified": rig.app.reachable()}));
     assert!(stored(&record.name).is_none());
     assert!(get_connection(&conn.id).unwrap().is_none());
     for account in [conn.id.to_uppercase(), conn.id.clone()] {
@@ -491,7 +509,7 @@ async fn a_removal_deletes_the_record_its_secrets_and_pins_and_closes_the_sessio
     }
     assert!(engine_storage::pinned_nodes::list(&db, &conn.id).unwrap().is_empty());
     assert!(!fixture.layer.is_open(&conn.id));
-    assert_eq!(rig.app.changed(), 1);
+    rig.app.expect_changed(1);
     let question = rig.seen.asked().last().unwrap().0.clone();
     assert!(question.contains("REMOVE") && question.contains(&record.name), "{question}");
     assert!(!question.contains("PRODUCTION"));
@@ -522,7 +540,7 @@ async fn a_declined_removal_or_an_unknown_connection_changes_nothing() {
     assert!(get_connection(&conn.id).unwrap().is_some());
     assert_eq!(rig.secret(&conn.id).as_deref(), Some(PASSWORD));
     assert!(fixture.layer.is_open(&conn.id));
-    assert_eq!(rig.app.changed(), 0);
+    rig.app.expect_changed(0);
     let asked = rig.seen.asked().len();
     let unknown = rig.harness.call("remove_connection", json!({"connection_id": "no-such-id"})).await;
     assert_eq!(code(&unknown), "agent.invalid_arguments");
@@ -568,5 +586,5 @@ async fn cancelling_the_request_while_the_question_waits_adds_nothing_even_if_it
     assert_eq!(entry.approval.as_deref(), Some("cancelled"));
     question.accept(true);
     assert!(stored(&name).is_none());
-    assert_eq!(app.changed(), 0);
+    app.expect_changed(0);
 }

@@ -348,14 +348,16 @@ mod tests {
 
     #[test]
     fn sqlite_takes_an_absolute_path() {
+        // Absolute on every OS (`/tmp/shop.db` has no drive on Windows).
+        let path = std::env::temp_dir().join("shop.db").to_string_lossy().into_owned();
         let mut input = new(ConnectionKind::Sqlite);
-        input.path = Some("/tmp/shop.db".into());
-        assert_eq!(build_record(&input, ID, 0.0).unwrap().uri, "sqlite:///tmp/shop.db");
+        input.path = Some(path.clone());
+        assert_eq!(build_record(&input, ID, 0.0).unwrap().uri, format!("sqlite://{path}"));
         input.path = Some("shop.db".into());
         assert!(build_record(&input, ID, 0.0).unwrap_err().contains("absolute"));
         let mut by_uri = new(ConnectionKind::Sqlite);
-        by_uri.uri = Some("SQLITE:///tmp/shop.db".into());
-        assert_eq!(build_record(&by_uri, ID, 0.0).unwrap().uri, "sqlite:///tmp/shop.db");
+        by_uri.uri = Some(format!("SQLITE://{path}"));
+        assert_eq!(build_record(&by_uri, ID, 0.0).unwrap().uri, format!("sqlite://{path}"));
         by_uri.uri = Some("postgresql://h/db".into());
         assert!(build_record(&by_uri, ID, 0.0).is_err());
     }

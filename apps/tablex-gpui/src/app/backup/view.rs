@@ -911,7 +911,7 @@ impl BackupView {
 }
 
 /// What a test can see of a wizard.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(in crate::app) struct ViewSnapshot {
     pub(in crate::app) mode: Mode,
     pub(in crate::app) step: &'static str,
@@ -938,6 +938,7 @@ pub(in crate::app) struct ViewSnapshot {
 
 #[cfg(test)]
 impl BackupView {
+    #[cfg(unix)]
     pub(in crate::app) fn snapshot(&self) -> ViewSnapshot {
         ViewSnapshot {
             mode: self.mode,
@@ -982,6 +983,7 @@ impl BackupView {
     }
 
     /// As if the connection of the wizard was switched to a `kind` one with this database.
+    #[cfg(unix)]
     pub(in crate::app) fn switch_for_test(&mut self, kind: ConnectionKind, database: &str, cx: &mut Context<Self>) {
         self.kind = kind;
         self.target.database = database.to_owned();
@@ -989,6 +991,7 @@ impl BackupView {
     }
 
     /// The rows the filter shows.
+    #[cfg(unix)]
     pub(in crate::app) fn shown_for_test(&self) -> usize {
         self.list.shown.len()
     }

@@ -1,6 +1,6 @@
 // R4b: the data transfer wizard, through the real navigator menus, the wizard tab, the shared review dialog (tables
 // to create) and the REAL SQLite driver on sessions of its own (one reads, one writes). The database is read back
-// with the `sqlite3` CLI; files are read back from disk.
+// with rusqlite; files are read back from disk.
 //
 // * The live tests at the end are `#[ignore]`d (dedicated `tablex-test-*` containers only).
 
@@ -667,8 +667,7 @@ fn hostile_names_are_quoted_in_files_and_statements_and_never_leave_the_folder(c
     assert!(sql.contains("(1, 'it''s', 'x\"y'),\n(2, '''; DELETE FROM decoy; --', 'z');"), "{sql}");
     // The file is replayed into a copy of the table: the statements do what they say and nothing else.
     let copy = SqliteDb::new("CREATE TABLE decoy(id INTEGER); INSERT INTO decoy VALUES (1); CREATE TABLE \"t\"\"x; DROP TABLE decoy; --\"(id INTEGER PRIMARY KEY, \"a\"\"b\" TEXT, \"c d; --\" TEXT);");
-    let status = std::process::Command::new("sqlite3").arg(&copy.0).stdin(std::fs::File::open(out.join("t_x; DROP TABLE decoy; --.sql")).unwrap()).status().unwrap();
-    assert!(status.success());
+    copy.sql(&sql);
     assert_eq!(copy.sql("SELECT count(*) FROM decoy"), "1");
     assert_eq!(copy.sql(&format!("SELECT \"a\"\"b\" || '|' || \"c d; --\" FROM \"{}\" ORDER BY id", table.replace('"', "\"\""))), "it's|x\"y\n'; DELETE FROM decoy; --|z");
     rig.click("transfer-close");

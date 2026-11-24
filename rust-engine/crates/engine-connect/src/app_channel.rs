@@ -154,7 +154,7 @@ pub enum BindError {
 pub enum ClientError {
     #[error("tablex is not running. Open tablex and try again.")]
     NotRunning,
-    #[error("tablex cannot be reached from a program on this platform: the app channel is not supported here")]
+    #[error("tablex cannot be reached from a program on this platform yet: the app connection exists on macOS and Linux only, not on Windows")]
     Unsupported,
     /// The channel broke (an I/O error, a reply that is not one, another protocol version).
     #[error("could not talk to tablex: {0}")]

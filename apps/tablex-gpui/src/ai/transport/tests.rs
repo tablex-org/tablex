@@ -527,7 +527,8 @@ fn a_failed_connection_names_the_problem_without_the_key() {
     let result = transport().send(
         post(
             format!("http://{address}/v1/messages"),
-            timeouts(2000, 2000),
+            // Windows takes about 2 s to refuse a connection to a closed port.
+            timeouts(10_000, 10_000),
         ),
         &cancel,
     );

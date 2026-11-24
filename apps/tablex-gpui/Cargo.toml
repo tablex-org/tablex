@@ -112,6 +112,9 @@ image = { version = "=0.25.10", default-features = false, features = ["png"] }
 # harness the driver crates use to load a driver and talk to a test server.
 engine-driver-conformance = { path = "../../rust-engine/crates/engine-driver-conformance" }
 tempfile = "3"
+# Seeds and reads back the scratch SQLite files of the driver-route tests in process (no `sqlite3` CLI; already in
+# the lock file through tablex-mcp's tests).
+rusqlite = { version = "0.41", features = ["bundled"] }
 # Signs the test manifests of the Strict-policy Driver Manager tests (already in the tree through
 # `engine-driver-host`, which verifies with it).
 ed25519-dalek = { version = "2.2", default-features = false }

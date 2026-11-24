@@ -1,5 +1,5 @@
 // R5: running a SQL file, through the real navigator menu, the real file prompt (stubbed answer), the wizard tab and the
-// REAL SQLite driver on a second session (read back with the `sqlite3` CLI). The live tests at the end (PostgreSQL, MySQL,
+// REAL SQLite driver on a second session (read back with rusqlite). The live tests at the end (PostgreSQL, MySQL,
 // MariaDB) are `#[ignore]`d: dedicated `tablex-test-*` containers only, with drop guards that clean up on a failure too.
 
 use crate::app::data_transfer::Namespace as FrNamespace;

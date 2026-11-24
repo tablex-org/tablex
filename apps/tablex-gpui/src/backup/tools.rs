@@ -213,6 +213,8 @@ pub enum SearchRoot {
 }
 
 impl SearchRoot {
+    // The Windows roots are all globs.
+    #[cfg_attr(windows, allow(dead_code))]
     pub fn dir(path: impl Into<PathBuf>) -> Self {
         Self::Dir(path.into())
     }
@@ -378,7 +380,7 @@ impl Locator {
     }
 
     /// Only these places (tests).
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn with_roots(roots: Vec<SearchRoot>) -> Self {
         Self { roots }
     }

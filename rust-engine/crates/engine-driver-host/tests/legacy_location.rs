@@ -385,7 +385,8 @@ fn two_processes_starting_together_move_the_store_once() {
     assert_eq!(rig.store().load_all().unwrap().len(), 2);
     assert_eq!(
         fs::read_dir(&rig.new_base).unwrap().count(),
-        1,
+        // Windows keeps the movers' queue lock file there too.
+        1 + usize::from(cfg!(windows)),
         "no aside directory was made by the losers"
     );
 }

@@ -207,17 +207,14 @@ pub fn system_pathext() -> Vec<String> {
 
 fn is_runnable(path: &Path) -> bool {
     let Ok(meta) = std::fs::metadata(path) else { return false };
-    if !meta.is_file() {
-        return false;
-    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        meta.permissions().mode() & 0o111 != 0
+        meta.is_file() && meta.permissions().mode() & 0o111 != 0
     }
     #[cfg(not(unix))]
     {
-        true
+        meta.is_file()
     }
 }
 
@@ -372,7 +369,8 @@ mod tests {
 
     #[test]
     fn the_search_path_puts_the_login_shell_first_without_repeats() {
-        let merged = merge_search_paths(Some(OsStr::new("/opt/homebrew/bin:/usr/bin")), Some(OsStr::new("/usr/bin:/bin::")));
+        let join = |entries: &[&str]| std::env::join_paths(entries).unwrap();
+        let merged = merge_search_paths(Some(join(&["/opt/homebrew/bin", "/usr/bin"]).as_os_str()), Some(join(&["/usr/bin", "/bin", "", ""]).as_os_str()));
         let directories: Vec<PathBuf> = std::env::split_paths(&merged).collect();
         assert_eq!(directories, [PathBuf::from("/opt/homebrew/bin"), PathBuf::from("/usr/bin"), PathBuf::from("/bin")]);
         assert_eq!(merge_search_paths(None, Some(OsStr::new("/bin"))), OsString::from("/bin"));

@@ -762,6 +762,11 @@ fn cargo_build_mongo(target_dir: &Path) -> PathBuf {
 
 #[test]
 fn loads_real_mongo_driver_and_validates_capabilities() {
+    // The driver is built by a bash script.
+    if Command::new("bash").arg("--version").output().is_err() {
+        eprintln!("bash not found; skipped");
+        return;
+    }
     let temp = TempDir::new().expect("temp directory");
     let source = build_real_mongo_driver();
     let staged = temp.path().join(common::driver_file_name("mongo"));

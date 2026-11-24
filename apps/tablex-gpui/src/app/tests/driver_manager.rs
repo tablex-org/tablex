@@ -14,33 +14,38 @@ fn file_url(path: &std::path::Path) -> String {
     url::Url::from_file_path(path).expect("absolute path").to_string()
 }
 
-/// A `file://` artifact that streams like a slow download: a FIFO whose
-/// writer sends the first half, then waits for `release` (dropping it also
-/// releases).
+/// An artifact URL that streams like a slow download: a one-connection HTTP server on loopback
+/// (the installer reads plain-HTTP loopback in every policy) that sends the first half, then waits
+/// for `release` (dropping it also releases).
 struct SlowArtifact {
-    path: std::path::PathBuf,
+    url: String,
     release: Option<std::sync::mpsc::Sender<()>>,
 }
 
 impl SlowArtifact {
-    fn new(dir: &std::path::Path, bytes: Vec<u8>) -> Self {
-        use std::io::Write;
-        let path = dir.join("slow-artifact.fifo");
-        assert!(std::process::Command::new("mkfifo").arg(&path).status().unwrap().success());
+    fn new(bytes: Vec<u8>) -> Self {
+        use std::io::{BufRead, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://127.0.0.1:{}/slow-artifact", listener.local_addr().unwrap().port());
         let (release, wait) = std::sync::mpsc::channel::<()>();
-        let fifo = path.clone();
         std::thread::spawn(move || {
-            // Blocks until the installer opens the read end.
-            let Ok(mut out) = std::fs::OpenOptions::new().write(true).open(&fifo) else {
+            let Ok((mut stream, _)) = listener.accept() else {
                 return;
             };
+            // The request head (up to the empty line) is not looked at.
+            let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            while reader.read_line(&mut line).is_ok_and(|read| read > 0) && line.trim_end() != "" {
+                line.clear();
+            }
             let half = bytes.len() / 2;
-            let _ = out.write_all(&bytes[..half]);
-            let _ = out.flush();
+            let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len());
+            let _ = stream.write_all(&bytes[..half]);
+            let _ = stream.flush();
             let _ = wait.recv();
-            let _ = out.write_all(&bytes[half..]);
+            let _ = stream.write_all(&bytes[half..]);
         });
-        Self { path, release: Some(release) }
+        Self { url, release: Some(release) }
     }
 
     fn release(&mut self) {
@@ -274,7 +279,7 @@ impl<'a> DmRig<'a> {
             this.driver_runtime
                 .session_handles
                 .get(key)
-                .map(|handle| handle.path().to_string_lossy().into_owned())
+                .map(|handle| handle.path().to_string_lossy().replace('\\', "/"))
                 .unwrap_or_default()
         })
     }
@@ -313,8 +318,8 @@ impl Drop for DmRig<'_> {
 fn install_shows_real_progress_then_the_driver_connects_without_a_restart(cx: &mut TestAppContext) {
     let db = SqliteDb::new(ITEMS_SEED);
     let mut rig = DmRig::new(cx, TrustPolicy::Developer);
-    let mut slow = SlowArtifact::new(&rig.root, std::fs::read(&rig.dylib).unwrap());
-    rig.publish_at("1.0.0", &file_url(&slow.path));
+    let mut slow = SlowArtifact::new(std::fs::read(&rig.dylib).unwrap());
+    rig.publish_at("1.0.0", &slow.url);
     rig.open_manager();
     assert!(rig.rendered("driver-row-sqlite") && rig.rendered("driver-action-sqlite"));
     assert_eq!(
@@ -354,8 +359,8 @@ fn cancelling_mid_download_leaves_no_partial_file_and_the_row_returns_to_install
     cx: &mut TestAppContext,
 ) {
     let mut rig = DmRig::new(cx, TrustPolicy::Developer);
-    let mut slow = SlowArtifact::new(&rig.root, std::fs::read(&rig.dylib).unwrap());
-    rig.publish_at("1.0.0", &file_url(&slow.path));
+    let mut slow = SlowArtifact::new(std::fs::read(&rig.dylib).unwrap());
+    rig.publish_at("1.0.0", &slow.url);
     rig.open_manager();
     rig.click("driver-action-sqlite");
     rig.wait("download progress", |this| {
@@ -375,7 +380,8 @@ fn cancelling_mid_download_leaves_no_partial_file_and_the_row_returns_to_install
         Some(PrimaryAction::Cancel)
     );
     rig.click("driver-action-sqlite");
-    assert!(rig.read(|this| this.driver_ui.queue.job("sqlite").unwrap().cancelling()));
+    // A cancelled download of the loopback server stops at once, so the job may already be over.
+    assert!(rig.read(|this| this.driver_ui.queue.job("sqlite").is_none_or(|job| job.cancelling())));
     slow.release();
     rig.wait("the cancel", |this| this.driver_ui.queue.job("sqlite").is_none());
 
@@ -415,7 +421,7 @@ fn update_keeps_an_open_session_on_the_old_version_until_reconnect_them(cx: &mut
     rig.wait("the update", |this| {
         this.driver_ui.queue.job("sqlite").is_none()
             && this.driver_ui.handles.get("sqlite").is_some_and(|handle| {
-                handle.path().to_string_lossy().contains("/sqlite/2.0.0/")
+                handle.path().to_string_lossy().replace('\\', "/").contains("/sqlite/2.0.0/")
             })
     });
     assert_eq!(rig.version_dirs(), ["1.0.0", "2.0.0"], "installed next to the old one");
@@ -454,7 +460,7 @@ fn update_keeps_an_open_session_on_the_old_version_until_reconnect_them(cx: &mut
                 .driver_runtime
                 .session_handles
                 .get(&key)
-                .is_some_and(|handle| handle.path().to_string_lossy().contains("/sqlite/2.0.0/"))
+                .is_some_and(|handle| handle.path().to_string_lossy().replace('\\', "/").contains("/sqlite/2.0.0/"))
     });
     assert_eq!(rig.select_rows(old_tab), 5);
     assert_eq!(rig.read(|this| this.driver_sessions("sqlite").iter().filter(|s| s.stale).count()), 0);
@@ -519,7 +525,7 @@ fn roll_back_makes_the_previous_version_current_and_loads_it(cx: &mut TestAppCon
     });
     assert_eq!(rig.stored_version().as_deref(), Some("1.0.0"));
     assert!(rig.read(|this| {
-        this.driver_ui.handles.get("sqlite").is_some_and(|handle| handle.path().to_string_lossy().contains("/sqlite/1.0.0/"))
+        this.driver_ui.handles.get("sqlite").is_some_and(|handle| handle.path().to_string_lossy().replace('\\', "/").contains("/sqlite/1.0.0/"))
     }));
     assert!(rig.read(|this| this.driver_ui.model.row("sqlite").unwrap().has_update()), "2.0.0 is offered again");
 }
@@ -962,8 +968,8 @@ fn driver_error_count(this: &AppRoot) -> usize {
 fn the_download_badge_of_a_tile_installs_the_driver_and_follows_the_job(cx: &mut TestAppContext) {
     use crate::connection_dialog::DriverDownload;
     let mut rig = DmRig::new(cx, TrustPolicy::Developer);
-    let mut slow = SlowArtifact::new(&rig.root, std::fs::read(&rig.dylib).unwrap());
-    rig.publish_at("1.0.0", &file_url(&slow.path));
+    let mut slow = SlowArtifact::new(std::fs::read(&rig.dylib).unwrap());
+    rig.publish_at("1.0.0", &slow.url);
     rig.open_manager();
     rig.open_new_connection();
     rig.click("connection-picker-category-lightweight");
@@ -1319,9 +1325,9 @@ fn the_tools_row_installs_with_progress_then_shows_the_path_and_the_copy_buttons
     use engine_driver_host::ToolCatalogState;
     let mut rig = DmRig::new(cx, TrustPolicy::Developer);
     let bytes = tool_bytes(1);
-    let mut slow = SlowArtifact::new(&rig.root, bytes.clone());
+    let mut slow = SlowArtifact::new(bytes.clone());
     rig.publish("1.0.0");
-    rig.publish_tool_at("0.1.0", &file_url(&slow.path), &bytes, &tool_sha256(&bytes));
+    rig.publish_tool_at("0.1.0", &slow.url, &bytes, &tool_sha256(&bytes));
     rig.open_manager_with_tool();
 
     // Not installed: name, what it is, the versions, Install; no path, no copy buttons.
@@ -1383,9 +1389,9 @@ fn cancelling_the_tool_download_leaves_nothing_and_the_row_returns_to_install(
 ) {
     let mut rig = DmRig::new(cx, TrustPolicy::Developer);
     let bytes = tool_bytes(2);
-    let mut slow = SlowArtifact::new(&rig.root, bytes.clone());
+    let mut slow = SlowArtifact::new(bytes.clone());
     rig.publish("1.0.0");
-    rig.publish_tool_at("0.1.0", &file_url(&slow.path), &bytes, &tool_sha256(&bytes));
+    rig.publish_tool_at("0.1.0", &slow.url, &bytes, &tool_sha256(&bytes));
     rig.open_manager_with_tool();
     rig.click("tool-action-install:tablex-mcp");
     rig.wait("download progress", |this| {
@@ -1397,7 +1403,8 @@ fn cancelling_the_tool_download_leaves_nothing_and_the_row_returns_to_install(
     assert!(!rig.tool_dir_files().is_empty(), "a partial file exists while downloading");
 
     rig.click("tool-action-cancel:tablex-mcp");
-    assert!(rig.read(|this| this.driver_ui.tools.job.as_ref().unwrap().cancelling()));
+    // A cancelled download of the loopback server stops at once, so the job may already be over.
+    assert!(rig.read(|this| this.driver_ui.tools.job.as_ref().is_none_or(|job| job.cancelling())));
     slow.release();
     rig.wait("the cancel", |this| this.driver_ui.tools.job.is_none());
 
@@ -2532,13 +2539,13 @@ fn a_policy_change_drops_queued_installs_and_cancels_running_ones_and_adopts_not
 ) {
     let mut rig = DmRig::new(cx, TrustPolicy::Developer);
     // A running driver install (A), one queued behind it (B = mysql) and a running tool install.
-    let mut slow_driver = SlowArtifact::new(&rig.root, std::fs::read(&rig.dylib).unwrap());
-    rig.publish_at("1.0.0", &file_url(&slow_driver.path));
+    let mut slow_driver = SlowArtifact::new(std::fs::read(&rig.dylib).unwrap());
+    rig.publish_at("1.0.0", &slow_driver.url);
     let tool_dir = rig.root.join("tool-source");
     std::fs::create_dir_all(&tool_dir).unwrap();
     let bytes = tool_bytes(21);
-    let mut slow_tool = SlowArtifact::new(&tool_dir, bytes.clone());
-    rig.publish_tool_at("0.1.0", &file_url(&slow_tool.path), &bytes, &tool_sha256(&bytes));
+    let mut slow_tool = SlowArtifact::new(bytes.clone());
+    rig.publish_tool_at("0.1.0", &slow_tool.url, &bytes, &tool_sha256(&bytes));
     rig.update(|this, _| this.driver_ui.developer_mode = true);
     rig.open_manager();
     rig.wait("the tool row", |this| this.driver_ui.tools.item().is_some());
@@ -2558,8 +2565,9 @@ fn a_policy_change_drops_queued_installs_and_cancels_running_ones_and_adopts_not
     turn_developer_mode_off(&mut rig);
     // (a) the queued one is gone, (b) the running ones were told to stop.
     assert!(rig.read(|this| this.driver_ui.queue.job("mysql").is_none()), "queued at the flip: dropped");
-    assert!(rig.read(|this| this.driver_ui.queue.job("sqlite").unwrap().cancelling()), "running driver job: cancelled");
-    assert!(rig.read(|this| this.driver_ui.tools.job.as_ref().unwrap().cancelling()), "running tool job: cancelled");
+    // A cancelled download of the loopback server stops at once, so a job may already be over by now.
+    assert!(rig.read(|this| this.driver_ui.queue.job("sqlite").is_none_or(|job| job.cancelling())), "running driver job: cancelled");
+    assert!(rig.read(|this| this.driver_ui.tools.job.as_ref().is_none_or(|job| job.cancelling())), "running tool job: cancelled");
 
     slow_driver.release();
     slow_tool.release();
@@ -2674,8 +2682,8 @@ fn the_missing_driver_dialog_does_not_claim_to_install_from_a_catalog_that_is_no
 #[gpui::test]
 fn a_result_that_arrives_after_a_policy_change_is_not_adopted(cx: &mut TestAppContext) {
     let mut rig = DmRig::new(cx, TrustPolicy::Developer);
-    let mut slow = SlowArtifact::new(&rig.root, std::fs::read(&rig.dylib).unwrap());
-    rig.publish_at("1.0.0", &file_url(&slow.path));
+    let mut slow = SlowArtifact::new(std::fs::read(&rig.dylib).unwrap());
+    rig.publish_at("1.0.0", &slow.url);
     rig.update(|this, _| this.driver_ui.developer_mode = true);
     rig.open_manager();
     rig.click("driver-action-sqlite");
@@ -2683,7 +2691,8 @@ fn a_result_that_arrives_after_a_policy_change_is_not_adopted(cx: &mut TestAppCo
         matches!(this.driver_ui.queue.job("sqlite").map(|job| &job.state), Some(InstallState::Downloading { bytes, .. }) if *bytes > 0)
     });
     turn_developer_mode_off(&mut rig);
-    assert!(rig.read(|this| this.driver_ui.queue.job("sqlite").unwrap().cancelling()));
+    // A cancelled download of the loopback server stops at once, so the job may already be over.
+    assert!(rig.read(|this| this.driver_ui.queue.job("sqlite").is_none_or(|job| job.cancelling())));
 
     // The install finished all the same (past the last cancel check): the result is not adopted.
     let handle = engine_driver_host::DriverLoader.load_verified(&rig.dylib, &rig.sha).expect("the real driver loads");

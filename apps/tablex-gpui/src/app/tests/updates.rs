@@ -323,9 +323,13 @@ fn the_launch_check_does_not_fetch_when_the_preference_is_off_the_build_is_debug
 
 use updates::install::tests as fixtures;
 
+// The pieces below serve the install tests, which are unix only.
+#[cfg_attr(not(unix), allow(dead_code))]
 const INSTALL_TARGET: &str = "aarch64-apple-darwin";
+#[cfg_attr(not(unix), allow(dead_code))]
 const ZIP_URL: &str = "https://github.com/tablex-org/tablex/releases/download/v0.2.0/tablex-0.2.0-macos-apple-silicon.app.zip";
 
+#[cfg_attr(not(unix), allow(dead_code))]
 fn app_manifest(size: u64, sha256: &str) -> serde_json::Value {
     serde_json::json!({
         "kind": "tablex-app-update", "schema": 1, "version": "0.2.0", "generatedAt": "2026-11-11T00:00:00Z",
@@ -334,12 +338,14 @@ fn app_manifest(size: u64, sha256: &str) -> serde_json::Value {
 }
 
 /// What the restart hook was armed with, and how often the app was asked to quit.
+#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Clone, Default)]
 struct Restarts {
     armed: std::rc::Rc<std::cell::RefCell<Vec<std::path::PathBuf>>>,
     quits: std::rc::Rc<std::cell::Cell<usize>>,
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 impl UpdateRig<'_> {
     /// Points the install at `fake`, the key 1 and `exe`; a restart is recorded instead of done.
     fn install_env(&mut self, exe: Option<std::path::PathBuf>) -> (std::sync::Arc<fixtures::Fake>, Restarts) {
@@ -376,6 +382,8 @@ impl UpdateRig<'_> {
     }
 }
 
+// Installing in place is macOS-only: directory_writable is false on Windows, so no Install is ever offered there.
+#[cfg(unix)]
 #[gpui::test]
 fn install_and_restart_is_offered_only_with_a_verified_manifest_and_an_installable_app(cx: &mut TestAppContext) {
     let mut rig = UpdateRig::new(cx, FakeReleases::tag("v0.2.0"), "0.1.0");
@@ -490,6 +498,8 @@ fn a_download_that_does_not_match_the_manifest_falls_back_to_download_and_change
     assert_eq!(entries, 1, "the running bundle is all that is there");
 }
 
+// Installing in place is macOS-only: directory_writable is false on Windows, so no Install is ever offered there.
+#[cfg(unix)]
 #[gpui::test]
 fn the_install_shows_its_progress_and_cancel_stops_it_quietly(cx: &mut TestAppContext) {
     let mut rig = UpdateRig::new(cx, FakeReleases::tag("v0.2.0"), "0.1.0");
@@ -514,6 +524,8 @@ fn the_install_shows_its_progress_and_cancel_stops_it_quietly(cx: &mut TestAppCo
     assert_eq!(rig.state().skipped, None);
 }
 
+// Installing in place is macOS-only: directory_writable is false on Windows, so no Install is ever offered there.
+#[cfg(unix)]
 #[gpui::test]
 fn closing_the_progress_notice_cancels_the_install(cx: &mut TestAppContext) {
     let mut rig = UpdateRig::new(cx, FakeReleases::tag("v0.2.0"), "0.1.0");
@@ -664,6 +676,8 @@ fn an_up_to_date_build_is_told_so_and_shows_no_dot(cx: &mut TestAppContext) {
     assert_eq!(rig.notifications(), 0);
 }
 
+// Installing in place is macOS-only: directory_writable is false on Windows, so no Install is ever offered there.
+#[cfg(unix)]
 #[gpui::test]
 fn a_newer_release_puts_a_dot_on_the_button_and_the_center_shows_its_notes_and_install(cx: &mut TestAppContext) {
     let releases = FakeReleases::tag("v0.2.0");

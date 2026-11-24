@@ -758,7 +758,7 @@ mod tests {
         let project_dir = Path::new("/work/proj");
         let all = super::parse(shared.as_bytes(), Some(local), &[], Some(project_dir)).unwrap();
         assert_eq!(by_name(&all, "placeholder").host, "/work/proj/data/app.db");
-        assert_eq!(by_name(&all, "relative").host, "/work/proj/notes.db");
+        assert_eq!(by_name(&all, "relative").host, project_dir.join("notes.db").to_string_lossy());
         assert_eq!(by_name(&all, "absolute").host, "/var/db/x.db");
         assert_eq!(by_name(&all, "maria").kind, ImportKind::Supported(ConnectionKind::Mariadb));
         // Without the project folder a path is left as it was.
