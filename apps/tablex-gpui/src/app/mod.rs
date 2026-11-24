@@ -125,6 +125,7 @@ mod tunnel_ui;
 mod updates;
 mod vim;
 mod vim_caret;
+mod welcome;
 mod window_failure;
 mod workspace;
 
@@ -273,6 +274,8 @@ pub struct AppRoot {
     navigator_ui: navigator_ui::NavigatorUiState,
     sidebar: sidebar::SidebarState,
     saved_connections: Vec<SavedConnection>,
+    /// What the Welcome tab lists as recent.
+    welcome: welcome::WelcomeState,
     /// Connection type and setting overrides of the saved connections.
     connection_policy: connection_policy::ConnectionPolicy,
     query_editors: workspace::WorkspaceEditors,
@@ -404,10 +407,11 @@ impl AppRoot {
         });
         let ui_scenario = scenario.clone().map(FixtureService::new);
         let mut connection_load_error: Option<String> = None;
-        let (saved_connections, connection_policy) = if let Some(service) = ui_scenario.as_ref() {
+        let (saved_connections, connection_policy, welcome) = if let Some(service) = ui_scenario.as_ref() {
             (
                 service.saved_connections().to_vec(),
                 connection_policy::ConnectionPolicy::default(),
+                welcome::WelcomeState::default(),
             )
         } else {
             // "Don't save passwords" makes every connection ask: known before the records are read.
@@ -419,6 +423,7 @@ impl AppRoot {
             (
                 records.iter().map(SavedConnection::from_record).collect(),
                 connection_policy::ConnectionPolicy::from_records(&records),
+                welcome::WelcomeState::from_records(&records),
             )
         };
         let mut navigator = NavigatorState::new(saved_connections.clone());
@@ -533,6 +538,7 @@ impl AppRoot {
             navigator_ui: navigator_ui::NavigatorUiState::default(),
             sidebar,
             saved_connections,
+            welcome,
             connection_policy,
             query_editors: workspace::WorkspaceEditors::default(),
             completion_foreign_keys: completion::ForeignKeyCache::default(),
@@ -865,6 +871,7 @@ mod tests {
     include!("tests/ssh_tunnel_live.rs");
     include!("tests/transactions.rs");
     include!("tests/transactions_smart.rs");
+    include!("tests/welcome.rs");
 
     /// GPUI `BenchContext` scroll benchmark; compiled only with the dev-only
     /// `bench` feature (see the file header for the run command).
@@ -878,6 +885,7 @@ mod tests {
         include!("tests/explain_capture.rs");
         include!("tests/sql_editor_capture.rs");
         include!("tests/shell_capture.rs");
+        include!("tests/welcome_capture.rs");
         include!("tests/sql_formatter_capture.rs");
         include!("tests/script_run_capture.rs");
         include!("tests/p5_capture.rs");

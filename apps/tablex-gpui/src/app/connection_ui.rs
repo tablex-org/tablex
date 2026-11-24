@@ -1428,6 +1428,7 @@ impl AppRoot {
             }
         };
         let saved = records.iter().map(SavedConnection::from_record).collect();
+        self.welcome = super::welcome::WelcomeState::from_records(&records);
         self.connection_policy = connection_policy::ConnectionPolicy::from_records(&records);
         self.apply_saved_connections(saved, cx);
         self.assistant_sync(cx);

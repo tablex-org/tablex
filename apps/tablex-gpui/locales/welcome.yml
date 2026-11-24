@@ -3,3 +3,51 @@ welcome:
   title:
     en: Welcome
     vi: Chào mừng
+  subtitle:
+    en: Connect to a database to get started.
+    vi: Kết nối tới một cơ sở dữ liệu để bắt đầu.
+  start:
+    en: Start
+    vi: Bắt đầu
+  recent:
+    en: Recent connections
+    vi: Kết nối gần đây
+  keyboard:
+    en: Keyboard
+    vi: Phím tắt
+  links:
+    en: Links
+    vi: Liên kết
+  open_sql_file:
+    en: Open SQL File
+    vi: Mở tệp SQL
+  import_connections:
+    en: Import Connections
+    vi: Nhập kết nối
+  recent_empty:
+    en: No saved connections yet. Add one with New Connection.
+    vi: Chưa có kết nối nào được lưu. Hãy thêm bằng Kết nối mới.
+  no_drivers_title:
+    en: No database drivers are installed
+    vi: Chưa cài driver cơ sở dữ liệu nào
+  no_drivers_body:
+    en: Install the drivers for the databases you use from Driver Manager, then connect.
+    vi: Cài driver cho các cơ sở dữ liệu bạn dùng trong Driver Manager, rồi kết nối.
+  install_drivers:
+    en: Install Drivers
+    vi: Cài driver
+  command_palette:
+    en: Command palette
+    vi: Bảng lệnh
+  go_to_object:
+    en: Go to object
+    vi: Đi tới đối tượng
+  run_query:
+    en: Run query
+    vi: Chạy truy vấn
+  repository:
+    en: tablex on GitHub
+    vi: tablex trên GitHub
+  release_notes:
+    en: Release notes
+    vi: Ghi chú phát hành

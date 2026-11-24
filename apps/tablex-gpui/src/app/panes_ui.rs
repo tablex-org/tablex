@@ -277,6 +277,7 @@ impl AppRoot {
         let is_redis_console = tab.query_mode.is_redis_command();
         let is_driver_manager = tab.kind == TabKind::DriverManager;
         let is_settings = tab.kind == TabKind::Settings;
+        let is_welcome = tab.kind == TabKind::Welcome;
         let is_error_log = tab.kind == TabKind::ErrorLog;
         let is_diagram = tab.kind == TabKind::Diagram;
         let is_source = tab.kind == TabKind::Source;
@@ -450,6 +451,7 @@ impl AppRoot {
         } else {
             div().into_any_element()
         };
+        let welcome = is_welcome.then(|| self.render_welcome(cx));
         // Beside the results, the editor and the results share the height through a splitter
         // (as the aggregate tab's do): the editor starts at its old 160px, and a short result
         // can give the editor the room it does not need.
@@ -521,6 +523,7 @@ impl AppRoot {
             .child(connection)
             .child(driver_manager)
             .child(settings_page)
+            .children(welcome)
             .children(diagram)
             .children(source)
             .children(compare)
