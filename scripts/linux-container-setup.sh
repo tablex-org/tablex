@@ -21,6 +21,7 @@ packages=(
     libwayland-dev                           # Wayland
     libx11-dev libx11-xcb-dev libxcb1-dev libxcb-xkb-dev   # X11
     libvulkan-dev                            # rendering (wgpu)
+    file                                     # appimagetool checks the binary type with it
 )
 # Bullseye's support has ended: the main mirrors still list its security updates but no longer
 # serve them (404), so every source is the archive, one consistent, signed snapshot.
