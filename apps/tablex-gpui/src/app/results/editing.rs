@@ -225,31 +225,40 @@ pub(in crate::app) fn row_value_to_json(
     row_json_cell(value, type_name, is_null).value
 }
 
+/// A value this long (bytes) is not edited in the cell's own box: a ~120 px
+/// column holds it as tens of thousands of wrapped rows, re-wrapped on every
+/// keystroke. Enter / double-click opens it in the Value panel's editor, which
+/// stages the full text the same way.
+pub(in crate::app) const INLINE_EDIT_MAX_BYTES: usize = 64 * 1024;
+
+/// A one-line text longer than this (bytes) is wider than any column, so it is
+/// not measured: shaping a megabyte line takes seconds and hundreds of MB.
+const FLOAT_PROBE_BYTES: usize = 4096;
+
 pub(in crate::app) fn cell_editor_should_float(
     window: &Window,
     text: &str,
     column_width: f32,
 ) -> bool {
-    let available_width = px((column_width - 16.0).max(1.0));
-    let font = window.text_style().font();
-    text.split('\n').any(|line| {
-        if line.is_empty() {
-            return false;
-        }
-        let run = gpui::TextRun {
-            len: line.len(),
-            font: font.clone(),
-            color: theme::text().into(),
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
-        window
-            .text_system()
-            .shape_line(line.to_string().into(), px(12.0), &[run], None)
-            .width
-            > available_width
-    }) || text.contains('\n')
+    if text.len() > FLOAT_PROBE_BYTES || text.contains('\n') {
+        return true;
+    }
+    if text.is_empty() {
+        return false;
+    }
+    let run = gpui::TextRun {
+        len: text.len(),
+        font: window.text_style().font(),
+        color: theme::text().into(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    window
+        .text_system()
+        .shape_line(text.to_string().into(), px(12.0), &[run], None)
+        .width
+        > px((column_width - 16.0).max(1.0))
 }
 
 #[derive(Debug, Clone)]
@@ -631,6 +640,19 @@ impl AppRoot {
             .join("\n")
     }
 
+    /// A value too big for the cell's box is edited in the Value panel.
+    fn open_large_cell_editor(
+        &mut self,
+        tab_id: u64,
+        position: CellPosition,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_grid_cell(tab_id, position);
+        self.open_cell_detail_tab_at(tab_id, CellDetailTab::Details, Some(position), cx);
+        self.open_cell_detail_editor(tab_id, window, cx);
+    }
+
     pub(in crate::app) fn begin_inline_edit(
         &mut self,
         tab_id: u64,
@@ -706,6 +728,10 @@ impl AppRoot {
                 self.pending_cell_text(tab.id, position)
                     .unwrap_or_else(|| field.map(mongo_detail_value).unwrap_or_default().into())
             };
+            if current_value.len() > INLINE_EDIT_MAX_BYTES {
+                self.open_large_cell_editor(tab.id, position, window, cx);
+                return;
+            }
             let original_text = current_value.clone();
             let floating = cell_editor_should_float(
                 window,
@@ -820,6 +846,10 @@ impl AppRoot {
             let current_value = self
                 .cell_edit_text(tab.id, position)
                 .unwrap_or_else(|| original_text.clone());
+            if current_value.len() > INLINE_EDIT_MAX_BYTES {
+                self.open_large_cell_editor(tab.id, position, window, cx);
+                return;
+            }
             let floating = cell_editor_should_float(
                 window,
                 current_value.as_ref(),

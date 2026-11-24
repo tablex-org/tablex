@@ -32,15 +32,30 @@ pub(in crate::app) fn export_context_data(
     format: ContextExportFormat,
     defaults: &crate::settings::ExportDefaults,
 ) -> Result<(usize, Option<String>), String> {
-    if matches!(format, ContextExportFormat::Csv | ContextExportFormat::CsvWithHeaders) {
-        let options = super::copy::DsvOptions {
-            column_separator: defaults.delimiter.clone(),
-            null_text: defaults.null_text.clone(),
-            include_headers: format == ContextExportFormat::CsvWithHeaders || defaults.header,
-            ..Default::default()
-        };
-        let text = data.format_with_dsv(super::copy::CopyFormat::Dsv, &options)?;
-        std::fs::write(path, text).map_err(|error| error.to_string())?;
+    // The delimited formats are written row by row to the file.
+    let dsv = match format {
+        ContextExportFormat::Csv | ContextExportFormat::CsvWithHeaders => {
+            Some(super::copy::DsvOptions {
+                column_separator: defaults.delimiter.clone(),
+                null_text: defaults.null_text.clone(),
+                include_headers: format == ContextExportFormat::CsvWithHeaders || defaults.header,
+                ..Default::default()
+            })
+        }
+        ContextExportFormat::Text => Some(super::copy::DsvOptions::single('\t', true)),
+        _ => None,
+    };
+    if let Some(options) = dsv {
+        let file = std::fs::File::create(path).map_err(|error| error.to_string())?;
+        let mut writer = std::io::BufWriter::new(file);
+        let written = data
+            .write_dsv(&mut writer, &options)
+            .and_then(|()| std::io::Write::flush(&mut writer).map_err(|error| error.to_string()));
+        if let Err(error) = written {
+            drop(writer);
+            let _ = std::fs::remove_file(path);
+            return Err(error);
+        }
         return Ok((data.rows.len(), None));
     }
     if format == ContextExportFormat::Xlsx {
@@ -61,22 +76,35 @@ pub(in crate::app) fn export_context_data(
         return Ok((writer.finish()?, None));
     }
     let copy_format = match format {
-        ContextExportFormat::Csv => super::copy::CopyFormat::Csv,
-        ContextExportFormat::CsvWithHeaders => super::copy::CopyFormat::CsvWithHeaders,
         ContextExportFormat::Json => super::copy::CopyFormat::Json,
         ContextExportFormat::Markdown => super::copy::CopyFormat::Markdown,
         ContextExportFormat::Sql => super::copy::CopyFormat::SqlInsert,
-        ContextExportFormat::Text => super::copy::CopyFormat::TsvWithHeaders,
-        ContextExportFormat::Xlsx => unreachable!(),
+        ContextExportFormat::Csv
+        | ContextExportFormat::CsvWithHeaders
+        | ContextExportFormat::Text
+        | ContextExportFormat::Xlsx => unreachable!(),
     };
-    std::fs::write(path, data.format(copy_format)?).map_err(|error| error.to_string())?;
+    // A file is not the clipboard: no copy limit.
+    std::fs::write(path, data.format_up_to(copy_format, usize::MAX)?).map_err(|error| error.to_string())?;
     let notice = (format == ContextExportFormat::Json)
         .then(|| super::copy::renamed_columns_notice(&data.json_columns().1))
         .flatten();
     Ok((data.rows.len(), notice))
 }
 
+/// What the background job needs: everything is owned, nothing reaches back into the app.
+struct ExportJob {
+    path: std::path::PathBuf,
+    data: super::copy::CopyData,
+    format: ContextExportFormat,
+    defaults: crate::settings::ExportDefaults,
+}
+
 impl AppRoot {
+    /// Collects the cells on the UI thread (one pass over what is on the page, no formatting) and
+    /// hands them to the background executor, which creates the folder, formats and writes the file
+    /// (`export_context_data`): a large page never blocks the window. A notification says the export
+    /// started, the dialog says how it ended.
     pub(in crate::app) fn export_context_selection(
         &mut self,
         tab_id: u64,
@@ -85,7 +113,7 @@ impl AppRoot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let result = (|| {
+        let job = (|| {
             let tab = self.workspace.tab(tab_id).ok_or("No active result tab")?;
             if format == ContextExportFormat::Sql && tab.query_mode.is_mongo_find()
             {
@@ -116,7 +144,7 @@ impl AppRoot {
                     .range
                     .ok_or("Select cells to export")?
             };
-            let data = self.collect_copy_context_range(tab_id, range)?;
+            let data = self.collect_copy_context_range_up_to(tab_id, range, usize::MAX)?;
             if format == ContextExportFormat::Sql {
                 self.validate_sql_copy_context(
                     tab_id,
@@ -158,12 +186,40 @@ impl AppRoot {
                     uuid::Uuid::new_v4(),
                     ext
                 ));
-            std::fs::create_dir_all(path.parent().ok_or("Export directory unavailable")?)
-                .map_err(|error| error.to_string())?;
-            let (rows, notice) =
-                export_context_data(&path, &data, format, &self.settings.results.export)?;
-            Ok::<_, String>((rows, notice, path))
+            Ok::<_, String>(ExportJob { path, data, format, defaults: self.settings.results.export.clone() })
         })();
+        let job = match job {
+            Ok(job) => job,
+            Err(error) => {
+                self.export_finished(tab_id, Err(error), window, cx);
+                return;
+            }
+        };
+        window.push_notification(format!("Exporting {} rows\u{2026}", job.data.rows.len()), cx);
+        let task = cx.background_executor().spawn(async move {
+            let ExportJob { path, data, format, defaults } = job;
+            let written = path
+                .parent()
+                .ok_or_else(|| "Export directory unavailable".to_string())
+                .and_then(|folder| std::fs::create_dir_all(folder).map_err(|error| error.to_string()))
+                .and_then(|()| export_context_data(&path, &data, format, &defaults));
+            written.map(|(rows, notice)| (rows, notice, path))
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| this.export_finished(tab_id, result, window, cx));
+        })
+        .detach();
+    }
+
+    /// How an export ended: the dialog, and the error log for a failure.
+    fn export_finished(
+        &mut self,
+        tab_id: u64,
+        result: Result<(usize, Option<String>, std::path::PathBuf), String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match result {
             Ok((rows, notice, path)) => window.open_alert_dialog(cx, move |dialog, _, _| {
                 dialog.title("Export complete").child(format!(

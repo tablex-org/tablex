@@ -435,6 +435,13 @@ impl TabView {
         }
     }
 
+    /// Rows a PageUp / PageDown moves: the visible rows but one, so the last
+    /// row of a screen is the first of the next.
+    pub(super) fn grid_page_rows(&self) -> usize {
+        let height = f32::from(self.grid_scroll.0.borrow().base_handle.bounds().size.height);
+        ((height / theme::ROW_HEIGHT) as usize).saturating_sub(1).max(1)
+    }
+
     /// Vertical scroll for a find jump: rows already fully in view stay put,
     /// others are centered (so the match is clear of the bar and header).
     pub(super) fn scroll_to_row(&mut self, row: usize) {

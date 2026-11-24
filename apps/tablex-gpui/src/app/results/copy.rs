@@ -32,7 +32,7 @@ impl Default for DsvOptions {
 
 impl DsvOptions {
     /// The delimited copy formats (TSV, CSV, pipe): one separator character.
-    fn single(separator: char, include_headers: bool) -> Self {
+    pub(in crate::app) fn single(separator: char, include_headers: bool) -> Self {
         Self {
             column_separator: separator.to_string(),
             include_headers,
@@ -497,6 +497,22 @@ impl CopyData {
         if format != CopyFormat::Dsv {
             return self.format(format);
         }
+        let mut out = Vec::new();
+        self.write_dsv(&mut out, options)?;
+        if out.len() > COPY_MAX_BYTES {
+            return Err("Formatted copy exceeds the 16 MiB limit".into());
+        }
+        String::from_utf8(out).map_err(|error| error.to_string())
+    }
+
+    /// The delimited text of every row, written as it is built: a file export
+    /// of a big page holds one row of text at a time, not the whole text, and
+    /// is not bound by the clipboard's size limit.
+    pub(in crate::app) fn write_dsv(
+        &self,
+        out: &mut impl std::io::Write,
+        options: &DsvOptions,
+    ) -> Result<(), String> {
         options.validate()?;
         if self.columns.is_empty()
             || self.rows.is_empty()
@@ -504,29 +520,29 @@ impl CopyData {
         {
             return Err("No rectangular selection to copy".into());
         }
-        let mut lines = Vec::with_capacity(self.rows.len() + usize::from(options.include_headers));
+        let io = |error: std::io::Error| error.to_string();
+        let mut first_line = true;
+        let mut line = |out: &mut dyn std::io::Write,
+                        fields: &mut dyn Iterator<Item = std::borrow::Cow<'_, str>>|
+         -> Result<(), String> {
+            if !std::mem::take(&mut first_line) {
+                out.write_all(options.row_separator.as_bytes()).map_err(io)?;
+            }
+            for (index, field) in fields.enumerate() {
+                if index > 0 {
+                    out.write_all(options.column_separator.as_bytes()).map_err(io)?;
+                }
+                out.write_all(field.as_bytes()).map_err(io)?;
+            }
+            Ok(())
+        };
         if options.include_headers {
-            lines.push(
-                self.columns
-                    .iter()
-                    .map(|name| options.field(name))
-                    .collect::<Vec<_>>()
-                    .join(&options.column_separator),
-            );
+            line(out, &mut self.columns.iter().map(|name| options.field(name)))?;
         }
         for row in &self.rows {
-            lines.push(
-                row.iter()
-                    .map(|cell| options.cell(cell))
-                    .collect::<Vec<_>>()
-                    .join(&options.column_separator),
-            );
+            line(out, &mut row.iter().map(|cell| options.cell(cell)))?;
         }
-        let result = lines.join(&options.row_separator);
-        if result.len() > COPY_MAX_BYTES {
-            return Err("Formatted copy exceeds the 16 MiB limit".into());
-        }
-        Ok(result)
+        Ok(())
     }
 
     fn json_rows(&self) -> Vec<serde_json::Value> {
@@ -558,6 +574,16 @@ impl CopyData {
     }
 
     pub(in crate::app) fn format(&self, format: CopyFormat) -> Result<String, String> {
+        self.format_up_to(format, COPY_MAX_BYTES)
+    }
+
+    /// `format`, refusing a text over `limit` bytes. The clipboard's limit is
+    /// [`COPY_MAX_BYTES`]; a file export passes `usize::MAX`.
+    pub(in crate::app) fn format_up_to(
+        &self,
+        format: CopyFormat,
+        limit: usize,
+    ) -> Result<String, String> {
         if format == CopyFormat::Dsv {
             return self.format_with_dsv(format, &DsvOptions::default());
         }
@@ -570,7 +596,7 @@ impl CopyData {
         let bytes = self.rows.iter().flatten().try_fold(0usize, |total, cell| {
             total
                 .checked_add(cell.raw.len())
-                .filter(|size| *size <= COPY_MAX_BYTES)
+                .filter(|size| *size <= limit)
                 .ok_or("Selected values exceed the 16 MiB copy limit")
         })?;
         let format = if format == CopyFormat::Smart {
@@ -623,7 +649,7 @@ impl CopyData {
                 return self
                     .format_with_dsv(CopyFormat::Dsv, &DsvOptions::single(sep, headers))
                     .and_then(|text| {
-                        if bytes > COPY_MAX_BYTES {
+                        if bytes > limit {
                             Err("Formatted copy exceeds the 16 MiB limit".into())
                         } else {
                             Ok(text)
@@ -801,7 +827,7 @@ impl CopyData {
             }
             CopyFormat::Smart => unreachable!(),
         };
-        if output.len() > COPY_MAX_BYTES || bytes > COPY_MAX_BYTES {
+        if output.len() > limit || bytes > limit {
             return Err("Formatted copy exceeds the 16 MiB limit".into());
         }
         Ok(output)
@@ -1028,6 +1054,17 @@ impl AppRoot {
         tab_id: u64,
         range: crate::grid::CellRange,
     ) -> Result<CopyData, String> {
+        self.collect_copy_context_range_up_to(tab_id, range, COPY_MAX_BYTES)
+    }
+
+    /// The cells of `range`, refusing more than `max_bytes` of values: the
+    /// clipboard's limit for a copy, `usize::MAX` for a file export.
+    pub(in crate::app) fn collect_copy_context_range_up_to(
+        &self,
+        tab_id: u64,
+        range: crate::grid::CellRange,
+        max_bytes: usize,
+    ) -> Result<CopyData, String> {
         let tab = self.workspace.tab(tab_id).ok_or("No result tab")?;
         let grid = self.grid(tab_id);
         let range = range.normalized();
@@ -1105,7 +1142,7 @@ impl AppRoot {
                     .ok_or("Full selected cell value unavailable")?;
                 total = total
                     .checked_add(raw.len())
-                    .filter(|bytes| *bytes <= COPY_MAX_BYTES)
+                    .filter(|bytes| *bytes <= max_bytes)
                     .ok_or("Selection exceeds the 16 MiB copy limit")?;
                 let pending_null = self
                     .workspace

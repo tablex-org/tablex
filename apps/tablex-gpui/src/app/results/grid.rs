@@ -716,12 +716,17 @@ impl AppRoot {
                     this.view_mut(tab_id).grid_focus(cx).focus(window, cx);
                     if event.click_count >= 2 {
                         this.begin_inline_edit(tab_id, position.row, position.column, window, cx);
-                        if this
-                            .view(tab_id)
+                        let view = this.view(tab_id);
+                        if view
                             .grid_ui
                             .inline_edit
                             .as_ref()
                             .is_some_and(|edit| edit.position == position)
+                            || view
+                                .detail_ui
+                                .edit
+                                .as_ref()
+                                .is_some_and(|edit| edit.position == position)
                         {
                             // Prevent the focusable grid parent from stealing editor focus.
                             window.prevent_default();
@@ -1683,7 +1688,39 @@ impl AppRoot {
                             return;
                         };
                         let current = range.end;
+                        // Paging and the ends of a row / column: PageUp / PageDown
+                        // move a screenful of rows, Home / End the first / last
+                        // column of the row, and with Ctrl (Cmd on macOS) the
+                        // first / last row of the column.
+                        let page = view.grid_page_rows();
+                        let last_row = this.grid(tab_id).row_count().saturating_sub(1);
+                        let last_column = this.display_column_count(tab_id).saturating_sub(1);
+                        let secondary = event.keystroke.modifiers.secondary(cx);
                         let next = match event.keystroke.key.as_str() {
+                            "pageup" => Some(CellPosition {
+                                row: current.row.saturating_sub(page),
+                                column: current.column,
+                            }),
+                            "pagedown" => Some(CellPosition {
+                                row: (current.row + page).min(last_row),
+                                column: current.column,
+                            }),
+                            "home" if secondary => Some(CellPosition {
+                                row: 0,
+                                column: current.column,
+                            }),
+                            "end" if secondary => Some(CellPosition {
+                                row: last_row,
+                                column: current.column,
+                            }),
+                            "home" => Some(CellPosition {
+                                row: current.row,
+                                column: 0,
+                            }),
+                            "end" => Some(CellPosition {
+                                row: current.row,
+                                column: last_column,
+                            }),
                             "up" => current.row.checked_sub(1).map(|row| CellPosition {
                                 row,
                                 column: current.column,
@@ -1731,6 +1768,27 @@ impl AppRoot {
                     .on_action(cx.listener(move |this, _: &gpui_component::input::Copy, _, cx| {
                         this.copy_grid_selection(tab_id, cx);
                     }))
+                    // Select All (Ctrl/Cmd+A, the Edit menu): every cell of the page. A
+                    // cell editor handles its own Select All before it gets here.
+                    .on_action(cx.listener(move |this, _: &gpui_component::input::SelectAll, _, cx| {
+                        if this.view(tab_id).grid_ui.inline_edit.is_some() {
+                            cx.propagate();
+                            return;
+                        }
+                        let rows = this.grid(tab_id).row_count();
+                        let columns = this.display_column_count(tab_id);
+                        if rows == 0 || columns == 0 {
+                            return;
+                        }
+                        let mut selection = this.view(tab_id).grid_ui.selection.borrow_mut();
+                        selection.select(CellPosition { row: 0, column: 0 });
+                        selection.extend_to(CellPosition {
+                            row: rows - 1,
+                            column: columns - 1,
+                        });
+                        drop(selection);
+                        this.notify_tab(tab_id, cx);
+                    }))
                     .on_action(cx.listener(move |this, _: &EditGridCell, window, cx| {
                         this.open_cell_editor(tab_id, window, cx);
                     }))
@@ -1766,6 +1824,22 @@ impl AppRoot {
                                     .h_full()
                                     .child(header)
                                     .child(body),
+                            ),
+                    )
+                    // The page's vertical scrollbar: a strip under the header, over the
+                    // last pixels of the rows (the horizontal scroll never moves it).
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(theme::RESULT_GRID_HEADER_HEIGHT))
+                            .right_0()
+                            .bottom_0()
+                            .w(Scrollbar::width())
+                            .debug_selector(|| "grid-vertical-scrollbar".into())
+                            .child(
+                                Scrollbar::vertical(&view.grid_scroll)
+                                    .mode(ScrollbarMode::Always)
+                                    .viewport_from_layout(),
                             ),
                     )
                     .when(grid.row_count() == 0, |this| {
@@ -1999,6 +2073,19 @@ impl AppRoot {
     }
 }
 
+/// What the result area says about a failed run: a lost connection in plain words with what to
+/// do (the banner above has Reconnect), anything else as the driver said it.
+pub(in crate::app) fn failed_query_text(error: &str) -> String {
+    let error = crate::sessions::redact_secrets(error);
+    if crate::sessions::is_connection_lost_error(&error) {
+        let detail = crate::error_log::DriverRejection::parse(&error)
+            .and_then(|rejection| rejection.message_if_leading)
+            .unwrap_or(&error);
+        return t!("grid.connection_lost", detail = detail).into_owned();
+    }
+    t!("grid.query_failed", error = error).into_owned()
+}
+
 #[cfg(test)]
 mod null_color_tests {
     #[test]
@@ -2013,17 +2100,4 @@ mod null_color_tests {
             super::grid_cell_text_color(false)
         );
     }
-}
-
-/// What the result area says about a failed run: a lost connection in plain words with what to
-/// do (the banner above has Reconnect), anything else as the driver said it.
-pub(in crate::app) fn failed_query_text(error: &str) -> String {
-    let error = crate::sessions::redact_secrets(error);
-    if crate::sessions::is_connection_lost_error(&error) {
-        let detail = crate::error_log::DriverRejection::parse(&error)
-            .and_then(|rejection| rejection.message_if_leading)
-            .unwrap_or(&error);
-        return t!("grid.connection_lost", detail = detail).into_owned();
-    }
-    t!("grid.query_failed", error = error).into_owned()
 }

@@ -455,6 +455,16 @@ static DEFS: &[ShortcutDef] = &[
         &["secondary-c"],
         bind!(CopyGridSelection),
     ),
+    // The component's own Select All action (also the Edit menu's): in a cell
+    // editor the Input's deeper binding wins and selects its text.
+    ShortcutDef::new(
+        "results.select_all",
+        "Results",
+        "Select All Cells",
+        GRID,
+        &["secondary-a"],
+        bind!(gpui_component::input::SelectAll),
+    ),
     ShortcutDef::new(
         "results.refresh",
         "Results",

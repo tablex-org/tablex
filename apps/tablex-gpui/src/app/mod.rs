@@ -751,6 +751,7 @@ mod tests {
     include!("tests/mongo_tree_perf.rs");
     include!("tests/mongo_admin.rs");
     include!("tests/results.rs");
+    include!("tests/results_big.rs");
     include!("tests/value_correctness.rs");
     include!("tests/value_copy.rs");
     include!("tests/grid_render_perf.rs");
