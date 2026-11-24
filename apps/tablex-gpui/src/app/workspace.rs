@@ -7,6 +7,8 @@ const CLOSED_TABS_KEPT: usize = 20;
 pub(super) struct WorkspaceEditors {
     /// Inactive editors stay alive with their cursor and undo history.
     pub(super) by_tab: HashMap<u64, gpui::Entity<EditorState>>,
+    /// Text to select when a tab's editor is created (the first placeholder of a "New ..." template).
+    pub(super) pending_selection: HashMap<u64, std::ops::Range<usize>>,
     /// SQL colors of the Mongo script tabs' editors.
     pub(super) sql_highlight: HashMap<u64, super::script_highlight::SqlHighlight>,
     /// Vim keys: each tab's switch and mode, and the register all tabs share.
@@ -396,6 +398,9 @@ impl AppRoot {
         })
         .detach();
         self.query_editors.by_tab.insert(tab_id, editor.clone());
+        if let Some(range) = self.query_editors.pending_selection.remove(&tab_id) {
+            editor.update(cx, |state, cx| state.set_selected_range(range, cx));
+        }
         if language == "javascript" {
             self.start_sql_highlight(tab_id, &editor, cx);
         }
@@ -406,6 +411,7 @@ impl AppRoot {
     pub(super) fn editor_for_tab_removed(&mut self, tab_id: u64) {
         self.cancel_format_of(tab_id);
         self.query_editors.by_tab.remove(&tab_id);
+        self.query_editors.pending_selection.remove(&tab_id);
         self.query_editors.sql_highlight.remove(&tab_id);
         self.query_editors.vim.tab_removed(tab_id);
         self.query_editors.header_fit.borrow_mut().remove(&tab_id);
@@ -419,6 +425,7 @@ impl AppRoot {
         self.connection_overviews.remove(&tab_id);
         self.properties_edits.remove(&tab_id);
         self.source_tabs.remove(&tab_id);
+        self.compare_tabs.remove(&tab_id);
         self.imports.remove(&tab_id);
         self.transfers.remove(&tab_id);
         self.file_runs.remove(&tab_id);

@@ -332,6 +332,11 @@ impl NavigatorState {
                 )
             })
             .collect();
+        let folder_filters = preferences
+            .folder_filters
+            .iter()
+            .map(|filter| Ok((filter.key.clone(), crate::sidebar_preferences::CompiledFolderFilter::new(filter)?)))
+            .collect::<Result<HashMap<_, _>, String>>()?;
         let ids: HashSet<_> = preferences
             .groups
             .iter()
@@ -342,6 +347,7 @@ impl NavigatorState {
         self.visible_filter_matchers = matchers;
         self.visible_filter_names = names;
         self.visible_schema_names = schemas;
+        self.folder_filters = folder_filters;
         // The visible-object filter decides which databases are listed.
         self.catalog_revision += 1;
         self.rebuild_visible();
@@ -623,7 +629,87 @@ impl NavigatorState {
                 .or_default()
                 .push(group);
         }
-        self.append_group(None, 0, &mut rows, &mut visited, &groups, &buckets, &orders);
+        // The Bookmarks section: first, hidden when there is none (or while a search narrows the tree). A bookmark of a
+        // connection that is not in the list is not shown.
+        if !self.search_active() {
+            let known: HashSet<String> = self.connections.iter().map(|connection| connection.id.to_string()).collect();
+            let listed: Vec<&crate::sidebar_preferences::Bookmark> =
+                self.preferences.bookmarks.iter().filter(|bookmark| known.contains(bookmark.target.connection())).collect();
+            if !listed.is_empty() {
+                rows.push(NavigatorRow {
+                    id: NavigatorNodeId::BookmarkSection,
+                    label: "Bookmarks".to_string(),
+                    depth: 0,
+                    expandable: true,
+                    expanded: !self.bookmarks_collapsed,
+                    load: None,
+                    disabled: false,
+                });
+                if !self.bookmarks_collapsed {
+                    rows.extend(listed.into_iter().map(|bookmark| NavigatorRow {
+                        id: NavigatorNodeId::Bookmark { id: bookmark.id.clone() },
+                        label: bookmark.name.clone(),
+                        depth: 1,
+                        expandable: false,
+                        expanded: false,
+                        load: None,
+                        disabled: false,
+                    }));
+                }
+            }
+        }
+        if self.group_by_driver {
+            // A section per database type; the user's groups (and the sort) apply inside each one,
+            // and a group with no connection of the type is left out of its section.
+            for kind in DRIVER_SECTIONS {
+                let of_kind: HashMap<Option<&str>, Vec<&SavedConnection>> = buckets
+                    .iter()
+                    .filter_map(|(group, list)| {
+                        let list: Vec<_> = list.iter().copied().filter(|conn| conn.kind == kind).collect();
+                        (!list.is_empty()).then_some((*group, list))
+                    })
+                    .collect();
+                if of_kind.is_empty() {
+                    continue;
+                }
+                let id = NavigatorNodeId::Driver {
+                    driver: kind.driver_id().to_string(),
+                };
+                let open = self.search_active() || !self.collapsed_drivers.contains(kind.driver_id());
+                let start = rows.len();
+                rows.push(NavigatorRow {
+                    id,
+                    label: driver_title(kind).to_string(),
+                    depth: 0,
+                    expandable: true,
+                    expanded: open,
+                    load: None,
+                    disabled: false,
+                });
+                if open {
+                    self.append_group(None, 1, &mut rows, &mut visited, &groups, &of_kind, &orders, true);
+                }
+                if self.search_active() && rows.len() == start + 1 {
+                    rows.truncate(start);
+                }
+            }
+        } else {
+            self.append_group(None, 0, &mut rows, &mut visited, &groups, &buckets, &orders, false);
+        }
+        let signature = self
+            .expanded
+            .iter()
+            .map(|id| {
+                use std::hash::{Hash, Hasher};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                id.hash(&mut hasher);
+                hasher.finish()
+            })
+            .fold(0u64, u64::wrapping_add);
+        if signature != self.expanded_signature {
+            self.expanded_signature = signature;
+            self.tree_revision += 1;
+        }
         self.visible = rows;
         self.visible_lookup = self
             .visible
@@ -666,6 +752,7 @@ impl NavigatorState {
         groups: &HashMap<Option<&str>, Vec<&ConnectionGroup>>,
         buckets: &HashMap<Option<&str>, Vec<&SavedConnection>>,
         orders: &HashMap<uuid::Uuid, usize>,
+        prune_empty: bool,
     ) {
         enum Entry<'a> {
             Group(&'a ConnectionGroup),
@@ -693,6 +780,14 @@ impl NavigatorState {
         }
         entries.sort_by_key(|(order, _)| *order);
         for (_, entry) in entries {
+            // Inside a database-type section a group shows only when it holds a connection of the type.
+            if prune_empty {
+                if let Entry::Group(group) = &entry {
+                    if !Self::holds_connections(&group.id, groups, buckets) {
+                        continue;
+                    }
+                }
+            }
             let Entry::Group(group) = entry else {
                 if let Entry::Connection(connection) = entry {
                     self.append_connection(connection, depth, rows, visited);
@@ -723,6 +818,7 @@ impl NavigatorState {
                     groups,
                     buckets,
                     orders,
+                    prune_empty,
                 );
             }
             let matched =
@@ -741,6 +837,20 @@ impl NavigatorState {
                 };
             }
         }
+    }
+
+    /// Whether the group `id` or a group below it has a connection in `buckets`.
+    fn holds_connections(
+        id: &str,
+        groups: &HashMap<Option<&str>, Vec<&ConnectionGroup>>,
+        buckets: &HashMap<Option<&str>, Vec<&SavedConnection>>,
+    ) -> bool {
+        buckets.get(&Some(id)).is_some_and(|list| !list.is_empty())
+            || groups
+                .get(&Some(id))
+                .into_iter()
+                .flatten()
+                .any(|child| Self::holds_connections(&child.id, groups, buckets))
     }
 
     fn append_connection(
@@ -799,6 +909,8 @@ impl NavigatorState {
             return;
         }
         if let Some(Some(children)) = self.children.get(parent) {
+            // The folder's own include / exclude patterns, when it has any.
+            let folder_filter = self.folder_filter_of(parent);
             // The pinned children first, in the order they were pinned, then the others as listed.
             let pinned = self.pinned_children(parent, children);
             let others = children
@@ -821,6 +933,9 @@ impl NavigatorState {
                     .filter(|filter| filter.narrows())
                 {
                     label = format!("{label} \u{00B7} {}", filter.summary());
+                }
+                if folder_filter.is_some_and(|filter| !filter.allows(&label)) {
+                    continue;
                 }
                 let expandable = self.is_expandable(child);
                 let matched = self.matches(child, &label);
@@ -902,6 +1017,28 @@ impl NavigatorState {
         self.only_databases
             .get(connection)
             .is_some_and(|only| only != database)
+    }
+
+    /// The compiled patterns of the folder `id` stands for, if it has a filter.
+    fn folder_filter_of(&self, id: &NavigatorNodeId) -> Option<&crate::sidebar_preferences::CompiledFolderFilter> {
+        if self.folder_filters.is_empty() {
+            return None;
+        }
+        self.folder_filters.get(&folder_key(id)?)
+    }
+
+    /// What the filter of the folder `id` leaves of its loaded children: `Some` when the folder has a
+    /// filter (`None` inside: its children are not loaded yet, there is nothing to count).
+    pub fn folder_filter_note(&self, id: &NavigatorNodeId) -> Option<Option<FolderFilterCount>> {
+        let filter = self.folder_filter_of(id)?;
+        let Some(Some(children)) = self.children.get(id) else { return Some(None) };
+        let (mut shown, mut total) = (0, 0);
+        for child in children.iter().filter(|child| self.visible_filter_allows(child)) {
+            total += 1;
+            let label = self.labels.get(child).cloned().unwrap_or_else(|| super::default_label(child));
+            shown += usize::from(filter.allows(&label));
+        }
+        Some(Some(FolderFilterCount { shown, total }))
     }
 
     pub(super) fn visible_filter_allows(&self, id: &NavigatorNodeId) -> bool {
@@ -1020,6 +1157,28 @@ impl NavigatorState {
         }
         (next.is_none()).then_some(40)
     }
+}
+
+/// How many of a folder's loaded children its filter shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FolderFilterCount {
+    pub shown: usize,
+    pub total: usize,
+}
+
+/// The folder a row stands for, as a filter names it: a connection lists databases, a database
+/// schemas, an object group its objects. Other rows are no folder.
+pub fn folder_key(id: &NavigatorNodeId) -> Option<crate::sidebar_preferences::FolderKey> {
+    use crate::sidebar_preferences::{FolderKey, FolderKind};
+    let (connection, database, schema, folder) = match id {
+        NavigatorNodeId::Connection { connection } => (connection, "", "", FolderKind::Databases),
+        NavigatorNodeId::Database { connection, database } => (connection, database.as_str(), "", FolderKind::Schemas),
+        NavigatorNodeId::ObjectGroup { connection, database, schema, group } => {
+            (connection, database.as_str(), schema.as_str(), FolderKind::Objects(*group))
+        }
+        _ => return None,
+    };
+    Some(FolderKey { connection: connection.clone(), database: database.to_owned(), schema: schema.to_owned(), folder })
 }
 
 #[cfg(test)]

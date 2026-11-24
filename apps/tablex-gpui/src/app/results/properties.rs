@@ -343,6 +343,9 @@ impl AppRoot {
                 Some(object.as_str()),
             ),
             NavigatorNodeId::Group { .. }
+            | NavigatorNodeId::Driver { .. }
+            | NavigatorNodeId::BookmarkSection
+            | NavigatorNodeId::Bookmark { .. }
             | NavigatorNodeId::SchemaObject { .. }
             | NavigatorNodeId::Provider { .. } => return,
         };

@@ -280,6 +280,7 @@ impl AppRoot {
         let is_error_log = tab.kind == TabKind::ErrorLog;
         let is_diagram = tab.kind == TabKind::Diagram;
         let is_source = tab.kind == TabKind::Source;
+        let is_compare = tab.kind == TabKind::Compare;
         let import = (tab.kind == TabKind::Import).then(|| self.imports.get(&tab_id).cloned()).flatten();
         let transfer = (tab.kind == TabKind::Transfer).then(|| self.transfers.get(&tab_id).cloned()).flatten();
         let file_run = (tab.kind == TabKind::SqlFile).then(|| self.file_runs.get(&tab_id).cloned()).flatten();
@@ -431,6 +432,7 @@ impl AppRoot {
                 ))
         });
         let source = is_source.then(|| self.render_source_tab(tab_id, window, cx));
+        let compare = is_compare.then(|| self.render_compare_tab(tab_id, cx));
         let import = import.map(|view| div().flex_1().min_h_0().min_w_0().child(view));
         let transfer = transfer.map(|view| div().flex_1().min_h_0().min_w_0().child(view));
         let file_run = file_run.map(|view| div().flex_1().min_h_0().min_w_0().child(view));
@@ -521,6 +523,7 @@ impl AppRoot {
             .child(settings_page)
             .children(diagram)
             .children(source)
+            .children(compare)
             .children(import)
             .children(transfer)
             .children(file_run)

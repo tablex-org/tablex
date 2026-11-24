@@ -342,3 +342,51 @@ sidebar:
   import_select_none:
     en: "Select none"
     vi: "Bỏ chọn tất cả"
+  disconnect_all:
+    en: Disconnect All
+    vi: Ngắt tất cả kết nối
+  disconnect_group:
+    en: Disconnect All in Group
+    vi: Ngắt mọi kết nối trong nhóm
+  folder_filtered:
+    en: "(filtered)"
+    vi: "(đã lọc)"
+  folder_filtered_count:
+    en: "(filtered %{shown}/%{total})"
+    vi: "(đã lọc %{shown}/%{total})"
+  tree_copy_left_out:
+    en: "Copied the tables of the first one's schema; %{count} from other schemas left out"
+    vi: "Đã sao chép các bảng cùng lược đồ với bảng đầu tiên; bỏ qua %{count} bảng thuộc lược đồ khác"
+  paste_connecting:
+    en: Connecting first; paste again once the connection is open
+    vi: Đang kết nối trước; hãy dán lại khi kết nối đã mở
+  stats_rows:
+    en: "About %{rows} (estimate)"
+    vi: "Khoảng %{rows} (ước tính)"
+  stats_size:
+    en: "%{size} on disk"
+    vi: "%{size} trên đĩa"
+  compare_title:
+    en: DDL compare
+    vi: So sánh DDL
+  compare_counts:
+    en: "+%{added} −%{removed} lines"
+    vi: "+%{added} −%{removed} dòng"
+  compare_identical:
+    en: The two definitions are identical.
+    vi: Hai định nghĩa giống hệt nhau.
+  compare_loading:
+    en: Reading the definitions…
+    vi: Đang đọc các định nghĩa…
+  bookmarks:
+    en: Bookmarks
+    vi: Dấu trang
+  bookmark_unavailable:
+    en: The connection of this bookmark no longer exists
+    vi: Kết nối của dấu trang này không còn tồn tại
+  no_bookmarks:
+    en: There are no bookmarks yet
+    vi: Chưa có dấu trang nào
+  no_bookmarks_match:
+    en: No matching bookmarks
+    vi: Không có dấu trang phù hợp

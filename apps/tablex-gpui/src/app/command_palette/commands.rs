@@ -45,6 +45,10 @@ pub(in crate::app) enum StaticAction {
     ToggleSidebar,
     RevealActiveTab,
     CollapseSidebar,
+    GoToObject,
+    GoToBookmark,
+    ReconnectConnection,
+    DisconnectAll,
     ViewDiagram,
     SplitEditorRight,
     SplitEditorDown,
@@ -59,7 +63,7 @@ pub(in crate::app) enum StaticAction {
 }
 
 impl StaticAction {
-    pub(super) const ALL: [Self; 44] = [
+    pub(super) const ALL: [Self; 48] = [
         Self::NewQuery,
         Self::NewConnection,
         Self::SaveQuery,
@@ -93,6 +97,10 @@ impl StaticAction {
         Self::ToggleSidebar,
         Self::RevealActiveTab,
         Self::CollapseSidebar,
+        Self::GoToObject,
+        Self::GoToBookmark,
+        Self::ReconnectConnection,
+        Self::DisconnectAll,
         Self::ViewDiagram,
         Self::SplitEditorRight,
         Self::SplitEditorDown,
@@ -141,6 +149,10 @@ impl StaticAction {
             Self::ToggleSidebar => "Toggle Sidebar",
             Self::RevealActiveTab => "Reveal Active Tab in Sidebar",
             Self::CollapseSidebar => "Collapse Sidebar Tree",
+            Self::GoToObject => "Go to Object",
+            Self::GoToBookmark => "Go to Bookmark",
+            Self::ReconnectConnection => "Reconnect",
+            Self::DisconnectAll => "Disconnect All",
             Self::ViewDiagram => "View Diagram",
             Self::SplitEditorRight => "Split Editor Right",
             Self::SplitEditorDown => "Split Editor Down",
@@ -209,6 +221,13 @@ impl StaticAction {
             Self::ToggleSidebar => "Show or hide the sidebar".into(),
             Self::RevealActiveTab => "Locate the active tab's object in the tree".into(),
             Self::CollapseSidebar => "Collapse every expanded tree node".into(),
+            // Short: a long detail is cut before its shortcut hint.
+            Self::GoToObject => hinted("Jump to a table, view, function or collection", "navigation.go_to_object"),
+            Self::GoToBookmark => "Open one of the bookmarks of the tree".into(),
+            Self::ReconnectConnection => {
+                "Drop the session of the selected (or active tab's) connection and connect again".into()
+            }
+            Self::DisconnectAll => "Disconnect every connected connection".into(),
             Self::ViewDiagram => format!(
                 "ER diagram of the selected schema  ({} on a database or schema)",
                 primary_label(false, "Enter")
@@ -269,6 +288,10 @@ impl StaticAction {
             Self::ToggleSidebar => "hide show panel",
             Self::RevealActiveTab => "locate select sidebar",
             Self::CollapseSidebar => "collapse all tree",
+            Self::GoToObject => "find search quick open table view function procedure collection database schema jump navigate",
+            Self::GoToBookmark => "bookmarks favorites favourites saved shortcuts jump open",
+            Self::ReconnectConnection => "refresh session connect again drop restart",
+            Self::DisconnectAll => "close sessions connections everything logout",
             Self::ViewDiagram => "er erd relationships foreign keys schema database",
             Self::SplitEditorRight => "split pane column side by side layout",
             Self::SplitEditorDown => "split pane row stacked layout",
@@ -315,6 +338,10 @@ impl StaticAction {
             Self::ToggleSidebar => "icons/chevrons-left.svg",
             Self::RevealActiveTab => "icons/locate-fixed.svg",
             Self::CollapseSidebar => "icons/chevrons-down-up.svg",
+            Self::GoToObject => "icons/search.svg",
+            Self::GoToBookmark => "icons/bookmark.svg",
+            Self::ReconnectConnection => "icons/refresh-cw.svg",
+            Self::DisconnectAll => "icons/close.svg",
             Self::ViewDiagram => "icons/network.svg",
             Self::SplitEditorRight => "icons/panel-right.svg",
             Self::SplitEditorDown => "icons/panel-bottom.svg",
@@ -386,6 +413,16 @@ impl StaticAction {
                 app.locate_active_sidebar_tab(cx);
             }
             Self::CollapseSidebar => app.collapse_navigator(cx),
+            Self::GoToObject => app.open_goto_object(window, cx),
+            Self::GoToBookmark => app.open_go_to_bookmark(window, cx),
+            Self::ReconnectConnection => {
+                if let Some(connection) = app.reconnect_target() {
+                    app.request_reconnect(&connection, window, cx);
+                }
+            }
+            Self::DisconnectAll => {
+                app.request_disconnect_all(super::super::navigator_tools::DisconnectScope::All, window, cx);
+            }
             Self::ViewDiagram => app.open_diagram_for_selection(cx),
             Self::SplitEditorRight => app.split_editor(Edge::Right, window, cx),
             Self::SplitEditorDown => app.split_editor(Edge::Bottom, window, cx),

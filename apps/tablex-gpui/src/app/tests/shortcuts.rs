@@ -64,6 +64,7 @@ fn old_binding_table(cx: &gpui::App) -> Vec<gpui::KeyBinding> {
         shortcuts::key_binding(cx, "secondary-c", CopyGridSelection, Some("grid")),
         shortcuts::key_binding(cx, "secondary-r", RefreshGridResults, Some("grid")),
         shortcuts::key_binding(cx, "secondary-c", CopyConnectionName, Some("sidebar")),
+        shortcuts::key_binding(cx, "secondary-v", PasteNavigatorSelection, Some("sidebar")),
         shortcuts::key_binding(cx, "secondary-e", EditConnection, Some("sidebar")),
         shortcuts::key_binding(cx, "f5", RefreshConnection, Some("sidebar")),
         shortcuts::key_binding(cx, "secondary-shift-c", CopyNavigatorQualifiedName, Some("sidebar")),
@@ -81,6 +82,7 @@ fn old_binding_table(cx: &gpui::App) -> Vec<gpui::KeyBinding> {
         shortcuts::key_binding(cx, "secondary-shift-[", PreviousTabGroup, None),
         shortcuts::key_binding(cx, "secondary-shift-l", ToggleErrorLog, None),
         shortcuts::key_binding(cx, "secondary-shift-a", ToggleAssistant, None),
+        shortcuts::key_binding(cx, "secondary-shift-d", GoToObject, None),
         shortcuts::key_binding(cx, "escape", AssistantEscape, Some("assistant")),
         shortcuts::key_binding(cx, &format!("{pane}-left"), FocusPaneLeft, None),
         shortcuts::key_binding(cx, &format!("{pane}-right"), FocusPaneRight, None),
@@ -311,6 +313,9 @@ fn a_chord_used_in_an_overlapping_context_is_blocked_with_the_other_actions_name
 
     // The same chord in disjoint contexts is fine: sidebar "Edit Connection"
     // takes the grid's secondary-r.
+    // The page is taller than the window: keep the sidebar rows inside it.
+    visual.simulate_resize(gpui::size(gpui::px(1300.0), gpui::px(4000.0)));
+    settle(visual);
     record_chord(
         visual,
         "shortcut-chip-sidebar.edit_connection-0".into(),

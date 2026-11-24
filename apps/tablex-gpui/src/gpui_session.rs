@@ -125,6 +125,15 @@ pub struct SessionGroup {
     pub database: String,
 }
 
+/// The nodes one connection's tree had open. Each node is kept as plain JSON and decoded one by
+/// one, so a node a later version no longer knows is skipped instead of making the session unusable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct SessionTree {
+    pub connection_id: String,
+    pub nodes: Vec<serde_json::Value>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GpuiSession {
@@ -139,6 +148,8 @@ pub struct GpuiSession {
     /// predate panes: every tab then lives in a single pane, `active` and
     /// `collapsed_groups` apply to it.
     pub panes: Option<crate::panes::PaneLayoutSpec>,
+    /// Open nodes of the connection tree, per connection (filled by the app, not by the workspace).
+    pub tree: Vec<SessionTree>,
 }
 
 impl Default for GpuiSession {
@@ -149,6 +160,7 @@ impl Default for GpuiSession {
             active: None,
             collapsed_groups: Vec::new(),
             panes: None,
+            tree: Vec::new(),
         }
     }
 }

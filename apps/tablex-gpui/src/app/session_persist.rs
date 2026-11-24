@@ -19,6 +19,8 @@ pub(super) struct SessionPersist {
     pub(super) path: Option<PathBuf>,
     /// Workspace revision already on disk (or deliberately not saved).
     saved_revision: u64,
+    /// Open-node revision of the tree already on disk.
+    saved_tree_revision: u64,
     /// Orders and serializes every file write (background and quit-time) and
     /// remembers what is really on disk.
     pub(super) writer: std::sync::Arc<gpui_session::SessionWriter>,
@@ -33,6 +35,7 @@ impl Default for SessionPersist {
         Self {
             path: None,
             saved_revision: 0,
+            saved_tree_revision: 0,
             writer: std::sync::Arc::new(gpui_session::SessionWriter::in_database()),
             pending: None,
             writes: 0,
@@ -75,6 +78,7 @@ impl AppRoot {
         self.shell.session.path = resolve_path(scenario_enabled);
         self.restore_workspace_session(scenario_enabled, restore_swift_sql_tabs, cx);
         self.shell.session.saved_revision = self.workspace.revision();
+        self.shell.session.saved_tree_revision = self.navigator.tree_revision();
         if self.shell.session.path.is_some() {
             self.shell.session._quit = Some(cx.on_app_quit(|this, _| {
                 this.flush_session_blocking();
@@ -94,6 +98,12 @@ impl AppRoot {
         // "Restore tabs on start" (Settings › Navigation).
         let restore = self.settings.navigation.restore_tabs;
         if restore == crate::settings::RestoreTabs::None {
+            // The tabs stay closed; what the tree had open still comes back.
+            if let Some(path) = self.shell.session.path.clone() {
+                if let LoadOutcome::Loaded(session) = gpui_session::load(&path) {
+                    self.remember_session_tree(&session);
+                }
+            }
             return;
         }
         if let Some(path) = self.shell.session.path.clone() {
@@ -138,12 +148,55 @@ impl AppRoot {
         }
     }
 
+    /// The nodes the last session had open, kept until their connections connect (setting
+    /// "Remember the tree"). Nodes of connections that no longer exist, and the ones this version
+    /// cannot read, are left out.
+    fn remember_session_tree(&mut self, session: &gpui_session::GpuiSession) {
+        if !self.settings.navigation.restore_tree_state {
+            return;
+        }
+        let trees = session
+            .tree
+            .iter()
+            .map(|tree| {
+                let nodes = tree
+                    .nodes
+                    .iter()
+                    .filter_map(|node| serde_json::from_value::<NavigatorNodeId>(node.clone()).ok())
+                    .collect();
+                (tree.connection_id.clone(), nodes)
+            })
+            .collect();
+        self.navigator.set_remembered_tree(trees);
+    }
+
+    /// The session to write: the workspace plus the open nodes of the tree (when remembered).
+    fn session_snapshot(&self) -> gpui_session::GpuiSession {
+        let mut session = self.workspace.snapshot();
+        if self.settings.navigation.restore_tree_state {
+            session.tree = self
+                .navigator
+                .tree_snapshot()
+                .into_iter()
+                .map(|(connection_id, nodes)| gpui_session::SessionTree {
+                    connection_id,
+                    nodes: nodes
+                        .iter()
+                        .filter_map(|node| serde_json::to_value(node).ok())
+                        .collect(),
+                })
+                .collect();
+        }
+        session
+    }
+
     fn apply_session(
         &mut self,
         session: &gpui_session::GpuiSession,
         scenario_enabled: bool,
         cx: &mut Context<Self>,
     ) {
+        self.remember_session_tree(session);
         let connections = &self.saved_connections;
         self.workspace.restore_snapshot(session, |tab| {
             tab.connection_id.is_empty()
@@ -175,18 +228,19 @@ impl AppRoot {
         let session = &self.shell.session;
         if session.path.is_none()
             || session.pending.is_some()
-            || session.saved_revision == self.workspace.revision()
+            || (session.saved_revision == self.workspace.revision()
+                && session.saved_tree_revision == self.navigator.tree_revision())
         {
             return;
         }
         self.shell.session.pending = Some(cx.spawn(async move |this, cx| {
             loop {
-                let Ok(seen) = this.update(cx, |this, _| this.workspace.revision()) else {
+                let Ok(seen) = this.update(cx, |this, _| (this.workspace.revision(), this.navigator.tree_revision())) else {
                     return;
                 };
                 cx.background_executor().timer(SAVE_DEBOUNCE).await;
                 match this.update(cx, |this, cx| {
-                    let quiet = this.workspace.revision() == seen;
+                    let quiet = (this.workspace.revision(), this.navigator.tree_revision()) == seen;
                     if quiet {
                         this.flush_session(cx);
                     }
@@ -208,7 +262,8 @@ impl AppRoot {
             return;
         };
         self.shell.session.saved_revision = self.workspace.revision();
-        let bytes = match gpui_session::encode(&self.workspace.snapshot()) {
+        self.shell.session.saved_tree_revision = self.navigator.tree_revision();
+        let bytes = match gpui_session::encode(&self.session_snapshot()) {
             Ok(bytes) => bytes,
             Err(error) => {
                 self.report_error(Area::App, None, format!("Could not save the workspace: {error}"));
@@ -246,7 +301,7 @@ impl AppRoot {
         let Some(path) = self.shell.session.path.clone() else {
             return;
         };
-        let Ok(bytes) = gpui_session::encode(&self.workspace.snapshot()) else {
+        let Ok(bytes) = gpui_session::encode(&self.session_snapshot()) else {
             return;
         };
         let _ = self.shell.session.writer.write_now(&path, &bytes);

@@ -54,6 +54,9 @@ pub enum TabKind {
     /// The sessions running on a connection's server (one tab per connection): the connection is in the tab's identity fields; the
     /// list is a `ProcessListView` entity of the app. Never persisted: it is a live read of the server.
     ProcessList,
+    /// The DDL of two tables or views side by side as a line diff: the first one's connection is in the tab's identity fields; the
+    /// diff is a `DdlCompareState` of the app. Never persisted: it is a read of the server.
+    Compare,
     /// The result area of a query tab, shown in a tab of its own (the query tab shows a note in
     /// its place): the source tab is kept by the app. Never persisted: it is a view of another
     /// tab's result.
@@ -604,7 +607,7 @@ fn session_tab(tab: &Tab) -> Option<crate::gpui_session::SessionTab> {
         // Singleton utility tab; reopened on demand.
         TabKind::DriverManager | TabKind::Settings => return None,
         // A wizard over a file and a load in flight: nothing to restore.
-        TabKind::Import | TabKind::Transfer | TabKind::SqlFile | TabKind::Backup | TabKind::Restore | TabKind::Accounts | TabKind::ProcessList | TabKind::Results | TabKind::ErrorLog => return None,
+        TabKind::Import | TabKind::Transfer | TabKind::SqlFile | TabKind::Backup | TabKind::Restore | TabKind::Accounts | TabKind::ProcessList | TabKind::Compare | TabKind::Results | TabKind::ErrorLog => return None,
     };
     Some(SessionTab {
         kind: kind.into(),
@@ -1267,6 +1270,16 @@ impl WorkspaceState {
                 let at = self.tabs.iter().position(|tab| tab.id == source).map_or(self.tabs.len(), |at| at + 1);
                 self.tabs.insert(at, tab);
             }
+        }
+        self.normalize();
+        id
+    }
+
+    /// Opens a tab for the DDL compare of two objects (the first one's connection is the tab's).
+    pub fn open_compare_tab(&mut self, connection_id: &str, title: &str) -> u64 {
+        let id = self.open_tab_with_kind(TabKind::Compare, title.to_string());
+        if let Some(tab) = self.active_tab_mut() {
+            tab.connection_id = connection_id.to_string();
         }
         self.normalize();
         id

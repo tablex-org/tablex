@@ -1,5 +1,6 @@
 use super::object_actions::append_object_items;
 use super::sidebar_names::{self, NameStyle};
+use super::table_stats::StatsLabel;
 use super::*;
 use crate::catalog::TableProperties;
 use crate::connection_import::ImportSource;
@@ -203,7 +204,7 @@ pub(super) fn tinted(base: Rgba, alpha: f32) -> Rgba {
 /// connection's tinted subtree background.
 pub(super) fn row_connection_id(id: &NavigatorNodeId) -> Option<&str> {
     match id {
-        NavigatorNodeId::Group { .. } => None,
+        NavigatorNodeId::Group { .. } | NavigatorNodeId::Driver { .. } | NavigatorNodeId::BookmarkSection | NavigatorNodeId::Bookmark { .. } => None,
         NavigatorNodeId::Connection { connection }
         | NavigatorNodeId::Database { connection, .. }
         | NavigatorNodeId::Schema { connection, .. }
@@ -257,7 +258,7 @@ fn row_glyph(
         // Connections render brand art at the call site; this arm only
         // satisfies exhaustiveness for direct callers.
         NavigatorNodeId::Connection { .. } => component(IconName::Building2, theme::text_muted()),
-        NavigatorNodeId::Group { .. } => {
+        NavigatorNodeId::Group { .. } | NavigatorNodeId::Driver { .. } => {
             let name = if row.expanded {
                 IconName::FolderOpen
             } else {
@@ -265,6 +266,11 @@ fn row_glyph(
             };
             component(name, theme::icon_folder())
         }
+        NavigatorNodeId::BookmarkSection | NavigatorNodeId::Bookmark { .. } => Icon::empty()
+            .path("icons/bookmark.svg")
+            .size(px(theme::SIDEBAR_ICON_SIZE))
+            .text_color(theme::icon_folder())
+            .into_any_element(),
         NavigatorNodeId::Database { .. } => icon(SidebarGlyph::Database, theme::icon_database()),
         NavigatorNodeId::Schema { .. } => component(IconName::FolderOpen, theme::icon_schema()),
         NavigatorNodeId::ObjectGroup { group, .. } | NavigatorNodeId::SchemaObject { group, .. } => {
@@ -367,6 +373,7 @@ fn row_label(row: &NavigatorRow) -> String {
             TableFolder::Triggers => t!("sidebar.folder_triggers"),
         }
         .into_owned(),
+        NavigatorNodeId::BookmarkSection => t!("sidebar.bookmarks").into_owned(),
         _ => row.label.clone(),
     }
 }
@@ -502,12 +509,17 @@ pub(super) struct NavigatorUiState {
     /// Connections whose "Create Database" waits for the connect it started: the dialog opens when
     /// they are connected, and the wish is dropped when the connect fails or is cancelled.
     pub(super) create_database_after_connect: HashSet<String>,
+    /// Connections a user action is connecting: they open their first level when they are up
+    /// ("Expand on connect").
+    pub(super) expand_after_connect: HashSet<String>,
     /// Bumped whenever visible navigator rows change; captured by load tasks.
     pub(super) generation: u64,
     /// Row currently hovered by a native sidebar drag for drop highlighting.
     pub(super) drop_target: Option<NavigatorNodeId>,
     /// The row whose failure popover is open (at most one).
     pub(super) problem_open: Option<NavigatorNodeId>,
+    /// The tables Copy remembered for Paste (see `tree_clipboard`).
+    pub(super) clipboard: Option<super::tree_clipboard::TreeClip>,
 }
 
 impl AppRoot {
@@ -534,13 +546,27 @@ impl AppRoot {
                 if !self.navigator.select_visible(&row.id, false, false) {
                     return;
                 }
-                self.handle_navigator_disclosure(row, cx);
+                // With another double-click action a single click only selects (the arrow expands).
+                if self.settings.navigation.connection_double_click
+                    == crate::settings::ConnectionDoubleClick::Expand
+                {
+                    self.handle_navigator_disclosure(row, cx);
+                }
                 self.notify_chrome(cx);
             }
             NavigatorNodeId::Object { .. } | NavigatorNodeId::SchemaObject { .. } => {
                 self.navigator_ui.drop_target = None;
                 self.navigator.select_visible(&row.id, false, false);
                 // "Single click opens" (Settings › Navigation).
+                if self.settings.navigation.single_click_opens {
+                    self.handle_navigator_open(row, cx);
+                }
+                self.notify_chrome(cx);
+            }
+            // A bookmark is selected by a click and opened by a double-click or Enter (or by a click, as an object is).
+            NavigatorNodeId::Bookmark { .. } => {
+                self.navigator_ui.drop_target = None;
+                self.navigator.select_visible(&row.id, false, false);
                 if self.settings.navigation.single_click_opens {
                     self.handle_navigator_open(row, cx);
                 }
@@ -562,6 +588,22 @@ impl AppRoot {
         if row.disabled {
             self.notify_chrome(cx);
             return;
+        }
+
+        // The Bookmarks section opens and closes; a bookmark opens its object (Enter, and a click that opens).
+        match &row.id {
+            NavigatorNodeId::BookmarkSection => {
+                self.handle_navigator_disclosure(row, cx);
+                self.notify_chrome(cx);
+                return;
+            }
+            NavigatorNodeId::Bookmark { id } => {
+                let id = id.clone();
+                self.activate_bookmark(&id, cx);
+                self.notify_chrome(cx);
+                return;
+            }
+            _ => {}
         }
 
         if let Some(parent) = self.navigator.load_more_parent(&row.id) {
@@ -668,6 +710,9 @@ impl AppRoot {
         } else if matches!(row.id, NavigatorNodeId::SchemaObject { .. }) {
             // A function, trigger, sequence, ... has no data: its source opens.
             self.open_schema_object_source(&row.id, &row.label, cx);
+        } else if let NavigatorNodeId::Bookmark { id } = &row.id {
+            let id = id.clone();
+            self.activate_bookmark(&id, cx);
         } else if matches!(row.id, NavigatorNodeId::Provider { .. }) {
             self.open_redis_key_node(&row.id, cx);
         }
@@ -782,6 +827,7 @@ impl AppRoot {
             .open_or_activate_connection_tab(connection.to_string(), saved.name);
         if !self.sessions.is_connected(connection) {
             self.ensure_connected(connection.to_string(), None, cx);
+            self.note_connect_by_hand(connection);
         }
         self.notify_chrome(cx);
     }
@@ -1549,6 +1595,7 @@ impl AppRoot {
                 // Single-selection copy target for the settings menu; the
                 // helper also backs the model tests.
                 let settings_copy_target = self.sidebar_single_config_copy_target();
+                let any_connected = !self.connected_in_scope(&navigator_tools::DisconnectScope::All).is_empty();
                 let settings_root = root.clone();
                 sidebar_bounds_probe(
                     Button::new("sidebar-settings")
@@ -1730,6 +1777,22 @@ impl AppRoot {
                                         .on_click(move |_, window, app| {
                                             let _ = item_root.update(app, |this, cx| {
                                                 this.paste_sidebar_connection_config(window, cx);
+                                            });
+                                        }),
+                                );
+                            }
+                            {
+                                let item_root = settings_root.clone();
+                                built = built.separator().item(
+                                    PopupMenuItem::new(t!("sidebar.disconnect_all"))
+                                        .disabled(!any_connected)
+                                        .on_click(move |_, window, app| {
+                                            let _ = item_root.update(app, |this, cx| {
+                                                this.request_disconnect_all(
+                                                    navigator_tools::DisconnectScope::All,
+                                                    window,
+                                                    cx,
+                                                );
                                             });
                                         }),
                                 );
@@ -1966,7 +2029,84 @@ impl AppRoot {
                                     ),
                             );
                         }
+                        // A table, view or materialized view: the estimate of its rows and size at the right edge (when the
+                        // setting is on), and the estimates and comment in its tooltip. Read lazily, one statement per namespace.
+                        let stats_row = matches!(row.id, NavigatorNodeId::Object { .. }) && this.table_stats_supported(&row.id);
+                        let mut stats_tip = None;
+                        if stats_row {
+                            let show = this.settings.navigation.show_table_stats;
+                            // Read after this frame (the read changes the app; drawing only looks at it).
+                            if show && this.table_stats_missing(&row.id) {
+                                let (root, id) = (cx.entity(), row.id.clone());
+                                cx.defer(move |app| {
+                                    root.update(app, |this, cx| this.ensure_table_stats(&id, cx));
+                                });
+                            }
+                            if let Some(stats) = this.table_stats_of(&row.id) {
+                                // The name has priority (as for a table item's detail): the estimate gives up its width
+                                // first and draws the rows alone, or nothing, in what is left.
+                                if let Some(label) = StatsLabel::new(&stats).filter(|_| show) {
+                                    let mut stats_box = div()
+                                        .debug_selector(move || format!("sidebar-stats-{index}"))
+                                        .flex()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .child(label);
+                                    stats_box.style().flex_shrink = Some(DETAIL_SHRINK);
+                                    element = element.child(stats_box);
+                                }
+                                if !stats.is_empty() {
+                                    stats_tip = Some(stats);
+                                }
+                            }
+                        }
+                        // A folder under its own filter says so, with how many of its children it shows.
+                        if let Some(count) = this.navigator.folder_filter_note(&row.id) {
+                            let note = match count {
+                                Some(count) => t!("sidebar.folder_filtered_count", shown = count.shown, total = count.total),
+                                None => t!("sidebar.folder_filtered"),
+                            };
+                            element = element.child(
+                                div()
+                                    .debug_selector(move || format!("sidebar-filter-{index}"))
+                                    .flex()
+                                    .flex_shrink_0()
+                                    .items_center()
+                                    .gap(px(3.0))
+                                    .px(px(4.0))
+                                    .text_size(px(10.0))
+                                    .text_color(theme::text_faint())
+                                    .child(Icon::empty().path("icons/filter.svg").size(px(10.0)).text_color(theme::text_faint()))
+                                    .child(note.into_owned()),
+                            );
+                        }
                         element = element.hover(move |style| style.bg(row_hover));
+                        if stats_row {
+                            let hover_id = row.id.clone();
+                            element = element.on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                                if *hovered {
+                                    this.ensure_table_stats(&hover_id, cx);
+                                }
+                            }));
+                            // It opens with the whole name (the row truncates it), then what the catalog says.
+                            if let NavigatorNodeId::Object { schema, object, .. } = &row.id {
+                                let name = gpui::SharedString::from(if schema.is_empty() { object.clone() } else { format!("{schema}.{object}") });
+                                element = element.tooltip(move |window, cx| {
+                                    let lines = stats_tip.as_ref().map(|stats| stats.tooltip_lines()).unwrap_or_default();
+                                    let name = name.clone();
+                                    Tooltip::element(move |_, _| {
+                                        div()
+                                            .debug_selector(|| "sidebar-stats-tooltip".to_string())
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(2.0))
+                                            .child(div().debug_selector({ let name = name.clone(); move || format!("sidebar-tooltip-name {name}") }).font_weight(gpui::FontWeight::SEMIBOLD).child(name.clone()))
+                                            .children(lines.clone().into_iter().map(|line| div().child(line)))
+                                    })
+                                    .build(window, cx)
+                                });
+                            }
+                        }
                         // A Redis key shows its type at the right edge.
                         if provider_kind == Some(crate::navigator::redis_tree::KEY) {
                             if let Some(type_name) = this
@@ -2070,7 +2210,9 @@ impl AppRoot {
                                     return;
                                 }
                                 if event.click_count() >= 2 {
-                                    this.handle_navigator_open(&row_for_click, cx);
+                                    if !this.handle_connection_double_click(&row_for_click, window, cx) {
+                                        this.handle_navigator_open(&row_for_click, cx);
+                                    }
                                 } else {
                                     this.handle_navigator_row_click(&row_for_click, cx);
                                 }
@@ -2186,6 +2328,17 @@ impl AppRoot {
                                     let rename_root = menu_root.clone();
                                     let delete_root = menu_root.clone();
                                     let move_root = menu_root.clone();
+                                    let disconnect_root = menu_root.clone();
+                                    let disconnect_group = row_group.clone();
+                                    let group_has_connected = menu_root
+                                        .update(cx, |this, _| {
+                                            !this
+                                                .connected_in_scope(&navigator_tools::DisconnectScope::Group(
+                                                    disconnect_group.clone(),
+                                                ))
+                                                .is_empty()
+                                        })
+                                        .unwrap_or(false);
                                     let parent = row_group.clone();
                                     menu.item(PopupMenuItem::new(t!("sidebar.new_subgroup")).on_click(
                                         move |_, window, app| {
@@ -2284,6 +2437,19 @@ impl AppRoot {
                                         built
                                     })
                                     .item(
+                                        PopupMenuItem::new(t!("sidebar.disconnect_group"))
+                                            .disabled(!group_has_connected)
+                                            .on_click(move |_, window, app| {
+                                                let _ = disconnect_root.update(app, |this, cx| {
+                                                    this.request_disconnect_all(
+                                                        navigator_tools::DisconnectScope::Group(disconnect_group.clone()),
+                                                        window,
+                                                        cx,
+                                                    );
+                                                });
+                                            }),
+                                    )
+                                    .item(
                                         PopupMenuItem::new(t!("sidebar.delete_group")).on_click(
                                             move |_, window, app| {
                                                 let _ = delete_root.update(app, |this, cx| {
@@ -2300,11 +2466,21 @@ impl AppRoot {
                                 .into_any_element();
                         }
 
+                        // A bookmark: Open, Rename…, Remove.
+                        if let NavigatorNodeId::Bookmark { id } = &row_id {
+                            let (bookmark_root, bookmark_id) = (menu_root.clone(), id.clone());
+                            return base
+                                .context_menu(move |menu, _, _| {
+                                    super::bookmarks::build_bookmark_menu(menu, bookmark_root.clone(), bookmark_id.clone())
+                                })
+                                .into_any_element();
+                        }
+
                         // Functions, triggers, sequences, types, events: View Source.
                         if let NavigatorNodeId::SchemaObject { .. } = &row_id {
                             let (source_root, source_row) = (menu_root.clone(), row.clone());
                             return base
-                                .context_menu(move |menu, _, _| {
+                                .context_menu(move |menu, _, cx| {
                                     let copy_root = source_root.clone();
                                     let (source_root, source_row) =
                                         (source_root.clone(), source_row.clone());
@@ -2316,26 +2492,39 @@ impl AppRoot {
                                             });
                                         },
                                     ));
-                                    sidebar_names::append_copy_name_items(
+                                    let menu = sidebar_names::append_copy_name_items(
                                         menu.separator(),
-                                        copy_root,
+                                        copy_root.clone(),
                                         &copy_id,
                                         &[NameStyle::Plain, NameStyle::Qualified],
-                                    )
+                                    );
+                                    super::bookmarks::append_bookmark_item(menu, copy_root, &copy_id, cx)
                                 })
                                 .into_any_element();
                         }
 
-                        // The Tables group: New Table.
-                        if let NavigatorNodeId::ObjectGroup { group, .. } = &row_id {
-                            // The other groups have no action: no (empty) menu.
-                            if *group != ObjectGroup::Tables {
-                                return base.into_any_element();
-                            }
+                        // An object group: New Table (Tables), the New entry of what it lists, and its Filter.
+                        if let NavigatorNodeId::ObjectGroup { .. } = &row_id {
                             let (group_root, group_id) = (menu_root.clone(), row_id.clone());
                             return base
                                 .context_menu(move |menu, window, cx| {
-                                    append_object_items(menu, group_root.clone(), &group_id, false, window, cx)
+                                    let entries = group_root.update(cx, |this, _| this.has_object_entries(&group_id)).unwrap_or(false);
+                                    let menu = append_object_items(menu, group_root.clone(), &group_id, false, window, cx);
+                                    super::folder_filter::append_filter_items(menu, group_root.clone(), &group_id, entries, cx)
+                                })
+                                .into_any_element();
+                        }
+
+                        // A folder under a table: the New entry of what it lists.
+                        if let NavigatorNodeId::TableFolder { .. } = &row_id {
+                            let (folder_root, folder_id) = (menu_root.clone(), row_id.clone());
+                            let has_entries = this.create_menu_kinds(&row_id);
+                            if has_entries.is_empty() {
+                                return base.into_any_element();
+                            }
+                            return base
+                                .context_menu(move |menu, window, cx| {
+                                    append_object_items(menu, folder_root.clone(), &folder_id, false, window, cx)
                                 })
                                 .into_any_element();
                         }
@@ -2548,12 +2737,13 @@ impl AppRoot {
                                                 cx,
                                             );
                                             // "Copy Name" is the menu's own entry.
-                                            sidebar_names::append_copy_name_items(
+                                            let menu = sidebar_names::append_copy_name_items(
                                                 menu,
                                                 target_root.clone(),
                                                 &target.id,
                                                 &[NameStyle::Qualified],
-                                            )
+                                            );
+                                            super::bookmarks::append_bookmark_item(menu, target_root.clone(), &target.id, cx)
                                         })
                                         .into_any_element();
                                 }
@@ -2653,7 +2843,8 @@ impl AppRoot {
                                         &object_id,
                                         &[NameStyle::Plain, NameStyle::Qualified],
                                     );
-                                    append_object_items(menu, diagram_root.clone(), &object_id, true, window, cx)
+                                    let menu = append_object_items(menu, diagram_root.clone(), &object_id, true, window, cx);
+                                    super::folder_filter::append_filter_items(menu, diagram_root.clone(), &object_id, true, cx)
                                 })
                                 .into_any_element();
                         }
@@ -2891,6 +3082,11 @@ impl AppRoot {
                 if !this.sidebar.focus.is_focused(window) {
                     return;
                 }
+                // Tables and views of a SQL connection are remembered for a Paste (their qualified names go to the clipboard too).
+                let rows = this.tree_copy_selection();
+                if this.copy_tree_objects(&rows, cx) {
+                    return;
+                }
                 let selection = this.navigator.selection_in_visible_order();
                 if selection.len() > 1 {
                     // One name per line.
@@ -2918,6 +3114,15 @@ impl AppRoot {
                     selection.extend(this.navigator.selected().cloned());
                 }
                 this.copy_navigator_names(&selection, NameStyle::Qualified, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PasteNavigatorSelection, window, cx| {
+                if !this.sidebar.focus.is_focused(window) {
+                    cx.propagate();
+                    return;
+                }
+                if let Some(id) = this.navigator.selected().cloned() {
+                    this.paste_tree_objects(&id, window, cx);
+                }
             }))
             .on_action(cx.listener(|this, _: &RenameNavigatorSelection, window, cx| {
                 if !this.sidebar.focus.is_focused(window) {
@@ -3054,6 +3259,8 @@ impl AppRoot {
         self.navigator_ui.generation = self.navigator.generation();
         self.continue_sidebar_locate(cx);
         self.pump_remote_search(cx);
+        self.refresh_goto_object(cx);
+        self.continue_tree_restore(&request.connection_id(), cx);
         self.continue_schema_diagrams(cx);
         self.completion_node_loaded(&request.parent_id(), cx);
     }
@@ -3122,6 +3329,8 @@ impl AppRoot {
                 this.completion_node_loaded(&request.parent_id(), cx);
                 // A remote search waits on these loads too.
                 this.pump_remote_search(cx);
+                this.refresh_goto_object(cx);
+                this.continue_tree_restore(&request.connection_id(), cx);
                 cx.notify();
             });
         });

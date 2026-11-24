@@ -1236,6 +1236,24 @@ pub(super) fn build_connection_menu(
                 }),
         )
     };
+    // Reconnect: drop the session and connect again. Not offered when the connection is not
+    // connected (Connect is shown then); disabled while a connect is running.
+    let menu = if connected || connecting {
+        let reconnect_root = menu_root.clone();
+        let reconnect_id = connection_id.clone();
+        menu.item(
+            PopupMenuItem::new(t!("menu.reconnect"))
+                .icon(menu_icon(navigator_ui::SidebarGlyph::Refresh))
+                .disabled(connecting)
+                .on_click(move |_, window, app| {
+                    let _ = reconnect_root.update(app, |this, cx| {
+                        this.request_reconnect(&reconnect_id, window, cx);
+                    });
+                }),
+        )
+    } else {
+        menu
+    };
     // Copy Name carries the real Cmd-C action for its hint; the click handler
     // above it wins on click, while keypresses land on the sidebar-level
     // selection-aware listener (never inside text inputs).
@@ -1386,6 +1404,33 @@ pub(super) fn build_connection_menu(
             }),
     );
 
+    // Paste the tables copied in the tree: opens the Data Transfer into this connection (SQL connections only).
+    let paste = menu_root
+        .update(cx, |this, _| {
+            let id = NavigatorNodeId::Connection { connection: connection_id.clone() };
+            this.paste_target(&id).map(|_| this.tree_clipboard_filled())
+        })
+        .ok()
+        .flatten();
+    let menu = match paste {
+        Some(filled) => {
+            let (root, id) = (menu_root.clone(), connection_id.clone());
+            menu.item(super::mongo_admin_view::entry_item(
+                super::mongo_admin_view::Entry {
+                    selector: "connection-menu-paste",
+                    label: t!("menu.paste"),
+                    icon: Icon::empty().path("icons/clipboard-paste.svg").size(px(12.0)),
+                    disabled: (!filled).then(|| t!("menu.paste_tables_empty")),
+                    destructive: false,
+                },
+                move |window, app| {
+                    let _ = root.update(app, |this, cx| this.paste_tree_objects(&NavigatorNodeId::Connection { connection: id.clone() }, window, cx));
+                },
+            ))
+        }
+        None => menu,
+    };
+
     // Backup and Restore with the server's native tools (PostgreSQL, MySQL, MariaDB).
     let menu = if can_backup {
         [(super::backup::Mode::Backup, t!("menu.backup"), "icons/download.svg"), (super::backup::Mode::Restore, t!("menu.restore"), "icons/upload.svg")].into_iter().fold(menu, |menu, (mode, label, icon)| {
@@ -1484,6 +1529,13 @@ pub(super) fn build_connection_menu(
                     this.open_visible_filter_dialog(&filter_id, window, cx);
                 });
             }),
+    );
+    let menu = super::folder_filter::append_filter_items(
+        menu,
+        menu_root.clone(),
+        &NavigatorNodeId::Connection { connection: connection_id.clone() },
+        false,
+        cx,
     );
     let edit_root = menu_root.clone();
     let edit_id = connection_id.clone();

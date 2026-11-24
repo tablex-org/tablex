@@ -29,6 +29,8 @@ arrow-schema = "60"
 bson = "2.13"
 chrono = "0.4"
 regex = "1"
+# The line diff of two DDLs (the crate gpui-component's own diff view is built on; it shows a patch, it does not make one).
+similar = { version = "2.7", features = ["unicode"] }
 # Format SQL (token based, guarded by `sql_format`: the built-in formatter). Its only dependencies are `winnow` and
 # `unicode_categories`.
 sqlformat = "0.5"

@@ -118,7 +118,7 @@ impl AppRoot {
                 }
             }
             NavigatorNodeId::TableItem { .. } => self.navigator.label(id).map(str::to_owned),
-            NavigatorNodeId::ObjectGroup { .. } | NavigatorNodeId::TableFolder { .. } => None,
+            NavigatorNodeId::ObjectGroup { .. } | NavigatorNodeId::TableFolder { .. } | NavigatorNodeId::Driver { .. } | NavigatorNodeId::BookmarkSection | NavigatorNodeId::Bookmark { .. } => None,
         };
         Ok(text)
     }

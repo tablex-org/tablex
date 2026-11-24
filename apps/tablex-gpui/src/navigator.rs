@@ -11,14 +11,27 @@ mod pins;
 mod sidebar_view;
 pub mod redis_tree;
 pub mod sql_driver;
-pub use sidebar_view::{NavigatorAction, SearchOptions, SearchScope};
+pub use sidebar_view::{folder_key, NavigatorAction, SearchOptions, SearchScope};
 
 /// Fully-qualified identity of one node in the navigator tree. Two tables
 /// named "users" in different schemas must never collide, so every id carries
-/// its full path.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// its full path. Serializable for the remembered tree state; the driver section is never saved.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum NavigatorNodeId {
     Group {
+        id: String,
+    },
+    /// A section of the "group by database type" tree (render-time only): the driver id of its type.
+    #[serde(skip)]
+    Driver {
+        driver: String,
+    },
+    /// The Bookmarks section at the top of the tree (render-time only).
+    #[serde(skip)]
+    BookmarkSection,
+    /// One bookmark of that section (render-time only): the id of the bookmark in the preferences.
+    #[serde(skip)]
+    Bookmark {
         id: String,
     },
     Connection {
@@ -89,7 +102,7 @@ pub enum NavigatorNodeId {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ObjectGroup {
     Tables,
     Views,
@@ -189,7 +202,7 @@ impl ObjectGroup {
 /// The folders under a table or view. A folder is always shown where
 /// its dialect has the kind (see [`Self::for_kind`]) and, like an [`ObjectGroup`], expands to
 /// nothing when it is empty. Everything but Columns is the driver's `describe_object` answer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum TableFolder {
     Columns,
     Indexes,
@@ -294,6 +307,8 @@ pub enum LoadRequest {
 }
 
 pub const PROVIDER_PAGE_SIZE: u64 = 200;
+/// Open nodes kept per connection in the session file.
+pub const TREE_STATE_LIMIT: usize = 200;
 /// Per-call cap of a server-side filtered object listing.
 pub const REMOTE_FILTER_LIMIT: usize = 500;
 /// Databases per connection a remote search looks into (the rest are counted, not searched).
@@ -343,6 +358,8 @@ pub struct NavigatorState {
     visible_filter_matchers: HashMap<String, Vec<regex::Regex>>,
     visible_filter_names: HashMap<String, HashSet<String>>,
     visible_schema_names: HashMap<String, HashMap<String, HashSet<String>>>,
+    /// The include / exclude patterns of single folders, compiled (see `SidebarPreferences::folder_filters`).
+    folder_filters: HashMap<crate::sidebar_preferences::FolderKey, crate::sidebar_preferences::CompiledFolderFilter>,
     connected_ids: HashSet<String>,
     visible: Vec<NavigatorRow>,
     visible_lookup: HashMap<NavigatorNodeId, usize>,
@@ -352,6 +369,19 @@ pub struct NavigatorState {
     anchor: Option<NavigatorNodeId>,
     expanded: std::collections::HashSet<NavigatorNodeId>,
     collapsed_groups: HashSet<String>,
+    /// Settings: connections are listed under a section per database type.
+    group_by_driver: bool,
+    /// The sections (driver ids) the user collapsed.
+    collapsed_drivers: HashSet<String>,
+    /// The Bookmarks section is collapsed.
+    bookmarks_collapsed: bool,
+    /// The open nodes of connections whose tree is not (fully) loaded: what the last session left
+    /// open and what a closed session had. Applied step by step as the nodes load, then forgotten.
+    remembered_tree: HashMap<String, Vec<NavigatorNodeId>>,
+    /// Hash of the open nodes the last rebuild saw, and the count of its changes (the session saves
+    /// the tree state when this moves).
+    expanded_signature: u64,
+    tree_revision: u64,
     search_collapsed: HashSet<NavigatorNodeId>,
     selected: Option<NavigatorNodeId>,
     load_states: HashMap<NavigatorNodeId, NodeLoadState>,
@@ -449,7 +479,7 @@ pub struct ExpansionOutcome {
 /// Saved connection a node belongs to (`None` for sidebar groups).
 fn node_connection(id: &NavigatorNodeId) -> Option<&str> {
     match id {
-        NavigatorNodeId::Group { .. } => None,
+        NavigatorNodeId::Group { .. } | NavigatorNodeId::Driver { .. } | NavigatorNodeId::BookmarkSection | NavigatorNodeId::Bookmark { .. } => None,
         NavigatorNodeId::Connection { connection }
         | NavigatorNodeId::Database { connection, .. }
         | NavigatorNodeId::Schema { connection, .. }
@@ -471,6 +501,172 @@ impl NavigatorState {
         } else {
             self.provider_page_size
         }
+    }
+
+    /// Settings: list the connections under a section per database type (user groups stay inside).
+    pub fn set_group_by_driver(&mut self, on: bool) {
+        if self.group_by_driver != on {
+            self.group_by_driver = on;
+            self.rebuild_visible();
+        }
+    }
+
+    /// The open nodes of `connection`'s loaded tree, parents before children, at most
+    /// [`TREE_STATE_LIMIT`] of them.
+    fn expanded_nodes(&self, connection: &str) -> Vec<NavigatorNodeId> {
+        let root = NavigatorNodeId::Connection {
+            connection: connection.to_string(),
+        };
+        let mut found = Vec::new();
+        let mut stack = vec![&root];
+        while let Some(id) = stack.pop() {
+            if found.len() >= TREE_STATE_LIMIT {
+                break;
+            }
+            if self.expanded.contains(id) {
+                found.push(id.clone());
+            }
+            if let Some(Some(children)) = self.children.get(id) {
+                stack.extend(children.iter().rev());
+            }
+        }
+        found
+    }
+
+    /// Keeps what is open under `connection` to open it again when the connection reloads (its
+    /// tree is about to be reset: a disconnect, a reconnect). Nothing open keeps what was kept.
+    pub fn remember_tree(&mut self, connection: &str) {
+        let nodes = self.expanded_nodes(connection);
+        if !nodes.is_empty() {
+            self.remembered_tree.insert(connection.to_string(), nodes);
+            self.tree_revision += 1;
+        }
+    }
+
+    /// What the last session had open (replaces what was remembered). Connections that no longer
+    /// exist and nodes of other connections are ignored.
+    pub fn set_remembered_tree(&mut self, trees: Vec<(String, Vec<NavigatorNodeId>)>) {
+        self.remembered_tree = trees
+            .into_iter()
+            .filter(|(connection, _)| self.connection(connection).is_some())
+            .map(|(connection, nodes)| {
+                let nodes = nodes
+                    .into_iter()
+                    .filter(|node| node_connection(node) == Some(connection.as_str()))
+                    .take(TREE_STATE_LIMIT)
+                    .collect::<Vec<_>>();
+                (connection, nodes)
+            })
+            .filter(|(_, nodes)| !nodes.is_empty())
+            .collect();
+        self.tree_revision += 1;
+    }
+
+    /// The open nodes of every connection (its loaded tree, plus what is still waiting to open),
+    /// in saved-connection order: what the session file keeps.
+    pub fn tree_snapshot(&self) -> Vec<(String, Vec<NavigatorNodeId>)> {
+        self.connections
+            .iter()
+            .filter_map(|saved| {
+                let id = saved.id.to_string();
+                let mut nodes = self.expanded_nodes(&id);
+                for node in self.remembered_tree.get(&id).into_iter().flatten() {
+                    if !nodes.contains(node) {
+                        nodes.push(node.clone());
+                    }
+                }
+                nodes.truncate(TREE_STATE_LIMIT);
+                (!nodes.is_empty()).then_some((id, nodes))
+            })
+            .collect()
+    }
+
+    /// Moves whenever the open nodes change (the session saves the tree state then).
+    pub fn tree_revision(&self) -> u64 {
+        self.tree_revision
+    }
+
+    /// Whether the node is open (its children, when loaded, are listed under it).
+    pub fn is_expanded(&self, id: &NavigatorNodeId) -> bool {
+        self.expanded.contains(id)
+    }
+
+    /// The ids of the connections in the group `group` or a group below it.
+    pub fn group_member_ids(&self, group: &str) -> Vec<String> {
+        let prefs = &self.preferences;
+        self.connections
+            .iter()
+            .filter_map(|saved| {
+                let id = saved.id.to_string();
+                let mut parent = prefs
+                    .connections
+                    .iter()
+                    .find(|item| item.id == id)
+                    .and_then(|item| item.group.as_deref());
+                while let Some(current) = parent {
+                    if current == group {
+                        return Some(id);
+                    }
+                    parent = prefs
+                        .groups
+                        .iter()
+                        .find(|item| item.id == current)
+                        .and_then(|item| item.parent.as_deref());
+                }
+                None
+            })
+            .collect()
+    }
+
+    /// Whether remembered nodes of `connection` still wait to open.
+    pub fn has_remembered_tree(&self, connection: &str) -> bool {
+        self.remembered_tree.contains_key(connection)
+    }
+
+    /// Opens the remembered nodes of `connection` that exist now, parents first, and returns the
+    /// loads that opening them needs. A node that is not loaded yet waits for the next call while
+    /// anything of the connection is still loading; once nothing is, the rest is gone from the
+    /// server and is forgotten. Never connects: it only walks what the tree holds.
+    pub fn resume_tree(&mut self, connection: &str) -> Vec<LoadRequest> {
+        let mut requests = Vec::new();
+        if self.search_active() {
+            return requests;
+        }
+        let Some(mut pending) = self.remembered_tree.remove(connection) else {
+            return requests;
+        };
+        self.tree_revision += 1;
+        loop {
+            let mut progressed = false;
+            let mut waiting = Vec::new();
+            for id in pending {
+                if self.expanded.contains(&id) {
+                    progressed = true;
+                    continue;
+                }
+                let exists = match &id {
+                    NavigatorNodeId::Connection { connection } => self.connection(connection).is_some(),
+                    other => self.labels.contains_key(other),
+                };
+                if !exists {
+                    waiting.push(id);
+                    continue;
+                }
+                progressed = true;
+                requests.extend(self.toggle_expansion(&id).request);
+            }
+            pending = waiting;
+            if !progressed || pending.is_empty() {
+                break;
+            }
+        }
+        let loading = self.load_states.iter().any(|(id, state)| {
+            *state == NodeLoadState::Loading && node_connection(id) == Some(connection)
+        });
+        if loading && !pending.is_empty() {
+            self.remembered_tree.insert(connection.to_string(), pending);
+        }
+        requests
     }
 
     /// Applies the navigation settings; the tree is rebuilt only when the
@@ -594,6 +790,7 @@ impl NavigatorState {
     /// Drops every piece of per-node state under `connection` (including the
     /// connection row's own expansion and load state).
     fn purge_connection_state(&mut self, connection: &str) {
+        self.remembered_tree.remove(connection);
         let under = |id: &NavigatorNodeId| node_connection(id) == Some(connection);
         self.catalog_revision += 1;
         self.expanded.retain(|id| !under(id));
@@ -755,8 +952,11 @@ impl NavigatorState {
     /// databases / schemas / tables / views and provider (Mongo) databases and
     /// collections. Columns, object-group folders, load-more placeholders and
     /// saved-pipeline folders are skipped. Pure in-memory; never loads.
-    pub fn visit_catalog<'a>(
+    /// With `routines`, the loaded functions and procedures of the schemas too (what "Go to
+    /// object" searches).
+    pub fn visit_catalog_with<'a>(
         &'a self,
+        routines: bool,
         mut visit: impl FnMut(&'a NavigatorNodeId, &'a str, Option<KindOfObject>, Option<&'a ProviderNode>),
     ) {
         let mut stack: Vec<&NavigatorNodeId> = Vec::new();
@@ -783,6 +983,13 @@ impl NavigatorState {
                     | NavigatorNodeId::Object { .. } => {
                         if let Some(label) = label {
                             visit(id, label, self.object_kinds.get(id).copied(), None);
+                        }
+                    }
+                    NavigatorNodeId::SchemaObject { group, .. }
+                        if routines && matches!(group, ObjectGroup::Functions | ObjectGroup::Procedures) =>
+                    {
+                        if let Some(label) = label {
+                            visit(id, label, None, None);
                         }
                     }
                     NavigatorNodeId::Provider { node, .. } => {
@@ -814,6 +1021,11 @@ impl NavigatorState {
         self.load_generations.get(&request.parent_id()).copied()
     }
 
+    /// The generation of the last load of the children of `id` (it changes when they load again).
+    pub fn node_load_generation(&self, id: &NavigatorNodeId) -> Option<u64> {
+        self.load_generations.get(id).copied()
+    }
+
     /// Flattens expanded branches into the rows the list should render.
     pub fn visible_rows(&self) -> Vec<NavigatorRow> {
         self.visible.clone()
@@ -835,6 +1047,20 @@ impl NavigatorState {
         {
             if !self.search_collapsed.insert(id.clone()) {
                 self.search_collapsed.remove(id);
+            }
+            self.rebuild_visible();
+            return ExpansionOutcome {
+                request: None,
+            };
+        }
+        if matches!(id, NavigatorNodeId::BookmarkSection) {
+            self.bookmarks_collapsed = !self.bookmarks_collapsed;
+            self.rebuild_visible();
+            return ExpansionOutcome { request: None };
+        }
+        if let NavigatorNodeId::Driver { driver } = id {
+            if !self.collapsed_drivers.insert(driver.clone()) {
+                self.collapsed_drivers.remove(driver);
             }
             self.rebuild_visible();
             return ExpansionOutcome {
@@ -2177,7 +2403,7 @@ impl NavigatorNodeId {
     }
     fn load_request(&self) -> Option<LoadRequest> {
         match self {
-            NavigatorNodeId::Group { .. } => None,
+            NavigatorNodeId::Group { .. } | NavigatorNodeId::Driver { .. } | NavigatorNodeId::BookmarkSection | NavigatorNodeId::Bookmark { .. } => None,
             NavigatorNodeId::Connection { connection } => Some(LoadRequest::Databases {
                 connection: connection.clone(),
             }),
@@ -2319,6 +2545,30 @@ impl LoadRequest {
     }
 }
 
+/// The name of a database type, as the "group by database type" sections show it.
+pub fn driver_title(kind: ConnectionKind) -> &'static str {
+    match kind {
+        ConnectionKind::Postgres => "PostgreSQL",
+        ConnectionKind::Sqlite => "SQLite",
+        ConnectionKind::Mongodb => "MongoDB",
+        ConnectionKind::Mysql => "MySQL",
+        ConnectionKind::Mariadb => "MariaDB",
+        ConnectionKind::Redis => "Redis",
+        ConnectionKind::Clickhouse => "ClickHouse",
+    }
+}
+
+/// The order of the database-type sections.
+const DRIVER_SECTIONS: [ConnectionKind; 7] = [
+    ConnectionKind::Postgres,
+    ConnectionKind::Mysql,
+    ConnectionKind::Mariadb,
+    ConnectionKind::Sqlite,
+    ConnectionKind::Clickhouse,
+    ConnectionKind::Mongodb,
+    ConnectionKind::Redis,
+];
+
 pub fn quote_identifier(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
@@ -2326,6 +2576,9 @@ pub fn quote_identifier(value: &str) -> String {
 fn default_label(id: &NavigatorNodeId) -> String {
     match id {
         NavigatorNodeId::Group { id } => id.clone(),
+        NavigatorNodeId::Driver { driver } => driver.clone(),
+        NavigatorNodeId::BookmarkSection => "Bookmarks".into(),
+        NavigatorNodeId::Bookmark { id } => id.clone(),
         NavigatorNodeId::Connection { connection } => connection.clone(),
         NavigatorNodeId::Database { database, .. } => database.clone(),
         NavigatorNodeId::Schema { schema, .. } => schema.clone(),
@@ -2348,6 +2601,7 @@ mod tests {
     use super::*;
     use crate::connections::{ConnectionKind, SavedConnection};
     use crate::sidebar_preferences::{ConnectionSort, SidebarPreferences};
+    use super::sidebar_view::FolderFilterCount;
 
     fn sqlite_conn(id: &str, name: &str) -> SavedConnection {
         SavedConnection {
@@ -4616,6 +4870,83 @@ mod tests {
         assert!(matches!(collection.id, NavigatorNodeId::Provider { .. }));
     }
 
+    fn folder_filter(key: crate::sidebar_preferences::FolderKey, include: &[&str], exclude: &[&str]) -> crate::sidebar_preferences::FolderFilter {
+        crate::sidebar_preferences::FolderFilter {
+            key,
+            include: include.iter().map(|pattern| (*pattern).to_owned()).collect(),
+            exclude: exclude.iter().map(|pattern| (*pattern).to_owned()).collect(),
+        }
+    }
+
+    fn labels(state: &NavigatorState) -> Vec<String> {
+        state.visible_rows().iter().map(|row| row.label.clone()).collect()
+    }
+
+    #[test]
+    fn a_folder_filter_narrows_its_own_folder_only_and_counts_what_it_leaves() {
+        let mut state = NavigatorState::new(vec![postgres_conn()]);
+        postgres_schema(&mut state);
+        let tables = object_group_id(CONN, "app", "public", ObjectGroup::Tables);
+        let views = object_group_id(CONN, "app", "public", ObjectGroup::Views);
+        for (group, names, kind) in [
+            (&tables, ["orders", "Orders_old", "users", "order_items"], KindOfObject::Table),
+            (&views, ["order_totals", "orders_old_v", "user_names", "x"], KindOfObject::View),
+        ] {
+            let request = state.toggle_expansion(group).request.unwrap();
+            state.apply_load(&request, state.generation(), Ok(names.iter().map(|name| object_child(CONN, "app", "public", name, kind)).collect()));
+        }
+        let all = labels(&state);
+        assert_eq!(all.len(), 3 + 1 + 4 + 1 + 4 + 6, "{all:?}");
+        let key = folder_key(&tables).unwrap();
+        let mut prefs = SidebarPreferences::default();
+        // Include and exclude, wildcards and case do not matter: `Orders_old` is an `*_OLD` too.
+        prefs.set_folder_filter(folder_filter(key.clone(), &["ORDER*", "user?"], &["*_old"])).unwrap();
+        state.set_preferences(prefs.clone()).unwrap();
+        let rows = labels(&state);
+        let shown: Vec<_> = rows.iter().filter(|label| matches!(label.as_str(), "orders" | "Orders_old" | "users" | "order_items")).collect();
+        assert_eq!(shown, ["orders", "users", "order_items"], "{rows:?}");
+        // `user?` is exactly one character after `user`: `users` matches, `user_names` (a view) is another folder.
+        for view in ["order_totals", "orders_old_v", "user_names", "x"] {
+            assert!(rows.iter().any(|label| label == view), "the Views folder is not filtered: {rows:?}");
+        }
+        assert_eq!(state.folder_filter_note(&tables), Some(Some(FolderFilterCount { shown: 3, total: 4 })));
+        assert_eq!(state.folder_filter_note(&views), None, "another folder has no filter");
+        // The filter leaves the load alone: the folder is still loaded, expanded and has all its children.
+        assert_eq!(state.loaded_children(&tables).map(<[_]>::len), Some(4));
+        // Clearing brings everything back.
+        prefs.clear_folder_filter(&key);
+        state.set_preferences(prefs).unwrap();
+        assert_eq!(labels(&state), all);
+        assert_eq!(state.folder_filter_note(&tables), None);
+    }
+
+    #[test]
+    fn a_filter_on_the_databases_of_a_connection_keeps_load_more_working() {
+        let mut state = NavigatorState::new(vec![mongo_conn(CONN, "Mongo")]);
+        state.enable_provider(CONN);
+        let root = NavigatorNodeId::Connection { connection: CONN.into() };
+        let mut prefs = SidebarPreferences::default();
+        prefs.set_folder_filter(folder_filter(folder_key(&root).unwrap(), &["vis*"], &[])).unwrap();
+        state.set_preferences(prefs).unwrap();
+        let request = state.toggle_expansion(&root).request.unwrap();
+        let node = |name: &str| engine_driver_api::NavigatorNode {
+            id: name.into(),
+            kind: "database".into(),
+            label: name.into(),
+            subtitle: None,
+            icon: None,
+            has_children: true,
+            payload: serde_json::json!({"database":name}),
+            actions: vec![],
+        };
+        state.apply_provider_page(&request, state.generation(), Ok(engine_driver_api::NavigatorPage { nodes: vec![node("hidden")], next_cursor: Some("next".into()) }));
+        assert_eq!(labels(&state), ["Mongo", "Load More"]);
+        let more = state.load_more(&root).expect("the next page is still asked for");
+        state.apply_provider_page(&more, state.generation(), Ok(engine_driver_api::NavigatorPage { nodes: vec![node("visible_db")], next_cursor: None }));
+        assert_eq!(labels(&state), ["Mongo", "visible_db"]);
+        assert_eq!(state.folder_filter_note(&root), Some(Some(FolderFilterCount { shown: 1, total: 2 })));
+    }
+
     #[test]
     fn replace_provider_children_keeps_surviving_expansion_and_drops_the_rest() {
         let mut state = three_expanded();
@@ -4682,7 +5013,7 @@ mod tests {
 
     fn catalog_databases(state: &NavigatorState) -> Vec<String> {
         let mut seen = Vec::new();
-        state.visit_catalog(|id, label, _, _| {
+        state.visit_catalog_with(false, |id, label, _, _| {
             if matches!(id, NavigatorNodeId::Database { .. }) {
                 seen.push(label.to_owned());
             }
@@ -4991,5 +5322,135 @@ mod tests {
         // Cleared, the tree is as it was: the table is collapsed.
         state.set_search(SearchOptions::default()).unwrap();
         assert!(!labels(&state).contains(&"orders_pkey".to_string()));
+    }
+
+    // ---- tree state, database-type sections ------------------------------------------------
+
+    fn labels_with_depth(state: &NavigatorState) -> Vec<(usize, String)> {
+        state.visible_rows().into_iter().map(|row| (row.depth, row.label)).collect()
+    }
+
+    #[test]
+    fn group_by_driver_lists_a_section_per_type_with_the_user_groups_inside() {
+        let mut state = NavigatorState::new(vec![
+            sqlite_conn(CONN, "lite one"),
+            mongo_conn(CONN_B, "docs"),
+            sqlite_conn(CONN_C, "lite two"),
+        ]);
+        let mut prefs = SidebarPreferences::default();
+        prefs.add_group("work", "Work", None).unwrap();
+        prefs.add_group("empty", "Empty", None).unwrap();
+        prefs.move_connection(CONN, Some("work"), 0).unwrap();
+        prefs.move_connection(CONN_B, Some("work"), 1).unwrap();
+        state.set_preferences(prefs).unwrap();
+        // Off: the groups at the top, as saved.
+        assert_eq!(
+            labels_with_depth(&state),
+            [(0, "Work".into()), (1, "lite one".into()), (1, "docs".into()), (0, "Empty".into()), (0, "lite two".into())]
+        );
+        state.set_group_by_driver(true);
+        // A section per type in a fixed order; a group shows inside the sections it has a
+        // connection for and nowhere else (Empty has none).
+        assert_eq!(
+            labels_with_depth(&state),
+            [
+                (0, "SQLite".into()),
+                (1, "Work".into()),
+                (2, "lite one".into()),
+                (1, "lite two".into()),
+                (0, "MongoDB".into()),
+                (1, "Work".into()),
+                (2, "docs".into()),
+            ]
+        );
+        // A section collapses and opens again with its rows.
+        let sqlite = NavigatorNodeId::Driver { driver: "sqlite".into() };
+        state.toggle_expansion(&sqlite);
+        assert_eq!(
+            labels_with_depth(&state),
+            [(0, "SQLite".into()), (0, "MongoDB".into()), (1, "Work".into()), (2, "docs".into())]
+        );
+        state.toggle_expansion(&sqlite);
+        assert_eq!(state.visible_rows().len(), 7);
+        state.set_group_by_driver(false);
+        assert_eq!(state.visible_rows().len(), 5);
+    }
+
+    #[test]
+    fn open_nodes_are_listed_parents_first_capped_and_kept_for_the_connection_that_closed() {
+        let mut state = three_expanded();
+        let snapshot = state.tree_snapshot();
+        assert_eq!(snapshot.len(), 3, "one entry per connection with open nodes");
+        let (conn, nodes) = &snapshot[0];
+        assert_eq!(conn, CONN);
+        // connection, database, schema, Tables group: parents before children.
+        assert_eq!(nodes.len(), 4);
+        assert!(matches!(nodes[0], NavigatorNodeId::Connection { .. }));
+        assert!(matches!(nodes[3], NavigatorNodeId::ObjectGroup { .. }));
+        // The remembered form survives a JSON round trip (the session file keeps it that way).
+        let json = serde_json::to_value(nodes).unwrap();
+        let back: Vec<NavigatorNodeId> = serde_json::from_value(json).unwrap();
+        assert_eq!(&back, nodes);
+
+        // The tree is reset (a disconnect): what was open is remembered, the rows collapse.
+        state.remember_tree(CONN);
+        state.reset_node(&NavigatorNodeId::Connection { connection: CONN.into() });
+        assert!(rows_of(&state, CONN).iter().all(|(_, expanded)| !expanded));
+        assert_eq!(state.tree_snapshot()[0].1, *nodes, "still saved while it is closed");
+        // A connection that no longer exists keeps nothing.
+        state.set_connections(vec![sqlite_conn(CONN_B, "B"), sqlite_conn(CONN_C, "C")]);
+        assert!(!state.has_remembered_tree(CONN));
+        assert!(state.tree_snapshot().iter().all(|(id, _)| id != CONN));
+    }
+
+    #[test]
+    fn remembered_nodes_open_as_their_parents_load_and_the_gone_ones_are_forgotten() {
+        let mut state = three_expanded();
+        let nodes = state.tree_snapshot().remove(0).1;
+        state.reset_node(&NavigatorNodeId::Connection { connection: CONN.into() });
+        state.set_remembered_tree(vec![(CONN.into(), nodes)]);
+        assert!(state.has_remembered_tree(CONN));
+
+        // The connection opens first: its databases are requested, nothing deeper exists yet.
+        let requests = state.resume_tree(CONN);
+        assert_eq!(requests, [LoadRequest::Databases { connection: CONN.into() }]);
+        assert!(state.has_remembered_tree(CONN), "the rest waits for the databases");
+        state.apply_load(&requests[0], state.generation(), Ok(vec![database_child(CONN, "app")]));
+        let requests = state.resume_tree(CONN);
+        assert_eq!(requests, [LoadRequest::Schemas { connection: CONN.into(), database: "app".into() }]);
+        state.apply_load(&requests[0], state.generation(), Ok(vec![schema_child(CONN, "app", "public")]));
+        // The schema opens at once, then the Tables group asks for its tables.
+        let requests = state.resume_tree(CONN);
+        assert!(matches!(requests.as_slice(), [LoadRequest::Objects { group: ObjectGroup::Tables, .. }]));
+        state.apply_load(
+            &requests[0],
+            state.generation(),
+            Ok(vec![object_child(CONN, "app", "public", "orders", KindOfObject::Table)]),
+        );
+        assert!(!state.has_remembered_tree(CONN), "everything is open again");
+        assert!(state.visible_rows().iter().any(|row| row.label == "orders"));
+
+        // A node the server no longer has is forgotten once nothing is loading.
+        state.reset_node(&NavigatorNodeId::Connection { connection: CONN.into() });
+        let gone = NavigatorNodeId::Database { connection: CONN.into(), database: "dropped".into() };
+        state.set_remembered_tree(vec![(
+            CONN.into(),
+            vec![NavigatorNodeId::Connection { connection: CONN.into() }, gone],
+        )]);
+        let requests = state.resume_tree(CONN);
+        state.apply_load(&requests[0], state.generation(), Ok(vec![database_child(CONN, "app")]));
+        assert!(state.resume_tree(CONN).is_empty());
+        assert!(!state.has_remembered_tree(CONN));
+    }
+
+    #[test]
+    fn at_most_a_bounded_number_of_nodes_is_kept_per_connection() {
+        let mut state = NavigatorState::new(vec![sqlite_conn(CONN, "A")]);
+        let nodes: Vec<NavigatorNodeId> = (0..TREE_STATE_LIMIT + 50)
+            .map(|index| NavigatorNodeId::Database { connection: CONN.into(), database: format!("db{index}") })
+            .collect();
+        state.set_remembered_tree(vec![(CONN.into(), nodes), ("not-a-connection".into(), Vec::new())]);
+        assert_eq!(state.tree_snapshot()[0].1.len(), TREE_STATE_LIMIT);
+        assert!(!state.has_remembered_tree("not-a-connection"));
     }
 }

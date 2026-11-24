@@ -9,6 +9,7 @@ gpui::actions!(
         CopyConnectionString,
         CopyConnectionName,
         CopyNavigatorQualifiedName,
+        PasteNavigatorSelection,
         RenameNavigatorSelection,
         DeleteNavigatorSelection,
         OpenNavigatorSelection,
@@ -80,6 +81,7 @@ gpui::actions!(
         AssistantFix,
         AssistantOptimise,
         OpenCommandPalette,
+        GoToObject,
         OpenSettings,
         CloseSettings,
         PaletteNewQuery,
@@ -115,6 +117,7 @@ pub(super) fn bind_keys(cx: &mut gpui::App) {
     // its `AppRoot` (the active window may be a results window, which holds none).
     // The menu's "AI Assistant" and the shortcut with nothing focused: same fallback.
     super::menus::on_app_root::<ToggleAssistant>(cx, |app, window, cx| app.toggle_assistant(window, cx));
+    super::menus::on_app_root::<GoToObject>(cx, |app, window, cx| app.open_goto_object(window, cx));
     super::menus::on_app_root::<OpenSettings>(cx, |app, window, cx| app.open_settings(window, cx));
     // The SQL editor's own commands act on the active tab, so they work with nothing focused too.
     super::menus::on_app_root::<SaveActiveSql>(cx, |app, window, cx| app.save_active_sql(window, cx));

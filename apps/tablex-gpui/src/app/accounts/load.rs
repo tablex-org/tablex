@@ -94,8 +94,13 @@ fn failure(error: &engine_driver_host::LoaderError) -> ReadError {
 impl DriverCatalog {
     /// Opens the session `spec` describes (blocking: call it off the UI thread).
     pub(in crate::app) fn open(spec: SessionSpec) -> Result<Self, ReadError> {
+        Self::open_in(spec, None)
+    }
+
+    /// Like [`Self::open`], with every query sent to `database` (the catalog of a PostgreSQL database is its own).
+    pub(in crate::app) fn open_in(spec: SessionSpec, database: Option<String>) -> Result<Self, ReadError> {
         let (session, tunnel) = spec.open().map_err(ReadError::Failed)?;
-        Ok(Self { session, database: None, _tunnel: tunnel })
+        Ok(Self { session, database, _tunnel: tunnel })
     }
 
     fn send(&mut self, sql: &str) -> Result<engine_driver_api::QueryPage, ReadError> {

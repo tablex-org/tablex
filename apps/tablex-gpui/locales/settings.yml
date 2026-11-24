@@ -923,6 +923,51 @@ settings:
         description:
           en: "Objects loaded per \"load more\" in the sidebar tree."
           vi: "Số đối tượng tải về mỗi lần bấm \"tải thêm\" trong cây thanh bên."
+      connection_double_click:
+        title:
+          en: Double-click a connection
+          vi: Nhấp đúp vào kết nối
+        description:
+          en: What double-clicking a connection does. Connect or disconnect and Open a new SQL editor leave a single click to only select it; the arrow still expands.
+          vi: Việc xảy ra khi nhấp đúp vào một kết nối. Với Kết nối hoặc ngắt kết nối và Mở trình soạn SQL mới, nhấp một lần chỉ chọn; mũi tên vẫn mở rộng nhánh.
+        options:
+          expand:
+            en: Expand or collapse
+            vi: Mở rộng hoặc thu gọn
+          connect:
+            en: Connect or disconnect
+            vi: Kết nối hoặc ngắt kết nối
+          new_query:
+            en: Open a new SQL editor
+            vi: Mở trình soạn SQL mới
+      expand_on_connect:
+        title:
+          en: Expand on connect
+          vi: Mở rộng khi kết nối
+        description:
+          en: A connection made by hand (Connect, a double-click, the palette) opens its first level in the tree.
+          vi: Kết nối do bạn tự thực hiện (Kết nối, nhấp đúp, bảng lệnh) sẽ mở cấp đầu tiên trong cây.
+      group_by_driver:
+        title:
+          en: Group by database type
+          vi: Nhóm theo loại cơ sở dữ liệu
+        description:
+          en: The tree lists connections under a section per database type; your own groups stay inside each section.
+          vi: Cây liệt kê kết nối dưới từng mục theo loại cơ sở dữ liệu; các nhóm của bạn nằm trong mỗi mục.
+      restore_tree_state:
+        title:
+          en: Remember the tree
+          vi: Ghi nhớ cây
+        description:
+          en: The nodes you left open come back when their connection connects after a restart. Nothing connects only to restore the tree.
+          vi: Các nút bạn để mở sẽ quay lại khi kết nối của chúng được kết nối sau khi khởi động lại. Không có kết nối nào được tạo chỉ để khôi phục cây.
+      show_table_stats:
+        title:
+          en: Show table sizes
+          vi: Hiện kích thước bảng
+        description:
+          en: Table rows show an estimate of their rows and size, read from the server's catalog once per folder.
+          vi: Các dòng bảng hiện ước tính số dòng và dung lượng, đọc từ danh mục của máy chủ một lần cho mỗi thư mục.
       table_double_click:
         title:
           en: Double-click a table

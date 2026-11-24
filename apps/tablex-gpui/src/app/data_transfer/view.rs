@@ -460,6 +460,25 @@ impl TransferView {
 
     // ---- the target ------------------------------------------------------------------------------------
 
+    /// The namespace the tables go to is chosen already (a Paste in the tree): the target step opens on it, and the tables are
+    /// created there where they are missing.
+    pub(super) fn prefill_target(&mut self, target: Namespace, window: &mut Window, cx: &mut Context<Self>) {
+        self.target_kind = TargetKind::Table;
+        self.kind_select.update(cx, |select, cx| select.set_selected_index(Some(IndexPath::default().row(0)), window, cx));
+        if let Some(row) = self.connections.iter().position(|connection| connection.id == target.connection) {
+            self.target_conn_kind = self.connections[row].kind;
+            self.connection_select.update(cx, |select, cx| select.set_selected_index(Some(IndexPath::default().row(row)), window, cx));
+        }
+        self.namespaces = vec![target.clone()];
+        let labels = vec![target.label()];
+        self.namespace_select.update(cx, |select, cx| {
+            select.set_items(labels, window, cx);
+            select.set_selected_index(Some(IndexPath::default().row(0)), window, cx);
+        });
+        self.target = target;
+        cx.notify();
+    }
+
     fn choose_connection(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(connection) = self.connections.get(row).cloned() else { return };
         let namespaces = self.root.read_with(cx, |root, _| root.transfer_namespaces(&connection.id, &self.source)).unwrap_or_default();
@@ -565,7 +584,17 @@ impl TransferView {
                 let row = self.connection_select.read(cx).selected_index(cx).map_or(0, |index| index.row);
                 let current = self.target.clone();
                 self.choose_connection(row, window, cx);
-                if let Some(position) = self.namespaces.iter().position(|namespace| *namespace == current) {
+                // A namespace chosen before (a Paste in the tree) stays even when the tree has not listed it.
+                let position = match self.namespaces.iter().position(|namespace| *namespace == current) {
+                    None if current.connection == self.target.connection && !(current.database.is_empty() && current.schema.is_empty()) => {
+                        self.namespaces.insert(0, current.clone());
+                        let labels: Vec<SharedString> = self.namespaces.iter().map(Namespace::label).collect();
+                        self.namespace_select.update(cx, |select, cx| select.set_items(labels, window, cx));
+                        Some(0)
+                    }
+                    found => found,
+                };
+                if let Some(position) = position {
                     self.target = current;
                     self.namespace_select.update(cx, |select, cx| select.set_selected_index(Some(IndexPath::default().row(position)), window, cx));
                 }

@@ -345,6 +345,7 @@ impl AppRoot {
         self.release_idle_own_sessions(cx);
         self.workspace
             .set_open_next_to_active(settings.navigation.open_data_tabs_next_to_active);
+        self.navigator.set_group_by_driver(settings.navigation.group_by_driver);
         self.navigator.set_settings_defaults(
             !settings.navigation.show_system_objects,
             u64::from(settings.navigation.navigator_page_size),

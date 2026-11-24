@@ -1078,6 +1078,36 @@ fn build_registry() -> Vec<SettingDescriptor> {
             d,
         ),
         choice(
+            place!("navigation.connection_double_click", Navigation, "Sidebar", "Double-click a connection", "What double-clicking a connection does. Connect or disconnect and Open a new SQL editor leave a single click to only select it; the arrow still expands."),
+            |s| s.navigation.connection_double_click,
+            |s, v| s.navigation.connection_double_click = v,
+            d,
+        ),
+        toggle(
+            place!("navigation.expand_on_connect", Navigation, "Sidebar", "Expand on connect", "A connection made by hand (Connect, a double-click, the palette) opens its first level in the tree."),
+            |s| s.navigation.expand_on_connect,
+            |s, v| s.navigation.expand_on_connect = v,
+            d,
+        ),
+        toggle(
+            place!("navigation.group_by_driver", Navigation, "Sidebar", "Group by database type", "The tree lists connections under a section per database type; your own groups stay inside each section."),
+            |s| s.navigation.group_by_driver,
+            |s, v| s.navigation.group_by_driver = v,
+            d,
+        ),
+        toggle(
+            place!("navigation.restore_tree_state", Navigation, "Sidebar", "Remember the tree", "The nodes you left open come back when their connection connects after a restart. Nothing connects only to restore the tree."),
+            |s| s.navigation.restore_tree_state,
+            |s, v| s.navigation.restore_tree_state = v,
+            d,
+        ),
+        toggle(
+            place!("navigation.show_table_stats", Navigation, "Sidebar", "Show table sizes", "Table rows show an estimate of their rows and size, read from the server's catalog once per folder."),
+            |s| s.navigation.show_table_stats,
+            |s, v| s.navigation.show_table_stats = v,
+            d,
+        ),
+        choice(
             place!("navigation.table_double_click", Navigation, "Opening", "Double-click a table", "What double-clicking a table or view opens."),
             |s| s.navigation.table_double_click,
             |s, v| s.navigation.table_double_click = v,

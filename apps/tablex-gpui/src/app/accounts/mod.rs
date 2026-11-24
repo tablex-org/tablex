@@ -123,7 +123,7 @@ impl AppRoot {
             | NavigatorNodeId::TableFolder { connection, .. }
             | NavigatorNodeId::TableItem { connection, .. }
             | NavigatorNodeId::Provider { connection, .. } => Some(connection.clone()),
-            NavigatorNodeId::Group { .. } => None,
+            NavigatorNodeId::Group { .. } | NavigatorNodeId::Driver { .. } | NavigatorNodeId::BookmarkSection | NavigatorNodeId::Bookmark { .. } => None,
         }
     }
 

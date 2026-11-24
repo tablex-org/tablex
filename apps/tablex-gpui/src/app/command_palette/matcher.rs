@@ -43,6 +43,8 @@ struct Token {
 pub(super) struct Query {
     tokens: Vec<Token>,
     mask: u64,
+    /// Only the entry's own name can match (its path never makes an entry match).
+    title_only: bool,
 }
 
 impl Query {
@@ -62,7 +64,13 @@ impl Query {
                 }
             })
             .collect();
-        Self { tokens, mask }
+        Self { tokens, mask, title_only: false }
+    }
+
+    /// [`Self::parse`] for "Go to object": every token must match the name of the entry itself;
+    /// the connection / database / schema text it lives under never makes it match.
+    pub(super) fn parse_title_only(raw: &str) -> Self {
+        Self { title_only: true, ..Self::parse(raw) }
     }
 
     pub(super) fn is_empty(&self) -> bool {
@@ -237,6 +245,8 @@ fn entry_score(entry: &Entry, query: &Query, scope_scores: &[i32]) -> Option<i32
         let best = match title {
             // An exact/prefix title hit cannot be beaten by scope text.
             Some(score) if score >= TITLE_DECISIVE => score,
+            Some(score) if query.title_only => score,
+            None if query.title_only => return None,
             other => other.max((*scoped != NO_SCORE).then_some(*scoped))?,
         };
         total += best;
@@ -370,6 +380,20 @@ mod tests {
         hits.iter()
             .map(|hit| index.segments[hit.segment as usize].entries[hit.entry as usize].title.to_string())
             .collect()
+    }
+
+    #[test]
+    fn a_title_only_query_never_matches_on_the_path() {
+        let index = index_of(&[("carts", "Orders"), ("orders", "Shop"), ("order_items", "Shop")]);
+        // The scope names "Orders": a normal query lists all of its objects, a title-only one does not.
+        assert_eq!(rank(&index, "ord", 10).len(), 3);
+        let mut hits = Vec::new();
+        Ranker::default().top(&index, &Query::parse_title_only("ord"), 10, &mut hits);
+        let titles: Vec<_> = hits
+            .iter()
+            .map(|hit| index.segments[hit.segment as usize].entries[hit.entry as usize].title.to_string())
+            .collect();
+        assert_eq!(titles, ["orders", "order_items"]);
     }
 
     #[test]

@@ -579,7 +579,7 @@ fn deleting_or_adding_a_connection_keeps_other_connections_expanded(cx: &mut Tes
                 | NavigatorNodeId::TableFolder { connection, .. }
                 | NavigatorNodeId::TableItem { connection, .. }
                 | NavigatorNodeId::Provider { connection, .. } => connection == postgres_id,
-                NavigatorNodeId::Group { .. } => false,
+                NavigatorNodeId::Group { .. } | NavigatorNodeId::Driver { .. } | NavigatorNodeId::BookmarkSection | NavigatorNodeId::Bookmark { .. } => false,
             })
             .cloned()
             .collect::<Vec<_>>()

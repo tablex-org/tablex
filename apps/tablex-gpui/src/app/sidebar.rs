@@ -746,16 +746,15 @@ impl AppRoot {
                 .unwrap_or_else(|| "Resolve the sidebar preferences error before saving".into()));
         }
         let result = (|| {
-            let path = self
-                .sidebar
-                .path
-                .as_ref()
-                .ok_or("Sidebar preferences path is unavailable")?;
             let mut candidate = self.navigator.preferences().clone();
             change(&mut candidate)?;
-            candidate
-                .save(path)
-                .map_err(|error| format!("Could not save sidebar preferences: {error}"))?;
+            // Without a preference file (plain scenario runs) the change applies in memory
+            // and nothing is reported.
+            if let Some(path) = self.sidebar.path.as_ref() {
+                candidate
+                    .save(path)
+                    .map_err(|error| format!("Could not save sidebar preferences: {error}"))?;
+            }
             self.navigator.set_preferences(candidate)
         })();
         self.sidebar.error = result.as_ref().err().cloned();
@@ -1056,7 +1055,9 @@ impl AppRoot {
                     return false;
                 };
                 match &id {
-                    NavigatorNodeId::Group { .. } => self.handle_navigator_disclosure(&row, cx),
+                    NavigatorNodeId::Group { .. } | NavigatorNodeId::Driver { .. } => {
+                        self.handle_navigator_disclosure(&row, cx)
+                    }
                     _ => self.activate_navigator_row(&row, cx),
                 }
                 true
@@ -1211,7 +1212,7 @@ impl AppRoot {
         true
     }
 
-    pub(super) fn open_mongo_script_tab(&mut self, connection: &str, database: &str, collection: &str) {
+    pub(super) fn open_mongo_script_tab(&mut self, connection: &str, database: &str, collection: &str) -> u64 {
         let id = self.workspace.open_query_tab_with_metadata(
             "Mongo Script",
             TabMetadata {
@@ -1227,6 +1228,7 @@ impl AppRoot {
                 tab.sql = crate::mongo_script::collection_template(collection);
             }
         }
+        id
     }
 }
 

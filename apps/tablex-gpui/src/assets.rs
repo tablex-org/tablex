@@ -110,6 +110,9 @@ impl AssetSource for Assets {
                 "square-dashed.svg",
                 "arrow-left-right.svg",
                 "pin.svg",
+                "bookmark.svg",
+                "clipboard-paste.svg",
+                "git-compare.svg",
                 "save.svg",
                 "zap.svg",
                 "hand.svg",
@@ -253,6 +256,9 @@ pub fn asset(path: &str) -> Option<&'static [u8]> {
             Some(include_bytes!("../assets/icons/arrow-left-right.svg"))
         }
         "icons/pin.svg" => Some(include_bytes!("../assets/icons/pin.svg")),
+        "icons/bookmark.svg" => Some(include_bytes!("../assets/icons/bookmark.svg")),
+        "icons/clipboard-paste.svg" => Some(include_bytes!("../assets/icons/clipboard-paste.svg")),
+        "icons/git-compare.svg" => Some(include_bytes!("../assets/icons/git-compare.svg")),
         "icons/save.svg" => Some(include_bytes!("../assets/icons/save.svg")),
         "icons/zap.svg" => Some(include_bytes!("../assets/icons/zap.svg")),
         "icons/hand.svg" => Some(include_bytes!("../assets/icons/hand.svg")),

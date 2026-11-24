@@ -17,6 +17,8 @@
 //! one's reload. A tab with staged edits, a pending structure draft or an open transaction is never
 //! closed behind the user's back: it stays and the next load says what is missing.
 
+mod create;
+mod create_templates;
 mod generate_sql;
 mod host;
 mod menu;
@@ -26,6 +28,8 @@ mod table_form;
 pub(in crate::app) use host::{ObjectActionEvent, ObjectActionHost};
 #[cfg(all(test, feature = "bench"))]
 pub(in crate::app) use table_form::NewTableForm;
+#[cfg(test)]
+pub(in crate::app) use create_templates::CreateKind;
 pub(in crate::app) use menu::{append_object_items, ObjectKind, ObjectMenuItem};
 
 use std::collections::HashSet;
@@ -50,6 +54,7 @@ impl AppRoot {
             NavigatorNodeId::Schema { connection, database, schema } | NavigatorNodeId::ObjectGroup { connection, database, schema, .. } => {
                 origin(connection, database, schema, "")
             }
+            NavigatorNodeId::TableFolder { connection, database, schema, object, .. } => origin(connection, database, schema, object),
             NavigatorNodeId::Database { connection, database } => {
                 origin(connection, database, &self.default_schema_of_database(connection, database), "")
             }
@@ -76,6 +81,18 @@ impl AppRoot {
     pub(in crate::app) fn run_object_menu_item(&mut self, item: ObjectMenuItem, id: &NavigatorNodeId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(origin) = self.object_origin(id) else { return };
         match item {
+            ObjectMenuItem::CopyObjects => {
+                let ids = self.rows_for_name_action(id);
+                self.copy_tree_objects(&ids, cx);
+            }
+            ObjectMenuItem::PasteObjects => self.paste_tree_objects(id, window, cx),
+            ObjectMenuItem::CompareDdl => {
+                if let Some((left, right)) = self.compare_pair(id) {
+                    self.open_ddl_compare(left, right, cx);
+                }
+            }
+            ObjectMenuItem::CompareDdlWith => self.compare_ddl_with(id, window, cx),
+            ObjectMenuItem::AddBookmark => self.open_add_bookmark_dialog(id, window, cx),
             ObjectMenuItem::NewTable => {
                 self.open_new_table_dialog(origin, window, cx);
             }

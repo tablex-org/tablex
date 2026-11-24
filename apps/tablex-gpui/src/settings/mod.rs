@@ -286,6 +286,15 @@ choice_enum!(
 );
 
 choice_enum!(
+    /// What double-clicking a connection in the navigator does.
+    ConnectionDoubleClick {
+        Expand => ("expand", "Expand or collapse"),
+        Connect => ("connect", "Connect or disconnect"),
+        NewQuery => ("new_query", "Open a new SQL editor"),
+    }
+);
+
+choice_enum!(
     /// Which tabs come back after a restart.
     RestoreTabs {
         All => ("all", "All tabs"),
@@ -617,6 +626,16 @@ pub struct Navigation {
     pub restore_tabs: RestoreTabs,
     pub open_data_tabs_next_to_active: bool,
     pub navigator_page_size: u32,
+    /// What double-clicking a connection does (a single click then only selects it).
+    pub connection_double_click: ConnectionDoubleClick,
+    /// A connection made from the tree, the palette or a double-click opens its first level.
+    pub expand_on_connect: bool,
+    /// The tree lists the connections under a section per database type.
+    pub group_by_driver: bool,
+    /// Which tree nodes are open comes back after a restart (for the connections that reconnect).
+    pub restore_tree_state: bool,
+    /// Table rows show an estimate of their rows and size (read lazily, one catalog query per folder).
+    pub show_table_stats: bool,
 }
 
 impl Default for Navigation {
@@ -630,6 +649,11 @@ impl Default for Navigation {
             restore_tabs: RestoreTabs::All,
             open_data_tabs_next_to_active: false,
             navigator_page_size: 200,
+            connection_double_click: ConnectionDoubleClick::Expand,
+            expand_on_connect: false,
+            group_by_driver: false,
+            restore_tree_state: true,
+            show_table_stats: false,
         }
     }
 }
@@ -924,6 +948,7 @@ mod tests {
         assert_serde_names_match::<CopyDefault>();
         assert_serde_names_match::<TableOpenAction>();
         assert_serde_names_match::<RestoreTabs>();
+        assert_serde_names_match::<ConnectionDoubleClick>();
         assert_serde_names_match::<Effort>();
         assert_serde_names_match::<AiProvider>();
     }

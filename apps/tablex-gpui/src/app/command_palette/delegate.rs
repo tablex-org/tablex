@@ -60,6 +60,9 @@ pub(super) struct PaletteDelegate {
     hits: Vec<Hit>,
     sections: Vec<Section>,
     selected: Option<IndexPath>,
+    /// "Go to object": only objects of the catalog index, chosen by Enter or a click, with no idle
+    /// list; each keystroke also asks the app to look further on the server (see `goto`).
+    goto: bool,
 }
 
 impl PaletteDelegate {
@@ -73,21 +76,45 @@ impl PaletteDelegate {
             hits: Vec::new(),
             sections: Vec::new(),
             selected: None,
+            goto: false,
         }
+    }
+
+    /// The delegate of the "Go to object" dialog.
+    pub(super) fn new_goto(root: WeakEntity<AppRoot>) -> Self {
+        Self { goto: true, ..Self::new(root) }
+    }
+
+    /// Swaps the searchable snapshot (more of the catalog loaded) and ranks the query again.
+    pub(super) fn replace_index(&mut self, index: Arc<Index>) {
+        self.index = index;
+        self.refresh();
+    }
+
+    fn parse_query(&self, raw: &str) -> Query {
+        if self.goto {
+            Query::parse_title_only(raw)
+        } else {
+            Query::parse(raw)
+        }
+    }
+
+    pub(super) fn shows_rows(&self) -> bool {
+        self.has_rows()
     }
 
     /// Installs a fresh index snapshot + recent list (called on every open).
     pub(super) fn load(&mut self, index: Arc<Index>, recent: Vec<Recent>) {
         self.index = index;
         self.recent = recent;
-        self.query = Query::parse("");
+        self.query = self.parse_query("");
         self.refresh();
     }
 
     /// Height that fits the search field plus the current sections / rows
     /// (all heights are fixed), capped like the old fixed panel.
     pub(super) fn panel_height(&self) -> f32 {
-        let body = if self.sections.is_empty() {
+        let body = if self.sections.is_empty() || self.goto && self.query.is_empty() {
             EMPTY_HEIGHT
         } else {
             self.sections
@@ -113,6 +140,9 @@ impl PaletteDelegate {
 
     /// Empty query: Recent, then a short list of what is one keystroke away.
     fn build_idle(&mut self) {
+        if self.goto {
+            return;
+        }
         if !self.recent.is_empty() {
             self.sections.push(Section {
                 title: "Recent",
@@ -195,6 +225,17 @@ impl PaletteDelegate {
             .collect()
     }
 
+    /// `(badge, title, detail)` of every row shown, in order.
+    #[cfg(test)]
+    pub(super) fn rows_detailed(&self) -> Vec<(&'static str, String, String)> {
+        self.sections
+            .iter()
+            .flat_map(|section| section.rows.iter())
+            .filter_map(|row| self.item(*row))
+            .map(|item| (item.kind.badge(), item.title.to_string(), item.detail.to_string()))
+            .collect()
+    }
+
     fn row_at(&self, ix: IndexPath) -> Option<Row> {
         self.sections.get(ix.section)?.rows.get(ix.row).copied()
     }
@@ -236,8 +277,15 @@ impl ListDelegate for PaletteDelegate {
         window: &mut Window,
         cx: &mut Context<ListState<Self>>,
     ) -> Task<()> {
-        self.query = Query::parse(query);
+        self.query = self.parse_query(query);
         self.refresh();
+        if self.goto {
+            let (root, text) = (self.root.clone(), query.trim().to_string());
+            // After this update: the app may be mid-update when the dialog sets its query.
+            cx.defer(move |cx| {
+                let _ = root.update(cx, |app, cx| app.goto_query_changed(text, cx));
+            });
+        }
         // The list selects against its previous (possibly empty) row cache;
         // make sure a fresh result set always has its first row highlighted.
         cx.defer_in(window, |state, window, cx| {
@@ -358,6 +406,26 @@ impl ListDelegate for PaletteDelegate {
         )
     }
 
+    fn render_initial(
+        &mut self,
+        _: &mut Window,
+        _: &mut Context<ListState<Self>>,
+    ) -> Option<gpui::AnyElement> {
+        self.goto.then(|| {
+            div()
+                .debug_selector(|| "goto-hint".into())
+                .w_full()
+                .h(px(EMPTY_HEIGHT))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(13.0))
+                .text_color(theme::text_muted())
+                .child("Type the name of a table, view, function or collection")
+                .into_any_element()
+        })
+    }
+
     fn render_empty(
         &mut self,
         _: &mut Window,
@@ -428,6 +496,16 @@ impl PaletteDelegate {
             _ => item,
         };
         let root = self.root.clone();
+        if self.goto {
+            if let (Command::Node(node), Activation::Primary) = (&item.command, how) {
+                let node = node.clone();
+                window.close_dialog(cx);
+                window.defer(cx, move |_, cx| {
+                    let _ = root.update(cx, |app, cx| app.goto_object_node(&node, cx));
+                });
+            }
+            return;
+        }
         // Close first: activation may open its own dialog (New Connection).
         window.close_dialog(cx);
         window.defer(cx, move |window, cx| {

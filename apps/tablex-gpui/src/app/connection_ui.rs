@@ -594,6 +594,7 @@ impl AppRoot {
                             }
                         }
                         this.navigator_ui.generation = this.navigator.generation();
+                        this.connection_came_up(&connection_key_task, cx);
                         this.rerun_tabs_after_reconnect(&connection_key_task, cx);
                         this.connected_for_create_database(&connection_key_task, cx);
                     }
@@ -1310,12 +1311,17 @@ impl AppRoot {
 
     /// [`Self::disconnect_connection`] for a reconnect: the typed secrets stay, the tunnel does
     /// not (a reconnect always opens a fresh one).
-    fn release_connection(
+    pub(super) fn release_connection(
         &mut self,
         connection_id: &str,
         keep_secrets: bool,
         cx: &mut Context<Self>,
     ) {
+        // What is open in the tree comes back when the connection connects again.
+        if self.settings.navigation.restore_tree_state {
+            self.navigator.remember_tree(connection_id);
+        }
+        self.navigator_ui.expand_after_connect.remove(connection_id);
         self.process_list_connection_released(connection_id, cx);
         self.navigator_ui.create_database_after_connect.remove(connection_id);
         if self.scenario_ui.service.is_some() {

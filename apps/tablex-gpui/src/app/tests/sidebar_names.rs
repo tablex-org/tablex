@@ -135,9 +135,10 @@ fn cmd_c_and_cmd_shift_c_on_the_focused_tree_copy_the_selection_one_per_line(cx:
     visual.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string("untouched".into())));
     visual.simulate_keystrokes(&primary("c"));
     settle(visual);
+    // Cmd+C on tables also remembers them for a Paste (see `tree_clipboard`), and then puts their qualified names on the clipboard.
     let plain = sn_clipboard(visual).expect("copied");
     assert_eq!(plain.lines().count(), 2, "{plain}");
-    assert!(plain.contains("orders") && plain.contains("fixture_table_01") && !plain.contains('"'), "{plain}");
+    assert!(plain.contains("\"public\".\"orders\"") && plain.contains("fixture_table_01"), "{plain}");
     visual.simulate_keystrokes(&primary("shift-c"));
     settle(visual);
     let qualified = sn_clipboard(visual).expect("copied");

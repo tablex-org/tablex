@@ -248,6 +248,14 @@ pub(super) fn build_mongo_node_menu(
             snapshot.caps.collection,
             AppRoot::open_mongo_drop_dialog,
         );
+        let new_index = dialog_item(
+            "mongo-menu-new-index",
+            t!("menu.new_index"),
+            glyph(SidebarGlyph::PencilRuler),
+            false,
+            snapshot.caps.indexes,
+            AppRoot::open_mongo_new_index,
+        );
         // "New Aggregation" opens a Compass-style Aggregate tab; it needs a
         // driver that can run `mongo_aggregate`.
         let aggregation = {
@@ -270,6 +278,7 @@ pub(super) fn build_mongo_node_menu(
             .item(query)
             .item(aggregation)
             .item(indexes)
+            .item(new_index)
             .item(rename)
             .item(clone)
             .item(refresh)
@@ -333,7 +342,25 @@ pub(super) fn build_mongo_node_menu(
                 },
             )
         };
+        // New Collection: a script tab with `createCollection` (the driver has no create-collection
+        // operation of its own); it needs what a script needs.
+        let new_collection = {
+            let (root, connection, database) = (root.clone(), target.connection.clone(), target.database.clone());
+            entry_item(
+                Entry {
+                    selector: "mongo-menu-new-collection",
+                    label: t!("menu.new_collection"),
+                    icon: glyph(SidebarGlyph::Table),
+                    disabled: gate(snapshot.can_query),
+                    destructive: false,
+                },
+                move |_, app| {
+                    let _ = root.update(app, |this, cx| this.open_mongo_collection_template(&connection, &database, cx));
+                },
+            )
+        };
         menu.item(query)
+            .item(new_collection)
             .item(default_item)
             .item(refresh)
             .separator()
@@ -1322,6 +1349,26 @@ impl AppRoot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_mongo_index_manager_at(target, false, window, cx);
+    }
+
+    /// "New Index": the manager with its create form open.
+    pub(super) fn open_mongo_new_index(
+        &mut self,
+        target: MongoNodeTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_mongo_index_manager_at(target, true, window, cx);
+    }
+
+    fn open_mongo_index_manager_at(
+        &mut self,
+        target: MongoNodeTarget,
+        create: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(collection) = target.collection.clone() else {
             return;
         };
@@ -1399,6 +1446,7 @@ impl AppRoot {
             cx,
         );
         let title = format!("Indexes: \"{}\"", view.read(cx).collection);
+        let form_view = view.clone();
         window.open_dialog(cx, move |dialog, _, _| {
             let enter_view = view.clone();
             dialog
@@ -1418,5 +1466,8 @@ impl AppRoot {
                     DialogFooter::new().child(dialog_cancel("mongo-index-close").label(t!("common.close"))),
                 )
         });
+        if create {
+            form_view.update(cx, |this, cx| this.open_form(window, cx));
+        }
     }
 }

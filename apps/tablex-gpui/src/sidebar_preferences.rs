@@ -100,6 +100,150 @@ impl VisibleObjectFilter {
     }
 }
 
+/// What a sidebar folder lists: the databases of a connection, the schemas of a database, or one
+/// group of objects (Tables, Views, Functions, ...) of a schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FolderKind {
+    Databases,
+    Schemas,
+    Objects(crate::navigator::ObjectGroup),
+}
+
+/// Which folder a [`FolderFilter`] narrows. The parts above the folder are empty when the folder
+/// has no such parent (the databases of a connection have no database or schema).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct FolderKey {
+    pub connection: String,
+    pub database: String,
+    pub schema: String,
+    pub folder: FolderKind,
+}
+
+/// The names one folder lists: what matches an include pattern (all when there is none) and no
+/// exclude pattern. A pattern is a name with `*` (any run of characters) and `?` (one character),
+/// case-insensitive. Applied to the children the navigator has loaded, nothing is asked of the driver.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FolderFilter {
+    pub key: FolderKey,
+    pub include: Vec<String>,
+    pub exclude: Vec<String>,
+}
+
+const FOLDER_FILTER_PATTERNS: usize = 32;
+const FOLDER_FILTER_PATTERN_LENGTH: usize = 256;
+
+/// The patterns of a comma-separated field: trimmed, empty entries dropped.
+pub fn parse_folder_patterns(text: &str) -> Vec<String> {
+    text.split(',').map(str::trim).filter(|pattern| !pattern.is_empty()).map(str::to_owned).collect()
+}
+
+/// The regular expression of a wildcard pattern (the whole name must match).
+fn wildcard_regex(pattern: &str) -> String {
+    let mut out = String::with_capacity(pattern.len() + 8);
+    out.push_str("(?s)^");
+    let mut buffer = [0u8; 4];
+    for ch in pattern.chars() {
+        match ch {
+            '*' => out.push_str(".*"),
+            '?' => out.push('.'),
+            other => out.push_str(&regex::escape(other.encode_utf8(&mut buffer))),
+        }
+    }
+    out.push('$');
+    out
+}
+
+/// A [`FolderFilter`] with its patterns compiled once (one pass over a name per list).
+#[derive(Debug, Clone)]
+pub struct CompiledFolderFilter {
+    include: Option<regex::RegexSet>,
+    exclude: Option<regex::RegexSet>,
+}
+
+impl CompiledFolderFilter {
+    pub fn new(filter: &FolderFilter) -> Result<Self, String> {
+        let compile = |patterns: &[String]| -> Result<Option<regex::RegexSet>, String> {
+            if patterns.is_empty() {
+                return Ok(None);
+            }
+            regex::RegexSetBuilder::new(patterns.iter().map(|pattern| wildcard_regex(pattern)))
+                .case_insensitive(true)
+                .build()
+                .map(Some)
+                .map_err(|_| "Invalid folder filter pattern".to_string())
+        };
+        Ok(Self { include: compile(&filter.include)?, exclude: compile(&filter.exclude)? })
+    }
+
+    pub fn allows(&self, name: &str) -> bool {
+        self.include.as_ref().is_none_or(|set| set.is_match(name)) && !self.exclude.as_ref().is_some_and(|set| set.is_match(name))
+    }
+}
+
+impl FolderFilter {
+    fn validate(&self) -> Result<(), String> {
+        if self.key.connection.is_empty() {
+            return Err("Invalid folder filter connection".into());
+        }
+        for patterns in [&self.include, &self.exclude] {
+            if patterns.len() > FOLDER_FILTER_PATTERNS
+                || patterns.iter().any(|pattern| pattern.is_empty() || pattern.len() > FOLDER_FILTER_PATTERN_LENGTH)
+            {
+                return Err("Folder filter exceeds the supported limit".into());
+            }
+        }
+        Ok(())
+    }
+}
+
+/// What a [`Bookmark`] points at: the same places the tree has, named by the names of their path, so it finds its row again after a
+/// restart (a MongoDB collection by its database and name, which is all the tree knows it by before it has loaded).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BookmarkTarget {
+    Database { connection: String, database: String },
+    Schema { connection: String, database: String, schema: String },
+    /// A table, view or materialized view.
+    Object { connection: String, database: String, schema: String, object: String },
+    /// A function, procedure, sequence, trigger, type or event; `object` is the driver's node id.
+    Routine { connection: String, database: String, schema: String, group: crate::navigator::ObjectGroup, object: String },
+    Collection { connection: String, database: String, collection: String },
+}
+
+impl BookmarkTarget {
+    pub fn connection(&self) -> &str {
+        match self {
+            Self::Database { connection, .. }
+            | Self::Schema { connection, .. }
+            | Self::Object { connection, .. }
+            | Self::Routine { connection, .. }
+            | Self::Collection { connection, .. } => connection,
+        }
+    }
+}
+
+/// A row of the tree the user keeps close: listed in the sidebar's Bookmarks section, whatever is open. Not a pin (a pin only moves a
+/// row to the top of its own level).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Bookmark {
+    pub id: String,
+    pub name: String,
+    pub target: BookmarkTarget,
+}
+
+const BOOKMARK_LIMIT: usize = 1_000;
+const BOOKMARK_NAME_LIMIT: usize = 200;
+
+impl Bookmark {
+    fn validate(&self) -> Result<(), String> {
+        if self.id.is_empty() || self.name.trim().is_empty() || self.name.chars().count() > BOOKMARK_NAME_LIMIT || self.target.connection().is_empty() {
+            return Err("Invalid bookmark".into());
+        }
+        Ok(())
+    }
+}
+
 fn validate_default_database(name: &str) -> Result<(), String> {
     if name.is_empty() || name.trim() != name || name.contains(['\0', '/']) {
         return Err("Invalid default database name".into());
@@ -135,6 +279,11 @@ pub struct SidebarPreferences {
     /// Width of the assistant dock; see [`Self::resolve_assistant_width`].
     pub assistant_width: Option<f32>,
     pub visible_filters: HashMap<String, VisibleObjectFilter>,
+    /// Include / exclude patterns of single folders of the tree (see [`FolderFilter`]); at most
+    /// one per [`FolderKey`].
+    pub folder_filters: Vec<FolderFilter>,
+    /// The bookmarks of the Bookmarks section at the top of the tree, in the order they were made.
+    pub bookmarks: Vec<Bookmark>,
     /// Sidebar "Local search" switch, inverted so the serde/derive default
     /// (`false`) is the default of local-only search.
     pub global_search: bool,
@@ -246,6 +395,22 @@ impl SidebarPreferences {
             }
             filter.validate()?;
         }
+        if self.folder_filters.len() > 10_000 {
+            return Err("Folder filters exceed the supported limit".into());
+        }
+        for filter in &self.folder_filters {
+            filter.validate()?;
+        }
+        if self.bookmarks.len() > BOOKMARK_LIMIT {
+            return Err("Bookmarks exceed the supported limit".into());
+        }
+        let mut bookmarks = HashSet::new();
+        for bookmark in &self.bookmarks {
+            bookmark.validate()?;
+            if !bookmarks.insert(bookmark.id.as_str()) {
+                return Err("Duplicate bookmark".into());
+            }
+        }
         let mut groups = HashSet::new();
         for group in &self.groups {
             if group.id.is_empty()
@@ -305,6 +470,53 @@ impl SidebarPreferences {
         filter.validate()?;
         self.visible_filters.insert(connection.into(), filter);
         Ok(())
+    }
+
+    pub fn bookmark(&self, id: &str) -> Option<&Bookmark> {
+        self.bookmarks.iter().find(|bookmark| bookmark.id == id)
+    }
+
+    /// Adds a bookmark; its name is trimmed.
+    pub fn add_bookmark(&mut self, mut bookmark: Bookmark) -> Result<(), String> {
+        bookmark.name = bookmark.name.trim().to_owned();
+        bookmark.validate()?;
+        if self.bookmarks.len() >= BOOKMARK_LIMIT || self.bookmark(&bookmark.id).is_some() {
+            return Err("Bookmarks exceed the supported limit".into());
+        }
+        self.bookmarks.push(bookmark);
+        Ok(())
+    }
+
+    pub fn rename_bookmark(&mut self, id: &str, name: &str) -> Result<(), String> {
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > BOOKMARK_NAME_LIMIT {
+            return Err("Invalid bookmark name".into());
+        }
+        let bookmark = self.bookmarks.iter_mut().find(|bookmark| bookmark.id == id).ok_or("The bookmark no longer exists")?;
+        bookmark.name = name.to_owned();
+        Ok(())
+    }
+
+    pub fn remove_bookmark(&mut self, id: &str) {
+        self.bookmarks.retain(|bookmark| bookmark.id != id);
+    }
+
+    pub fn folder_filter(&self, key: &FolderKey) -> Option<&FolderFilter> {
+        self.folder_filters.iter().find(|filter| &filter.key == key)
+    }
+
+    /// Sets the filter of its folder; one without patterns clears it.
+    pub fn set_folder_filter(&mut self, filter: FolderFilter) -> Result<(), String> {
+        filter.validate()?;
+        self.clear_folder_filter(&filter.key);
+        if !(filter.include.is_empty() && filter.exclude.is_empty()) {
+            self.folder_filters.push(filter);
+        }
+        Ok(())
+    }
+
+    pub fn clear_folder_filter(&mut self, key: &FolderKey) {
+        self.folder_filters.retain(|filter| &filter.key != key);
     }
 
     pub fn default_database(&self, connection: &str) -> Option<&str> {
@@ -740,6 +952,8 @@ impl SidebarPreferences {
 
     pub fn remove_connection(&mut self, id: &str) {
         self.connections.retain(|item| item.id != id);
+        // A bookmark of a connection that is gone has nothing to open: it goes with it.
+        self.bookmarks.retain(|bookmark| bookmark.target.connection() != id);
     }
 }
 
@@ -1057,5 +1271,119 @@ mod tests {
         assert!(prefs.save(&path.join("cannot-create-here.json")).is_err());
         assert_eq!(SidebarPreferences::load(&path).unwrap(), prefs);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn key(folder: FolderKind) -> FolderKey {
+        FolderKey { connection: "conn".into(), database: "app".into(), schema: "public".into(), folder }
+    }
+
+    fn filter(include: &[&str], exclude: &[&str]) -> FolderFilter {
+        FolderFilter {
+            key: key(FolderKind::Objects(crate::navigator::ObjectGroup::Tables)),
+            include: include.iter().map(|pattern| (*pattern).to_owned()).collect(),
+            exclude: exclude.iter().map(|pattern| (*pattern).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn folder_patterns_are_comma_separated_wildcards_that_ignore_case_and_match_the_whole_name() {
+        assert_eq!(parse_folder_patterns(" user_* , ,order?,"), ["user_*", "order?"]);
+        let compiled = |include: &[&str], exclude: &[&str]| CompiledFolderFilter::new(&filter(include, exclude)).unwrap();
+        let only = compiled(&["user_*", "order?"], &[]);
+        for name in ["user_", "USER_accounts", "orders", "ORDERS"] {
+            assert!(only.allows(name), "{name}");
+        }
+        // The whole name must match: `?` is one character, and a pattern is no substring search.
+        for name in ["order", "orders2", "myuser_x", "users"] {
+            assert!(!only.allows(name), "{name}");
+        }
+        let excluding = compiled(&[], &["tmp_*", "*_OLD"]);
+        assert!(excluding.allows("orders") && excluding.allows("tmp") && excluding.allows("old"));
+        assert!(!excluding.allows("tmp_a") && !excluding.allows("orders_old") && !excluding.allows("TMP_X"));
+        // Exclude wins over include.
+        let both = compiled(&["a*"], &["*b"]);
+        assert!(both.allows("axe") && !both.allows("aab") && !both.allows("xe"));
+        // Regex characters are literal.
+        let literal = compiled(&["a.b", "(x)", "[y]"], &[]);
+        assert!(literal.allows("a.b") && literal.allows("(X)") && literal.allows("[y]"));
+        assert!(!literal.allows("aXb") && !literal.allows("x") && !literal.allows("y"));
+        // Non-ASCII names.
+        assert!(compiled(&["caf?*"], &[]).allows("Café_au_lait"));
+        // No pattern at all allows everything.
+        assert!(compiled(&[], &[]).allows("anything"));
+    }
+
+    #[test]
+    fn a_folder_filter_round_trips_through_the_file_is_replaced_per_folder_and_clears() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sidebar-preferences.json");
+        let mut prefs = SidebarPreferences::default();
+        prefs.set_folder_filter(filter(&["a*"], &["*_old"])).unwrap();
+        let views = FolderFilter { key: key(FolderKind::Objects(crate::navigator::ObjectGroup::Views)), include: vec!["v?".into()], exclude: vec![] };
+        let schemas = FolderFilter { key: key(FolderKind::Schemas), include: vec![], exclude: vec!["pg_*".into()] };
+        for other in [views.clone(), schemas.clone()] {
+            prefs.set_folder_filter(other).unwrap();
+        }
+        prefs.save(&path).unwrap();
+        let restored = SidebarPreferences::load(&path).unwrap();
+        assert_eq!(restored, prefs);
+        assert_eq!(restored.folder_filters.len(), 3);
+        // Setting a folder's filter again replaces it; one without patterns clears it.
+        let mut changed = restored;
+        changed.set_folder_filter(filter(&["b*"], &[])).unwrap();
+        assert_eq!(changed.folder_filters.len(), 3);
+        assert_eq!(changed.folder_filter(&filter(&[], &[]).key).unwrap().include, ["b*"]);
+        changed.set_folder_filter(filter(&[], &[])).unwrap();
+        assert!(changed.folder_filter(&filter(&[], &[]).key).is_none());
+        changed.clear_folder_filter(&views.key);
+        assert_eq!(changed.folder_filters, [schemas]);
+        // A file from before folder filters has none.
+        let old: SidebarPreferences = serde_json::from_str("{}").unwrap();
+        assert!(old.folder_filters.is_empty());
+    }
+
+    #[test]
+    fn a_folder_filter_over_the_limits_is_refused() {
+        let mut prefs = SidebarPreferences::default();
+        assert!(prefs.set_folder_filter(filter(&vec!["a"; 33], &[])).is_err());
+        assert!(prefs.set_folder_filter(filter(&[&"a".repeat(257)], &[])).is_err());
+        let mut nameless = filter(&["a"], &[]);
+        nameless.key.connection.clear();
+        assert!(prefs.set_folder_filter(nameless).is_err());
+        assert!(prefs.folder_filters.is_empty());
+    }
+    #[test]
+    fn bookmarks_round_trip_rename_remove_and_go_with_their_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sidebar-preferences.json");
+        let object = |id: &str, name: &str, connection: &str, table: &str| Bookmark {
+            id: id.into(),
+            name: name.into(),
+            target: BookmarkTarget::Object { connection: connection.into(), database: "app".into(), schema: "public".into(), object: table.into() },
+        };
+        let mut prefs = SidebarPreferences::default();
+        prefs.add_bookmark(object("1", "  Orders  ", "conn", "orders")).unwrap();
+        prefs.add_bookmark(object("2", "Customers", "other", "customers")).unwrap();
+        prefs.add_bookmark(Bookmark { id: "3".into(), name: "shop".into(), target: BookmarkTarget::Collection { connection: "conn".into(), database: "shop".into(), collection: "carts".into() } }).unwrap();
+        assert_eq!(prefs.bookmark("1").unwrap().name, "Orders", "the name is trimmed");
+        prefs.save(&path).unwrap();
+        let restored = SidebarPreferences::load(&path).unwrap();
+        assert_eq!(restored, prefs);
+        // A file from before bookmarks has none.
+        let old: SidebarPreferences = serde_json::from_str("{}").unwrap();
+        assert!(old.bookmarks.is_empty());
+
+        let mut changed = restored;
+        changed.rename_bookmark("2", "  Clients ").unwrap();
+        assert_eq!(changed.bookmark("2").unwrap().name, "Clients");
+        assert!(changed.rename_bookmark("2", "   ").is_err() && changed.rename_bookmark("nope", "x").is_err());
+        assert!(changed.add_bookmark(object("1", "again", "conn", "orders")).is_err(), "an id is used once");
+        assert!(changed.add_bookmark(object("4", " ", "conn", "orders")).is_err());
+        assert!(changed.add_bookmark(object("5", &"n".repeat(201), "conn", "orders")).is_err());
+        changed.remove_bookmark("1");
+        assert_eq!(changed.bookmarks.iter().map(|bookmark| bookmark.id.as_str()).collect::<Vec<_>>(), ["2", "3"]);
+        // A deleted connection takes its bookmarks along.
+        changed.remove_connection("conn");
+        assert_eq!(changed.bookmarks.iter().map(|bookmark| bookmark.id.as_str()).collect::<Vec<_>>(), ["2"]);
     }
 }

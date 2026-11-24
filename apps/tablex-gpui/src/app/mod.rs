@@ -62,8 +62,10 @@ mod another_user;
 mod connection_policy;
 mod connection_ui;
 mod data_import;
+mod ddl_compare;
 mod accounts;
 mod backup;
+mod bookmarks;
 mod file_run;
 mod data_transfer;
 mod driver_manager;
@@ -77,7 +79,9 @@ mod mongo_admin_view;
 mod mongo_script;
 mod mongo_shell;
 mod navigator_status;
+mod navigator_tools;
 mod navigator_ui;
+mod folder_filter;
 mod key_home_ui;
 mod object_actions;
 mod panes_ui;
@@ -111,10 +115,12 @@ mod source_tab;
 mod sql_editor;
 mod structure_edit;
 mod tab_bar;
+mod table_stats;
 #[cfg(test)]
 mod test_data;
 mod transaction;
 mod transaction_dialogs;
+mod tree_clipboard;
 mod tunnel_ui;
 mod updates;
 mod vim;
@@ -216,6 +222,13 @@ pub struct AppRoot {
     /// Test double: where the Users & Privileges tabs read their catalogs from.
     #[cfg(test)]
     accounts_injected: Option<Arc<accounts::InjectedCatalog>>,
+    /// The row counts, sizes and comments read for the tables of the tree (see `table_stats`).
+    table_stats: table_stats::StatsCache,
+    /// Test double: where the table estimates are read from.
+    #[cfg(test)]
+    table_stats_injected: Option<Arc<accounts::InjectedCatalog>>,
+    /// The state of each DDL compare tab (see `ddl_compare`).
+    compare_tabs: HashMap<u64, ddl_compare::DdlCompareState>,
     /// The tab of each connection's Process List.
     process_lists: process_list::ProcessListViews,
     /// Test double: where the Process List tabs get their session from.
@@ -480,6 +493,10 @@ impl AppRoot {
             accounts: HashMap::new(),
             #[cfg(test)]
             accounts_injected: None,
+            compare_tabs: HashMap::new(),
+            table_stats: Default::default(),
+            #[cfg(test)]
+            table_stats_injected: None,
             process_lists: HashMap::new(),
             #[cfg(test)]
             process_list_injected: None,
@@ -773,6 +790,7 @@ mod tests {
     include!("tests/sidebar_names.rs");
     include!("tests/navigator_status.rs");
     include!("tests/sidebar_batch.rs");
+    include!("tests/navigator_tools.rs");
     include!("tests/sidebar_import.rs");
     include!("tests/editing.rs");
     include!("tests/cell_detail.rs");
@@ -788,6 +806,8 @@ mod tests {
     include!("tests/properties_edit.rs");
     include!("tests/object_actions.rs");
     include!("tests/generate_sql.rs");
+    include!("tests/navigator_create.rs");
+    include!("tests/navigator_tree.rs");
     include!("tests/data_import.rs");
     include!("tests/data_transfer.rs");
     include!("tests/file_run.rs");

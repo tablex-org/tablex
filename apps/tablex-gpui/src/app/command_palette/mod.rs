@@ -17,6 +17,7 @@
 
 mod commands;
 mod delegate;
+mod goto;
 mod index;
 mod matcher;
 
@@ -55,6 +56,8 @@ pub(super) struct PaletteState {
     /// Newest first, in memory only.
     recent: VecDeque<Recent>,
     catalog: Option<CatalogCache>,
+    /// "Go to object": its own list, catalog segment (with routines) and state.
+    goto: goto::GotoState,
 }
 
 /// Registers the app-level `OpenCommandPalette` handler. Like Cmd+F it has to
@@ -248,7 +251,7 @@ impl AppRoot {
                 cache.segment.clone()
             }
             _ => {
-                let segment = Arc::new(self.palette_catalog_segment());
+                let segment = Arc::new(self.palette_catalog_segment(false));
                 self.palette.catalog = Some(CatalogCache {
                     revision,
                     connections,
@@ -265,6 +268,11 @@ impl AppRoot {
                     self.assistant_editor_asks(),
                     self.explain_offered(),
                     self.workspace.active_tab().is_some_and(super::assistant::is_sql_editor),
+                    index::ConnectedOffers {
+                        any: !self.connected_in_scope(&super::navigator_tools::DisconnectScope::All).is_empty(),
+                        reconnect: self.reconnect_target().is_some(),
+                        bookmarks: !self.navigator.preferences().bookmarks.is_empty(),
+                    },
                 )),
                 Arc::new(self.palette_tabs_segment()),
                 Arc::new(self.palette_connections_segment()),
@@ -284,7 +292,7 @@ impl AppRoot {
             .collect()
     }
 
-    fn connections_signature(&self) -> u64 {
+    pub(in crate::app::command_palette) fn connections_signature(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         for saved in &self.saved_connections {
@@ -339,15 +347,25 @@ impl AppRoot {
 
     /// Databases, schemas, tables, views and Mongo collections that are
     /// already loaded in the navigator.
-    fn palette_catalog_segment(&self) -> Segment {
+    fn palette_catalog_segment(&self, routines: bool) -> Segment {
+        self.catalog_segment_of(&[&self.navigator], routines)
+    }
+
+    /// The loaded catalog of `navs` in one segment. A node that the first one already lists is not
+    /// listed again (the second is "Go to object"'s own search catalog).
+    fn catalog_segment_of(&self, navs: &[&crate::navigator::NavigatorState], routines: bool) -> Segment {
         let names: HashMap<String, (&str, ConnectionKind)> = self
             .saved_connections
             .iter()
             .map(|saved| (saved.id.to_string(), (saved.name.as_str(), saved.kind)))
             .collect();
         let mut builder = SegmentBuilder::new();
+        for (position, nav) in navs.iter().enumerate() {
         let mut object_scope: Option<(&str, &str, &str, u32)> = None;
-        self.navigator.visit_catalog(|id, label, object_kind, provider| {
+        nav.visit_catalog_with(routines, |id, label, object_kind, provider| {
+            if position > 0 && navs[0].label(id).is_some() {
+                return;
+            }
             let Some(connection) = node_connection_id(id) else {
                 return;
             };
@@ -393,6 +411,22 @@ impl AppRoot {
                     };
                     builder.push(object, icon_of(object), scope, label, None);
                 }
+                NavigatorNodeId::SchemaObject { database, schema, .. } => {
+                    let place = if schema.is_empty() {
+                        database.clone()
+                    } else {
+                        format!("{database}.{schema}")
+                    };
+                    let detail = join_detail(name, &place);
+                    let scope = builder.scope(&detail, "", connection, database, schema);
+                    builder.push(
+                        Kind::Routine,
+                        icon_of(Kind::Routine),
+                        scope,
+                        label,
+                        Some(Command::Node(id.clone())),
+                    );
+                }
                 NavigatorNodeId::Provider { .. } => {
                     if !matches!(kind, ConnectionKind::Mongodb | ConnectionKind::Redis) {
                         return;
@@ -429,6 +463,7 @@ impl AppRoot {
                 _ => {}
             }
         });
+        }
         builder.finish()
     }
 
@@ -518,6 +553,7 @@ fn icon_of(kind: Kind) -> TabIcon {
         Kind::Table => TabIcon::Colored("icons/table.svg", theme::icon_table()),
         Kind::View => TabIcon::Colored("icons/eye.svg", theme::icon_view()),
         Kind::Collection => TabIcon::Colored("icons/table.svg", theme::icon_collection()),
+        Kind::Routine => TabIcon::Colored("icons/braces.svg", theme::icon_schema()),
         Kind::Pipeline => TabIcon::Colored("icons/list-ordered.svg", theme::icon_schema()),
         Kind::Script => TabIcon::Plain("icons/square-terminal.svg"),
         Kind::Connection => TabIcon::Plain("icons/building-2.svg"),

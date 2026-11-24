@@ -936,6 +936,7 @@ impl AppRoot {
                                 }
                             }
                         }
+                        this.connection_came_up(&connection, cx);
                     } else {
                         this.navigator_ui.create_database_after_connect.remove(&connection);
                         let error = match outcome {
@@ -1174,7 +1175,27 @@ impl AppRoot {
         let _ = preferences.add_group("work", "Work", None);
         let _ = preferences.move_connections(&all, &work, Some("work"), 0);
         let _ = preferences.move_group("work", None, 0);
+        // The Bookmarks section: two tables of Production and a MongoDB collection.
+        let object = |id: &str, name: &str, object: &str| crate::sidebar_preferences::Bookmark {
+            id: id.into(),
+            name: name.into(),
+            target: crate::sidebar_preferences::BookmarkTarget::Object {
+                connection: POSTGRES_ID.into(),
+                database: database.into(),
+                schema: "public".into(),
+                object: object.into(),
+            },
+        };
+        let _ = preferences.add_bookmark(object("demo-customers", "Customers", "customers"));
+        let _ = preferences.add_bookmark(object("demo-revenue", "Monthly revenue", "monthly_revenue"));
+        let _ = preferences.add_bookmark(crate::sidebar_preferences::Bookmark {
+            id: "demo-carts".into(),
+            name: "Carts".into(),
+            target: crate::sidebar_preferences::BookmarkTarget::Collection { connection: MONGO_ID.into(), database: database.into(), collection: "carts".into() },
+        });
         let _ = self.navigator.set_preferences(preferences);
+        // The row counts and sizes of the tables (Settings > Sidebar > Show table sizes) are on in the shot.
+        Arc::make_mut(&mut self.settings).navigation.show_table_stats = true;
 
         // The tree: Production > shop > public > Tables, with `orders` open on its Columns.
         let root = NavigatorNodeId::Connection { connection: POSTGRES_ID.into() };
@@ -1450,6 +1471,8 @@ impl AppRoot {
                 self.continue_sidebar_locate(cx);
                 self.completion_node_loaded(&request.parent_id(), cx);
                 self.pump_remote_search(cx);
+                self.refresh_goto_object(cx);
+                self.continue_tree_restore(&request.connection_id(), cx);
             }
             Err(error) => self.apply_navigator_load(&request, generation, Err(error), cx),
         }

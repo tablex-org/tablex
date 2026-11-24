@@ -94,6 +94,12 @@ impl AppRoot {
 
     /// "Transfer Data…" / "Export Data…" and the toolbar's: opens the wizard on `init`.
     pub(in crate::app) fn open_data_transfer(&mut self, init: TransferInit, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_data_transfer_to(init, None, window, cx);
+    }
+
+    /// Like [`Self::open_data_transfer`], with the target of the tables already chosen (a Paste in the tree): nothing runs until the
+    /// user goes through the wizard.
+    pub(in crate::app) fn open_data_transfer_to(&mut self, init: TransferInit, target: Option<Namespace>, window: &mut Window, cx: &mut Context<Self>) {
         let kind = match self.transfer_source_gate(&init.source.connection) {
             Ok(kind) => kind,
             Err(problem) => {
@@ -118,6 +124,9 @@ impl AppRoot {
             .unwrap_or_default();
         let root = cx.entity().downgrade();
         let view = cx.new(|cx| TransferView::new(root, tab_id, init, kind, dialect, version, connections, folder, window, cx));
+        if let Some(target) = target {
+            view.update(cx, |view, cx| view.prefill_target(target, window, cx));
+        }
         self.transfers.insert(tab_id, view.clone());
         self.activate_tab_ui(tab_id, cx);
         // After this update ends: the wizard asks the app for the tables.

@@ -398,6 +398,15 @@ static DEFS: &[ShortcutDef] = &[
         bind!(AssistantEscape),
     )
     .fixed(),
+    // Cmd+Shift+D (Ctrl+Shift+D elsewhere): free in the keymap and in the editor.
+    ShortcutDef::new(
+        "navigation.go_to_object",
+        "General",
+        "Go to Object",
+        ANY,
+        &["secondary-shift-d"],
+        bind!(GoToObject),
+    ),
     ShortcutDef::new(
         "workspace.toggle_assistant",
         "General",
@@ -612,6 +621,15 @@ static DEFS: &[ShortcutDef] = &[
         SIDEBAR,
         &["f4"],
         bind!(OpenNavigatorSelection),
+    ),
+    // Paste of the tables Cmd+C remembered: opens the Data Transfer on the focused connection, database or schema.
+    ShortcutDef::new(
+        "sidebar.paste_tables",
+        "Sidebar",
+        "Paste Tables",
+        SIDEBAR,
+        &["secondary-v"],
+        bind!(PasteNavigatorSelection),
     ),
     ShortcutDef::new(
         "diagram.find",

@@ -25,6 +25,8 @@ pub(super) enum Kind {
     Table,
     View,
     Collection,
+    /// A function or procedure ("Go to object" only).
+    Routine,
 }
 
 impl Kind {
@@ -41,6 +43,7 @@ impl Kind {
             Self::Table => "Table",
             Self::View => "View",
             Self::Collection => "Collection",
+            Self::Routine => "Routine",
         }
     }
 
@@ -57,6 +60,7 @@ impl Kind {
             Self::Table => "Tables",
             Self::View => "Views",
             Self::Collection => "Collections",
+            Self::Routine => "Routines",
         }
     }
 
@@ -69,7 +73,7 @@ impl Kind {
             Self::Connection => 4,
             Self::Script | Self::Pipeline => 3,
             Self::Database | Self::Schema => 2,
-            Self::Table | Self::View | Self::Collection => 0,
+            Self::Table | Self::View | Self::Collection | Self::Routine => 0,
         }
     }
 }
@@ -390,12 +394,24 @@ pub(super) fn char_bit(c: char) -> u64 {
     1 << bit
 }
 
+/// What the connected connections offer the action list.
+#[derive(Clone, Copy, Default)]
+pub(super) struct ConnectedOffers {
+    /// Some connection is connected (Disconnect All).
+    pub(super) any: bool,
+    /// The selected / active connection can reconnect (Reconnect).
+    pub(super) reconnect: bool,
+    /// The tree has bookmarks (Go to Bookmark).
+    pub(super) bookmarks: bool,
+}
+
 /// Builds the icon-bearing entries of the static action list.
 pub(super) fn actions_segment(
     shortcuts: &super::super::shortcuts::Overrides,
     asks: super::super::assistant::EditorAsks,
     explain: bool,
     sql_editor: bool,
+    connections: ConnectedOffers,
 ) -> Segment {
     let mut builder = SegmentBuilder::new();
     for action in StaticAction::ALL {
@@ -403,6 +419,9 @@ pub(super) fn actions_segment(
         let offered = match action {
             StaticAction::ExplainQuery | StaticAction::OptimiseQuery => asks.explain,
             StaticAction::FixQuery => asks.fix,
+            StaticAction::ReconnectConnection => connections.reconnect,
+            StaticAction::DisconnectAll => connections.any,
+            StaticAction::GoToBookmark => connections.bookmarks,
             StaticAction::ExplainPlan | StaticAction::ExplainPlanAnalyze => explain,
             StaticAction::FormatSql
             | StaticAction::SaveSqlFileAs
