@@ -122,3 +122,7 @@ rusqlite = { version = "0.41", features = ["bundled"] }
 ed25519-dalek = { version = "2.2", default-features = false }
 # The credential, tunnel and record test doubles of the connect crate.
 engine-connect = { path = "../../rust-engine/crates/engine-connect", features = ["testing"] }
+
+# The Windows exe's icon and version info (build.rs); already in the tree through gpui, and not built on other systems.
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3"

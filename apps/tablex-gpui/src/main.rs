@@ -1,3 +1,6 @@
+// A release build on Windows is a GUI program: without this it opens a console window next to the app.
+#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
+
 // The interface texts: `t!` with a key like `area.name` reads them in the language of `i18n::code()` (a plain
 // `rust_i18n::t!` would read the process-wide locale, which tests must not share).
 #[cfg(feature = "ui")]

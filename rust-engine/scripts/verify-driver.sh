@@ -24,19 +24,22 @@ done
 [[ -f "${DYLIB}" ]] || { echo "Usage: $0 <dylib> [--json OUT.json]" >&2; exit 2; }
 
 CARGO_BIN="$(cargo_bin)"
-TMP="$(mktemp -t tablex-inspect.XXXXXX)"
-trap 'rm -f "${TMP}"' EXIT
+# Not named TMP: that is an environment variable on Windows (Git bash exports it), and
+# the file named here would become link.exe's temp directory (LNK1104 in the build below).
+INSPECT_OUT="$(mktemp -t tablex-inspect.XXXXXX)"
+trap 'rm -f "${INSPECT_OUT}"' EXIT
 
 if ! "${CARGO_BIN}" run -q --release --locked --manifest-path "${RUST_ENGINE_DIR}/Cargo.toml" \
-    -p engine-driver-host --example inspect-driver -- "${DYLIB}" > "${TMP}"; then
+    -p engine-driver-host --example inspect-driver -- "${DYLIB}" > "${INSPECT_OUT}"; then
     echo "VERIFY FAILED: host could not load ${DYLIB}" >&2
     exit 1
 fi
-python3 - "${TMP}" "${DYLIB}" <<'PY'
+# Windows runners have `python`, not always `python3`.
+"$(command -v python3 || command -v python)" - "${INSPECT_OUT}" "${DYLIB}" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["abi_version"] == 2, f"ABI {d['abi_version']} != 2"
 print(f"OK {sys.argv[2]}: driver={d['driver']} abi={d['abi_version']} "
       f"features={d['feature_count']} schemes={','.join(d['uri_schemes'])}")
 PY
-[[ -z "${JSON_OUT}" ]] || cp "${TMP}" "${JSON_OUT}"
+[[ -z "${JSON_OUT}" ]] || cp "${INSPECT_OUT}" "${JSON_OUT}"

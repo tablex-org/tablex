@@ -716,6 +716,9 @@ pub(crate) fn open_with_scenario(scenario: Option<UiScenario>, cx: &mut gpui::Ap
                 titlebar
             }),
             is_resizable: true,
+            // The Wayland app id / X11 window class: the Linux desktop file (scripts/package-linux.sh)
+            // names it, which gives the window its icon in the dock and the task switcher.
+            app_id: Some("tablex".into()),
             // Linux defaults to server-side decorations, where the window
             // manager draws its own bar and `TitleBar` omits its min / max /
             // close buttons. Ask for client-side so the title bar is the only

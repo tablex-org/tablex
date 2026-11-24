@@ -8407,6 +8407,7 @@ dependencies = [
  "criterion",
  "dirs",
  "ed25519-dalek 2.2.0",
+ "embed-resource",
  "engine-agent",
  "engine-ai",
  "engine-connect",

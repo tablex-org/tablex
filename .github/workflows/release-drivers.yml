@@ -39,8 +39,11 @@ name: Release Drivers
 # that has the `mongo.command` op), so bump the driver's version when its ops change. The
 # formatter's is the `version` of rust-engine/crates/tablex-sqruff.
 #
-# Run it from a `drivers-v*` tag only: push the tag, or "Run workflow" with the
-# tag selected as the ref. Never add pull_request / pull_request_target here.
+# Publish by pushing a `drivers-v*` tag. Dry run: "Run workflow" on any branch (workflow_dispatch) runs
+# every build job (all drivers, the MCP server, the plugins) and uploads their files as workflow artifacts
+# (3 days), and nothing else: the release job runs on a pushed tag only (`github.event_name == 'push'`), so no
+# dispatch, whatever ref it names, reaches the `release` environment (its secrets) or `gh release`.
+# Never add pull_request / pull_request_target here.
 on:
   push:
     tags:
@@ -61,7 +64,7 @@ jobs:
   build:
     name: build (${{ matrix.target }})
     # Forks skip: RELEASE_OWNER is a repository variable (Settings > Variables).
-    if: github.repository_owner == vars.RELEASE_OWNER && github.ref_type == 'tag' && startsWith(github.ref_name, 'drivers-v')
+    if: github.repository_owner == vars.RELEASE_OWNER && (github.event_name == 'workflow_dispatch' || (github.ref_type == 'tag' && startsWith(github.ref_name, 'drivers-v')))
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.experimental }}
     strategy:
@@ -80,15 +83,28 @@ jobs:
           # The scripts emit .so / .dll here, but the app's Linux / Windows
           # driver loading is not finished: these jobs must not block the
           # release, and a failing one simply publishes nothing for its target.
+          # The Linux jobs run in Debian 11 (glibc 2.31) so the libraries load on Debian 11+, Ubuntu 20.04+
+          # and RHEL 9 (a build on ubuntu-24.04 needs glibc 2.39), with OpenSSL linked statically
+          # (scripts/linux-container-setup.sh).
           - target: linux-x86_64
             os: ubuntu-24.04
             experimental: true
+            container: debian:11@sha256:6f519a81440354a85eb592c5f32109ab80605f6b892455983a6f618bf87fabe9
           - target: linux-aarch64
             os: ubuntu-24.04-arm
             experimental: true
+            container: debian:11@sha256:6f519a81440354a85eb592c5f32109ab80605f6b892455983a6f618bf87fabe9
           - target: windows-x86_64
             os: windows-2022
             experimental: true
+            # The C runtime linked into every library and exe: no Visual C++ Redistributable needed. Each module
+            # owns its CRT; the driver ABI frees memory in the module that allocated it (engine-driver-api).
+            rustflags: -C target-feature=+crt-static
+    # Only the Linux entries have an image; the others run on the runner itself.
+    container: ${{ matrix.container }}
+    env:
+      # Empty on the other targets.
+      RUSTFLAGS: ${{ matrix.rustflags }}
     defaults:
       run:
         shell: bash
@@ -98,7 +114,12 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
+      # Compilers, -dev packages, rustup and static OpenSSL of the Debian 11 image.
+      - name: Set up the build container
+        if: ${{ matrix.container }}
+        run: scripts/linux-container-setup.sh
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        if: ${{ !matrix.container }}
         with:
           toolchain: stable
       - name: Build and verify all drivers
@@ -168,12 +189,12 @@ jobs:
           name: dylibs-${{ matrix.target }}
           path: out/
           if-no-files-found: ignore
-          retention-days: 7
+          retention-days: ${{ github.event_name == 'workflow_dispatch' && 3 || 7 }}
 
   release:
     name: sign and publish
     needs: build
-    if: github.repository_owner == vars.RELEASE_OWNER && github.ref_type == 'tag' && startsWith(github.ref_name, 'drivers-v')
+    if: github.repository_owner == vars.RELEASE_OWNER && github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'drivers-v')
     runs-on: macos-15
     # Required reviewers + protected-tag restriction are configured on this
     # environment (README: "Release CI"). Secrets live only here.

@@ -81,6 +81,11 @@ an unloadable driver. Release signing in `package-driver.sh` re-signs the stripp
    (all but the first are `continue-on-error`: the app's Linux / Windows loading is unfinished, and the
    first Intel run should confirm the x86_64 zip before it blocks a release). Each job also uploads the
    `<id>.inspect.json` that `verify-driver.sh --json` wrote on its own runner.
+   The Linux jobs run in a Debian 11 container (`scripts/linux-container-setup.sh` in the repository root
+   installs the build packages, rustup and a static OpenSSL), so the libraries need glibc 2.31 at most
+   instead of the runner's 2.39 and load on Debian 11+, Ubuntu 20.04+ and RHEL 9. `verify-driver.sh` keeps
+   its temporary file out of a variable named `TMP`: on Windows that is the environment variable
+   `link.exe` writes its temporary files to (a file there fails every build script link with LNK1104).
 2. **`release` job (secrets, `release` environment, `macos-15`).** Imports the Developer ID certificate
    into a temporary keychain, runs `package-driver.sh --target <matrix target>` per target and driver (the
    host target is dlopen-verified; the others are packaged from their runner's `--inspect` JSON; `SIGNING_IDENTITY` / `TEAM_ID`,

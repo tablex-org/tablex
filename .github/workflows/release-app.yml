@@ -1,8 +1,21 @@
 name: Release App
-# Builds tablex.app for macOS (Apple silicon and Intel) from a `v*` tag, packs each
-# into a .dmg (scripts/bundle-macos.sh + scripts/dmg-macos.sh) and publishes them as
-# the GitHub Release of that tag, marked latest. The tag must be the app version of
-# apps/tablex-gpui/Cargo.toml (`v0.1.0` for 0.1.0).
+# Builds tablex for macOS (Apple silicon and Intel), Linux (x86_64 and aarch64) and Windows (x86_64) from a
+# `v*` tag, and publishes them as the GitHub Release of that tag, marked latest. One version for all: the
+# tag must be the app version of apps/tablex-gpui/Cargo.toml (`v0.1.0` for 0.1.0).
+#   macOS    tablex.app packed into a .dmg (scripts/bundle-macos.sh + scripts/dmg-macos.sh), signed below
+#   Linux    tablex-<version>-linux-<arch>.tar.gz and .AppImage (scripts/package-linux.sh), built in a
+#            Debian 11 container (scripts/linux-container-setup.sh): glibc 2.31 is the oldest it needs, and
+#            OpenSSL is linked statically, so the files run on Debian 11+, Ubuntu 20.04+ and RHEL 9
+#   Windows  tablex-<version>-windows-x86_64-setup.exe (an Inno Setup installer, per user, no administrator
+#            rights: scripts/windows/tablex.iss) and tablex-<version>-windows-x86_64.zip (portable)
+#            (scripts/package-windows.ps1), neither code signed
+# SHA256SUMS lists the SHA-256 of every file of the release but itself.
+# One failed build job fails the run before anything is published: re-run the failed job.
+#
+# Dry run: "Run workflow" on any branch (workflow_dispatch) runs every build job and uploads the files as
+# workflow artifacts (3 days), with the version of Cargo.toml and no tag check. It never publishes: the
+# publish job runs on a pushed `v*` tag only (`github.event_name == 'push'`), so no dispatch, whatever ref it
+# names, reaches the `release` environment (its secrets) or `gh release`.
 #
 # There is no Developer ID: the build jobs make an ad-hoc signed bundle, and the publish job signs it
 # again with the tablex release certificate (self-signed, pinned in scripts/release-signing.sha1; the
@@ -10,7 +23,8 @@ name: Release App
 # update zip. Its designated requirement is the same in every release, so what a user allowed in the
 # Keychain survives an update. It is not notarized: macOS asks the user to confirm the first launch
 # (the release notes say how). Drivers are not in the app: it installs them from the signed driver
-# catalog (release-drivers.yml).
+# catalog (release-drivers.yml). Linux and Windows builds do not update in place: the app tells the user
+# about the new release and opens its page (apps/tablex-gpui/src/app/updates).
 #
 # In-app update: each build also packs the bundle as `tablex-<version>-macos-<arch>.app.zip`, and the
 # publish job writes `app-update.json` (version, size and SHA-256 of both zips) and signs it with the
@@ -41,7 +55,7 @@ jobs:
   build:
     name: build (${{ matrix.arch }})
     # Forks skip: RELEASE_OWNER is a repository variable (Settings > Variables).
-    if: github.repository_owner == vars.RELEASE_OWNER && github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    if: github.repository_owner == vars.RELEASE_OWNER && (github.event_name == 'workflow_dispatch' || (github.ref_type == 'tag' && startsWith(github.ref_name, 'v')))
     runs-on: macos-15
     timeout-minutes: 60
     strategy:
@@ -57,25 +71,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: The tag names the app version
-        run: |
-          set -euo pipefail
-          version="$(sed -n 's/^version = "\(.*\)"/\1/p' apps/tablex-gpui/Cargo.toml | head -n 1)"
-          # The update manifest needs a plain major.minor.patch: fail here, not when publishing.
-          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "the app version ${version} is not major.minor.patch" >&2
-            exit 1
-          fi
-          if [[ "${GITHUB_REF_NAME}" != "v${version}" ]]; then
-            echo "tag ${GITHUB_REF_NAME} does not match the app version ${version}" >&2
-            exit 1
-          fi
-          echo "VERSION=${version}" >> "${GITHUB_ENV}"
-          # What changed, written before tagging; it opens the release page.
-          if [[ ! -s "release-notes/${GITHUB_REF_NAME}.md" ]]; then
-            echo "release-notes/${GITHUB_REF_NAME}.md is missing or empty" >&2
-            exit 1
-          fi
+      - name: Check the app version (the tag names it)
+        run: scripts/release-version.sh
 
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
@@ -99,11 +96,176 @@ jobs:
           name: app-${{ matrix.arch }}
           path: dist/*.app.zip
           if-no-files-found: error
+          retention-days: ${{ github.event_name == 'workflow_dispatch' && 3 || 7 }}
+
+  build-linux:
+    name: build (linux-${{ matrix.arch }})
+    if: github.repository_owner == vars.RELEASE_OWNER && (github.event_name == 'workflow_dispatch' || (github.ref_type == 'tag' && startsWith(github.ref_name, 'v')))
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    # Debian 11 (bullseye, glibc 2.31), by the digest of its multi-architecture image: everything below runs in it.
+    container:
+      image: debian:11@sha256:6f519a81440354a85eb592c5f32109ab80605f6b892455983a6f618bf87fabe9
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # No git in the image yet: the action downloads the tree instead, which is all the build needs.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Check the app version (the tag names it)
+        run: scripts/release-version.sh
+
+      # Compilers, -dev packages, rustup, static OpenSSL; the extra packages are for packaging.
+      - name: Set up the build environment
+        run: scripts/linux-container-setup.sh imagemagick desktop-file-utils binutils
+
+      - name: Build (dist profile)
+        run: |
+          set -euo pipefail
+          cargo build --locked --profile dist -p tablex-gpui
+          cargo build --locked --profile dist -p tablex-mcp
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          # --max-glibc fails the job when something newer than the container's glibc got linked.
+          scripts/package-linux.sh --version "${VERSION}" --arch "${{ matrix.arch }}" --out dist --max-glibc 2.31
+
+      # The tarball and the AppImage are what users download: unpack both and run the MCP server in them
+      # (it prints its version and exits, no server, no network).
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          name="tablex-${VERSION}-linux-${{ matrix.arch }}"
+          tar -tzf "dist/${name}.tar.gz" | grep -Fx "${name}/bin/tablex"
+          target/dist/tablex-mcp --version
+          work="$(mktemp -d)"
+          (cd "${work}" && "${GITHUB_WORKSPACE}/dist/${name}.AppImage" --appimage-extract >/dev/null)
+          test -x "${work}/squashfs-root/usr/bin/tablex"
+          test -L "${work}/squashfs-root/AppRun"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: app-linux-${{ matrix.arch }}
+          path: |
+            dist/*.tar.gz
+            dist/*.AppImage
+          if-no-files-found: error
+          retention-days: ${{ github.event_name == 'workflow_dispatch' && 3 || 7 }}
+
+  build-windows:
+    name: build (windows-x86_64)
+    if: github.repository_owner == vars.RELEASE_OWNER && (github.event_name == 'workflow_dispatch' || (github.ref_type == 'tag' && startsWith(github.ref_name, 'v')))
+    runs-on: windows-2022
+    timeout-minutes: 90
+    # The C runtime is linked into the exe: no Visual C++ Redistributable to install. The drivers of the
+    # catalog are built the same way (release-drivers.yml); each module owns its own CRT, and memory is
+    # always freed by the module that allocated it (engine-driver-api's ABI).
+    env:
+      RUSTFLAGS: -C target-feature=+crt-static
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # Deep cargo registry / target paths exceed MAX_PATH on Windows.
+      - name: Enable long paths
+        run: git config --system core.longpaths true
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Check the app version (the tag names it)
+        run: scripts/release-version.sh
+
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
+
+      - name: Build (dist profile)
+        run: |
+          set -euo pipefail
+          cargo build --locked --profile dist -p tablex-gpui
+          cargo build --locked --profile dist -p tablex-mcp
+          # Our own just-built binary: it prints its version and exits.
+          target/dist/tablex-mcp.exe --version
+
+      # The import tables name the DLLs the exes load: none of the C runtime's (VCRUNTIME140, MSVCP140, the
+      # api-ms-win-crt-* forwarders, ucrtbase) may be among them.
+      - name: No C runtime DLL is imported
+        run: |
+          set -euo pipefail
+          for exe in target/dist/tablex-gpui.exe target/dist/tablex-mcp.exe; do
+            if grep -aiqE 'vcruntime|msvcp|api-ms-win-crt|ucrtbase' "${exe}"; then
+              echo "${exe} imports the dynamic C runtime" >&2
+              exit 1
+            fi
+          done
+
+      - name: Package
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-windows.ps1 -Version "${VERSION}" -OutDir dist
+
+      # Inno Setup 6.7.4 from its official GitHub release, checked against the SHA-256 of the file (the digest
+      # GitHub shows for the asset). To move to another version change the version, the tag in the URL and the hash together.
+      - name: Install Inno Setup
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = "6.7.4"
+          $sha256 = "a549929319f9120716677c685535ca4671e4b937b5fdc87e2585f32d8eb30e8c"
+          $setup = Join-Path $env:RUNNER_TEMP "innosetup-$version.exe"
+          Invoke-WebRequest -UseBasicParsing -Uri "https://github.com/jrsoftware/issrc/releases/download/is-6_7_4/innosetup-$version.exe" -OutFile $setup
+          $actual = (Get-FileHash -Algorithm SHA256 $setup).Hash.ToLower()
+          if ($actual -ne $sha256) { throw "innosetup-$version.exe has SHA-256 $actual, expected $sha256" }
+          $dir = Join-Path $env:RUNNER_TEMP "inno"
+          Start-Process -FilePath $setup -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/CURRENTUSER", "/DIR=`"$dir`"" -Wait
+          if (-not (Test-Path (Join-Path $dir "ISCC.exe"))) { throw "Inno Setup was not installed" }
+          "INNO_ISCC=$(Join-Path $dir 'ISCC.exe')" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      # The installer holds the files of the zip (scripts/package-windows-installer.ps1).
+      - name: Installer
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-windows-installer.ps1 -Version "${VERSION}" -OutDir dist -Iscc "${INNO_ISCC}"
+
+      # Install it for this user into a scratch folder, check the files, uninstall it: it must leave nothing behind.
+      - name: Installer smoke test
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $setup = (Resolve-Path "dist\tablex-$env:VERSION-windows-x86_64-setup.exe").Path
+          $dir = Join-Path $env:RUNNER_TEMP "tablex-installed"
+          Start-Process -FilePath $setup -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CURRENTUSER", "/DIR=`"$dir`"" -Wait
+          foreach ($file in "tablex.exe", "tablex-mcp.exe", "LICENSE", "README.txt", "licenses\Apache-2.0.txt", "unins000.exe") {
+            if (-not (Test-Path (Join-Path $dir $file))) { throw "the installer did not put $file in place" }
+          }
+          & (Join-Path $dir "tablex-mcp.exe") --version
+          Start-Process -FilePath (Join-Path $dir "unins000.exe") -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait
+          for ($i = 0; $i -lt 30 -and (Test-Path (Join-Path $dir "tablex.exe")); $i++) { Start-Sleep -Seconds 1 }
+          if (Test-Path (Join-Path $dir "tablex.exe")) { throw "the uninstaller left tablex.exe behind" }
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: app-windows-x86_64
+          path: |
+            dist/*.zip
+            dist/*-setup.exe
+          if-no-files-found: error
+          retention-days: ${{ github.event_name == 'workflow_dispatch' && 3 || 7 }}
 
   release:
     name: publish
-    needs: build
-    if: github.repository_owner == vars.RELEASE_OWNER && github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    needs: [build, build-linux, build-windows]
+    if: github.repository_owner == vars.RELEASE_OWNER && github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
     # macOS, as release-drivers.yml: the signer is built and run there.
     runs-on: macos-15
     # The signing key lives in this environment (required reviewers and the allowed tags are set on it).
@@ -179,6 +341,20 @@ jobs:
             --signer rust-engine/target/release/examples/sign-manifest
           test -s dist/app-update.json.sig
 
+      # Every file of the release but this list itself, signature included: what `shasum -a 256 -c` checks.
+      - name: Checksums
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          cd dist
+          shasum -a 256 "tablex-${version}-"* app-update.json app-update.json.sig > SHA256SUMS
+          cat SHA256SUMS
+          # The ten files of the five builds (two .dmg, two .app.zip, two .tar.gz, two .AppImage, one .zip, one
+          # -setup.exe) must all be in it.
+          test "$(grep -c "tablex-${version}-" SHA256SUMS)" -eq 10
+
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -188,16 +364,33 @@ jobs:
           set -euo pipefail
           version="${TAG#v}"
           cat > notes.md <<EOF
-          tablex ${version} for macOS 12 or later.
+          tablex ${version} for macOS 12 or later, Linux and Windows.
 
-          | Mac | Download |
+          | System | Download |
           | --- | --- |
-          | Apple silicon (M1 and later) | \`tablex-${version}-macos-apple-silicon.dmg\` |
-          | Intel | \`tablex-${version}-macos-intel.dmg\` |
+          | macOS, Apple silicon (M1 and later) | \`tablex-${version}-macos-apple-silicon.dmg\` |
+          | macOS, Intel | \`tablex-${version}-macos-intel.dmg\` |
+          | Linux, x86_64 | \`tablex-${version}-linux-x86_64.AppImage\` or \`.tar.gz\` |
+          | Linux, aarch64 | \`tablex-${version}-linux-aarch64.AppImage\` or \`.tar.gz\` |
+          | Windows 10 or later, x86_64 | \`tablex-${version}-windows-x86_64-setup.exe\` (installer), or \`tablex-${version}-windows-x86_64.zip\` (portable) |
 
-          Open the .dmg and drag tablex to Applications. The app is not notarized by Apple yet, so
+          **macOS**: open the .dmg and drag tablex to Applications. The app is not notarized by Apple yet, so
           the first launch needs a confirmation: right-click tablex in Applications and choose
           **Open**, or run \`xattr -dr com.apple.quarantine /Applications/tablex.app\`.
+
+          **Linux**: the AppImage and the tarball hold the same build (it needs glibc 2.31 or newer, a Wayland
+          or X11 session and a Vulkan driver). For the AppImage run \`chmod +x tablex-${version}-linux-*.AppImage\`
+          and start it (or run it with \`--appimage-extract-and-run\` when FUSE is not installed). The tarball
+          runs from where it is unpacked; its README says how to install it for your user.
+
+          **Windows**: run the \`-setup.exe\`: it installs tablex for your user (no administrator rights), adds
+          it to the Start menu and to Apps > Installed apps, and a later version's installer upgrades it in
+          place; uninstalling keeps your connections and settings. The zip is the portable build: unzip and run
+          \`tablex.exe\`. The programs are not code signed yet, so SmartScreen asks for a confirmation:
+          **More info**, then **Run anyway**. Linux and Windows builds do not update themselves: the app tells
+          you about a new release and opens this page.
+
+          \`SHA256SUMS\` lists the SHA-256 of every file: \`sha256sum -c SHA256SUMS --ignore-missing\`.
 
           Database drivers are installed from the app: **Driver Manager** lists PostgreSQL,
           MySQL, MariaDB, SQLite, MongoDB, Redis and ClickHouse.
@@ -207,4 +400,5 @@ jobs:
           # What changed first (release-notes/<tag>.md), then the install notes.
           { cat "release-notes/${TAG}.md"; printf '\n---\n\n'; cat notes.md; } > release-notes.md
           gh release create "${TAG}" --title "tablex ${version}" --notes-file release-notes.md --latest \
-            dist/*.dmg dist/*.app.zip dist/app-update.json dist/app-update.json.sig
+            dist/*.dmg dist/*.app.zip dist/*.tar.gz dist/*.AppImage dist/*-windows-*.zip dist/*-setup.exe \
+            dist/SHA256SUMS dist/app-update.json dist/app-update.json.sig
