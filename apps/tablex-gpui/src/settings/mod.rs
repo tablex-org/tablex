@@ -120,6 +120,24 @@ choice_enum!(
 );
 
 choice_enum!(
+    /// The Vim mode an editor starts in when it opens or Vim is switched on.
+    VimDefaultMode {
+        Normal => ("normal", "Normal"),
+        Insert => ("insert", "Insert"),
+    }
+);
+
+choice_enum!(
+    /// When Vim's register and the system clipboard are the same: Always (every delete, change and
+    /// yank writes it, `p` reads it), on a yank only, or never.
+    VimClipboard {
+        Always => ("always", "Always"),
+        OnYank => ("on_yank", "On yank"),
+        Never => ("never", "Never"),
+    }
+);
+
+choice_enum!(
     /// How boolean cells are drawn.
     BooleanDisplay {
         Text => ("text", "Text"),
@@ -353,6 +371,22 @@ pub struct EditorSettings {
     pub auto_close: bool,
     /// Basic Vim keys in the query editors; a tab's own switch overrides it for that tab.
     pub vim_mode: bool,
+    /// Vim: the mode an editor starts in.
+    pub vim_default_mode: VimDefaultMode,
+    /// Vim: how the register and the system clipboard are tied.
+    pub vim_clipboard: VimClipboard,
+    /// Vim: two keys typed in Insert mode that leave it (`jk`); empty = none.
+    pub vim_escape_sequence: String,
+    /// Vim: milliseconds the second key of the escape sequence may take.
+    pub vim_escape_timeout: u32,
+    /// Vim: milliseconds a yanked text stays highlighted; 0 = not at all.
+    pub vim_highlight_yank: u32,
+    /// Vim: whether it takes the Ctrl chords (Ctrl-R, Ctrl-D, Ctrl-U, Ctrl-[).
+    pub vim_ctrl_keys: bool,
+    /// Vim: a search ignores the case of letters.
+    pub vim_ignore_case: bool,
+    /// Vim: with ignore case, a search with a capital letter is case sensitive again.
+    pub vim_smart_case: bool,
     pub autocomplete_auto_trigger: bool,
     pub autocomplete_insert_space: bool,
     pub autocomplete_max_items: u32,
@@ -429,6 +463,14 @@ impl Default for EditorSettings {
             tab_size: 2,
             auto_close: true,
             vim_mode: false,
+            vim_default_mode: VimDefaultMode::Normal,
+            vim_clipboard: VimClipboard::OnYank,
+            vim_escape_sequence: String::new(),
+            vim_escape_timeout: 300,
+            vim_highlight_yank: 200,
+            vim_ctrl_keys: true,
+            vim_ignore_case: true,
+            vim_smart_case: true,
             autocomplete_auto_trigger: true,
             autocomplete_insert_space: false,
             autocomplete_max_items: 50,
@@ -873,6 +915,8 @@ mod tests {
         assert_serde_names_match::<ErrorLogPlace>();
         assert_serde_names_match::<KeywordCase>();
         assert_serde_names_match::<FormatterChoice>();
+        assert_serde_names_match::<VimDefaultMode>();
+        assert_serde_names_match::<VimClipboard>();
         assert_serde_names_match::<BooleanDisplay>();
         assert_serde_names_match::<DateTimeFormat>();
         assert_serde_names_match::<BinaryDisplay>();

@@ -141,8 +141,8 @@ fn insert_escape_and_letters_in_normal_mode(cx: &mut TestAppContext) {
     let tab = vim_sql_tab(&app, visual, "world");
     vim_toggle(visual);
     vim_cursor(&app, visual, tab, 0);
-    // Letters in Normal mode are commands (or nothing), never text.
-    vim_press(visual, "zqZ:/f,;");
+    // Letters in Normal mode are commands (or nothing), never text (`f,` finds nothing, `;` repeats it).
+    vim_press(visual, "zqZ:f,;");
     assert_eq!(editor_text(&app, visual, tab), "world");
     vim_press(visual, "i");
     vim_press(visual, "hello ");
@@ -621,4 +621,438 @@ fn the_block_caret_is_not_a_frame_behind_the_editor_caret(cx: &mut TestAppContex
         assert_block_at_caret(now, vim_thin_caret(&app, visual, tab), why);
         assert_ne!(now.origin, previous.origin, "{why}: {previous:?} -> {now:?}");
     }
+}
+
+// ---- the Vim settings, the search prompt, `.` and the view ------------------------------------
+
+/// Changes Settings > Editor (the way the page's Apply does) and lets the app settle.
+fn vim_set(
+    app: &gpui::Entity<AppRoot>,
+    visual: &mut gpui::VisualTestContext,
+    change: impl FnOnce(&mut crate::settings::EditorSettings),
+) {
+    app.update(visual, |this, cx| {
+        let mut next = (**this.settings()).clone();
+        change(&mut next.editor);
+        this.apply_settings(next, None, cx);
+    });
+    settle(visual);
+}
+
+fn vim_prompt(app: &gpui::Entity<AppRoot>, visual: &gpui::VisualTestContext, tab: u64) -> Option<String> {
+    app.read_with(visual, |this, _| this.vim_prompt_text(tab))
+}
+
+fn vim_clipboard_text(visual: &gpui::VisualTestContext) -> Option<String> {
+    visual.read_from_clipboard().and_then(|item| item.text())
+}
+
+/// Time passes for the app's timers (a test window has a clock of its own).
+fn vim_wait(visual: &mut gpui::VisualTestContext, millis: u64) {
+    visual.cx.executor().advance_clock(std::time::Duration::from_millis(millis));
+    settle(visual);
+}
+
+#[gpui::test]
+fn counts_dot_find_and_text_objects_work_with_real_keystrokes(cx: &mut TestAppContext) {
+    let (app, visual) = layout_app(cx);
+    let tab = vim_sql_tab(&app, visual, "one two three\nfour (five) six\nseven\neight");
+    vim_toggle(visual);
+    vim_cursor(&app, visual, tab, 0);
+    vim_press(visual, "2w");
+    assert_eq!(vim_selection(&app, visual, tab), 8..8, "2w");
+    vim_cursor(&app, visual, tab, 2);
+    vim_press(visual, "2j");
+    assert_eq!(vim_selection(&app, visual, tab), 32..32, "2j keeps the column");
+    vim_press(visual, "gg");
+    vim_press(visual, "x.");
+    assert_eq!(editor_text(&app, visual, tab), "e two three\nfour (five) six\nseven\neight", "x then . takes two chars");
+    vim_press(visual, "dw");
+    assert_eq!(editor_text(&app, visual, tab), "two three\nfour (five) six\nseven\neight");
+    vim_press(visual, "jf(");
+    assert_eq!(vim_selection(&app, visual, tab), 15..15, "f( finds the bracket");
+    vim_press(visual, "ci(X");
+    visual.simulate_keystrokes("escape");
+    assert_eq!(editor_text(&app, visual, tab), "two three\nfour (X) six\nseven\neight", "ci( changes what is inside");
+    vim_press(visual, "gg2dd");
+    assert_eq!(editor_text(&app, visual, tab), "seven\neight");
+    vim_press(visual, "u");
+    assert_eq!(editor_text(&app, visual, tab), "two three\nfour (X) six\nseven\neight", "one undo step for 2dd");
+    vim_cursor(&app, visual, tab, 0);
+    vim_press(visual, "3J");
+    assert_eq!(editor_text(&app, visual, tab), "two three four (X) six seven\neight", "3J joins three lines");
+}
+
+#[gpui::test]
+fn the_search_prompt_is_typed_in_the_status_line_and_run_with_enter(cx: &mut TestAppContext) {
+    let (app, visual) = layout_app(cx);
+    let tab = vim_sql_tab(&app, visual, "one two\nthree two\nfour two");
+    vim_toggle(visual);
+    vim_cursor(&app, visual, tab, 0);
+    assert!(visual.debug_bounds("vim-prompt").is_none(), "no prompt before /");
+    vim_press(visual, "/two");
+    assert_eq!(vim_prompt(&app, visual, tab), Some("/two".into()));
+    assert!(visual.debug_bounds("vim-prompt").is_some(), "the prompt is in the status line");
+    assert_eq!(editor_text(&app, visual, tab), "one two\nthree two\nfour two", "what is typed in the prompt is not text");
+    assert_eq!(vim_selection(&app, visual, tab), 0..0, "nothing moves before Enter");
+    visual.simulate_keystrokes("enter");
+    settle(visual);
+    assert_eq!(vim_prompt(&app, visual, tab), None);
+    assert!(visual.debug_bounds("vim-prompt").is_none());
+    assert_eq!(editor_text(&app, visual, tab), "one two\nthree two\nfour two", "Enter ran the search, it did not break the line");
+    assert_eq!(vim_selection(&app, visual, tab), 4..4);
+    for (keys, at) in [("n", 14), ("n", 23), ("n", 4), ("N", 23)] {
+        vim_press(visual, keys);
+        assert_eq!(vim_selection(&app, visual, tab), at..at, "{keys}");
+    }
+    // Escape cancels, Backspace edits.
+    vim_press(visual, "?one");
+    assert_eq!(vim_prompt(&app, visual, tab), Some("?one".into()));
+    visual.simulate_keystrokes("escape");
+    assert_eq!(vim_prompt(&app, visual, tab), None);
+    assert_eq!(vim_selection(&app, visual, tab), 23..23, "Escape searched nothing");
+    assert_eq!(vim_mode_of(&app, visual, tab), crate::vim::Mode::Normal);
+    vim_press(visual, "/tw");
+    visual.simulate_keystrokes("backspace");
+    assert_eq!(vim_prompt(&app, visual, tab), Some("/t".into()));
+    assert_eq!(editor_text(&app, visual, tab), "one two\nthree two\nfour two", "Backspace did not delete text");
+    visual.simulate_keystrokes("enter");
+    settle(visual);
+    assert_eq!(vim_selection(&app, visual, tab), 4..4, "the next t wraps to the first line");
+    // `*` searches the word under the cursor, in whole words.
+    vim_cursor(&app, visual, tab, 4);
+    vim_press(visual, "*");
+    assert_eq!(vim_selection(&app, visual, tab), 14..14);
+}
+
+#[gpui::test]
+fn search_follows_the_ignore_case_and_smart_case_settings(cx: &mut TestAppContext) {
+    let (app, visual) = layout_app(cx);
+    let tab = vim_sql_tab(&app, visual, "x foo Foo");
+    vim_toggle(visual);
+    let search = |app: &gpui::Entity<AppRoot>, visual: &mut gpui::VisualTestContext, pattern: &str| {
+        vim_cursor(app, visual, tab, 0);
+        vim_press(visual, &format!("/{pattern}"));
+        visual.simulate_keystrokes("enter");
+        settle(visual);
+        vim_selection(app, visual, tab).start
+    };
+    assert_eq!(search(&app, visual, "Foo"), 6, "smart case: a capital letter is exact");
+    vim_set(&app, visual, |editor| editor.vim_smart_case = false);
+    assert_eq!(search(&app, visual, "Foo"), 2, "without smart case the capital is ignored");
+    vim_set(&app, visual, |editor| editor.vim_ignore_case = false);
+    assert_eq!(search(&app, visual, "Foo"), 6, "case sensitive");
+    assert_eq!(search(&app, visual, "foo"), 2);
+    vim_set(&app, visual, |editor| editor.vim_ignore_case = true);
+    assert_eq!(search(&app, visual, "FOO"), 2, "ignore case");
+}
+
+#[gpui::test]
+fn the_clipboard_setting_decides_what_reaches_and_comes_from_the_system_clipboard(cx: &mut TestAppContext) {
+    let (app, visual) = layout_app(cx);
+    let tab = vim_sql_tab(&app, visual, "one\ntwo\nthree");
+    vim_toggle(visual);
+    vim_cursor(&app, visual, tab, 0);
+    let write = |visual: &mut gpui::VisualTestContext, text: &str| {
+        visual.write_to_clipboard(gpui::ClipboardItem::new_string(text.into()));
+    };
+    // On yank (the default): a delete leaves the clipboard alone, a yank writes it.
+    write(visual, "KEEP");
+    vim_press(visual, "dd");
+    assert_eq!(editor_text(&app, visual, tab), "two\nthree");
+    assert_eq!(vim_clipboard_text(visual), Some("KEEP".into()), "a delete is not copied");
+    vim_press(visual, "yy");
+    assert_eq!(vim_clipboard_text(visual), Some("two\n".into()), "a yank is");
+    // Always: a delete is copied, and `p` puts what the clipboard holds.
+    vim_set(&app, visual, |editor| editor.vim_clipboard = crate::settings::VimClipboard::Always);
+    vim_press(visual, "jdd");
+    assert_eq!(editor_text(&app, visual, tab), "two");
+    assert_eq!(vim_clipboard_text(visual), Some("three\n".into()), "a delete is copied");
+    write(visual, "EXT");
+    vim_press(visual, "p");
+    assert_eq!(editor_text(&app, visual, tab), "tEXTwo", "p puts the system clipboard, not Vim's register");
+    // Never: the clipboard is not touched in either direction.
+    vim_set(&app, visual, |editor| editor.vim_clipboard = crate::settings::VimClipboard::Never);
+    write(visual, "KEEP2");
+    vim_cursor(&app, visual, tab, 0);
+    vim_press(visual, "yl$p");
+    assert_eq!(vim_clipboard_text(visual), Some("KEEP2".into()), "a yank is not copied");
+    assert_eq!(editor_text(&app, visual, tab), "tEXTwot", "p puts Vim's own register");
+}
+
+#[gpui::test]
+fn the_escape_sequence_leaves_insert_mode_and_its_keys_never_stay_in_the_text(cx: &mut TestAppContext) {
+    use crate::vim::Mode::{Insert, Normal};
+    let (app, visual) = layout_app(cx);
+    let tab = vim_sql_tab(&app, visual, "abc");
+    vim_set(&app, visual, |editor| editor.vim_escape_sequence = "jk".into());
+    vim_toggle(visual);
+    vim_cursor(&app, visual, tab, 0);
+    // jk: no j, no k, Normal mode.
+    vim_press(visual, "Axy");
+    vim_press(visual, "jk");
+    assert_eq!(editor_text(&app, visual, tab), "abcxy");
+    assert_eq!(vim_mode_of(&app, visual, tab), Normal);
+    // A j alone is held back, then typed when the time is up.
+    vim_press(visual, "Aj");
+    assert_eq!(editor_text(&app, visual, tab), "abcxy", "the first key is held, not typed yet");
+    assert_eq!(vim_mode_of(&app, visual, tab), Insert);
+    vim_wait(visual, 299);
+    assert_eq!(editor_text(&app, visual, tab), "abcxy", "still within the timeout");
+    vim_wait(visual, 2);
+    assert_eq!(editor_text(&app, visual, tab), "abcxyj", "the timeout types it");
+    assert_eq!(vim_mode_of(&app, visual, tab), Insert);
+    // j then another key: both are typed, in order.
+    vim_press(visual, "jx");
+    assert_eq!(editor_text(&app, visual, tab), "abcxyjjx");
+    // jjk: the first j is text, the second and k leave.
+    vim_press(visual, "jjk");
+    assert_eq!(editor_text(&app, visual, tab), "abcxyjjxj");
+    assert_eq!(vim_mode_of(&app, visual, tab), Normal);
+    // j then Escape: the j is typed first.
+    vim_press(visual, "Aj");
+    visual.simulate_keystrokes("escape");
+    assert_eq!(editor_text(&app, visual, tab), "abcxyjjxjj");
+    assert_eq!(vim_mode_of(&app, visual, tab), Normal);
+    // Ctrl-[ is Escape too: the held j is typed first.
+    vim_press(visual, "Aj");
+    visual.simulate_keystrokes("ctrl-[");
+    assert_eq!(editor_text(&app, visual, tab), "abcxyjjxjjj");
+    assert_eq!(vim_mode_of(&app, visual, tab), Normal);
+    // A timer left from a key that was typed does not type it twice.
+    vim_wait(visual, 1000);
+    assert_eq!(editor_text(&app, visual, tab), "abcxyjjxjjj");
+    // The second key alone is plain text.
+    vim_press(visual, "Ak");
+    assert_eq!(editor_text(&app, visual, tab), "abcxyjjxjjjk");
+    visual.simulate_keystrokes("escape");
+    // Same key twice.
+    vim_set(&app, visual, |editor| editor.vim_escape_sequence = "jj".into());
+    vim_press(visual, "Ajj");
+    assert_eq!(editor_text(&app, visual, tab), "abcxyjjxjjjk");
+    assert_eq!(vim_mode_of(&app, visual, tab), Normal);
+    // Off: typed as they come.
+    vim_set(&app, visual, |editor| editor.vim_escape_sequence = String::new());
+    vim_press(visual, "Ajk");
+    assert_eq!(editor_text(&app, visual, tab), "abcxyjjxjjjkjk");
+    assert_eq!(vim_mode_of(&app, visual, tab), Insert);
+    // One key is not a sequence.
+    vim_set(&app, visual, |editor| editor.vim_escape_sequence = "j".into());
+    vim_press(visual, "j");
+    assert_eq!(editor_text(&app, visual, tab), "abcxyjjxjjjkjkj");
+}
+
+#[gpui::test]
+fn a_held_escape_key_is_typed_before_a_key_that_moves_the_caret_or_the_selection(cx: &mut TestAppContext) {
+    use crate::vim::Mode::{Insert, Normal};
+    let (app, visual) = layout_app(cx);
+    let tab = vim_sql_tab(&app, visual, "abc");
+    vim_set(&app, visual, |editor| editor.vim_escape_sequence = "jk".into());
+    vim_toggle(visual);
+    vim_cursor(&app, visual, tab, 0);
+    let mut expected = String::from("abc");
+    for chord in ["shift-left", "secondary-a", "home", "alt-left", "shift-end"] {
+        vim_press(visual, "Aj");
+        assert_eq!(editor_text(&app, visual, tab), expected, "{chord}: the j is held");
+        vim_chord(visual, chord);
+        // The timer must find nothing left to type: the j is already in the text, where it was
+        // pressed, and the key's selection (or caret move) was not typed over.
+        vim_wait(visual, 2100);
+        expected.push('j');
+        assert_eq!(editor_text(&app, visual, tab), expected, "{chord}: typed once, at the caret it was pressed at");
+        assert_eq!(vim_mode_of(&app, visual, tab), Insert, "{chord}");
+        visual.simulate_keystrokes("escape");
+        assert_eq!(vim_mode_of(&app, visual, tab), Normal, "{chord}");
+    }
+}
+
+#[gpui::test]
+fn a_count_and_dot_repeat_only_what_was_typed_after_the_caret_moved_in_insert(cx: &mut TestAppContext) {
+    let (app, visual) = layout_app(cx);
+    let tab = vim_sql_tab(&app, visual, "abc def");
+    vim_toggle(visual);
+    vim_cursor(&app, visual, tab, 0);
+    // 3iX, End, Esc: the move ended the insert, so the count has nothing to repeat.
+    vim_press(visual, "3iX");
+    vim_chord(visual, "end");
+    visual.simulate_keystrokes("escape");
+    assert_eq!(editor_text(&app, visual, tab), "Xabc def");
+    // 3iX, End, Y, Esc, `.`: Y only, once more.
+    vim_cursor(&app, visual, tab, 0);
+    vim_press(visual, "3iX");
+    vim_chord(visual, "end");
+    vim_press(visual, "Y");
+    visual.simulate_keystrokes("escape");
+    assert_eq!(editor_text(&app, visual, tab), "XXabc defY");
+    vim_press(visual, ".");
+    assert_eq!(editor_text(&app, visual, tab), "XXabc defYY");
+}
+
+#[gpui::test]
+fn ctrl_keys_are_vims_until_the_setting_leaves_them_to_the_editor(cx: &mut TestAppContext) {
+    let (app, visual) = layout_app(cx);
+    let text: String = (0..120).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+    let tab = vim_sql_tab(&app, visual, &text);
+    vim_toggle(visual);
+    vim_cursor(&app, visual, tab, 0);
+    let row = |app: &gpui::Entity<AppRoot>, visual: &gpui::VisualTestContext| {
+        editor_text(app, visual, tab)[..vim_selection(app, visual, tab).start].matches('\n').count()
+    };
+    let half = app.read_with(visual, |this, cx| this.query_editors.by_tab[&tab].read(cx).visible_row_range().expect("drawn").len() / 2);
+    assert!(half >= 3, "a window with rows: {half}");
+    vim_chord(visual, "ctrl-d");
+    assert_eq!(row(&app, visual), half, "Ctrl-D: half a page down");
+    vim_chord(visual, "ctrl-u");
+    assert_eq!(row(&app, visual), 0, "Ctrl-U: back");
+    // Copy and select all are the app's in every mode.
+    vim_press(visual, "Vj");
+    vim_chord(visual, "secondary-c");
+    assert_eq!(vim_clipboard_text(visual).as_deref().map(|text| text.trim_end()), Some("line 0\nline 1"), "copy works in Visual mode");
+    visual.simulate_keystrokes("escape");
+    vim_chord(visual, "secondary-a");
+    assert_eq!(vim_selection(&app, visual, tab), 0..text.len(), "select all works in Normal mode");
+    vim_cursor(&app, visual, tab, 0);
+    // Off: Ctrl-D, Ctrl-U and Ctrl-R are not Vim's.
+    vim_set(&app, visual, |editor| editor.vim_ctrl_keys = false);
+    vim_chord(visual, "ctrl-d");
+    assert_eq!(row(&app, visual), 0, "Ctrl-D is left alone");
+    vim_press(visual, "ddu");
+    assert_eq!(editor_text(&app, visual, tab), text);
+    vim_chord(visual, "ctrl-r");
+    assert_eq!(editor_text(&app, visual, tab), text, "Ctrl-R is not a redo now");
+    // Escape works either way.
+    vim_press(visual, "i");
+    visual.simulate_keystrokes("escape");
+    assert_eq!(vim_mode_of(&app, visual, tab), crate::vim::Mode::Normal);
+    vim_set(&app, visual, |editor| editor.vim_ctrl_keys = true);
+    vim_chord(visual, "ctrl-r");
+    assert_eq!(editor_text(&app, visual, tab), text.split_once('\n').unwrap().1, "and with the setting on it redoes again");
+}
+
+#[gpui::test]
+fn a_yank_is_highlighted_for_the_configured_time(cx: &mut TestAppContext) {
+    let (app, visual) = layout_app(cx);
+    let tab = vim_sql_tab(&app, visual, "abc def ghi\nsecond");
+    vim_toggle(visual);
+    vim_cursor(&app, visual, tab, 0);
+    assert!(visual.debug_bounds("vim-yank-highlight").is_none());
+    let caret = vim_block(visual).expect("block caret");
+    vim_press(visual, "yw");
+    let flash = visual.debug_bounds("vim-yank-highlight").expect("a yank is highlighted");
+    assert!((flash.left() - caret.left()).abs() < TOLERANCE * 2.0, "starts at the text: {flash:?} vs {caret:?}");
+    assert!((flash.size.width - caret.size.width * 4.0).abs() < TOLERANCE * 4.0, "four chars wide: {flash:?} vs {caret:?}");
+    vim_wait(visual, 150);
+    assert!(visual.debug_bounds("vim-yank-highlight").is_some(), "still there after 150 ms");
+    vim_wait(visual, 100);
+    assert!(visual.debug_bounds("vim-yank-highlight").is_none(), "gone after the 200 ms");
+    // The next key ends it at once.
+    vim_press(visual, "yw");
+    assert!(visual.debug_bounds("vim-yank-highlight").is_some());
+    vim_press(visual, "l");
+    assert!(visual.debug_bounds("vim-yank-highlight").is_none(), "a key moves on");
+    // A line yank covers the line; a delete highlights nothing.
+    vim_press(visual, "yy");
+    let line = visual.debug_bounds("vim-yank-highlight").expect("a line yank is highlighted");
+    assert!(line.size.width > caret.size.width * 10.0, "the line's width: {line:?}");
+    vim_wait(visual, 250);
+    vim_press(visual, "x");
+    assert!(visual.debug_bounds("vim-yank-highlight").is_none(), "x is not a yank");
+    // 0 turns it off.
+    vim_set(&app, visual, |editor| editor.vim_highlight_yank = 0);
+    vim_press(visual, "yw");
+    assert!(visual.debug_bounds("vim-yank-highlight").is_none(), "off");
+    // A longer time lasts longer.
+    vim_set(&app, visual, |editor| editor.vim_highlight_yank = 1000);
+    vim_press(visual, "yw");
+    vim_wait(visual, 900);
+    assert!(visual.debug_bounds("vim-yank-highlight").is_some());
+    vim_wait(visual, 200);
+    assert!(visual.debug_bounds("vim-yank-highlight").is_none());
+}
+
+#[gpui::test]
+fn the_start_mode_setting_decides_the_mode_of_a_new_editor_and_of_a_switch(cx: &mut TestAppContext) {
+    use crate::settings::VimDefaultMode;
+    use crate::vim::Mode::{Insert, Normal};
+    let (app, visual) = layout_app(cx);
+    let first = vim_sql_tab(&app, visual, "abc");
+    vim_set(&app, visual, |editor| editor.vim_default_mode = VimDefaultMode::Insert);
+    // The switch starts in the setting's mode.
+    vim_toggle(visual);
+    assert_eq!(vim_mode_of(&app, visual, first), Insert);
+    vim_press(visual, "X");
+    assert_eq!(editor_text(&app, visual, first), "abcX", "typing is text in Insert");
+    visual.simulate_keystrokes("escape");
+    assert_eq!(vim_mode_of(&app, visual, first), Normal);
+    // A new editor with Vim on in Settings.
+    vim_set(&app, visual, |editor| editor.vim_mode = true);
+    click_debug_button(visual, "global-new-query");
+    settle(visual);
+    let second = active_tab(&app, visual);
+    assert_eq!(vim_mode_of(&app, visual, second), Insert, "a new editor starts in Insert");
+    let area = visual.debug_bounds("query-editor-area").expect("editor area");
+    visual.simulate_click(gpui::point(area.center().x, area.bottom() - gpui::px(40.0)), Default::default());
+    settle(visual);
+    vim_press(visual, "hello");
+    assert_eq!(editor_text(&app, visual, second), "hello");
+    // And the other way.
+    vim_set(&app, visual, |editor| editor.vim_default_mode = VimDefaultMode::Normal);
+    click_debug_button(visual, "global-new-query");
+    settle(visual);
+    let third = active_tab(&app, visual);
+    assert_eq!(vim_mode_of(&app, visual, third), Normal);
+}
+
+#[gpui::test]
+fn z_commands_scroll_the_cursor_line_to_the_top_middle_and_bottom(cx: &mut TestAppContext) {
+    let (app, visual) = layout_app(cx);
+    let text: String = (0..300).map(|i| format!("l{i}")).collect::<Vec<_>>().join("\n");
+    let tab = vim_sql_tab(&app, visual, &text);
+    vim_toggle(visual);
+    let middle = text.find("l150\n").unwrap();
+    vim_cursor(&app, visual, tab, middle);
+    let place = |app: &gpui::Entity<AppRoot>, visual: &gpui::VisualTestContext| {
+        app.read_with(visual, |this, cx| {
+            let geometry = this.query_editors.by_tab[&tab].read(cx).prepaint_caret_geometry().expect("drawn");
+            let caret = vim_thin_caret(app, visual, tab);
+            (caret, geometry.input_bounds(), geometry.line_height())
+        })
+    };
+    let mut tops = Vec::new();
+    for (keys, name) in [("zt", "top"), ("zz", "middle"), ("zb", "bottom")] {
+        vim_press(visual, keys);
+        let (caret, area, row) = place(&app, visual);
+        assert_eq!(vim_selection(&app, visual, tab), middle..middle, "{keys}: the cursor stays");
+        match name {
+            "top" => assert!((caret.top() - area.top()).abs() < row * 2.0, "zt: {caret:?} in {area:?}"),
+            "middle" => assert!((caret.center().y - area.center().y).abs() < row, "zz: {caret:?} in {area:?}"),
+            _ => assert!((area.bottom() - caret.bottom()).abs() < row * 2.0, "zb: {caret:?} in {area:?}"),
+        }
+        tops.push(caret.top());
+    }
+    assert!(tops[0] < tops[1] && tops[1] < tops[2], "the line moves down the view: {tops:?}");
+}
+
+#[gpui::test]
+fn the_vim_settings_have_their_own_group_with_every_row(cx: &mut TestAppContext) {
+    let _ = cx;
+    let rows: Vec<_> = crate::settings::registry::registry()
+        .iter()
+        .filter(|descriptor| descriptor.group == "Vim")
+        .map(|descriptor| descriptor.id)
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            "editor.vim_mode",
+            "editor.vim_default_mode",
+            "editor.vim_clipboard",
+            "editor.vim_escape_sequence",
+            "editor.vim_escape_timeout",
+            "editor.vim_highlight_yank",
+            "editor.vim_ctrl_keys",
+            "editor.vim_ignore_case",
+            "editor.vim_smart_case",
+        ]
+    );
 }

@@ -682,12 +682,6 @@ fn build_registry() -> Vec<SettingDescriptor> {
             d,
         ),
         toggle(
-            place!("editor.vim_mode", Editor, "Typing", "Vim keys", "Use basic Vim keys (Normal, Insert and Visual modes) in the query editors. Each editor also has its own switch in its status line."),
-            |s| s.editor.vim_mode,
-            |s, v| s.editor.vim_mode = v,
-            d,
-        ),
-        toggle(
             place!("editor.autocomplete_auto_trigger", Editor, "Autocomplete", "Open suggestions while typing", "Show the suggestion list while typing. Off disables the list."),
             |s| s.editor.autocomplete_auto_trigger,
             |s, v| s.editor.autocomplete_auto_trigger = v,
@@ -800,6 +794,65 @@ fn build_registry() -> Vec<SettingDescriptor> {
             d,
         )
         .unavailable_when(|s| (s.editor.formatter == FormatterChoice::BuiltIn).then_some("settings.unavailable.built_in_needs_no_process")),
+        toggle(
+            place!("editor.vim_mode", Editor, "Vim", "Vim keys", "Use Vim keys (Normal, Insert and Visual modes) in the query editors. Each editor also has its own switch in its status line."),
+            |s| s.editor.vim_mode,
+            |s, v| s.editor.vim_mode = v,
+            d,
+        ),
+        choice(
+            place!("editor.vim_default_mode", Editor, "Vim", "Start in", "The Vim mode an editor starts in, when it opens or when Vim is switched on for it."),
+            |s| s.editor.vim_default_mode,
+            |s, v| s.editor.vim_default_mode = v,
+            d,
+        ),
+        choice(
+            place!("editor.vim_clipboard", Editor, "Vim", "Use the system clipboard", "Always: every yank, delete and change is copied to the system clipboard and p pastes from it. On yank: only a yank is copied; p pastes the last yank or delete. Never: Vim keeps its own register."),
+            |s| s.editor.vim_clipboard,
+            |s, v| s.editor.vim_clipboard = v,
+            d,
+        ),
+        text(
+            place!("editor.vim_escape_sequence", Editor, "Vim", "Escape sequence", "Two keys typed one after the other in Insert mode that leave it, such as jk or jj. Empty turns it off. While you type the first key, it is held back until the second one comes or the time below runs out."),
+            2,
+            |s| &s.editor.vim_escape_sequence,
+            |s, v| s.editor.vim_escape_sequence = v,
+            d,
+        ),
+        number::<u32>(
+            place!("editor.vim_escape_timeout", Editor, "Vim", "Escape sequence timeout", "Milliseconds the second key of the escape sequence may take."),
+            (100.0, 2000.0, 50.0),
+            |s| s.editor.vim_escape_timeout,
+            |s, v| s.editor.vim_escape_timeout = v,
+            d,
+        )
+        .unavailable_when(|s| (s.editor.vim_escape_sequence.chars().count() != 2).then_some("settings.unavailable.no_escape_sequence")),
+        number::<u32>(
+            place!("editor.vim_highlight_yank", Editor, "Vim", "Highlight on yank", "Milliseconds the yanked text stays highlighted. 0 turns it off."),
+            (0.0, 2000.0, 50.0),
+            |s| s.editor.vim_highlight_yank,
+            |s, v| s.editor.vim_highlight_yank = v,
+            d,
+        ),
+        toggle(
+            place!("editor.vim_ctrl_keys", Editor, "Vim", "Take Ctrl keys", "Vim handles Ctrl-R (redo), Ctrl-D and Ctrl-U (half a page) and Ctrl-[ (Escape). Off leaves them to the editor and the app; Escape works either way."),
+            |s| s.editor.vim_ctrl_keys,
+            |s, v| s.editor.vim_ctrl_keys = v,
+            d,
+        ),
+        toggle(
+            place!("editor.vim_ignore_case", Editor, "Vim", "Search ignores case", "A search with / ? * # does not tell a from A."),
+            |s| s.editor.vim_ignore_case,
+            |s, v| s.editor.vim_ignore_case = v,
+            d,
+        ),
+        toggle(
+            place!("editor.vim_smart_case", Editor, "Vim", "Smart case", "A search that contains a capital letter is case sensitive again. Needs Search ignores case."),
+            |s| s.editor.vim_smart_case,
+            |s, v| s.editor.vim_smart_case = v,
+            d,
+        )
+        .unavailable_when(|s| (!s.editor.vim_ignore_case).then_some("settings.unavailable.needs_ignore_case")),
         // ---- Results & Data --------------------------------------------------
         number::<u32>(
             place!("results.page_size", Results, "Fetching", "Default page size", "Rows fetched per page in a new tab."),

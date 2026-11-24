@@ -11,6 +11,10 @@
 //! background, which also covers the editor's thin caret under it; an unfocused editor gets an
 //! outline. One element per editor, no entity, timer or polling; each frame costs one 1-char layout.
 //!
+//! `YankFlash` is the same kind of overlay for the highlight of a yank: translucent boxes over the
+//! yanked text (one per line it touches, at most `MAX_LINES`), asked from the editor's last layout
+//! (`range_to_bounds`) and laid out like the caret's box.
+//!
 //! Not drawn: Visual-line mode (the selected lines are the feedback) and, in Visual mode, a head on
 //! an empty line (its position is not known to the editor).
 use super::*;
@@ -151,6 +155,114 @@ impl Element for BlockCaret {
     ) {
         if let Some((cell, area)) = prepaint {
             window.with_content_mask(Some(ContentMask { bounds: *area }), |window| cell.paint(window, cx));
+        }
+    }
+}
+
+/// Most lines of a yank that get a box (a yank of the whole file flashes the lines near it only).
+const MAX_LINES: usize = 300;
+
+/// The highlight of a yank: boxes over the text it took.
+pub(super) struct YankFlash {
+    editor: gpui::Entity<EditorState>,
+    range: std::ops::Range<usize>,
+}
+
+impl YankFlash {
+    pub(super) fn new(editor: gpui::Entity<EditorState>, range: std::ops::Range<usize>) -> Self {
+        Self { editor, range }
+    }
+}
+
+impl Element for YankFlash {
+    type RequestLayoutState = ();
+    type PrepaintState = Option<(Vec<AnyElement>, Bounds<Pixels>)>;
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let style = Style { position: Position::Absolute, ..Style::default() };
+        (window.request_layout(style, [], cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        let (area, rects) = {
+            let state = self.editor.read(cx);
+            let area = state.prepaint_caret_geometry()?.input_bounds();
+            let text = state.text();
+            // The text may have changed since the yank: the range is kept inside it.
+            let end = self.range.end.min(text.len());
+            let mut start = self.range.start.min(end);
+            let mut rects = Vec::new();
+            for _ in 0..MAX_LINES {
+                let row = text.offset_to_point(start).row;
+                let line_end = text.line_end_offset(row).min(end);
+                // A line the editor has not laid out (out of view) has no box.
+                rects.extend(state.range_to_bounds(&(start..line_end)));
+                if line_end >= end {
+                    break;
+                }
+                start = line_end + 1;
+            }
+            (area, rects)
+        };
+        let color = Hsla::from(theme::warning()).opacity(0.35);
+        let mut boxes = Vec::new();
+        for bounds in rects {
+            // An empty line gets a stub, so the yank of it shows.
+            let size = gpui::size(bounds.size.width.max(gpui::px(4.0)), bounds.size.height);
+            let mut cell = div()
+                .debug_selector(|| "vim-yank-highlight".into())
+                .w(size.width)
+                .h(size.height)
+                .bg(color)
+                .rounded(gpui::px(2.0))
+                .into_any_element();
+            cell.layout_as_root(size.map(AvailableSpace::Definite), window, cx);
+            window.with_content_mask(Some(ContentMask { bounds: area }), |window| {
+                cell.prepaint_at(bounds.origin, window, cx);
+            });
+            boxes.push(cell);
+        }
+        Some((boxes, area))
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        if let Some((boxes, area)) = prepaint {
+            window.with_content_mask(Some(ContentMask { bounds: *area }), |window| {
+                for cell in boxes {
+                    cell.paint(window, cx);
+                }
+            });
         }
     }
 }

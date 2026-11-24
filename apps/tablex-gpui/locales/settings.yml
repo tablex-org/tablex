@@ -88,6 +88,12 @@ settings:
     built_in_needs_no_process:
       en: The built-in formatter needs no process.
       vi: Trình định dạng tích hợp sẵn không cần tiến trình.
+    no_escape_sequence:
+      en: Needs an escape sequence of two keys.
+      vi: Cần một chuỗi phím thoát gồm hai phím.
+    needs_ignore_case:
+      en: Needs Search ignores case.
+      vi: Cần bật Tìm kiếm không phân biệt hoa thường.
     fallback_anthropic_only:
       en: "Not available: only Anthropic can retry on a fallback model."
       vi: "Không khả dụng: chỉ Anthropic mới thử lại được bằng mô hình dự phòng."
@@ -390,8 +396,81 @@ settings:
           en: Vim keys
           vi: Phím Vim
         description:
-          en: "Use basic Vim keys (Normal, Insert and Visual modes) in the query editors. Each editor also has its own switch in its status line."
-          vi: "Dùng các phím Vim cơ bản (chế độ Normal, Insert và Visual) trong trình soạn truy vấn. Mỗi trình soạn cũng có công tắc riêng ở thanh trạng thái."
+          en: "Use Vim keys (Normal, Insert and Visual modes) in the query editors. Each editor also has its own switch in its status line."
+          vi: "Dùng phím Vim (chế độ Normal, Insert và Visual) trong trình soạn truy vấn. Mỗi trình soạn cũng có công tắc riêng ở thanh trạng thái."
+      vim_default_mode:
+        title:
+          en: Start in
+          vi: Bắt đầu ở chế độ
+        description:
+          en: The Vim mode an editor starts in, when it opens or when Vim is switched on for it.
+          vi: Chế độ Vim mà trình soạn bắt đầu, khi mở ra hoặc khi bật Vim cho nó.
+        options:
+          normal:
+            en: Normal
+            vi: Normal
+          insert:
+            en: Insert
+            vi: Insert
+      vim_clipboard:
+        title:
+          en: Use the system clipboard
+          vi: Dùng bộ nhớ tạm của hệ thống
+        description:
+          en: "Always: every yank, delete and change is copied to the system clipboard and p pastes from it. On yank: only a yank is copied; p pastes the last yank or delete. Never: Vim keeps its own register."
+          vi: "Luôn luôn: mọi lệnh yank, xoá và đổi đều được chép vào bộ nhớ tạm của hệ thống và p dán từ đó. Khi yank: chỉ yank được chép; p dán lần yank hoặc xoá gần nhất. Không bao giờ: Vim dùng thanh ghi riêng."
+        options:
+          always:
+            en: Always
+            vi: Luôn luôn
+          on_yank:
+            en: On yank
+            vi: Khi yank
+          never:
+            en: Never
+            vi: Không bao giờ
+      vim_escape_sequence:
+        title:
+          en: Escape sequence
+          vi: Chuỗi phím thoát
+        description:
+          en: "Two keys typed one after the other in Insert mode that leave it, such as jk or jj. Empty turns it off. While you type the first key, it is held back until the second one comes or the time below runs out."
+          vi: "Hai phím gõ liên tiếp trong chế độ Insert để thoát khỏi nó, như jk hoặc jj. Để trống là tắt. Phím đầu được giữ lại cho đến khi phím thứ hai tới hoặc hết thời gian chờ bên dưới."
+      vim_escape_timeout:
+        title:
+          en: Escape sequence timeout
+          vi: Thời gian chờ chuỗi phím thoát
+        description:
+          en: Milliseconds the second key of the escape sequence may take.
+          vi: Số mili giây tối đa cho phím thứ hai của chuỗi phím thoát.
+      vim_highlight_yank:
+        title:
+          en: Highlight on yank
+          vi: Tô sáng khi yank
+        description:
+          en: Milliseconds the yanked text stays highlighted. 0 turns it off.
+          vi: Số mili giây văn bản vừa yank được tô sáng. 0 là tắt.
+      vim_ctrl_keys:
+        title:
+          en: Take Ctrl keys
+          vi: Dùng phím Ctrl
+        description:
+          en: "Vim handles Ctrl-R (redo), Ctrl-D and Ctrl-U (half a page) and Ctrl-[ (Escape). Off leaves them to the editor and the app; Escape works either way."
+          vi: "Vim xử lý Ctrl-R (làm lại), Ctrl-D và Ctrl-U (nửa trang) và Ctrl-[ (Escape). Tắt thì để các phím này cho trình soạn và ứng dụng; phím Escape vẫn dùng được."
+      vim_ignore_case:
+        title:
+          en: Search ignores case
+          vi: Tìm kiếm không phân biệt hoa thường
+        description:
+          en: "A search with / ? * # does not tell a from A."
+          vi: "Tìm bằng / ? * # không phân biệt a với A."
+      vim_smart_case:
+        title:
+          en: Smart case
+          vi: Phân biệt hoa thường thông minh
+        description:
+          en: A search that contains a capital letter is case sensitive again. Needs Search ignores case.
+          vi: Tìm kiếm có chứa chữ hoa thì lại phân biệt hoa thường. Cần bật Tìm kiếm không phân biệt hoa thường.
       autocomplete_auto_trigger:
         title:
           en: Open suggestions while typing
@@ -1010,6 +1089,9 @@ settings:
     typing:
       en: Typing
       vi: Nhập liệu
+    vim:
+      en: Vim
+      vi: Vim
     autocomplete:
       en: Autocomplete
       vi: Tự động hoàn thành

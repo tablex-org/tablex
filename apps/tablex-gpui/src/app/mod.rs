@@ -616,6 +616,7 @@ impl AppRoot {
             app.apply_scenario_language(cx);
         }
         app.apply_tab_bar_preferences(cx);
+        app.watch_vim_keys(cx);
         app.init_workspace_session(scenario_enabled, cx);
         // Tests that need the stored pins call `load_node_pins` themselves, on a database of their own.
         #[cfg(not(test))]
