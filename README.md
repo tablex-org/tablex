@@ -50,7 +50,11 @@ The screenshots use the app's built-in sample data.
 
 macOS 12 or later: the `.dmg` for your Mac (Apple silicon or Intel) from the [latest release](https://github.com/tablex-org/tablex/releases/latest). Drag tablex to Applications. The app is not notarized yet, so confirm the first launch with right-click > **Open**. Databases are added from **Driver Manager** inside the app.
 
-Linux and Windows: build from source.
+**Linux (preview)**: `tablex-<version>-linux-x86_64` or `-linux-aarch64`, as a `.tar.gz` or an `.AppImage`, from the [latest release](https://github.com/tablex-org/tablex/releases/latest). It needs glibc 2.31 or newer (Debian 11, Ubuntu 20.04, RHEL 9 and later), a Wayland or X11 session, and a Vulkan or OpenGL driver. For the AppImage run `chmod +x` on it and start it; the tarball runs from where you unpack it.
+
+**Windows (preview)**: for Windows 10 or 11 on x86_64, from the same release. Run `tablex-<version>-windows-x86_64-setup.exe`: it installs tablex for your user (no administrator rights, nothing else to install), adds it to the Start menu and Apps > Installed apps, and a newer installer upgrades it in place; uninstalling keeps your connections and settings. Or take the portable `tablex-<version>-windows-x86_64.zip`, unzip it and run `tablex.exe`. Neither is code signed yet, so SmartScreen asks for a confirmation the first time: **More info** > **Run anyway**.
+
+The Linux and Windows builds do not update themselves: the app tells you about a new release and opens its page.
 
 ## Building from source
 
