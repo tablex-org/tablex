@@ -4,7 +4,7 @@
 
 A performance-first database client written in Rust with [GPUI](https://www.gpui.rs/).
 
-- One native app aimed at macOS, Linux and Windows. It is developed and tested on macOS; the Linux and Windows builds are wired into CI but are not proven yet.
+- One native app for macOS, Linux and Windows. It is developed on macOS; the Linux and Windows builds are previews.
 - Database support comes from driver plugins that the app downloads, verifies and loads at run time.
 - Results travel as Apache Arrow from the driver to a virtualized grid.
 
