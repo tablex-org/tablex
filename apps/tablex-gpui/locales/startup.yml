@@ -3,3 +3,6 @@ startup:
   window_failed:
     en: "tablex could not open its window: no supported graphics driver was found. tablex needs Vulkan or OpenGL on Linux, DirectX 11 on Windows, Metal on macOS. Details: %{error}"
     vi: "tablex không mở được cửa sổ: không tìm thấy trình điều khiển đồ họa được hỗ trợ. tablex cần Vulkan hoặc OpenGL trên Linux, DirectX 11 trên Windows, Metal trên macOS. Chi tiết: %{error}"
+  no_display:
+    en: "tablex needs a desktop session: neither WAYLAND_DISPLAY nor DISPLAY is set. Start it from your desktop, or from a terminal inside the desktop session."
+    vi: "tablex cần một phiên desktop: chưa đặt WAYLAND_DISPLAY hay DISPLAY. Hãy mở tablex từ desktop, hoặc từ một terminal trong phiên desktop."

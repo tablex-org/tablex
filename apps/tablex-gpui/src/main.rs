@@ -178,6 +178,13 @@ fn main() {
             std::process::exit(2);
         }
     };
+    // Without a display GPUI starts headless: no window, nothing printed, and the process stays
+    // running in the background (holding the MCP channel). Say why and exit instead.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    if scenario.is_none() && !has_display(&gpui::GraphicalEnvironment::detect()) {
+        eprintln!("{}", t!("startup.no_display"));
+        std::process::exit(1);
+    }
     gpui_platform::application()
         .with_assets(assets::Assets)
         .run(move |cx| {
@@ -204,6 +211,12 @@ fn main() {
         });
 }
 
+/// Whether the session names a display server GPUI can open a window on (`ZED_HEADLESS` aside).
+#[cfg(all(feature = "ui", any(target_os = "linux", target_os = "freebsd")))]
+fn has_display(environment: &gpui::GraphicalEnvironment) -> bool {
+    environment.guess_compositor() != "headless"
+}
+
 #[cfg(not(feature = "ui"))]
 fn main() {
     let scenario = match ui_scenario::UiScenario::from_args(std::env::args()) {
@@ -221,6 +234,26 @@ fn main() {
 
 #[cfg(all(test, feature = "ui"))]
 mod bootstrap_tests {
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[test]
+    fn a_session_without_a_display_is_refused() {
+        let environment = |wayland: Option<&str>, x11: Option<&str>| gpui::GraphicalEnvironment {
+            wayland_display: wayland.map(Into::into),
+            x11_display: x11.map(Into::into),
+            xdg_runtime_dir: Some("/run/user/1000".into()),
+            current_desktop: None,
+            activation_token: None,
+        };
+        assert!(!super::has_display(&environment(None, None)));
+        assert!(!super::has_display(&environment(Some(""), Some(""))));
+        assert!(super::has_display(&environment(None, Some(":0"))));
+        assert!(super::has_display(&environment(Some("wayland-0"), None)));
+        assert_eq!(
+            rust_i18n::t!("startup.no_display", locale = "en"),
+            "tablex needs a desktop session: neither WAYLAND_DISPLAY nor DISPLAY is set. Start it from your desktop, or from a terminal inside the desktop session."
+        );
+    }
+
     /// macOS renders zero glyphs unless `gpui-pre-platform` is built with its
     /// `font-kit` feature (`MacPlatform::new` falls back to `NoopTextSystem`
     /// and logs "compiled without the `font-kit` feature, so no text will be
