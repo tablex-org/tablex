@@ -1,6 +1,6 @@
 [package]
 name = "tablex-mcp"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 publish = false
 description = "Standalone MCP server (stdio) for tablex: the engine-agent tool layer over the saved connections, shipped as a separate download"
