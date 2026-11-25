@@ -775,3 +775,70 @@ fn the_repeat_probe_slices_only_the_column_it_reads_so_a_wide_result_costs_what_
     let (narrow_allocations, wide_allocations) = (least(&narrow, rows), least(&wide, rows));
     assert!(wide_allocations <= narrow_allocations + 8, "{wide_allocations} allocations for 300 columns, {narrow_allocations} for 2");
 }
+
+/// `numbers_of` / `micros_of` replace `arrow_cast::cast` (its kernel is megabytes of the binary):
+/// each type the chart classes as numeric or temporal gives what `cast` gave.
+#[test]
+fn the_written_out_conversions_match_arrow_cast() {
+    use arrow_array::types::{Decimal256Type, Float16Type};
+    use arrow_array::ArrowPrimitiveType;
+    use arrow_array::{
+        Date64Array, Decimal256Array, Float32Array, Int16Array, Int32Array, Int8Array, PrimitiveArray,
+        TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray, UInt16Array, UInt32Array,
+        UInt8Array,
+    };
+    // The native types through arrow-array, which re-exports neither `half` nor `arrow-buffer`.
+    type F16 = <Float16Type as ArrowPrimitiveType>::Native;
+    type I256 = <Decimal256Type as ArrowPrimitiveType>::Native;
+
+    let close = |a: f64, b: f64| a == b || (a - b).abs() <= a.abs().max(b.abs()) * 1e-15;
+    let numeric: Vec<ArrayRef> = vec![
+        Arc::new(Int8Array::from(vec![Some(-128), None, Some(127)])),
+        Arc::new(Int16Array::from(vec![Some(-32768), Some(7)])),
+        Arc::new(Int32Array::from(vec![Some(i32::MIN), None, Some(i32::MAX)])),
+        Arc::new(Int64Array::from(vec![Some(i64::MIN), Some(-1), Some(i64::MAX), None])),
+        Arc::new(UInt8Array::from(vec![Some(255), None])),
+        Arc::new(UInt16Array::from(vec![Some(65535)])),
+        Arc::new(UInt32Array::from(vec![Some(u32::MAX), None])),
+        Arc::new(UInt64Array::from(vec![Some(u64::MAX), Some(0)])),
+        Arc::new(PrimitiveArray::<Float16Type>::from(vec![Some(F16::from_f32(1.5)), None])),
+        Arc::new(Float32Array::from(vec![Some(0.1), Some(f32::NAN), None])),
+        Arc::new(Float64Array::from(vec![Some(-0.0), Some(f64::INFINITY), None])),
+        Arc::new(Decimal128Array::from(vec![Some(12_345), Some(-1), None]).with_precision_and_scale(10, 2).unwrap()),
+        Arc::new(Decimal128Array::from(vec![Some(42), None]).with_precision_and_scale(10, -3).unwrap()),
+        Arc::new(
+            Decimal256Array::from(vec![Some(I256::from_i128(-987_654_321)), Some(I256::from_parts(5, 1)), Some(I256::from_parts(7, -3)), None])
+                .with_precision_and_scale(76, 4)
+                .unwrap(),
+        ),
+    ];
+    for array in &numeric {
+        let ours = numbers_of(array.as_ref()).unwrap();
+        let cast = arrow_cast::cast::cast(array, &DataType::Float64).unwrap();
+        let cast = cast.as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(ours.len(), cast.len(), "{}", array.data_type());
+        for row in 0..cast.len() {
+            assert_eq!(ours.is_null(row), cast.is_null(row), "{} row {row}", array.data_type());
+            if !cast.is_null(row) {
+                let (a, b) = (ours.value(row), cast.value(row));
+                assert!(close(a, b) || (a.is_nan() && b.is_nan()), "{} row {row}: {a} vs {b}", array.data_type());
+            }
+        }
+    }
+
+    let temporal: Vec<ArrayRef> = vec![
+        Arc::new(Date32Array::from(vec![Some(19_000), Some(-1), Some(i32::MAX), None])),
+        Arc::new(Date64Array::from(vec![Some(1_700_000_000_123), Some(i64::MAX), None])),
+        Arc::new(TimestampSecondArray::from(vec![Some(1_700_000_000), Some(i64::MAX), None])),
+        Arc::new(TimestampMillisecondArray::from(vec![Some(-1_234), None]).with_timezone("+07:00")),
+        Arc::new(TimestampMicrosecondArray::from(vec![Some(5), None]).with_timezone("Asia/Ho_Chi_Minh")),
+        Arc::new(TimestampNanosecondArray::from(vec![Some(1_700_000_000_123_456_789), Some(-1_999), None])),
+    ];
+    for array in &temporal {
+        let ours = micros_of(array.as_ref()).unwrap();
+        let cast = arrow_cast::cast::cast(array, &DataType::Timestamp(TimeUnit::Microsecond, None)).unwrap();
+        let cast = cast.as_any().downcast_ref::<TimestampMicrosecondArray>().unwrap();
+        assert_eq!(ours.data_type(), cast.data_type());
+        assert_eq!(&ours, cast, "{}", array.data_type());
+    }
+}

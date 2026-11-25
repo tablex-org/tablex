@@ -125,6 +125,73 @@ pub enum ColumnClass {
     Other,
 }
 
+/// A numeric column as `f64`, for the chart's values and numeric X. Written out per type instead of
+/// `arrow_cast::cast`, whose any-to-any kernel is several megabytes of the shipped binary (Arrow 60);
+/// a decimal is `unscaled / 10^scale`, which may differ from `cast` in the last bit only.
+fn numbers_of(array: &dyn Array) -> Result<Float64Array, arrow_schema::ArrowError> {
+    use arrow_array::cast::AsArray;
+    use arrow_array::types::*;
+    fn decimal(unscaled: f64, scale: i8) -> f64 {
+        unscaled / 10_f64.powi(scale.into())
+    }
+    Ok(match array.data_type() {
+        DataType::Int8 => array.as_primitive::<Int8Type>().unary(|x| x as f64),
+        DataType::Int16 => array.as_primitive::<Int16Type>().unary(|x| x as f64),
+        DataType::Int32 => array.as_primitive::<Int32Type>().unary(|x| x as f64),
+        DataType::Int64 => array.as_primitive::<Int64Type>().unary(|x| x as f64),
+        DataType::UInt8 => array.as_primitive::<UInt8Type>().unary(|x| x as f64),
+        DataType::UInt16 => array.as_primitive::<UInt16Type>().unary(|x| x as f64),
+        DataType::UInt32 => array.as_primitive::<UInt32Type>().unary(|x| x as f64),
+        DataType::UInt64 => array.as_primitive::<UInt64Type>().unary(|x| x as f64),
+        DataType::Float16 => array.as_primitive::<Float16Type>().unary(|x| x.to_f64()),
+        DataType::Float32 => array.as_primitive::<Float32Type>().unary(|x| x as f64),
+        DataType::Float64 => array.as_primitive::<Float64Type>().clone(),
+        DataType::Decimal128(_, scale) => {
+            let scale = *scale;
+            array.as_primitive::<Decimal128Type>().unary(|x| decimal(x as f64, scale))
+        }
+        DataType::Decimal256(_, scale) => {
+            let scale = *scale;
+            array.as_primitive::<Decimal256Type>().unary(|x| {
+                // Beyond i128, from the magnitude's two halves (a negative value's halves would
+                // cancel out in f64).
+                let unscaled = x.to_i128().map(|small| small as f64).unwrap_or_else(|| {
+                    let magnitude = |value: <Decimal256Type as arrow_array::ArrowPrimitiveType>::Native| {
+                        let (low, high) = value.to_parts();
+                        high as f64 * 2_f64.powi(128) + low as f64
+                    };
+                    if x.is_negative() { -magnitude(x.wrapping_neg()) } else { magnitude(x) }
+                });
+                decimal(unscaled, scale)
+            })
+        }
+        other => return Err(arrow_schema::ArrowError::CastError(format!("{other} is not numeric"))),
+    })
+}
+
+/// A date or timestamp column as microseconds since the epoch, for a time X. What
+/// `arrow_cast::cast` to `Timestamp(Microsecond, None)` gives (see [`numbers_of`] for why not
+/// `cast`): a time zone keeps the UTC instant, a coarser unit that would overflow is NULL, a finer
+/// one is truncated.
+fn micros_of(array: &dyn Array) -> Result<TimestampMicrosecondArray, arrow_schema::ArrowError> {
+    use arrow_array::cast::AsArray;
+    use arrow_array::types::*;
+    const MICROS_PER_DAY: i64 = 86_400_000_000;
+    Ok(match array.data_type() {
+        DataType::Date32 => array.as_primitive::<Date32Type>().unary_opt(|days| (days as i64).checked_mul(MICROS_PER_DAY)),
+        DataType::Date64 => array.as_primitive::<Date64Type>().unary_opt(|ms| ms.checked_mul(1_000)),
+        DataType::Timestamp(TimeUnit::Second, _) => {
+            array.as_primitive::<TimestampSecondType>().unary_opt(|s| s.checked_mul(1_000_000))
+        }
+        DataType::Timestamp(TimeUnit::Millisecond, _) => {
+            array.as_primitive::<TimestampMillisecondType>().unary_opt(|ms| ms.checked_mul(1_000))
+        }
+        DataType::Timestamp(TimeUnit::Microsecond, _) => array.as_primitive::<TimestampMicrosecondType>().unary(|us| us),
+        DataType::Timestamp(TimeUnit::Nanosecond, _) => array.as_primitive::<TimestampNanosecondType>().unary(|ns| ns / 1_000),
+        other => return Err(arrow_schema::ArrowError::CastError(format!("{other} is not a date or timestamp"))),
+    })
+}
+
 impl ColumnClass {
     fn of(data_type: &DataType) -> Self {
         match data_type {
@@ -623,23 +690,11 @@ impl<'a> Cells<'a> {
         }
         match column.class {
             ColumnClass::Numeric => {
-                let cast = arrow_cast::cast::cast(array, &DataType::Float64)?;
-                let numbers = cast
-                    .as_any()
-                    .downcast_ref::<Float64Array>()
-                    .ok_or_else(|| arrow_schema::ArrowError::CastError("not a Float64 array".into()))?
-                    .clone();
-                Ok(Self::Number(numbers, None))
+                Ok(Self::Number(numbers_of(array.as_ref())?, None))
             }
             _ if numeric_only => Err(arrow_schema::ArrowError::CastError("not numeric".into())),
             ColumnClass::Temporal => {
-                let cast = arrow_cast::cast::cast(array, &DataType::Timestamp(TimeUnit::Microsecond, None))?;
-                let times = cast
-                    .as_any()
-                    .downcast_ref::<TimestampMicrosecondArray>()
-                    .ok_or_else(|| arrow_schema::ArrowError::CastError("not a timestamp array".into()))?
-                    .clone();
-                Ok(Self::Time(times, None))
+                Ok(Self::Time(micros_of(array.as_ref())?, None))
             }
             ColumnClass::Text => Ok(Self::Text(Strings::open(array)?)),
             ColumnClass::Other => Ok(Self::Display {
