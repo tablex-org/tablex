@@ -111,11 +111,12 @@ fn capture_ssh_tunnel_screens() {
                     let center = window.bounds().center();
                     for _ in 0..wheel_events {
                         window.dispatch_event(
-                            gpui::PlatformInput::ScrollWheel(gpui::ScrollEvent {
+                            gpui::PlatformInput::Scroll(gpui::ScrollEvent {
                                 position: center,
                                 delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.0), gpui::px(-300.0))),
                                 touch_phase: gpui::TouchPhase::Moved,
                                 modifiers: Default::default(),
+                                source: Default::default(),
                             }),
                             app_cx,
                         );
