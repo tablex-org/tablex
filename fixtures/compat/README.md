@@ -20,6 +20,8 @@ v0.1.10/
     Drivers/v2/                driver store: records, manifest watermark, update-check marker
     Projects/General/          saved SQL and scripts (+ .tablex/resource-metadata.json)
     logs/errors.log            error log
+    key-home, master.key       (v0.1.11 on) the Linux choice to keep the key in a file, and that file
+                               (the same fake master key)
   config/TableX/               <config dir>/TableX (a folder of its own here: the data dir is
                                `tablex`, and macOS compares names without case)
     grid-copy-default.json, snowflake/worker.json

@@ -1,0 +1,36 @@
+[
+  {
+    "id": "mongodb",
+    "version": "0.2.0",
+    "path": "/Users/example/Library/Application Support/tablex/Drivers/v2/mongodb/0.2.0/libdbengine_mongodb.dylib",
+    "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "teamId": "EXAMPLE001",
+    "installedAt": "2026-11-01T10:00:00Z",
+    "appAbiVersion": 2,
+    "uriSchemes": [
+      "mongodb",
+      "mongodb+srv"
+    ],
+    "license": "Apache-2.0",
+    "sourceRepo": "https://example.com/tablex/drivers",
+    "disabled": false,
+    "previousVersion": "0.1.0",
+    "previousPath": "/Users/example/Library/Application Support/tablex/Drivers/v2/mongodb/0.1.0/libdbengine_mongodb.dylib",
+    "previousSha256": "2222222222222222222222222222222222222222222222222222222222222222"
+  },
+  {
+    "id": "sqlite",
+    "version": "0.3.0",
+    "path": "/Users/example/Library/Application Support/tablex/Drivers/v2/sqlite/0.3.0/libdbengine_sqlite.dylib",
+    "sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+    "teamId": "EXAMPLE001",
+    "installedAt": "2026-11-02T08:30:00Z",
+    "appAbiVersion": 2,
+    "uriSchemes": [
+      "sqlite"
+    ],
+    "license": "MIT",
+    "sourceRepo": "https://example.com/tablex/drivers",
+    "disabled": true
+  }
+]

@@ -1,0 +1,15 @@
+{
+  "Scripts/monthly revenue.sql": {
+    "connectionUUID": "AAAAAAAA-0000-4000-8000-000000000001",
+    "database": "shop",
+    "createdAt": 1700000000.0,
+    "updatedAt": 1700000000.0
+  },
+  "Scripts/open carts.js": {
+    "connectionUUID": "AAAAAAAA-0000-4000-8000-000000000004",
+    "database": "orders",
+    "dialect": "mongoScript",
+    "createdAt": 1700000100.0,
+    "updatedAt": 1700000100.0
+  }
+}

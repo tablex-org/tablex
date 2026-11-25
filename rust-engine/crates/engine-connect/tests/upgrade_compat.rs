@@ -9,6 +9,7 @@
 //! tablex-gpui, which owns their formats.
 
 use engine_connect::credentials::{jump_account, CredentialError, CredentialStore, SecretKind};
+use engine_connect::key_home::{self, Home, KeyHomeStore};
 use engine_connect::records::{self, ConnectionKind, SavedConnection};
 use engine_connect::secret_store::EncryptedStore;
 use engine_storage::aggregate::{self, SavedAggregate};
@@ -21,7 +22,7 @@ use std::sync::{Mutex, MutexGuard};
 /// The releases whose fixture sets are checked. Append the version when its fixtures are added.
 /// The data of a release only grows: change no value below once a fixture set holds it, add new
 /// rows (the checks look each expected row up, so a later set may hold more).
-const VERSIONS: &[&str] = &["v0.1.10"];
+const VERSIONS: &[&str] = &["v0.1.10", "v0.1.11"];
 
 /// The master key of the fixtures' secrets: made up, used only here (base64 of 32 bytes `0x24`).
 const FIXTURE_KEY: &str = "JCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQ=";
@@ -254,6 +255,10 @@ fn generate_fixture_set() {
     for (kind, account, value) in secrets() {
         store.write(kind, &account, value).unwrap();
     }
+    // Since v0.1.11 (Linux without a keyring): the key in a file of the data dir, chosen once.
+    let data_dir = db.parent().unwrap();
+    std::fs::write(data_dir.join(key_home::CHOICE_FILE), "file").unwrap();
+    std::fs::write(data_dir.join(key_home::KEY_FILE), FIXTURE_KEY).unwrap();
     // One file: fold the write-ahead log in so no `-wal` / `-shm` is left beside it.
     let conn = app_db::open(&db).unwrap();
     conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(())).unwrap();
@@ -334,6 +339,21 @@ fn assert_secrets(version: &str, db: &Path) {
     assert_eq!(store.load(SecretKind::Database, LOCAL).unwrap(), None, "no password was saved for the file connection");
 }
 
+/// A set that chose the key file (v0.1.11 on): the choice still reads as the file, and the key in it
+/// opens the sealed secrets with no OS store at all.
+fn assert_key_home(version: &str, db: &Path) {
+    let data_dir = db.parent().unwrap();
+    if !data_dir.join(key_home::CHOICE_FILE).exists() {
+        return;
+    }
+    let homes = || KeyHomeStore::new(Os::default(), Some(data_dir.to_path_buf()), true);
+    assert_eq!(homes().home().unwrap(), Home::File, "{version}: the key home");
+    let store = EncryptedStore::new(Box::new(homes()), Some(db.to_path_buf()));
+    for (kind, account, value) in secrets() {
+        assert_eq!(store.load(kind, &account).unwrap().as_deref(), Some(value), "{version}: secret {kind:?} {account} through the key file");
+    }
+}
+
 /// Each release's data dir, checked in a process of its own (the stores keep one database per
 /// process): this test starts itself once per version with `TABLEX_COMPAT_VERSION` set.
 #[test]
@@ -366,6 +386,7 @@ fn check_version(version: &str) {
     assert_connections(version);
     assert_other_stores(version, &db);
     assert_secrets(version, &db);
+    assert_key_home(version, &db);
 
     // The round trip: write through the stores (as the app does on any change), read again.
     let all = connection::list_connections().unwrap();

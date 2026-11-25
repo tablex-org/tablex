@@ -10,7 +10,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// The releases whose fixture sets are checked. Append the version when its fixtures are added.
-const VERSIONS: &[&str] = &["v0.1.10"];
+const VERSIONS: &[&str] = &["v0.1.10", "v0.1.11"];
 
 /// The folder the fixture's absolute record paths are under (a made-up user's data dir); the test
 /// replaces it with its temporary directory.

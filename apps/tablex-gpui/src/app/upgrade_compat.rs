@@ -31,7 +31,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 /// The releases whose fixture sets are checked. Append the version when its fixtures are added.
-const VERSIONS: &[&str] = &["v0.1.10"];
+const VERSIONS: &[&str] = &["v0.1.10", "v0.1.11"];
 
 /// `(version, json path)` of values a later migration rewrites on purpose (a settings migration, say):
 /// the survival checks skip them. Nothing is listed while no migration touches a released value.

@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// The releases whose fixture sets are checked. Append the version when its fixtures are added.
-const VERSIONS: &[&str] = &["v0.1.10"];
+const VERSIONS: &[&str] = &["v0.1.10", "v0.1.11"];
 
 fn fixture_db(version: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

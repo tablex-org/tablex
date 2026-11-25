@@ -1,0 +1,1 @@
+db.carts.find({ open: true })
