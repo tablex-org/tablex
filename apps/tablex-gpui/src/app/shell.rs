@@ -689,6 +689,17 @@ impl Render for AppRoot {
     }
 }
 
+/// The first window's bounds: GPUI's default size, clipped to `visible` (the display without the
+/// taskbar, dock or menu bar) and centred in it.
+fn fit_to_visible(visible: gpui::Bounds<gpui::Pixels>) -> gpui::Bounds<gpui::Pixels> {
+    let size = gpui::DEFAULT_WINDOW_SIZE.min(&visible.size);
+    let origin = gpui::point(
+        visible.origin.x + (visible.size.width - size.width) / 2.0,
+        visible.origin.y + (visible.size.height - size.height) / 2.0,
+    );
+    gpui::Bounds::new(origin, size)
+}
+
 pub(crate) fn open_with_scenario(scenario: Option<UiScenario>, cx: &mut gpui::App) {
     let scenario_size = scenario
         .as_ref()
@@ -700,16 +711,21 @@ pub(crate) fn open_with_scenario(scenario: Option<UiScenario>, cx: &mut gpui::Ap
     actions::bind_keys(cx);
     let opened = cx.open_window(
         gpui::WindowOptions {
-            window_bounds: scenario.as_ref().map(|_| {
-                gpui::WindowBounds::centered(
+            window_bounds: match &scenario {
+                Some(_) => Some(gpui::WindowBounds::centered(
                     None,
                     gpui::Size {
                         width: px(scenario_size.0),
                         height: px(scenario_size.1),
                     },
                     cx,
-                )
-            }),
+                )),
+                // GPUI's own default fits the window to the whole display, so on a small screen it
+                // runs under the Windows taskbar; fit it to the display's visible area instead.
+                None => cx
+                    .primary_display()
+                    .map(|display| gpui::WindowBounds::Windowed(fit_to_visible(display.visible_bounds()))),
+            },
             titlebar: Some({
                 let mut titlebar = gpui_component::TitleBar::title_bar_options();
                 titlebar.title = scenario_title.clone();
@@ -801,4 +817,25 @@ pub(crate) fn open_with_scenario(scenario: Option<UiScenario>, cx: &mut gpui::Ap
     // After the first window exists: install the menu bar and take the
     // foreground so the previous app's menus do not stay on screen.
     super::menus::finish_launch(cx, |cx| cx.activate(true));
+}
+
+#[cfg(test)]
+mod window_bounds_tests {
+    use gpui::{Bounds, point, px, size};
+
+    #[test]
+    fn the_first_window_fits_the_visible_area_of_a_small_display() {
+        // 1280x800 with a 48 px taskbar: the default 1536x1095 would run under it.
+        let visible = Bounds::new(point(px(0.), px(0.)), size(px(1280.), px(752.)));
+        assert_eq!(super::fit_to_visible(visible), visible);
+    }
+
+    #[test]
+    fn a_large_display_keeps_the_default_size_centred_in_its_visible_area() {
+        // A menu bar of 25 px above the visible area.
+        let visible = Bounds::new(point(px(0.), px(25.)), size(px(2560.), px(1415.)));
+        let bounds = super::fit_to_visible(visible);
+        assert_eq!(bounds.size, gpui::DEFAULT_WINDOW_SIZE);
+        assert_eq!(bounds.origin, point(px(512.), px(185.)));
+    }
 }
