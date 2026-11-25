@@ -8405,6 +8405,7 @@ dependencies = [
  "cbc 0.1.2",
  "chrono",
  "criterion",
+ "ctor",
  "dirs",
  "ed25519-dalek 2.2.0",
  "embed-resource",
