@@ -883,6 +883,7 @@ mod tests {
         include!("tests/grid_bench_context.rs");
         include!("tests/properties_bench_context.rs");
         include!("tests/chart_bench_context.rs");
+        include!("tests/sidebar_bench_context.rs");
         include!("tests/ssh_tunnel_capture.rs");
         include!("tests/explain_capture.rs");
         include!("tests/sql_editor_capture.rs");

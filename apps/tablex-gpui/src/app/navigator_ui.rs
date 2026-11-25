@@ -12,6 +12,12 @@ use gpui::Rgba;
 use gpui::Stateful;
 use gpui_component::tooltip::Tooltip;
 
+/// Passes of the navigator list and rows they built (test builds only; the sidebar benchmark reads them).
+#[cfg(test)]
+pub(super) static LIST_PASSES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(test)]
+pub(super) static ROWS_BUILT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Lucide glyphs vendored under `assets/icons` for the sidebar.
 /// Implemented against the pinned `gpui-component` icon contract
 /// (`IconNamed -> Icon::new -> app AssetSource`) with no new dependency:
@@ -1882,6 +1888,11 @@ impl AppRoot {
             "navigator-tree",
             self.navigator.visible_row_count(),
             cx.processor(move |this, range: Range<usize>, _window, cx| {
+                #[cfg(test)]
+                {
+                    LIST_PASSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    ROWS_BUILT.fetch_add(range.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                }
                 range
                     .map(|index| {
                         // Owned per-row handle: inner `move` menu/drag closures
