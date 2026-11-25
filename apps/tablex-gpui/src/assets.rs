@@ -22,6 +22,10 @@ impl AssetSource for Assets {
                 "chevrons-up-down.svg",
                 "chevrons-left.svg",
                 "close.svg",
+                "window-close.svg",
+                "window-maximize.svg",
+                "window-minimize.svg",
+                "window-restore.svg",
                 "copy.svg",
                 "delete.svg",
                 "file.svg",
@@ -155,6 +159,10 @@ pub fn asset(path: &str) -> Option<&'static [u8]> {
         "icons/triangle-alert.svg" => Some(include_bytes!("../assets/icons/triangle-alert.svg")),
         "icons/info.svg" => Some(include_bytes!("../assets/icons/info.svg")),
         "icons/close.svg" => Some(include_bytes!("../assets/icons/close.svg")),
+        "icons/window-close.svg" => Some(include_bytes!("../assets/icons/window-close.svg")),
+        "icons/window-maximize.svg" => Some(include_bytes!("../assets/icons/window-maximize.svg")),
+        "icons/window-minimize.svg" => Some(include_bytes!("../assets/icons/window-minimize.svg")),
+        "icons/window-restore.svg" => Some(include_bytes!("../assets/icons/window-restore.svg")),
         "icons/copy.svg" => Some(include_bytes!("../assets/icons/copy.svg")),
         "icons/delete.svg" => Some(include_bytes!("../assets/icons/delete.svg")),
         "icons/file.svg" => Some(include_bytes!("../assets/icons/file.svg")),
@@ -280,6 +288,11 @@ mod tests {
     #[test]
     fn component_icon_assets_are_available() {
         assert!(super::asset("icons/plus.svg").is_some());
+        // The title bar's window controls (Windows, and Linux with client-side decorations).
+        assert!(super::asset("icons/window-close.svg").is_some());
+        assert!(super::asset("icons/window-maximize.svg").is_some());
+        assert!(super::asset("icons/window-minimize.svg").is_some());
+        assert!(super::asset("icons/window-restore.svg").is_some());
         assert!(super::asset("icons/sun.svg").is_some());
         assert!(super::asset("icons/moon.svg").is_some());
         assert!(super::asset("icons/monitor.svg").is_some());

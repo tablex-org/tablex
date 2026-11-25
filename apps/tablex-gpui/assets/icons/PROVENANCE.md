@@ -122,3 +122,11 @@ the glyphs above.
 `zap.svg` (Auto-commit) and `hand.svg` (Manual commit) on the SQL editor header's commit-mode
 button are copied verbatim from the pinned `gpui-kit-assets 0.10.0` Lucide set, ISC licensed like
 the glyphs above.
+
+## Window control glyphs
+
+`window-minimize.svg`, `window-maximize.svg`, `window-restore.svg` and
+`window-close.svg` are copied verbatim from the pinned `gpui-kit-assets 0.11.0`
+package (`assets/icons/`, Apache-2.0 like the crate). `gpui-component`'s
+`TitleBar` draws its minimize/maximize/close buttons with them on Windows and on
+Linux under client-side decorations; without them the buttons render blank.
