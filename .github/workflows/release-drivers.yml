@@ -184,6 +184,17 @@ jobs:
           [[ "${{ matrix.target }}" == windows-* ]] && name="${name}.exe"
           cp "${exe}" "out/${name}"
           ls -l out/tablex-sqruff-*
+      # The plugin and the formatter against scripts/size-budget.json, measured on the files just
+      # built (no second build); the budgets are for macOS arm64.
+      - name: Size check
+        if: matrix.target == 'macos-aarch64'
+        run: |
+          set -euo pipefail
+          for package in tablex-mongo-shell tablex-sqruff; do
+            bin="out/${package}-macos-aarch64"
+            python3 scripts/size_report.py --package "${package}" --binary "${bin}" --target macos-arm64 --markdown >> "$GITHUB_STEP_SUMMARY"
+            python3 scripts/size_report.py --package "${package}" --binary "${bin}" --target macos-arm64 --check
+          done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: dylibs-${{ matrix.target }}

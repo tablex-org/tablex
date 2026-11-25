@@ -8,8 +8,8 @@ name: CI
 #       cargo test -p tablex-gpui
 #   engine      (ubuntu / windows / macos-15)
 #       cargo test --manifest-path rust-engine/Cargo.toml --workspace
-#   size        (macos-15, pushes to main only)
-#       cargo build --profile dist -p tablex-gpui; scripts/size_report.py --check
+#   (the shipped size is checked by release-app.yml / release-drivers.yml on the
+#    builds they make anyway, dry runs included: no extra fat-LTO build here)
 #   audit       (ubuntu, pushes to main only, report-only)
 #       cargo audit for both lock files
 #   scripts     (ubuntu / macos-15)
@@ -156,51 +156,6 @@ jobs:
           persist-credentials: false
       - name: python unittest
         run: python3 -m unittest discover -s scripts/tests
-
-  # Shipped size of the app (the `dist` profile: fat LTO, stripped). Runs on
-  # pushes to main only: the LTO build is slow and a PR cannot change the
-  # budget without the change being visible in scripts/size-budget.json. The
-  # table lands in the job summary; exceeding the budget fails the job.
-  size:
-    name: size (macos-arm64)
-    if: github.event_name == 'push'
-    runs-on: macos-15
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
-        with:
-          toolchain: stable
-      # Its own cache (the `dist` profile shares nothing with the test jobs' debug builds): the
-      # dependencies come from it, so only the app's crates and the LTO link are built each time.
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          prefix-key: size-${{ runner.os }}
-          workspaces: |
-            . -> target
-            rust-engine -> target
-      - name: cargo build --profile dist
-        run: cargo build --profile dist -p tablex-gpui
-      - name: size report
-        run: |
-          python3 scripts/size_report.py --markdown >> "$GITHUB_STEP_SUMMARY"
-          python3 scripts/size_report.py --check
-      # The MongoDB Shell plugin is built like a driver (rust-engine workspace, release profile,
-      # `strip -x`), so it is measured from the file the build script writes.
-      - name: size report (MongoDB Shell plugin)
-        run: |
-          plugin="$(rust-engine/scripts/build-plugin.sh)"
-          python3 scripts/size_report.py --package tablex-mongo-shell --binary "${plugin}" --markdown >> "$GITHUB_STEP_SUMMARY"
-          python3 scripts/size_report.py --package tablex-mongo-shell --binary "${plugin}" --check
-      # The SQL formatter tool (sqruff, out of process) is built the same way. sqruff is linked into
-      # this executable only: the app's own size report above is what shows it never reached the app.
-      - name: size report (SQL Formatter, sqruff)
-        run: |
-          tool="$(rust-engine/scripts/build-plugin.sh --crate tablex-sqruff)"
-          python3 scripts/size_report.py --package tablex-sqruff --binary "${tool}" --markdown >> "$GITHUB_STEP_SUMMARY"
-          python3 scripts/size_report.py --package tablex-sqruff --binary "${tool}" --check
 
   # Known vulnerabilities in the dependency trees (RustSec advisory database).
   # Report-only until its first run is triaged: an advisory published upstream

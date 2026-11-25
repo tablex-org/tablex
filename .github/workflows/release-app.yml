@@ -82,6 +82,16 @@ jobs:
       - name: Build (dist profile)
         run: cargo build --locked --profile dist -p tablex-gpui --target ${{ matrix.target }}
 
+      # The shipped size against scripts/size-budget.json, measured on the build above (no second
+      # build): a dry run (workflow_dispatch) shows a regression before any release is tagged.
+      - name: Size check
+        if: matrix.arch == 'apple-silicon'
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/dist/tablex-gpui"
+          python3 scripts/size_report.py --binary "${bin}" --target macos-arm64 --markdown >> "$GITHUB_STEP_SUMMARY"
+          python3 scripts/size_report.py --binary "${bin}" --target macos-arm64 --check
+
       - name: Bundle
         run: |
           set -euo pipefail
