@@ -1,15 +1,25 @@
 //! The write approver of `tablex-mcp`: a statement that changes data is put to the user through MCP
 //! **elicitation** (`elicitation/create`), and runs only when the client answers `accept` with the
-//! boolean `run` set to `true` while the app's switch is still on.
+//! choice [`ANSWER_PROPERTY`] set to [`ANSWER_RUN`] while the app's settings still allow it.
+//!
+//! **The answer is a required single choice with no default** ("Run this statement" or "Do not run
+//! it"), not a checkbox. A client that fills in defaults, or whose Accept / Submit button sends the
+//! form as it stands, has no default to fill in: the answer is missing, and a missing answer never
+//! runs anything. Only `accept` with exactly [`ANSWER_RUN`] approves; every other answer is a
+//! reason of its own the agent can tell the user: a decline, a dismissal, the choice "Do not run
+//! it", an accept with no choice ([`no_choice`]), and an unusable value ([`REASON_NO_ANSWER`]).
 //!
 //! The client is the user's own agent host and may answer without showing the question; tablex
 //! cannot see that. So conditions must all hold before anything is asked, checked in this order,
 //! each a [`ApprovalDecision::Refuse`] with a fixed reason the model can act on:
-//! 1. the switch "Let MCP clients run changes" in the app's Settings → AI is on (read from
-//!    `settings.json` at the time of each write, and **again when the client says yes**: a switch
-//!    turned off while a question waited stops that write; unreadable = off);
+//! 1. the app's `settings.json` allows asking ([`McpWrites`]: read at the time of each write, and
+//!    **again when the client says yes**). There is no switch for it in the app any more (every
+//!    write is asked about, per statement); only a file written by an older app (schema below 7)
+//!    still carries "Let MCP clients run changes", and `false` there blocks writes. A missing or
+//!    unreadable file blocks them too;
 //! 2. the connection is not of a production type;
-//! 3. the client declared the elicitation capability (form mode);
+//! 3. the client declared the elicitation capability (form mode), or else the tablex app is running
+//!    and reachable on its local channel (below);
 //! 4. the statement is small enough to be reviewed, as shown ([`MAX_LINES`], [`MAX_CHARS`],
 //!    [`MAX_LINE_CHARS`]);
 //! 5. the connection's declines plus its open questions stay under [`MAX_DECLINES`] (a decline is
@@ -25,6 +35,24 @@
 //! (database, collection and the command as indented Extended JSON in the code block) and a script
 //! of SQL statements (`execute_batch`: every statement that changes data, listed in order, accepted
 //! or declined together).
+//!
+//! **Approval in the app.** A client that cannot ask gets its question put to the user in the tablex
+//! app instead ([`AppClient::ask_approval`]: a modal dialog with the same facts). Elicitation is
+//! preferred when the client has it; with neither, the write is refused and the reason says what the
+//! user can do. The app is a trust boundary here. The boundary itself is the socket (owned by this
+//! user, private, in a folder only this user can write to, with a peer of this user); on top of it a
+//! per-launch token file is the key of an HMAC challenge-response, so the token is never sent, a
+//! question is signed over what is shown, and the answer is signed over the same question, a nonce
+//! and the choice (see `engine_connect::app_channel`). Every other condition above applies
+//! unchanged. An app
+//! that closes, or a channel that drops, while the question is open is "not delivered"; a cancelled
+//! call closes the connection, which withdraws the question in the app.
+//!
+//! **Refusals.** Every refusal tells the agent what to tell the user (the setting by the name the
+//! app shows, a client that supports MCP elicitation, the tablex app) and ends with
+//! [`OUTSIDE_TABLEX`]: an agent that is refused must not go around tablex's access levels,
+//! approvals and audit by connecting to the database itself. [`refusal`] adds it, in the one place a
+//! refusal leaves this module.
 //!
 //! **Threads.** [`WriteApprover::approve`] blocks the call's own blocking thread. The question is
 //! sent by a task spawned on the server's runtime (so the protocol thread is never blocked and a
@@ -57,10 +85,11 @@ use engine_agent::{
     ApprovalDecision, CancelToken, ConnectionInfo, Language, TransactionApproval, WriteApproval,
     WriteApprover,
 };
-use engine_connect::profile::mcp_writes_enabled;
+use engine_connect::app_channel::{new_request_id, AppClient, ApprovalAsk, ClientError};
+use engine_connect::profile::{mcp_writes_state, McpWrites};
 use rmcp::model::{
     ClientResult, ElicitRequest, ElicitRequestParams, ElicitResult, ElicitationAction,
-    ElicitationSchema, ServerRequest,
+    ElicitationSchema, EnumSchema, LegacyEnumSchema, ServerRequest,
 };
 use rmcp::service::{ElicitationMode, Peer, PeerRequestOptions, RoleServer};
 use serde_json::Value;
@@ -68,38 +97,114 @@ use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-/// Refusal: the app's switch is off (or its file cannot be read), when asking or when the client
-/// said yes.
-pub const REASON_SWITCH_OFF: &str =
-    "changes through the MCP server are turned off in tablex: Settings → AI";
+/// The reason when the question was accepted with no choice made (a client's Accept or Submit
+/// button on a form left as it was). It counts as a decline ([`MAX_DECLINES`]), and says so.
+pub fn no_choice(title: &str) -> String {
+    format!(
+        "the question was accepted without choosing \"{title}\" or \"{}\", so nothing ran. Ask the \
+         user whether to go ahead, and tell them to choose \"{title}\" and accept. An answer without a \
+         choice counts as a decline: after {MAX_DECLINES} declines or unchosen answers on a connection, \
+         changes to it through MCP are off until the MCP server is restarted",
+        no_title(title)
+    )
+}
+
+/// The reason when the user chose the option that does not run it.
+pub fn chose_not_to(title: &str) -> String {
+    format!("the user chose \"{}\"", no_title(title))
+}
+
+/// The option that says no, for the question titled `title`.
+pub fn no_title(title: &str) -> &'static str {
+    match title {
+        COMMIT_TITLE => COMMIT_NO_TITLE,
+        CONNECTION_TITLE => CONNECTION_NO_TITLE,
+        _ => ANSWER_NO_TITLE,
+    }
+}
+
+/// The longest client name shown (spelled out), in characters.
+const MAX_CLIENT_NAME: usize = 80;
+
+/// `spelled` cut to `max` characters, never inside a `<U+XXXX>` unit, with an ellipsis when it was
+/// cut.
+fn cut_spelled(spelled: &str, max: usize) -> String {
+    let mut out = String::new();
+    let mut count = 0;
+    let mut rest = spelled;
+    while let Some(next) = rest.chars().next() {
+        // One unit: a spelled character, or one character.
+        let unit = if rest.starts_with("<U+") {
+            rest.find('>').map_or(next.len_utf8(), |end| end + 1)
+        } else {
+            next.len_utf8()
+        };
+        let length = rest[..unit].chars().count();
+        if count + length > max {
+            out.push('\u{2026}');
+            return out;
+        }
+        out.push_str(&rest[..unit]);
+        count += length;
+        rest = &rest[unit..];
+    }
+    out
+}
+
+/// The sentence every refusal ends with (see [`refusal`]).
+pub const OUTSIDE_TABLEX: &str = "Do not connect to the database outside tablex (for example with \
+     the URI or a script); ask the user instead.";
+
+/// A refusal as the agent receives it: `reason`, then [`OUTSIDE_TABLEX`]. The one place it is added.
+pub fn refusal(reason: &str) -> String {
+    format!("{}. {OUTSIDE_TABLEX}", reason.trim_end_matches('.'))
+}
+
+/// Refusal: the settings were written by an older tablex app whose switch "Let MCP clients run
+/// changes" is off (a file of schema 7 or later has no switch), when asking or when the client said
+/// yes. The setting is named as that app shows it.
+pub const REASON_SWITCH_OFF: &str = "changes through the MCP server are turned off in tablex. Ask the \
+     user to turn on \"Let MCP clients run changes\" in the tablex app (Settings \u{2192} AI Assistant \
+     \u{2192} MCP server), or to update tablex, which no longer has this switch";
+/// Refusal: tablex's settings are missing or cannot be read, so nothing can be asked.
+pub const REASON_SETTINGS_UNAVAILABLE: &str = "the tablex settings could not be read, so changes \
+     through the MCP server are off. Ask the user to open the tablex app once, and to check that it \
+     can write its settings";
 /// Refusal: the connection's type is a production one.
-pub const REASON_PRODUCTION: &str =
-    "a production connection can only be changed from the tablex app";
-/// Refusal: the client did not declare the elicitation capability.
-pub const REASON_NO_ELICITATION: &str = "this MCP client cannot ask the user";
+pub const REASON_PRODUCTION: &str = "a production connection can only be changed from the tablex app, \
+     never through MCP. Ask the user to make this change in the tablex app";
+/// Refusal: the client cannot show questions (the start of the reason; what the user can do about
+/// it follows, see [`no_way_to_ask`]).
+pub const REASON_NO_ELICITATION: &str =
+    "this MCP client cannot show approval questions (it does not support MCP elicitation)";
 /// Refusal: [`MAX_DECLINES`] questions about the connection ended in a no or in no usable answer.
 pub const REASON_DECLINED_OFTEN: &str =
     "declined, or left without a usable answer, several times in this server session; changes \
-     to this connection through MCP are off until the MCP server is restarted";
+     to this connection through MCP are off until the MCP server is restarted. Ask the user to \
+     restart it, or to make the change in the tablex app";
 /// Refusal: too big to be reviewed in a question.
 pub const REASON_TOO_LONG: &str = "too long to be shown for approval through MCP (more than 200 \
-     lines, 8000 characters in all or 400 in one line); the user can run it in the tablex app";
+     lines, 8000 characters in all or 400 in one line). Ask the user to run it in the tablex app, or \
+     send it in smaller parts";
 /// Refusal: a line hides text behind a run of blanks.
 pub const REASON_HIDDEN_BLANKS: &str = "a line has a run of more than 24 spaces or tabs (a tab counts \
-     as 8) followed by more text, which a code block can hide off-screen; the user can run it in the \
-     tablex app";
+     as 8) followed by more text, which a code block can hide off-screen. Ask the user to run it in \
+     the tablex app, or send it without the blanks";
 /// Refusal: the writes of a transaction cannot be reviewed in one commit question.
 pub const REASON_COMMIT_NOT_REVIEWABLE: &str = "the changes in this transaction are too long to be \
      shown for approval through MCP (more than 200 lines, 8000 characters in all or 400 in one line, \
-     or a line hides text behind a run of blanks); roll the transaction back, the user can run the \
-     changes in the tablex app";
+     or a line hides text behind a run of blanks). Roll the transaction back, and ask the user to run \
+     the changes in the tablex app";
 /// Refusal: [`MAX_OPEN_QUESTIONS`] questions are open.
-pub const REASON_BUSY: &str = "other changes are waiting for the user's answer";
+pub const REASON_BUSY: &str =
+    "other changes are waiting for the user's answer. Wait until they are answered, then try again";
 /// Refusal: the layer should never send a dangerous statement for a production connection here.
 pub const REASON_DANGEROUS: &str = "a dangerous statement is never run through MCP on a production \
-     connection; the user can run it in the tablex app";
-/// Refusal: the question did not reach the client.
-pub const REASON_NOT_DELIVERED: &str = "the question could not be delivered to the MCP client";
+     connection. Ask the user to run it in the tablex app";
+/// Refusal: the question did not reach the user.
+pub const REASON_NOT_DELIVERED: &str = "the question could not be delivered: the MCP client or the \
+     tablex app closed, or the connection to it dropped. Ask the user to check that it is open, and \
+     try again";
 /// Not approved: the question was sent but nothing usable came back.
 pub const REASON_NO_ANSWER: &str = "no usable answer came back from the MCP client";
 /// The reason in the audit line and for the model when the user dismissed the question.
@@ -108,15 +213,23 @@ pub const REASON_DISMISSED: &str = "the question was dismissed";
 /// under a cancelled token into its own `Cancelled`).
 const REASON_CANCELLED: &str = "cancelled";
 
-/// The one property of the requested schema.
-pub const ANSWER_PROPERTY: &str = "run";
-/// Its title, as the client shows it next to the control.
+/// The one property of the requested schema: a required choice with no default.
+pub const ANSWER_PROPERTY: &str = "answer";
+/// Its value that runs it (the only one that does).
+pub const ANSWER_RUN: &str = "run";
+/// Its other value.
+pub const ANSWER_DO_NOT_RUN: &str = "do_not_run";
+/// The option that runs it, as the client shows it (and the title of the question).
 pub const ANSWER_TITLE: &str = "Run this statement";
+/// The option that does not.
+pub const ANSWER_NO_TITLE: &str = "Do not run it";
 /// The title when the question is the COMMIT of a transaction.
-pub const COMMIT_TITLE: &str = "Commit this transaction";
+pub const COMMIT_TITLE: &str = engine_connect::app_channel::COMMIT_TITLE;
+pub const COMMIT_NO_TITLE: &str = "Do not commit it";
 /// The title when the question is a change to the saved connections (`add_connection`,
 /// `duplicate_connection`, `remove_connection`).
 pub const CONNECTION_TITLE: &str = "Make this change to your connections";
+pub const CONNECTION_NO_TITLE: &str = "Do not make this change";
 /// The question budget (declines, open questions) the connection tools share, in place of a
 /// connection: three declines end them for the server session, like a connection's writes.
 const CONNECTIONS_BUDGET: &str = "(saved connections)";
@@ -147,6 +260,8 @@ struct Budget {
 #[derive(Debug)]
 pub struct ElicitingApprover {
     settings_path: Option<PathBuf>,
+    /// The running app, which gets the question of a client that cannot ask (`None`: none known).
+    app: Option<AppClient>,
     budgets: Mutex<HashMap<String, Budget>>,
     open: AtomicUsize,
 }
@@ -168,17 +283,37 @@ impl Drop for OpenQuestion<'_> {
 }
 
 impl ElicitingApprover {
-    /// `settings_path`: the app's `settings.json` (`None`: unknown, so the switch reads as off).
+    /// `settings_path`: the app's `settings.json` (`None`: unknown, so changes are not allowed).
     pub fn new(settings_path: Option<PathBuf>) -> Self {
         Self {
             settings_path,
+            app: None,
             budgets: Mutex::default(),
             open: AtomicUsize::new(0),
         }
     }
 
+    /// Puts the questions of a client that cannot ask to the user in the app behind `app`.
+    #[must_use]
+    pub fn with_app(mut self, app: Option<AppClient>) -> Self {
+        self.app = app;
+        self
+    }
+
     fn switch_on(&self) -> bool {
-        mcp_writes_enabled(self.settings_path.as_deref())
+        self.writes() == McpWrites::Allowed
+    }
+
+    fn writes(&self) -> McpWrites {
+        mcp_writes_state(self.settings_path.as_deref())
+    }
+
+    /// The refusal text for settings that do not allow changes right now (see [`switch_off`]).
+    fn not_allowed(&self, instead: Option<&str>) -> String {
+        match self.writes() {
+            McpWrites::SwitchOff => switch_off(instead),
+            _ => settings_unavailable(instead),
+        }
     }
 
     fn budgets(&self) -> MutexGuard<'_, HashMap<String, Budget>> {
@@ -291,13 +426,15 @@ impl ElicitingApprover {
         let mut message = match request.dangerous {
             Some(reason) => format!(
                 "DANGEROUS: an MCP client asks to run a {noun} that can destroy or change data or \
-                 structure that a rollback may not bring back. Nothing runs unless you accept.\n\n\
+                 structure that a rollback may not bring back. Nothing runs unless you accept. To run it, choose \
+                 \"{ANSWER_TITLE}\" and accept.\n\n\
                  Why it is dangerous: {reason}\n\n\
                  Connection: {} ({connection_type})\n\n",
                 label(request.connection_name),
             ),
             None => format!(
-                "An MCP client asks to run a {noun} that changes data. Nothing runs unless you accept.\n\n\
+                "An MCP client asks to run a {noun} that changes data. Nothing runs unless you accept. To run it, \
+                 choose \"{ANSWER_TITLE}\" and accept.\n\n\
                  Connection: {} ({connection_type})\n\n",
                 label(request.connection_name),
             ),
@@ -387,7 +524,7 @@ impl ElicitingApprover {
         let mut message = format!(
             "An MCP client asks to COMMIT a transaction. The {total} change{} below ran inside it \
              and none is final yet: they become final only if you accept. Nothing is committed \
-             unless you accept.\n\nConnection: {} ({connection_type})\n\nTransaction: {}\n\n",
+             unless you accept. To commit, choose \"{COMMIT_TITLE}\" and accept.\n\nConnection: {} ({connection_type})\n\nTransaction: {}\n\n",
             plural(total),
             label(request.connection_name),
             label(transaction),
@@ -438,17 +575,22 @@ impl ElicitingApprover {
         message
     }
 
-    /// The requested schema: one required boolean, [`ANSWER_PROPERTY`], whose default is `false`
-    /// (a client that fills in defaults declines).
+    /// The requested schema: one required single choice, [`ANSWER_PROPERTY`], of [`ANSWER_RUN`] and
+    /// [`ANSWER_DO_NOT_RUN`] with titles and **no default** (a client that fills in defaults has
+    /// nothing to fill in, and an answer without a choice does not run anything; the safe option is
+    /// listed first, for a client that preselects the first one). The `enum` /
+    /// `enumNames` form is the one every version of the elicitation schema accepts.
     fn schema(commit: bool) -> Option<ElicitationSchema> {
         Self::schema_titled(if commit { COMMIT_TITLE } else { ANSWER_TITLE })
     }
 
     fn schema_titled(title: &'static str) -> Option<ElicitationSchema> {
+        // "Do not run" first: a client that preselects the first option preselects the safe one.
+        let mut choice = LegacyEnumSchema::new(vec![ANSWER_DO_NOT_RUN.to_owned(), ANSWER_RUN.to_owned()]);
+        choice.title = Some(format!("{title}?").into());
+        choice.enum_names = Some(vec![no_title(title).to_owned(), title.to_owned()]);
         ElicitationSchema::builder()
-            .required_bool_with(ANSWER_PROPERTY, |boolean| {
-                boolean.title(title).with_default(false)
-            })
+            .required_enum_schema(ANSWER_PROPERTY, EnumSchema::Legacy(choice))
             .build()
             .ok()
     }
@@ -462,21 +604,32 @@ impl ElicitingApprover {
             Answer::Reply(result) => result,
             // The call was cancelled after the question was sent: a user who dismisses it by
             // interrupting the tool call has said no.
+            Answer::App { approved } => return !approved,
+            Answer::AppRefused(_) => return false,
             Answer::Cancelled | Answer::NoReply => return true,
             Answer::NotDelivered => return false,
         };
         match result.action {
             ElicitationAction::Accept => !matches!(
                 result.content.as_ref().and_then(|c| c.get(ANSWER_PROPERTY)),
-                Some(Value::Bool(true))
+                Some(Value::String(answer)) if answer == ANSWER_RUN
             ),
             // A decline, a dismissal, or an action this build does not know.
             _ => true,
         }
     }
 
-    /// What the client's reply means. Only `accept` with `run: true` approves.
+    /// What the client's reply means for a question titled [`ANSWER_TITLE`]. See
+    /// [`decide_for`](Self::decide_for).
     pub fn decide(reply: Answer) -> ApprovalDecision {
+        Self::decide_for(reply, ANSWER_TITLE)
+    }
+
+    /// What the client's reply means. Only `accept` with [`ANSWER_RUN`] approves. The other answers
+    /// each say what happened, so the agent can tell the user: a decline, a dismissal, the choice
+    /// "Do not run it" ([`chose_not_to`]), and an `accept` with no choice ([`no_choice`]) are
+    /// different things with a reason of their own.
+    pub fn decide_for(reply: Answer, title: &str) -> ApprovalDecision {
         let deny = |reason: Option<&str>| ApprovalDecision::Deny {
             reason: reason.map(str::to_owned),
         };
@@ -484,9 +637,19 @@ impl ElicitingApprover {
             reason: REASON_NO_ANSWER.to_owned(),
         };
         match reply {
+            Answer::App { approved: true } => ApprovalDecision::Approve,
+            Answer::App { approved: false } => deny(None),
+            // Too many questions open in the app is the same busy as too many open here; any
+            // other refusal says what the app said.
+            Answer::AppRefused(text) if text.contains("too many questions") => ApprovalDecision::Refuse {
+                reason: refusal(REASON_BUSY),
+            },
+            Answer::AppRefused(text) => ApprovalDecision::Refuse {
+                reason: refusal(&format!("the tablex app could not take the question: {text}")),
+            },
             Answer::Cancelled => deny(Some(REASON_CANCELLED)),
             Answer::NotDelivered => ApprovalDecision::Refuse {
-                reason: REASON_NOT_DELIVERED.to_owned(),
+                reason: refusal(REASON_NOT_DELIVERED),
             },
             Answer::NoReply => unanswered(),
             Answer::Reply(result) => match result.action {
@@ -497,10 +660,15 @@ impl ElicitingApprover {
                     .as_ref()
                     .and_then(|content| content.get(ANSWER_PROPERTY))
                 {
-                    Some(Value::Bool(true)) => ApprovalDecision::Approve,
-                    Some(Value::Bool(false)) => deny(None),
-                    // `accept` without the answer, or with something that is not a boolean.
-                    _ => unanswered(),
+                    Some(Value::String(answer)) if answer == ANSWER_RUN => ApprovalDecision::Approve,
+                    Some(Value::String(answer)) if answer == ANSWER_DO_NOT_RUN => {
+                        deny(Some(&chose_not_to(title)))
+                    }
+                    // `accept` with no choice: nothing was chosen (a form left as it was).
+                    None | Some(Value::Null) => deny(Some(&no_choice(title))),
+                    // Something that is not one of the two choices (the boolean of an older
+                    // form, a number, another word): not an answer.
+                    Some(_) => unanswered(),
                 },
                 // `ElicitationAction` is non-exhaustive: an action this build does not know is
                 // not a yes.
@@ -536,80 +704,273 @@ pub fn code_span(text: &str) -> String {
     }
 }
 
+/// A change to the saved connections, put to the user: the text for MCP elicitation and the same
+/// facts for the app.
+pub struct ConnectionQuestion {
+    /// The Markdown question of elicitation.
+    pub message: String,
+    /// The question for the app (its `id` is set when it is sent).
+    pub app: ApprovalAsk,
+    /// What the user can do in the tablex app instead, for the refusal when the settings do not allow changes
+    /// ("add the connection in the tablex app (New Connection)").
+    pub instead: &'static str,
+}
+
+/// Where a question goes.
+enum Route {
+    /// MCP elicitation, to the client of the call.
+    Elicit(Caller),
+    /// The tablex app, with the client's name when it gave one.
+    App {
+        client: AppClient,
+        name: Option<String>,
+    },
+}
+
+/// The refusal text when an older app's switch is off; `instead` (a change to the connections) adds
+/// what the user can do in the app instead.
+pub fn switch_off(instead: Option<&str>) -> String {
+    with_instead(REASON_SWITCH_OFF, instead)
+}
+
+/// The refusal text when the settings are missing or unreadable (see [`switch_off`] for `instead`).
+pub fn settings_unavailable(instead: Option<&str>) -> String {
+    with_instead(REASON_SETTINGS_UNAVAILABLE, instead)
+}
+
+fn with_instead(reason: &str, instead: Option<&str>) -> String {
+    match instead {
+        Some(instead) => format!("{reason}, or ask the user to {instead}"),
+        None => reason.to_owned(),
+    }
+}
+
+/// The refusal text when the client cannot ask and the app cannot be asked either: what the user
+/// can do about it. `app`: why the app cannot be asked (`None`: this platform has no data directory,
+/// so there is no app to look for).
+pub fn no_way_to_ask(app: Option<&ClientError>) -> String {
+    match app {
+        None | Some(ClientError::NotRunning) => format!(
+            "{REASON_NO_ELICITATION}, and the tablex app is not running to show them. Ask the user \
+             to open the tablex app and try again, or to use a client that supports MCP elicitation"
+        ),
+        Some(ClientError::Unsupported) => format!(
+            "{REASON_NO_ELICITATION}, and approval in the tablex app is not available on Windows yet. \
+             Ask the user to use a client that supports MCP elicitation, or to run the change in \
+             the tablex app"
+        ),
+        Some(error) => format!(
+            "{REASON_NO_ELICITATION}, and the tablex app could not be asked ({error}). Ask the user \
+             to open the tablex app (or restart it) and try again, or to use a client that supports \
+             MCP elicitation"
+        ),
+    }
+}
+
 impl ElicitingApprover {
-    /// Puts a change to the user's saved connections to them: `message` says what will be added,
+    /// Where a question goes: elicitation when the client can ask, else the tablex app when it
+    /// answers, else the reason (a refusal's text, without [`OUTSIDE_TABLEX`]) it goes nowhere.
+    fn route(&self) -> Result<Route, String> {
+        let caller = Caller::current();
+        if let Some(caller) = caller.clone().filter(Caller::can_ask) {
+            return Ok(Route::Elicit(caller));
+        }
+        let Some(client) = self.app.clone() else {
+            return Err(no_way_to_ask(None));
+        };
+        client
+            .reachable()
+            .map_err(|error| no_way_to_ask(Some(&error)))?;
+        Ok(Route::App {
+            client,
+            name: caller.and_then(|caller| caller.client_name()),
+        })
+    }
+
+    /// Puts `ask` to the user in the app and waits. Nothing but the app's authenticated answer
+    /// approves; a cancelled call, a closed app and a dropped channel never do.
+    fn ask_app(client: &AppClient, name: Option<String>, mut ask: ApprovalAsk, cancel: &CancelToken) -> Answer {
+        ask.id = new_request_id();
+        // Spelled out first, then cut: a name of control characters is short only once it is shown.
+        ask.client = name.map(|name| cut_spelled(&spell_out(&name, false).0, MAX_CLIENT_NAME));
+        match client.ask_approval(&ask, &|| cancel.is_cancelled()) {
+            Ok(approved) => Answer::App { approved },
+            Err(ClientError::Cancelled) => Answer::Cancelled,
+            Err(ClientError::Refused(text)) => Answer::AppRefused(text),
+            Err(_) => Answer::NotDelivered,
+        }
+    }
+
+    /// Puts a change to the user's saved connections to them: `question` says what will be added,
     /// copied or removed. The same conditions as for a write apply that make sense for it, in this
-    /// order: the app's switch is on, the client can ask (elicitation, form mode), and the
-    /// connection tools have not been declined [`MAX_DECLINES`] times in this server session or
-    /// are not [`MAX_OPEN_QUESTIONS`] open. A production connection is not a reason to refuse here:
-    /// the message says it is one. Only a yes with `run` set to `true` approves.
-    pub fn ask_connection_change(&self, message: String, cancel: &CancelToken) -> ApprovalDecision {
+    /// order: the app's settings allow changes, the client can ask (elicitation, form mode) or the app can,
+    /// and the connection tools have not been declined [`MAX_DECLINES`] times in this server
+    /// session or are not [`MAX_OPEN_QUESTIONS`] open. A production connection is not a reason to
+    /// refuse here: the message says it is one. Only a yes approves.
+    pub fn ask_connection_change(
+        &self,
+        question: ConnectionQuestion,
+        cancel: &CancelToken,
+    ) -> ApprovalDecision {
         let refuse = |reason: &str| ApprovalDecision::Refuse {
-            reason: reason.to_owned(),
+            reason: refusal(reason),
         };
         if !self.switch_on() {
-            return refuse(REASON_SWITCH_OFF);
+            return refuse(&self.not_allowed(Some(question.instead)));
         }
-        let Some(caller) = Caller::current().filter(Caller::can_ask) else {
-            return refuse(REASON_NO_ELICITATION);
+        let route = match self.route() {
+            Ok(route) => route,
+            Err(reason) => return refuse(&reason),
         };
         let open = match self.open_question(CONNECTIONS_BUDGET) {
             Ok(open) => open,
             Err(reason) => return refuse(reason),
         };
-        let Some(schema) = Self::schema_titled(CONNECTION_TITLE) else {
-            return refuse(REASON_NOT_DELIVERED);
+        let answer = match route {
+            Route::Elicit(caller) => {
+                let Some(schema) = Self::schema_titled(CONNECTION_TITLE) else {
+                    return refuse(REASON_NOT_DELIVERED);
+                };
+                caller.ask(
+                    ElicitRequestParams::FormElicitationParams {
+                        meta: None,
+                        message: question.message,
+                        requested_schema: schema,
+                    },
+                    cancel,
+                )
+            }
+            Route::App { client, name } => Self::ask_app(&client, name, question.app, cancel),
         };
-        let params = ElicitRequestParams::FormElicitationParams {
-            meta: None,
-            message,
-            requested_schema: schema,
-        };
-        let answer = caller.ask(params, cancel);
         if Self::counts_against_the_connection(&answer) {
             self.record_decline(CONNECTIONS_BUDGET);
         }
         drop(open);
-        Self::decide(answer)
+        Self::decide_for(answer, CONNECTION_TITLE)
     }
 
-    /// After a yes to [`ask_connection_change`](Self::ask_connection_change): the app's switch may
-    /// have been turned off while the question waited.
-    pub fn connection_change_still_allowed(&self) -> Result<(), &'static str> {
+    /// After a yes to [`ask_connection_change`](Self::ask_connection_change): the app's settings may
+    /// have changed while the question waited. `Err` is a refusal's text.
+    pub fn connection_change_still_allowed(&self, instead: &str) -> Result<(), String> {
         if self.switch_on() {
             Ok(())
         } else {
-            Err(REASON_SWITCH_OFF)
+            Err(refusal(&self.not_allowed(Some(instead))))
         }
     }
 
     /// Conditions 1-3 of the module docs (and: no dangerous statement on a production connection),
-    /// in that order. The caller that can be asked, or the fixed reason a write is refused
-    /// without asking.
-    fn preflight(&self, request: &WriteApproval<'_>) -> Result<Caller, &'static str> {
+    /// in that order. Where the question goes, or the reason (not yet a [`refusal`]) a write is
+    /// refused without asking.
+    fn preflight(&self, request: &WriteApproval<'_>) -> Result<Route, String> {
         if request.dangerous.is_some() && request.production {
-            return Err(REASON_DANGEROUS);
+            return Err(REASON_DANGEROUS.to_owned());
         }
         if !self.switch_on() {
-            return Err(REASON_SWITCH_OFF);
+            return Err(self.not_allowed(None));
         }
         if request.production {
-            return Err(REASON_PRODUCTION);
+            return Err(REASON_PRODUCTION.to_owned());
         }
-        Caller::current()
-            .filter(Caller::can_ask)
-            .ok_or(REASON_NO_ELICITATION)
+        self.route()
+    }
+
+    /// The question for the app: the facts of [`message`](Self::message), as fields.
+    fn app_question(request: &WriteApproval<'_>) -> ApprovalAsk {
+        let name = |text: &str| spell_out(text, false).0;
+        let commit = request.transaction.and_then(|transaction| transaction.commit);
+        let noun = match (request.language, request.script) {
+            (Language::Redis | Language::Mongo, _) => "command",
+            (_, Some(_)) => "script",
+            (Language::Sql | Language::Other, None) => "statement",
+        };
+        let mut ask = ApprovalAsk {
+            title: if commit.is_some() {
+                COMMIT_TITLE.to_owned()
+            } else {
+                format!("Run this {noun}")
+            },
+            connection: Some(name(request.connection_name)),
+            connection_type: Some(if request.connection_type.trim().is_empty() {
+                "No type".to_owned()
+            } else {
+                name(request.connection_type)
+            }),
+            database: request.database.map(name),
+            collection: request.collection.map(name),
+            danger: request.dangerous.map(name),
+            ..ApprovalAsk::default()
+        };
+        // A dangerous statement and a commit are approved by a mouse click only.
+        ask.click_only = request.dangerous.is_some() || commit.is_some();
+        let plural = |n: usize| if n == 1 { "" } else { "s" };
+        let (statements, spelled): (Vec<&str>, usize) = match commit {
+            Some(statements) => (
+                statements.iter().map(String::as_str).collect(),
+                statements.iter().map(|text| spell_out(text, true).1).sum(),
+            ),
+            None => (vec![request.statement], spell_out(request.statement, true).1),
+        };
+        ask.statements = statements.iter().map(|text| spell_out(text, true).0).collect();
+        if let Some(changes) = request.script {
+            ask.notes.push(format!(
+                "The script is one question: the {changes} statement{} below that change{} data are \
+                 listed in order, and the statements that only read are not shown. Approving runs \
+                 the whole script.",
+                plural(changes),
+                if changes == 1 { "s" } else { "" },
+            ));
+        }
+        match request.transaction {
+            Some(TransactionApproval { id, commit: Some(_) }) => ask.notes.push(format!(
+                "The {} change{} below ran inside transaction {} and none is final yet: they \
+                 become final only if you approve.",
+                statements.len(),
+                plural(statements.len()),
+                name(id)
+            )),
+            Some(TransactionApproval { id, commit: None }) => ask.notes.push(format!(
+                "The {noun} runs inside transaction {}. It is NOT committed until you approve the \
+                 commit of the transaction; a rollback undoes it.",
+                name(id)
+            )),
+            None => {}
+        }
+        if spelled > 0 {
+            ask.notes.push(format!(
+                "Note: the text below has {spelled} character{} without a shape of its own \
+                 (controls, direction changes, zero-width characters), written as <U+XXXX>. What \
+                 runs has the original characters.",
+                plural(spelled),
+            ));
+        }
+        let names = [Some(request.connection_name), Some(request.connection_type), request.database, request.collection];
+        if names.into_iter().flatten().any(|text| text.chars().any(is_right_to_left)) {
+            ask.notes.push(
+                "Warning: a name above has right-to-left letters, which can change how the text \
+                 around it is displayed. Read it with care."
+                    .to_owned(),
+            );
+        }
+        if statements.iter().any(|text| text.chars().any(is_right_to_left)) {
+            ask.notes.push(
+                "Warning: the text below has right-to-left letters, which can change how the text \
+                 around them is displayed. Read it with care."
+                    .to_owned(),
+            );
+        }
+        ask
     }
 }
 
 impl WriteApprover for ElicitingApprover {
     fn approve(&self, request: &WriteApproval<'_>, cancel: &CancelToken) -> ApprovalDecision {
         let refuse = |reason: &str| ApprovalDecision::Refuse {
-            reason: reason.to_owned(),
+            reason: refusal(reason),
         };
-        let caller = match self.preflight(request) {
-            Ok(caller) => caller,
-            Err(reason) => return refuse(reason),
+        let route = match self.preflight(request) {
+            Ok(route) => route,
+            Err(reason) => return refuse(&reason),
         };
         let commit = request.transaction.and_then(|transaction| transaction.commit);
         let reviewed = match commit {
@@ -628,28 +989,37 @@ impl WriteApprover for ElicitingApprover {
             Ok(open) => open,
             Err(reason) => return refuse(reason),
         };
-        let Some(schema) = Self::schema(commit.is_some()) else {
-            return refuse(REASON_NOT_DELIVERED);
+        let answer = match route {
+            Route::Elicit(caller) => {
+                let Some(schema) = Self::schema(commit.is_some()) else {
+                    return refuse(REASON_NOT_DELIVERED);
+                };
+                caller.ask(
+                    ElicitRequestParams::FormElicitationParams {
+                        meta: None,
+                        message: Self::message(request),
+                        requested_schema: schema,
+                    },
+                    cancel,
+                )
+            }
+            Route::App { client, name } => {
+                Self::ask_app(&client, name, Self::app_question(request), cancel)
+            }
         };
-        let params = ElicitRequestParams::FormElicitationParams {
-            meta: None,
-            message: Self::message(request),
-            requested_schema: schema,
-        };
-        let answer = caller.ask(params, cancel);
         if Self::counts_against_the_connection(&answer) {
             self.record_decline(request.connection_id);
         }
         // The place is given back after the decline is counted, so the two never both miss it.
         drop(open);
-        Self::decide(answer)
+        Self::decide_for(answer, if commit.is_some() { COMMIT_TITLE } else { ANSWER_TITLE })
     }
 
     /// The commit question lists every write, so the whole list has to pass the same review as
     /// one statement does (lines, characters, line width, hidden blanks).
     fn commit_reviewable(&self, statements: &[String]) -> Result<(), String> {
         match Self::review_problem(&statements.join("\n")) {
-            Some(_) => Err(REASON_COMMIT_NOT_REVIEWABLE.to_owned()),
+            Some(_) => Err(refusal(REASON_COMMIT_NOT_REVIEWABLE)),
             None => Ok(()),
         }
     }
@@ -658,17 +1028,17 @@ impl WriteApprover for ElicitingApprover {
     fn check_writable(&self, request: &WriteApproval<'_>) -> Result<(), String> {
         self.preflight(request)
             .map(drop)
-            .map_err(str::to_owned)
+            .map_err(|reason| refusal(&reason))
     }
 
     /// The question may have waited a long time: the layer asks again, after a yes, whether the
-    /// switch is still on, so turning it off in the app stops a write that was asked while it was
-    /// on (audited `approved, then refused: ...`).
+    /// settings still allow changes, so an older app's switch turned off stops a write that was
+    /// asked while it was on (audited `approved, then refused: ...`).
     fn still_allowed(&self, _request: &WriteApproval<'_>) -> Result<(), String> {
         if self.switch_on() {
             Ok(())
         } else {
-            Err(REASON_SWITCH_OFF.to_owned())
+            Err(refusal(&self.not_allowed(None)))
         }
     }
 
@@ -684,6 +1054,10 @@ impl WriteApprover for ElicitingApprover {
 pub enum Answer {
     /// The client replied.
     Reply(ElicitResult),
+    /// The user answered in the tablex app (authenticated by the channel).
+    App { approved: bool },
+    /// The app was reached but would not take the question (it says why).
+    AppRefused(String),
     /// The call was cancelled after the question was sent.
     Cancelled,
     /// The question did not reach the client (the connection is closed or gone).
@@ -726,6 +1100,14 @@ impl Caller {
 
     fn current() -> Option<Self> {
         CURRENT.with(|current| current.borrow().clone())
+    }
+
+    /// The name the client gave itself in the handshake (not verified).
+    fn client_name(&self) -> Option<String> {
+        self.peer
+            .peer_info()
+            .map(|info| info.client_info.name.clone())
+            .filter(|name| !name.trim().is_empty())
     }
 
     /// The client declared the elicitation capability, form mode (the only mode used).
@@ -962,7 +1344,7 @@ mod tests {
         let message = ElicitingApprover::message(&request(statement, Some("main")));
         assert_eq!(
             message,
-            "An MCP client asks to run a statement that changes data. Nothing runs unless you accept.\n\n\
+            "An MCP client asks to run a statement that changes data. Nothing runs unless you accept. To run it, choose \"Run this statement\" and accept.\n\n\
              Connection: `Warehouse` (`Development`)\n\n\
              Database: `main`\n\n\
              The statement has 1 line and 39 characters.\n\n\
@@ -981,7 +1363,7 @@ mod tests {
         let message = ElicitingApprover::message(&request(statement, None));
         assert_eq!(
             message,
-            "An MCP client asks to run a statement that changes data. Nothing runs unless you accept.\n\n\
+            "An MCP client asks to run a statement that changes data. Nothing runs unless you accept. To run it, choose \"Run this statement\" and accept.\n\n\
              Connection: `Warehouse` (`Development`)\n\n\
              The statement has 1 line and 56 characters.\n\n\
              The statement is between the two lines of 3 backticks below. Everything between them is the \
@@ -1152,75 +1534,86 @@ mod tests {
     }
 
     #[test]
-    fn only_accept_with_run_true_approves() {
+    fn only_accept_with_the_run_choice_approves() {
         use ElicitationAction::{Accept, Cancel, Decline};
         let decide = ElicitingApprover::decide;
         assert_eq!(
-            decide(reply(Accept, Some(json!({"run": true})))),
+            decide(reply(Accept, Some(json!({"answer": "run"})))),
             ApprovalDecision::Approve
         );
-        // A person's no.
+        // A person's no, each with a reason of its own (a plain decline has none to add).
         for no in [
-            reply(Accept, Some(json!({"run": false}))),
+            reply(Accept, Some(json!({"answer": "do_not_run"}))),
+            reply(Accept, Some(json!({}))),
+            reply(Accept, None),
+            reply(Accept, Some(json!({"answer": null}))),
             reply(Decline, None),
-            reply(Decline, Some(json!({"run": true}))),
-            reply(Cancel, Some(json!({"run": true}))),
+            reply(Decline, Some(json!({"answer": "run"}))),
+            reply(Cancel, Some(json!({"answer": "run"}))),
         ] {
             assert!(ElicitingApprover::counts_against_the_connection(&no));
             assert!(matches!(decide(no), ApprovalDecision::Deny { .. }));
         }
-        // Nothing usable: not a yes either, and it counts like a decline (a client that turns a
-        // dismissal into an error must not make asking free).
+        // Not a choice: not a yes either, and it counts like a decline (a client that turns a
+        // dismissal into an error must not make the model's asking free).
         for odd in [
-            reply(Accept, None),
-            reply(Accept, Some(json!({}))),
-            reply(Accept, Some(json!({"run": "true"}))),
-            reply(Accept, Some(json!({"run": 1}))),
-            reply(Accept, Some(json!({"run": null}))),
-            reply(Accept, Some(json!({"other": true}))),
+            reply(Accept, Some(json!({"answer": "yes"}))),
+            reply(Accept, Some(json!({"answer": "RUN"}))),
+            reply(Accept, Some(json!({"answer": true}))),
+            reply(Accept, Some(json!({"answer": 1}))),
+            reply(Accept, Some(json!({"answer": ["run"]}))),
+            // The boolean form of an older question: never a yes.
+            reply(Accept, Some(json!({"run": true}))),
             reply(Accept, Some(json!("run"))),
             reply(Accept, Some(json!([true]))),
             Answer::NoReply,
         ] {
             assert!(ElicitingApprover::counts_against_the_connection(&odd));
-            assert_eq!(
-                decide(odd),
-                ApprovalDecision::Unanswered {
-                    reason: REASON_NO_ANSWER.to_owned()
-                }
-            );
+            let decision = decide(odd);
+            assert!(!matches!(decision, ApprovalDecision::Approve), "{decision:?}");
         }
-        assert!(matches!(
-            decide(Answer::NotDelivered),
-            ApprovalDecision::Refuse { .. }
-        ));
+        assert_eq!(
+            decide(reply(Accept, Some(json!({"answer": "yes"})))),
+            ApprovalDecision::Unanswered { reason: REASON_NO_ANSWER.to_owned() }
+        );
+        assert!(matches!(decide(Answer::NotDelivered), ApprovalDecision::Refuse { .. }));
         // A question that never reached the client is nobody's answer.
-        assert!(!ElicitingApprover::counts_against_the_connection(
-            &Answer::NotDelivered
-        ));
-        assert!(!ElicitingApprover::counts_against_the_connection(&reply(
-            Accept,
-            Some(json!({"run": true}))
-        )));
-        assert!(matches!(
-            decide(Answer::Cancelled),
-            ApprovalDecision::Deny { .. }
-        ));
+        assert!(!ElicitingApprover::counts_against_the_connection(&Answer::NotDelivered));
+        assert!(!ElicitingApprover::counts_against_the_connection(&reply(Accept, Some(json!({"answer": "run"})))));
+        assert!(matches!(decide(Answer::Cancelled), ApprovalDecision::Deny { .. }));
     }
 
     #[test]
-    fn the_requested_schema_is_one_required_boolean_that_defaults_to_no() {
+    fn the_requested_schema_is_one_required_choice_with_no_default() {
         let schema = serde_json::to_value(ElicitingApprover::schema(false).unwrap()).unwrap();
         assert_eq!(
             schema,
             json!({
                 "type": "object",
                 "properties": {
-                    "run": {"type": "boolean", "title": "Run this statement", "default": false}
+                    "answer": {
+                        "type": "string",
+                        "title": "Run this statement?",
+                        "enum": ["do_not_run", "run"],
+                        "enumNames": ["Do not run it", "Run this statement"]
+                    }
                 },
-                "required": ["run"]
+                "required": ["answer"]
             })
         );
+        let commit = serde_json::to_value(ElicitingApprover::schema(true).unwrap()).unwrap();
+        assert_eq!(commit["properties"]["answer"]["enumNames"], json!(["Do not commit it", "Commit this transaction"]));
+        let connections = serde_json::to_value(ElicitingApprover::schema_titled(CONNECTION_TITLE).unwrap()).unwrap();
+        assert_eq!(
+            connections["properties"]["answer"]["enumNames"],
+            json!(["Do not make this change", "Make this change to your connections"])
+        );
+        // One property, required, and nothing for a client to pre-fill.
+        for schema in [schema, commit, connections] {
+            assert_eq!(schema["required"], json!(["answer"]));
+            assert_eq!(schema["properties"].as_object().unwrap().len(), 1);
+            assert!(schema["properties"]["answer"].get("default").is_none(), "{schema}");
+        }
     }
 
     #[test]
@@ -1397,18 +1790,66 @@ mod tests {
     }
 
     fn switch_on_file() -> (tempfile::TempDir, std::path::PathBuf) {
+        settings_file(r#"{"schema_version": 7, "ai": {"agent_access": "read_write"}}"#)
+    }
+
+    fn settings_file(json: &str) -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
-        std::fs::write(
-            &path,
-            r#"{"schema_version": 4, "ai": {"mcp_writes": true}}"#,
-        )
-        .unwrap();
+        std::fs::write(&path, json).unwrap();
         (dir, path)
     }
 
     #[test]
-    fn a_call_without_a_client_is_refused_even_when_the_switch_is_on() {
+    fn the_old_switch_counts_only_for_a_file_of_an_older_app() {
+        let write = request("UPDATE t SET x = 1", None);
+        let refused = |json: &str, reason: String| {
+            let (_dir, path) = settings_file(json);
+            let approver = ElicitingApprover::new(Some(path));
+            let want = ApprovalDecision::Refuse { reason: refusal(&reason) };
+            assert_eq!(approver.approve(&write, &CancelToken::new()), want, "{json}");
+            assert_eq!(approver.check_writable(&write), Err(refusal(&reason)), "{json}");
+            assert_eq!(approver.still_allowed(&write), Err(refusal(&reason)), "{json}");
+        };
+        // Written by an older app: `false` still blocks, naming the switch it shows.
+        refused(r#"{"schema_version": 6, "ai": {"mcp_writes": false}}"#, switch_off(None));
+        refused(r#"{"schema_version": 4, "ai": {"mcp_writes": false}}"#, switch_off(None));
+        // An explicit `false` at schema 7 or later (the old switch turned off after a downgrade and
+        // back) is the user's "no" too.
+        refused(r#"{"schema_version": 7, "ai": {"mcp_writes": false}}"#, switch_off(None));
+        refused(r#"{"schema_version": 8, "ai": {"mcp_writes": false, "agent_access": "read_write"}}"#, switch_off(None));
+        // No file, or one that cannot be read: the settings are named, not a switch.
+        refused("{ not json", settings_unavailable(None));
+        refused(r#"{"schema_version": 7, "ai": {"mcp_writes": "yes"}}"#, settings_unavailable(None));
+        assert_eq!(ElicitingApprover::new(None).approve(&write, &CancelToken::new()), ApprovalDecision::Refuse {
+            reason: refusal(&settings_unavailable(None))
+        });
+        // Schema 7 and later: no switch. Everything else is as before (here: no client to ask).
+        for json in [
+            r#"{"schema_version": 7, "ai": {"agent_access": "read_write"}}"#,
+            r#"{"schema_version": 7, "ai": {"mcp_writes": true}}"#,
+        ] {
+            let (_dir, path) = settings_file(json);
+            let approver = ElicitingApprover::new(Some(path));
+            assert_eq!(
+                approver.approve(&write, &CancelToken::new()),
+                ApprovalDecision::Refuse { reason: refusal(&no_way_to_ask(None)) },
+                "{json}"
+            );
+            assert_eq!(approver.still_allowed(&write), Ok(()), "{json}");
+            // A production connection is never asked about, with or without the key.
+            let mut production = request("UPDATE t SET x = 1", None);
+            production.production = true;
+            assert_eq!(
+                approver.approve(&production, &CancelToken::new()),
+                ApprovalDecision::Refuse { reason: refusal(REASON_PRODUCTION) },
+                "{json}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_call_without_a_client_is_refused_even_when_changes_are_allowed() {
         let (_dir, path) = switch_on_file();
         let approver = ElicitingApprover::new(Some(path));
         assert_eq!(
@@ -1417,7 +1858,7 @@ mod tests {
                 &CancelToken::new()
             ),
             ApprovalDecision::Refuse {
-                reason: REASON_NO_ELICITATION.to_owned()
+                reason: refusal(&no_way_to_ask(None))
             }
         );
     }
@@ -1432,19 +1873,19 @@ mod tests {
         assert_eq!(
             approver.approve(&dangerous, &CancelToken::new()),
             ApprovalDecision::Refuse {
-                reason: REASON_NO_ELICITATION.to_owned()
+                reason: refusal(&no_way_to_ask(None))
             }
         );
         dangerous.production = true;
         assert_eq!(
             approver.approve(&dangerous, &CancelToken::new()),
             ApprovalDecision::Refuse {
-                reason: REASON_DANGEROUS.to_owned()
+                reason: refusal(REASON_DANGEROUS)
             }
         );
         assert_eq!(
             approver.check_writable(&dangerous),
-            Err(REASON_DANGEROUS.to_owned())
+            Err(refusal(REASON_DANGEROUS))
         );
     }
 
@@ -1461,6 +1902,10 @@ mod tests {
             },
             agent_access: None,
             statement_timeout_secs: None,
+            allowed_databases: None,
+            endpoint: None,
+            group: Vec::new(),
+            notes: None,
             revision: Default::default(),
         };
         assert!(approver.allows_dangerous(&connection));
@@ -1500,7 +1945,7 @@ mod tests {
         let statement = "{\n  \"delete\": \"orders\",\n  \"deletes\": [\n    {\n      \"q\": {\n        \"note\": \"``` [x](y)\"\n      },\n      \"limit\": 1\n    }\n  ]\n}";
         let message = ElicitingApprover::message(&mongo_request(statement));
         assert!(message.starts_with(
-            "An MCP client asks to run a command that changes data. Nothing runs unless you accept.\n\n\
+            "An MCP client asks to run a command that changes data. Nothing runs unless you accept. To run it, choose \"Run this statement\" and accept.\n\n\
              Connection: `Warehouse` (`Development`)\n\n\
              Database: `shop`\n\n\
              Collection: `orders`\n\n"
@@ -1527,12 +1972,12 @@ mod tests {
     #[test]
     fn a_mongodb_write_gets_the_same_refusals_as_any_other() {
         let command = "{\n  \"insert\": \"orders\"\n}";
-        // Switch off (or no settings): refused without asking.
+        // No settings: refused without asking.
         let off = ElicitingApprover::new(None);
         assert_eq!(
             off.approve(&mongo_request(command), &CancelToken::new()),
             ApprovalDecision::Refuse {
-                reason: REASON_SWITCH_OFF.to_owned()
+                reason: refusal(REASON_SETTINGS_UNAVAILABLE)
             }
         );
         assert!(off.check_writable(&mongo_request(command)).is_err());
@@ -1544,7 +1989,7 @@ mod tests {
         assert_eq!(
             on.approve(&production, &CancelToken::new()),
             ApprovalDecision::Refuse {
-                reason: REASON_PRODUCTION.to_owned()
+                reason: refusal(REASON_PRODUCTION)
             }
         );
         // An empty filter that was allowed is a dangerous change: not through MCP on production.
@@ -1554,7 +1999,7 @@ mod tests {
         assert_eq!(
             on.approve(&every_document, &CancelToken::new()),
             ApprovalDecision::Refuse {
-                reason: REASON_DANGEROUS.to_owned()
+                reason: refusal(REASON_DANGEROUS)
             }
         );
         // A command too long to be reviewed is refused once there is a client to ask.
@@ -1564,10 +2009,307 @@ mod tests {
         assert_eq!(
             on.approve(&mongo_request(command), &CancelToken::new()),
             ApprovalDecision::Refuse {
-                reason: REASON_NO_ELICITATION.to_owned()
+                reason: refusal(&no_way_to_ask(None))
             }
         );
-        // The switch is read again once the client says yes.
+        // The settings are read again once the client says yes.
         assert_eq!(on.still_allowed(&mongo_request(command)), Ok(()));
+    }
+
+    /// Every text a refusal can have, with the sentence the connection tools add for a removal.
+    fn every_reason() -> Vec<String> {
+        let mut reasons = vec![
+            switch_off(None),
+            switch_off(Some("add the connection in the tablex app (New Connection)")),
+            settings_unavailable(None),
+            settings_unavailable(Some("add the connection in the tablex app (New Connection)")),
+            REASON_PRODUCTION.to_owned(),
+            no_way_to_ask(None),
+            no_way_to_ask(Some(&ClientError::NotRunning)),
+            no_way_to_ask(Some(&ClientError::Unsupported)),
+            no_way_to_ask(Some(&ClientError::Failed("the tablex socket is open to other users".into()))),
+        ];
+        reasons.extend(
+            [
+                REASON_DECLINED_OFTEN,
+                REASON_TOO_LONG,
+                REASON_HIDDEN_BLANKS,
+                REASON_COMMIT_NOT_REVIEWABLE,
+                REASON_BUSY,
+                REASON_DANGEROUS,
+                REASON_NOT_DELIVERED,
+            ]
+            .map(str::to_owned),
+        );
+        reasons
+    }
+
+    #[test]
+    fn every_refusal_ends_with_the_outside_sentence_exactly_once_and_fits_the_clip() {
+        for reason in every_reason() {
+            assert!(!reason.contains("outside tablex"), "added in one place only: {reason}");
+            let text = refusal(&reason);
+            assert_eq!(text.matches(OUTSIDE_TABLEX).count(), 1, "{text}");
+            assert!(text.ends_with(OUTSIDE_TABLEX), "{text}");
+            // The layer clips what the model gets at 2000 characters and adds a prefix of its own.
+            assert!(text.chars().count() < 1000, "{} characters: {text}", text.chars().count());
+            // Each one names something to ask the user (or to wait for).
+            assert!(
+                text.contains("Ask the user") || text.contains("ask the user") || text.contains("Wait until") || text.contains("Roll the transaction back"),
+                "{text}"
+            );
+        }
+        assert_eq!(
+            OUTSIDE_TABLEX,
+            "Do not connect to the database outside tablex (for example with the URI or a script); ask the user instead."
+        );
+        // Calling it twice does not repeat it, and a reason that ends in a full stop gets one only.
+        assert_eq!(refusal("a reason."), format!("a reason. {OUTSIDE_TABLEX}"));
+    }
+
+    #[test]
+    fn the_switch_refusal_names_the_setting_as_the_older_app_shows_it() {
+        // The labels are those of the older app that wrote the file (this app has no such switch).
+        for label in ["Let MCP clients run changes", "AI Assistant", "MCP server"] {
+            assert!(REASON_SWITCH_OFF.contains(label), "{label}");
+        }
+        let writes = refusal(&switch_off(None));
+        assert!(writes.contains("Settings \u{2192} AI Assistant \u{2192} MCP server"), "{writes}");
+        assert!(!writes.contains("New Connection"), "{writes}");
+        let connections = refusal(&switch_off(Some("add the connection in the tablex app (New Connection)")));
+        assert!(
+            connections.contains("or ask the user to add the connection in the tablex app (New Connection)"),
+            "{connections}"
+        );
+        assert!(connections.contains("Let MCP clients run changes"), "{connections}");
+    }
+
+    #[test]
+    fn the_client_that_cannot_ask_is_told_what_the_user_can_do() {
+        let not_running = no_way_to_ask(Some(&ClientError::NotRunning));
+        assert_eq!(not_running, no_way_to_ask(None));
+        assert!(not_running.starts_with("this MCP client cannot show approval questions"), "{not_running}");
+        assert!(
+            not_running.contains("open the tablex app and try again, or to use a client that supports MCP elicitation"),
+            "{not_running}"
+        );
+        let windows = no_way_to_ask(Some(&ClientError::Unsupported));
+        assert!(windows.contains("approval in the tablex app is not available on Windows yet"), "{windows}");
+        assert!(windows.contains("client that supports MCP elicitation"), "{windows}");
+        assert!(!windows.contains("open the tablex app and try again"), "{windows}");
+        let broken = no_way_to_ask(Some(&ClientError::Failed("the tablex socket is open to other users".into())));
+        assert!(broken.contains("the tablex socket is open to other users"), "{broken}");
+        assert!(broken.contains("client that supports MCP elicitation"), "{broken}");
+    }
+
+    #[test]
+    fn the_production_too_long_and_declined_refusals_say_what_to_do() {
+        for (reason, what) in [
+            (REASON_PRODUCTION, "make this change in the tablex app"),
+            (REASON_DANGEROUS, "run it in the tablex app"),
+            (REASON_TOO_LONG, "run it in the tablex app"),
+            (REASON_HIDDEN_BLANKS, "run it in the tablex app"),
+            (REASON_COMMIT_NOT_REVIEWABLE, "run the changes in the tablex app"),
+            (REASON_DECLINED_OFTEN, "restart it"),
+            (REASON_BUSY, "Wait until"),
+            (REASON_NOT_DELIVERED, "try again"),
+        ] {
+            assert!(reason.contains(what), "{reason}");
+        }
+    }
+
+    #[test]
+    fn the_refusals_that_leave_the_approver_all_carry_the_sentence_and_answers_do_not() {
+        let ends = |text: &str| assert!(text.ends_with(OUTSIDE_TABLEX), "{text}");
+        let off = ElicitingApprover::new(None);
+        let write = request("DELETE FROM t WHERE a = 1", None);
+        let ApprovalDecision::Refuse { reason } = off.approve(&write, &CancelToken::new()) else {
+            panic!("refused");
+        };
+        ends(&reason);
+        ends(&off.check_writable(&write).unwrap_err());
+        ends(&off.still_allowed(&write).unwrap_err());
+        ends(&off.commit_reviewable(&["x".repeat(MAX_CHARS + 1)]).unwrap_err());
+        ends(&off.connection_change_still_allowed("remove the connection in the tablex app").unwrap_err());
+        let question = ConnectionQuestion {
+            message: String::new(),
+            app: ApprovalAsk::default(),
+            instead: "remove the connection in the tablex app",
+        };
+        let ApprovalDecision::Refuse { reason } = off.ask_connection_change(question, &CancelToken::new()) else {
+            panic!("refused");
+        };
+        ends(&reason);
+        assert!(reason.contains("or ask the user to remove the connection in the tablex app"), "{reason}");
+        let ApprovalDecision::Refuse { reason } = ElicitingApprover::decide(Answer::NotDelivered) else {
+            panic!("refused");
+        };
+        ends(&reason);
+        // A user's answer, and a question that got none, are not refusals: no sentence.
+        for decision in [
+            ElicitingApprover::decide(Answer::Cancelled),
+            ElicitingApprover::decide(Answer::NoReply),
+            ElicitingApprover::decide(Answer::App { approved: false }),
+        ] {
+            let text = format!("{decision:?}");
+            assert!(!text.contains("outside tablex"), "{text}");
+        }
+        assert_eq!(ElicitingApprover::decide(Answer::App { approved: true }), ApprovalDecision::Approve);
+    }
+
+    #[test]
+    fn the_app_question_carries_what_the_elicitation_shows() {
+        let mut dangerous = request("DROP TABLE t\u{200B}", Some("main"));
+        dangerous.dangerous = Some("DROP permanently removes database objects");
+        let ask = ElicitingApprover::app_question(&dangerous);
+        assert_eq!(ask.title, "Run this statement");
+        assert_eq!(ask.connection.as_deref(), Some("Warehouse"));
+        assert_eq!(ask.connection_type.as_deref(), Some("Development"));
+        assert_eq!(ask.database.as_deref(), Some("main"));
+        assert_eq!(ask.danger.as_deref(), Some("DROP permanently removes database objects"));
+        // Characters without a shape of their own are spelled, and said.
+        assert_eq!(ask.statements, ["DROP TABLE t<U+200B>"]);
+        assert!(ask.notes.iter().any(|note| note.contains("has 1 character without a shape of its own")), "{:?}", ask.notes);
+        assert!(ask.check().is_err(), "the id is set when it is sent");
+        // The commit lists every change, one block each.
+        let changes: Vec<String> = ["INSERT INTO t VALUES (1)", "DELETE FROM t WHERE a = 2"].map(str::to_owned).into();
+        let mut commit = request("COMMIT", None);
+        commit.transaction = Some(TransactionApproval { id: "tx-1", commit: Some(&changes) });
+        let ask = ElicitingApprover::app_question(&commit);
+        assert_eq!(ask.title, "Commit this transaction");
+        assert_eq!(ask.statements, changes);
+        assert!(ask.notes.iter().any(|note| note.contains("transaction tx-1")), "{:?}", ask.notes);
+        // A Mongo command and a script name what they are.
+        let command = ElicitingApprover::app_question(&mongo_request("{}"));
+        assert_eq!((command.title.as_str(), command.collection.as_deref()), ("Run this command", Some("orders")));
+    }
+
+    /// What a client's answer can be, and what the agent is told for each. Statements are
+    /// generic: nothing here names a real table.
+    #[test]
+    fn every_kind_of_answer_has_its_own_outcome_and_text() {
+        use ElicitationAction::{Accept, Cancel, Decline};
+        let deny = |answer: Answer| match ElicitingApprover::decide(answer) {
+            ApprovalDecision::Deny { reason } => reason,
+            other => panic!("a deny, got {other:?}"),
+        };
+        // 1. accept with the run value: the only yes.
+        assert_eq!(
+            ElicitingApprover::decide(reply(Accept, Some(json!({"answer": "run"})))),
+            ApprovalDecision::Approve
+        );
+        // 2. accept with do_not_run: the user chose not to.
+        let chose = deny(reply(Accept, Some(json!({"answer": "do_not_run"})))).expect("a reason");
+        assert_eq!(chose, chose_not_to(ANSWER_TITLE));
+        assert_eq!(chose, "the user chose \"Do not run it\"");
+        // 3. accept with no value: the form was submitted as it was.
+        let none = deny(reply(Accept, Some(json!({})))).expect("a reason");
+        assert_eq!(deny(reply(Accept, None)).as_deref(), Some(none.as_str()));
+        assert_eq!(none, no_choice(ANSWER_TITLE));
+        assert!(none.contains("accepted without choosing \"Run this statement\" or \"Do not run it\""), "{none}");
+        assert!(none.contains("so nothing ran"), "{none}");
+        assert!(none.contains("Ask the user whether to go ahead, and tell them to choose \"Run this statement\" and accept"), "{none}");
+        assert!(none.contains("counts as a decline"), "{none}");
+        assert!(none.contains(&format!("after {MAX_DECLINES} declines")), "{none}");
+        // 4. accept with the old boolean shape (or any other value): never a yes, not an answer.
+        for old in [json!({"run": true}), json!({"answer": true}), json!({"answer": "true"}), json!({"answer": "Run"})] {
+            assert_eq!(
+                ElicitingApprover::decide(reply(Accept, Some(old.clone()))),
+                match old.get("answer") {
+                    None => ApprovalDecision::Deny { reason: Some(none.clone()) },
+                    Some(_) => ApprovalDecision::Unanswered { reason: REASON_NO_ANSWER.to_owned() },
+                },
+                "{old}"
+            );
+        }
+        // 5. a decline: the user did not approve, with nothing to add (the layer says so).
+        assert_eq!(deny(reply(Decline, None)), None);
+        // 6. a dismissal.
+        assert_eq!(deny(reply(Cancel, None)).as_deref(), Some(REASON_DISMISSED));
+        // The texts differ, and none carries the refusal sentence (these are answers, not refusals).
+        let texts = [chose, none, REASON_DISMISSED.to_owned(), REASON_NO_ANSWER.to_owned()];
+        for (n, text) in texts.iter().enumerate() {
+            assert!(!text.contains("outside tablex"), "{text}");
+            for other in &texts[n + 1..] {
+                assert_ne!(text, other);
+            }
+        }
+        // The choice is named by the title of the question: the commit's and the connections' too.
+        for (title, no) in [(COMMIT_TITLE, "Do not commit it"), (CONNECTION_TITLE, "Do not make this change")] {
+            let ApprovalDecision::Deny { reason: Some(text) } =
+                ElicitingApprover::decide_for(reply(Accept, Some(json!({}))), title)
+            else {
+                panic!("a deny with a reason");
+            };
+            assert!(text.contains(&format!("choose \"{title}\" and accept")) && text.contains(no), "{text}");
+            let ApprovalDecision::Deny { reason: Some(text) } =
+                ElicitingApprover::decide_for(reply(Accept, Some(json!({"answer": "do_not_run"}))), title)
+            else {
+                panic!("a deny with a reason");
+            };
+            assert_eq!(text, format!("the user chose \"{no}\""));
+        }
+        // An answer without a choice counts toward the decline budget, like a decline.
+        assert!(ElicitingApprover::counts_against_the_connection(&reply(Accept, Some(json!({})))));
+    }
+
+    #[test]
+    fn the_question_says_to_choose_to_run_it_and_accept_near_the_top() {
+        let message = ElicitingApprover::message(&request("CREATE INDEX CONCURRENTLY ix ON items (label)", None));
+        let first_paragraph = message.split("\n\n").next().unwrap();
+        assert!(first_paragraph.ends_with("To run it, choose \"Run this statement\" and accept."), "{first_paragraph}");
+        let mut dangerous = request("DROP TABLE items", None);
+        dangerous.dangerous = Some("DROP permanently removes database objects");
+        let message = ElicitingApprover::message(&dangerous);
+        assert!(message.split("\n\n").next().unwrap().ends_with("To run it, choose \"Run this statement\" and accept."), "{message}");
+        let changes: Vec<String> = vec!["INSERT INTO items VALUES (1)".to_owned()];
+        let mut commit = request("COMMIT", None);
+        commit.transaction = Some(TransactionApproval { id: "tx-1", commit: Some(&changes) });
+        let message = ElicitingApprover::message(&commit);
+        assert!(message.split("\n\n").next().unwrap().ends_with("To commit, choose \"Commit this transaction\" and accept."), "{message}");
+        // The instruction names the option the form shows.
+        let schema = serde_json::to_value(ElicitingApprover::schema(false).unwrap()).unwrap();
+        assert_eq!(schema["properties"]["answer"]["enumNames"][1], ANSWER_TITLE);
+    }
+
+    #[test]
+    fn the_app_refusals_have_reasons_and_never_count_as_declines() {
+        let refused = |text: &str| ElicitingApprover::decide(Answer::AppRefused(text.to_owned()));
+        assert_eq!(
+            refused("tablex has too many questions waiting"),
+            ApprovalDecision::Refuse { reason: refusal(REASON_BUSY) }
+        );
+        let ApprovalDecision::Refuse { reason } = refused("tablex has no window to ask in") else {
+            panic!("a refusal");
+        };
+        assert!(reason.contains("tablex has no window to ask in") && reason.ends_with(OUTSIDE_TABLEX), "{reason}");
+        assert!(!ElicitingApprover::counts_against_the_connection(&Answer::AppRefused("x".into())));
+    }
+
+    #[test]
+    fn a_long_client_name_is_cut_after_it_is_spelled_and_never_inside_a_spelled_character() {
+        assert_eq!(cut_spelled("short", 80), "short");
+        assert_eq!(cut_spelled(&"a".repeat(80), 80), "a".repeat(80));
+        assert_eq!(cut_spelled(&"a".repeat(81), 80), format!("{}\u{2026}", "a".repeat(80)));
+        // Controls spell out to `<U+XXXX>`: 20 of them are 160 characters, and the cut falls between two.
+        let spelled = spell_out(&"\u{7}".repeat(20), false).0;
+        assert_eq!(spelled.chars().count(), 20 * "<U+0007>".len());
+        let cut = cut_spelled(&spelled, 80);
+        assert!(cut.ends_with(">\u{2026}"), "{cut}");
+        assert_eq!(cut.trim_end_matches('\u{2026}'), "<U+0007>".repeat(10));
+        let odd = cut_spelled(&format!("{}<U+202E>x", "a".repeat(75)), 80);
+        assert_eq!(odd, format!("{}\u{2026}", "a".repeat(75)), "a unit that does not fit is dropped whole");
+    }
+
+    #[test]
+    fn a_dangerous_statement_and_a_commit_are_click_only_in_the_app_and_a_plain_write_is_not() {
+        assert!(!ElicitingApprover::app_question(&request("INSERT INTO t VALUES (1)", None)).click_only);
+        let mut dangerous = request("DROP TABLE t", None);
+        dangerous.dangerous = Some("DROP removes objects");
+        assert!(ElicitingApprover::app_question(&dangerous).click_only);
+        let changes: Vec<String> = vec!["INSERT INTO t VALUES (1)".to_owned()];
+        let mut commit = request("COMMIT", None);
+        commit.transaction = Some(TransactionApproval { id: "tx-1", commit: Some(&changes) });
+        assert!(ElicitingApprover::app_question(&commit).click_only);
     }
 }

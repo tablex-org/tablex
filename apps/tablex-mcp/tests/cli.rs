@@ -385,11 +385,11 @@ fn the_real_binary_reads_the_switch_from_the_apps_settings_file_and_asks_the_cli
         json!({"connection_id": conn.id, "statement": "INSERT INTO items(label) VALUES ('cli')"});
     let count = json!({"connection_id": conn.id, "statement": "SELECT count(*) FROM items WHERE label = 'cli'"});
 
-    // Switch on in the file the binary's own data directory holds, and a client that cannot be
-    // asked: the reason is the client, not the switch.
+    // A schema 7 file (no switch) in the binary's own data directory, and a client that cannot be
+    // asked: the reason is the client.
     std::fs::write(
         &settings,
-        r#"{"schema_version": 4, "ai": {"mcp_writes": true}}"#,
+        r#"{"schema_version": 7, "ai": {"mcp_writes": true}}"#,
     )
     .unwrap();
     let mut session = start();
@@ -398,19 +398,20 @@ fn the_real_binary_reads_the_switch_from_the_apps_settings_file_and_asks_the_cli
     assert_eq!(opened["isError"], false, "{opened}");
     let refused = session.call(3, "execute_query", write.clone());
     assert!(
-        error_text(&refused).ends_with(REASON_NO_ELICITATION),
+        error_text(&refused).contains(REASON_NO_ELICITATION),
         "{}",
         error_text(&refused)
     );
-    // Read at the time of the write: switched off, the next write names the switch.
+    // Read at the time of the write: a file of an older app with its switch off, and the next
+    // write names that switch.
     std::fs::write(
         &settings,
-        r#"{"schema_version": 4, "ai": {"mcp_writes": false}}"#,
+        r#"{"schema_version": 6, "ai": {"mcp_writes": false}}"#,
     )
     .unwrap();
     let refused = session.call(4, "execute_query", write.clone());
     assert!(
-        error_text(&refused).ends_with(REASON_SWITCH_OFF),
+        error_text(&refused).contains(REASON_SWITCH_OFF),
         "{}",
         error_text(&refused)
     );
@@ -420,7 +421,7 @@ fn the_real_binary_reads_the_switch_from_the_apps_settings_file_and_asks_the_cli
     // A client that declares elicitation is asked, and a yes runs the statement.
     std::fs::write(
         &settings,
-        r#"{"schema_version": 4, "ai": {"mcp_writes": true}}"#,
+        r#"{"schema_version": 7, "ai": {"mcp_writes": true}}"#,
     )
     .unwrap();
     let mut session = start();
@@ -432,14 +433,14 @@ fn the_real_binary_reads_the_switch_from_the_apps_settings_file_and_asks_the_cli
     assert_eq!(question["method"], "elicitation/create", "{question}");
     assert_eq!(
         question["params"]["requestedSchema"]["required"],
-        json!(["run"])
+        json!(["answer"])
     );
     assert!(question["params"]["message"]
         .as_str()
         .unwrap()
         .contains("INSERT INTO items"));
     session.send(&json!({"jsonrpc": "2.0", "id": question["id"],
-        "result": {"action": "accept", "content": {"run": true}}}));
+        "result": {"action": "accept", "content": {"answer": "run"}}}));
     let answer = session.next_line().expect("the call's result");
     assert_eq!(answer["id"], 3, "{answer}");
     assert_eq!(answer["result"]["isError"], false, "{answer}");

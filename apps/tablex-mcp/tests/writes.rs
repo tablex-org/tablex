@@ -1,6 +1,6 @@
 //! Writes through the MCP server: a statement that changes data is put to the user through MCP
-//! elicitation, behind three conditions (the app's switch, a non-production connection, a client
-//! that can be asked), and runs only when the client answers `accept` with `run: true`.
+//! elicitation, behind three conditions (settings that allow it, a non-production connection, a
+//! client that can be asked), and runs only when the client answers `accept` with `run: true`.
 //!
 //! The server is the real one over an in-memory pipe, the client is an rmcp client that does or does
 //! not declare the elicitation capability. The matrix runs the real SQLite driver (`Fixture::new`,
@@ -18,9 +18,9 @@ use rmcp::model::{ElicitResult, ElicitationAction, ErrorData as McpError};
 use serde_json::{json, Value};
 use support::*;
 use tablex_mcp::approver::{
-    ElicitingApprover, MAX_CHARS, MAX_DECLINES, MAX_LINES, MAX_LINE_CHARS, MAX_OPEN_QUESTIONS,
+    no_way_to_ask, refusal, ElicitingApprover, MAX_CHARS, MAX_DECLINES, MAX_LINES, MAX_LINE_CHARS, MAX_OPEN_QUESTIONS,
     REASON_BUSY, REASON_DECLINED_OFTEN, REASON_DISMISSED, REASON_HIDDEN_BLANKS, REASON_NO_ANSWER,
-    REASON_NO_ELICITATION, REASON_PRODUCTION, REASON_SWITCH_OFF, REASON_TOO_LONG,
+    REASON_NO_ELICITATION, REASON_PRODUCTION, REASON_SETTINGS_UNAVAILABLE, REASON_SWITCH_OFF, REASON_TOO_LONG,
 };
 use tablex_mcp::server::McpServer;
 
@@ -54,7 +54,7 @@ impl Said {
             Said::Decline => ElicitResult::new(ElicitationAction::Decline),
             Said::Cancel => ElicitResult::new(ElicitationAction::Cancel),
             Said::Malformed => {
-                ElicitResult::new(ElicitationAction::Accept).with_content(json!({"run": "true"}))
+                ElicitResult::new(ElicitationAction::Accept).with_content(json!({"answer": "yes"}))
             }
         }
     }
@@ -62,7 +62,7 @@ impl Said {
 
 /// The exact text the model gets for a write that was not asked about.
 fn not_asked(reason: &str) -> String {
-    format!("this SQL statement was not run, and the user was not asked: {reason}")
+    format!("this SQL statement was not run, and the user was not asked: {}", refusal(reason))
 }
 
 /// The exact text the model gets for a write whose question got no usable answer.
@@ -90,6 +90,8 @@ fn rows_written(result: &rmcp::model::CallToolResult) -> i64 {
 
 #[derive(Debug, Clone, Copy)]
 struct Cell {
+    /// `true`: the settings of the current app (schema 7, no switch). `false`: those of an older app
+    /// whose switch "Let MCP clients run changes" is off (schema 6), which still blocks changes.
     switch: bool,
     access: &'static str,
     production: bool,
@@ -112,13 +114,18 @@ async fn run_cell(cell: Cell) -> Outcome {
         Some(cell.access),
         if cell.production { "production" } else { "" },
     );
-    let asker = Asker::answering(cell.capability, Ok(cell.said.reply()));
+    run_on(fixture, conn, cell.capability, cell.said, format!("{cell:?}")).await
+}
+
+/// One INSERT through `execute_query` on `conn`, with a client that answers `said`.
+async fn run_on(fixture: Fixture, conn: Conn, capability: bool, said: Said, cell: String) -> Outcome {
+    let asker = Asker::answering(capability, Ok(said.reply()));
     let seen = Arc::clone(&asker.seen);
     let harness = Harness::start_with(fixture, asker).await;
     let opened = harness
         .call("open_session", json!({"connection_id": conn.id}))
         .await;
-    assert_eq!(code(&opened), "ok", "{cell:?}: {}", text(&opened));
+    assert_eq!(code(&opened), "ok", "{cell}: {}", text(&opened));
     let result = harness
         .call(
             "execute_query",
@@ -174,13 +181,20 @@ fn expected(cell: Cell) -> (&'static str, String, usize, i64) {
         return refused(REASON_PRODUCTION);
     }
     if !cell.capability {
-        return refused(REASON_NO_ELICITATION);
+        return refused(&no_way_to_ask(None));
     }
     match cell.said {
         Said::Yes => ("ok", String::new(), 1, 1),
-        Said::No | Said::Decline => (
+        Said::Decline => (
             "agent.write_refused",
             "the user did not approve this SQL statement".into(),
+            1,
+            0,
+        ),
+                // The choice "Do not run it": the user chose not to, and the agent is told so.
+        Said::No => (
+            "agent.write_refused",
+            format!("the user did not approve this SQL statement: {}", tablex_mcp::approver::chose_not_to(tablex_mcp::approver::ANSWER_TITLE)),
             1,
             0,
         ),
@@ -227,9 +241,14 @@ async fn a_write_runs_exactly_once_in_the_one_allowed_cell_and_nowhere_else() {
                                 json!({
                                     "type": "object",
                                     "properties": {
-                                        "run": {"type": "boolean", "title": "Run this statement", "default": false}
+                                        "answer": {
+                                            "type": "string",
+                                            "title": "Run this statement?",
+                                            "enum": ["do_not_run", "run"],
+                                            "enumNames": ["Do not run it", "Run this statement"]
+                                        }
                                     },
-                                    "required": ["run"]
+                                    "required": ["answer"]
                                 }),
                                 "{cell:?}"
                             );
@@ -243,6 +262,97 @@ async fn a_write_runs_exactly_once_in_the_one_allowed_cell_and_nowhere_else() {
     assert_eq!(allowed, 1, "exactly one cell writes");
 }
 
+// ---- the default access, with no switch (schema 7) --------------------------------------------------
+
+#[tokio::test]
+async fn with_a_default_of_read_and_write_a_write_on_a_connection_with_no_setting_is_asked() {
+    // (a) The settings of the current app: schema 7, no switch, the default access Read and write.
+    // The connection sets no level itself and has no type, or a type that is not production.
+    for type_id in ["", "development"] {
+        let fixture = Fixture::new();
+        fixture.set_default_access("read_write");
+        let conn = fixture.typed_connection(None, type_id);
+        let outcome = run_on(fixture, conn, true, Said::Yes, type_id.to_owned()).await;
+        assert_eq!(outcome.code, "ok", "{type_id:?}: {}", outcome.message);
+        assert_eq!(outcome.questions.len(), 1, "{type_id:?}: put to the user, once");
+        assert_eq!(outcome.written, 1);
+        assert_eq!(outcome.approval.as_deref(), Some("approved"));
+        // A no changes nothing; so does a client that cannot be asked.
+        let fixture = Fixture::new();
+        fixture.set_default_access("read_write");
+        let conn = fixture.typed_connection(None, type_id);
+        let declined = run_on(fixture, conn, true, Said::Decline, type_id.to_owned()).await;
+        assert_eq!((declined.code.as_str(), declined.questions.len(), declined.written), ("agent.write_refused", 1, 0));
+        let fixture = Fixture::new();
+        fixture.set_default_access("read_write");
+        let conn = fixture.typed_connection(None, type_id);
+        let no_client = run_on(fixture, conn, false, Said::Yes, type_id.to_owned()).await;
+        assert_eq!(no_client.message, not_asked(&no_way_to_ask(None)));
+        assert_eq!(no_client.written, 0);
+    }
+    // The default is read: a write is refused by the access, before any question.
+    let fixture = Fixture::new();
+    fixture.set_default_access("read");
+    let conn = fixture.typed_connection(None, "");
+    let outcome = run_on(fixture, conn, true, Said::Yes, "read".into()).await;
+    assert_eq!((outcome.code.as_str(), outcome.questions.len(), outcome.written), ("agent.write_refused", 0, 0));
+    // The connection's own level still wins over the default.
+    let fixture = Fixture::new();
+    fixture.set_default_access("read_write");
+    let conn = fixture.typed_connection(Some("read"), "");
+    let own = run_on(fixture, conn, true, Said::Yes, "own".into()).await;
+    assert_eq!((own.code.as_str(), own.questions.len(), own.written), ("agent.write_refused", 0, 0));
+}
+
+#[tokio::test]
+async fn a_default_of_read_and_write_changes_nothing_for_a_production_connection() {
+    // (b) Production gets no default: with no level of its own the agent cannot even open a session.
+    let fixture = Fixture::new();
+    fixture.set_default_access("read_write");
+    let conn = fixture.typed_connection(None, "production");
+    let harness = Harness::start_with(fixture, Asker::answering(true, Ok(Said::Yes.reply()))).await;
+    let listed = harness.call("list_connections", json!({})).await;
+    assert!(text(&listed).contains("\"off\""), "{}", text(&listed));
+    let opened = harness.call("open_session", json!({"connection_id": conn.id})).await;
+    assert_eq!(opened.is_error, Some(true), "{}", text(&opened));
+    harness.client.cancel().await.unwrap();
+    harness.server.await.unwrap().unwrap();
+    // With a level of its own it is as before: a write is refused for the type, never asked.
+    let fixture = Fixture::new();
+    fixture.set_default_access("read_write");
+    let conn = fixture.typed_connection(Some("read_write"), "production");
+    let outcome = run_on(fixture, conn, true, Said::Yes, "production".into()).await;
+    assert_eq!(outcome.message, not_asked(REASON_PRODUCTION));
+    assert_eq!((outcome.questions.len(), outcome.written), (0, 0));
+}
+
+#[tokio::test]
+async fn settings_of_an_older_app_with_the_switch_off_still_refuse_a_write_on_a_read_write_connection() {
+    // (c) Schema 6 with `mcp_writes: false`: refused, naming the switch of that app, even with a
+    // default of Read and write and a connection of its own Read and write.
+    let fixture = Fixture::new();
+    fixture.write_settings(r#"{"schema_version": 6, "ai": {"mcp_writes": false}}"#);
+    let conn = fixture.typed_connection(Some("read_write"), "");
+    let outcome = run_on(fixture, conn, true, Said::Yes, "schema 6".into()).await;
+    assert_eq!(outcome.message, not_asked(REASON_SWITCH_OFF));
+    assert_eq!((outcome.questions.len(), outcome.written), (0, 0));
+    // The same file at schema 7: an explicit `false` (the old switch turned off after a downgrade and
+    // back) is still the user's "no"; a file with the key `true`, or none, asks as usual.
+    let fixture = Fixture::new();
+    fixture.write_settings(r#"{"schema_version": 7, "ai": {"mcp_writes": false}}"#);
+    let conn = fixture.typed_connection(Some("read_write"), "");
+    let outcome = run_on(fixture, conn, true, Said::Yes, "schema 7".into()).await;
+    assert_eq!(outcome.message, not_asked(REASON_SWITCH_OFF));
+    assert_eq!((outcome.questions.len(), outcome.written), (0, 0));
+    for file in [r#"{"schema_version": 7, "ai": {"mcp_writes": true}}"#, r#"{"schema_version": 7, "ai": {}}"#] {
+        let fixture = Fixture::new();
+        fixture.write_settings(file);
+        let conn = fixture.typed_connection(Some("read_write"), "");
+        let outcome = run_on(fixture, conn, true, Said::Yes, "schema 7".into()).await;
+        assert_eq!((outcome.code.as_str(), outcome.questions.len(), outcome.written), ("ok", 1, 1), "{file}");
+    }
+}
+
 #[tokio::test]
 async fn the_audit_entries_say_how_each_write_was_decided() {
     let base = Cell {
@@ -254,10 +364,13 @@ async fn the_audit_entries_say_how_each_write_was_decided() {
     };
     let approved = run_cell(base).await;
     assert_eq!(approved.approval.as_deref(), Some("approved"));
-    for said in [Said::No, Said::Decline] {
-        let declined = run_cell(Cell { said, ..base }).await;
-        assert_eq!(declined.approval.as_deref(), Some("declined"), "{said:?}");
-    }
+    let declined = run_cell(Cell { said: Said::Decline, ..base }).await;
+    assert_eq!(declined.approval.as_deref(), Some("declined"));
+    let chose_not = run_cell(Cell { said: Said::No, ..base }).await;
+    assert_eq!(
+        chose_not.approval,
+        Some(format!("declined: {}", tablex_mcp::approver::chose_not_to(tablex_mcp::approver::ANSWER_TITLE)))
+    );
     let dismissed = run_cell(Cell {
         said: Said::Cancel,
         ..base
@@ -276,6 +389,7 @@ async fn the_audit_entries_say_how_each_write_was_decided() {
         unreadable.approval.as_deref(),
         Some(format!("unanswered: {REASON_NO_ANSWER}").as_str())
     );
+    let no_ask = no_way_to_ask(None);
     for (cell, reason) in [
         (
             Cell {
@@ -296,13 +410,13 @@ async fn the_audit_entries_say_how_each_write_was_decided() {
                 capability: false,
                 ..base
             },
-            REASON_NO_ELICITATION,
+            no_ask.as_str(),
         ),
     ] {
         let refused = run_cell(cell).await;
         assert_eq!(
             refused.approval.as_deref(),
-            Some(format!("refused: {reason}").as_str()),
+            Some(format!("refused: {}", engine_agent::sanitize::clean(&refusal(reason), 200)).as_str()),
             "{cell:?}"
         );
     }
@@ -666,12 +780,36 @@ async fn an_unusable_answer_is_not_a_yes() {
         result.content = content;
         Ok(result)
     };
+    let no_choice = tablex_mcp::approver::no_choice(tablex_mcp::approver::ANSWER_TITLE);
+    // Accepted with no choice: nothing ran, and the agent is told what to ask the user to do.
     for (label, answer) in [
         ("accept without content", accept(None)),
-        ("run is null", accept(Some(json!({"run": null})))),
-        ("run is 1", accept(Some(json!({"run": 1})))),
+        ("answer is null", accept(Some(json!({"answer": null})))),
         ("another key", accept(Some(json!({"yes": true})))),
+        ("the boolean of the old form", accept(Some(json!({"run": true})))),
         ("content is a bool", accept(Some(json!(true)))),
+    ] {
+        let rig = rig(2, false, true, Asker::answering(true, answer)).await;
+        for _ in 0..MAX_DECLINES {
+            let result = rig.execute(0, INSERT).await;
+            assert_eq!(code(&result), "agent.write_refused", "{label}");
+            assert_eq!(
+                error_message(&result),
+                format!("the user did not approve this SQL statement: {no_choice}"),
+                "{label}"
+            );
+        }
+        assert!(rig.runs(0).is_empty(), "{label}");
+        // It counts like a decline: the same limit, and no question once it is reached.
+        let closed = rig.execute(0, INSERT).await;
+        assert_eq!(error_message(&closed), not_asked(REASON_DECLINED_OFTEN), "{label}");
+        assert_eq!(rig.harness.client.service().seen.asked().len(), MAX_DECLINES as usize, "{label}");
+        rig.finish().await;
+    }
+    for (label, answer) in [
+        ("answer is 1", accept(Some(json!({"answer": 1})))),
+        ("answer is a boolean", accept(Some(json!({"answer": true})))),
+        ("answer is another word", accept(Some(json!({"answer": "yes"})))),
         (
             "an error from the client",
             Err(McpError::internal_error("boom", None)),
@@ -743,55 +881,72 @@ async fn text_hidden_behind_blanks_is_not_asked() {
     rig.finish().await;
 }
 
-// ---- the switch is read at each write --------------------------------------------------------------
+// ---- the settings are read at each write -----------------------------------------------------------
 
 #[tokio::test]
-async fn the_switch_is_read_at_the_time_of_each_write_and_fails_closed() {
+async fn the_settings_are_read_at_the_time_of_each_write_and_fail_closed() {
     let rig = rig(1, false, false, Asker::answering(true, Ok(accepted(true)))).await;
     let fixture = &rig.harness.fixture;
     let refused = |result: &rmcp::model::CallToolResult| {
         assert_eq!(code(result), "agent.write_refused", "{}", text(result));
         error_message(result)
     };
+    // The rig starts with the file of an older app whose switch is off: nothing is asked.
     assert_eq!(
         refused(&rig.execute(0, INSERT).await),
         not_asked(REASON_SWITCH_OFF)
     );
-    // On in the file: the next write is asked and runs, without restarting anything.
-    fixture.set_mcp_writes(true);
+    // A file of the current app (schema 7, no switch): the next write is asked and runs, without
+    // restarting anything.
+    fixture.write_settings(r#"{"schema_version": 7, "ai": {}}"#);
     assert_eq!(code(&rig.execute(0, INSERT).await), "ok");
     assert_eq!(rig.runs(0).len(), 1);
-    // Off again: refused again.
+    // A file of an older app (schema 6) with its switch off: refused again, naming that switch.
     fixture.set_mcp_writes(false);
     assert_eq!(
         refused(&rig.execute(0, INSERT).await),
         not_asked(REASON_SWITCH_OFF)
     );
-    // Garbage, the wrong type, a missing key and a missing file all read as off.
-    for bad in [
-        "{ not json",
-        "",
-        r#"{"ai": {"mcp_writes": "true"}}"#,
-        r#"{"ai": {"mcp_writes": 1}}"#,
-        r#"{"ai": {}}"#,
-        "{}",
+    // ...and with it on, asked again. From schema 7 the switch is ignored when it is `true` or
+    // missing, but an explicit `false` still refuses.
+    fixture.write_settings(r#"{"schema_version": 6, "ai": {"mcp_writes": true}}"#);
+    assert_eq!(code(&rig.execute(0, INSERT).await), "ok");
+    fixture.write_settings(r#"{"schema_version": 7, "ai": {"mcp_writes": false}}"#);
+    assert_eq!(
+        refused(&rig.execute(0, INSERT).await),
+        not_asked(REASON_SWITCH_OFF)
+    );
+    fixture.write_settings(r#"{"schema_version": 7, "ai": {"mcp_writes": true}}"#);
+    assert_eq!(code(&rig.execute(0, INSERT).await), "ok");
+    assert_eq!(rig.runs(0).len(), 3);
+    // Garbage and the wrong type read as unavailable; a file with no (or no usable) version and no
+    // switch is an old app's, with the switch off.
+    for (bad, reason) in [
+        ("{ not json", REASON_SETTINGS_UNAVAILABLE),
+        ("", REASON_SETTINGS_UNAVAILABLE),
+        (r#"{"ai": {"mcp_writes": "true"}}"#, REASON_SETTINGS_UNAVAILABLE),
+        (r#"{"schema_version": 7, "ai": {"mcp_writes": 1}}"#, REASON_SETTINGS_UNAVAILABLE),
+        (r#"{"schema_version": 7, "ai": "on"}"#, REASON_SETTINGS_UNAVAILABLE),
+        (r#"{"ai": {}}"#, REASON_SWITCH_OFF),
+        ("{}", REASON_SWITCH_OFF),
+        (r#"{"schema_version": "7", "ai": {}}"#, REASON_SWITCH_OFF),
     ] {
         fixture.write_settings(bad);
         assert_eq!(
             refused(&rig.execute(0, INSERT).await),
-            not_asked(REASON_SWITCH_OFF),
+            not_asked(reason),
             "{bad:?}"
         );
     }
     std::fs::remove_file(fixture.settings_path()).unwrap();
     assert_eq!(
         refused(&rig.execute(0, INSERT).await),
-        not_asked(REASON_SWITCH_OFF)
+        not_asked(REASON_SETTINGS_UNAVAILABLE)
     );
     fixture.set_mcp_writes(true);
     assert_eq!(code(&rig.execute(0, INSERT).await), "ok");
-    assert_eq!(rig.runs(0).len(), 2, "two writes ran, five were refused");
-    assert_eq!(rig.harness.client.service().seen.asked().len(), 2);
+    assert_eq!(rig.runs(0).len(), 4, "four writes ran, the others were refused");
+    assert_eq!(rig.harness.client.service().seen.asked().len(), 4);
     rig.finish().await;
 }
 
@@ -1087,15 +1242,22 @@ async fn the_instructions_and_tool_descriptions_say_a_write_may_be_asked_and_a_r
 
 #[test]
 fn the_fixed_reasons_read_as_the_documentation_says() {
+    // The setting is named as the app shows it (locales/settings.yml), the way out is named, and
+    // every refusal ends with the same sentence once.
+    // Only a settings file written by an older app (schema below 7) still has the switch.
     assert_eq!(
         REASON_SWITCH_OFF,
-        "changes through the MCP server are turned off in tablex: Settings \u{2192} AI"
+        "changes through the MCP server are turned off in tablex. Ask the user to turn on \"Let MCP clients run \
+         changes\" in the tablex app (Settings \u{2192} AI Assistant \u{2192} MCP server), or to update tablex, \
+         which no longer has this switch"
     );
-    assert_eq!(
-        REASON_PRODUCTION,
-        "a production connection can only be changed from the tablex app"
-    );
-    assert_eq!(REASON_NO_ELICITATION, "this MCP client cannot ask the user");
+    assert!(REASON_SETTINGS_UNAVAILABLE.contains("Ask the user to open the tablex app once"));
+    assert!(REASON_PRODUCTION.contains("Ask the user to make this change in the tablex app"));
+    assert!(REASON_NO_ELICITATION.contains("does not support MCP elicitation"));
+    assert!(no_way_to_ask(None).contains("open the tablex app and try again, or to use a client that supports MCP elicitation"));
+    for reason in [REASON_SWITCH_OFF, REASON_SETTINGS_UNAVAILABLE, REASON_PRODUCTION, REASON_DECLINED_OFTEN, REASON_TOO_LONG, REASON_BUSY] {
+        assert_eq!(refusal(reason).matches(tablex_mcp::approver::OUTSIDE_TABLEX).count(), 1, "{reason}");
+    }
 }
 
 // ---- hand-written frames ---------------------------------------------------------------------------
@@ -1253,9 +1415,9 @@ fn accept_frame(id: &Value, content: Value) -> Value {
 async fn a_reply_that_is_not_a_valid_result_never_approves() {
     for bad in [
         json!({"action": "maybe"}),
-        json!({"action": "Accept", "content": {"run": true}}),
-        json!({"action": "ACCEPT", "content": {"run": true}}),
-        json!({"content": {"run": true}}),
+        json!({"action": "Accept", "content": {"answer": "run"}}),
+        json!({"action": "ACCEPT", "content": {"answer": "run"}}),
+        json!({"content": {"answer": "run"}}),
         json!("yes"),
         json!({}),
     ] {
@@ -1288,7 +1450,7 @@ async fn a_url_only_elicitation_capability_is_not_a_way_to_ask() {
         assert_eq!(code(&result), "agent.write_refused", "{capabilities}");
         assert_eq!(
             error_message(&result),
-            not_asked(REASON_NO_ELICITATION),
+            not_asked(&no_way_to_ask(None)),
             "{capabilities}"
         );
         assert_eq!(raw.runs(0), 0);
@@ -1298,7 +1460,7 @@ async fn a_url_only_elicitation_capability_is_not_a_way_to_ask() {
     let mut raw = Raw::start(1, json!({"elicitation": {"form": {}}})).await;
     let call = raw.write(0, INSERT).await;
     let question = raw.server_request("elicitation/create").await;
-    raw.send(accept_frame(&question["id"], json!({"run": true})))
+    raw.send(accept_frame(&question["id"], json!({"answer": "run"})))
         .await;
     assert_eq!(code(&raw.result(call).await), "ok");
     assert_eq!(raw.runs(0), 1);
@@ -1321,7 +1483,7 @@ async fn a_second_initialize_cannot_change_what_the_client_declared() {
     assert!(answer.get("error").is_some(), "refused: {answer}");
     let call = raw.write(0, INSERT).await;
     let result = raw.result(call).await;
-    assert_eq!(error_message(&result), not_asked(REASON_NO_ELICITATION));
+    assert_eq!(error_message(&result), not_asked(&no_way_to_ask(None)));
     assert_eq!(raw.runs(0), 0);
     raw.finish().await;
     // Declared elicitation, then drops it: the first declaration stands (and the server is
@@ -1338,7 +1500,7 @@ async fn a_second_initialize_cannot_change_what_the_client_declared() {
     assert!(raw.response(again).await.get("error").is_some());
     let call = raw.write(0, INSERT).await;
     let question = raw.server_request("elicitation/create").await;
-    raw.send(accept_frame(&question["id"], json!({"run": true})))
+    raw.send(accept_frame(&question["id"], json!({"answer": "run"})))
         .await;
     assert_eq!(code(&raw.result(call).await), "ok");
     raw.finish().await;
@@ -1358,26 +1520,26 @@ async fn a_late_a_duplicate_and_a_foreign_reply_change_nothing() {
     // The server withdraws the question from the client too.
     let notice = raw.server_request("notifications/cancelled").await;
     assert_eq!(notice["params"]["requestId"], withdrawn["id"]);
-    raw.send(accept_frame(&withdrawn["id"], json!({"run": true})))
+    raw.send(accept_frame(&withdrawn["id"], json!({"answer": "run"})))
         .await;
     raw.sync().await;
     assert_eq!(raw.runs(0), 0, "a late yes did not run it");
     // 2. A reply with an id nobody asked: ignored, and the real question is still open.
     let call = raw.write(1, INSERT).await;
     let question = raw.server_request("elicitation/create").await;
-    raw.send(accept_frame(&json!(987_654), json!({"run": true})))
+    raw.send(accept_frame(&json!(987_654), json!({"answer": "run"})))
         .await;
-    raw.send(accept_frame(&json!("fake-1"), json!({"run": true})))
+    raw.send(accept_frame(&json!("fake-1"), json!({"answer": "run"})))
         .await;
     raw.sync().await;
     assert_eq!(raw.runs(1), 0, "a reply with another id approves nothing");
     // 3. The right answer runs it once; the same answer again changes nothing.
-    raw.send(accept_frame(&question["id"], json!({"run": true})))
+    raw.send(accept_frame(&question["id"], json!({"answer": "run"})))
         .await;
     assert_eq!(code(&raw.result(call).await), "ok");
-    raw.send(accept_frame(&question["id"], json!({"run": true})))
+    raw.send(accept_frame(&question["id"], json!({"answer": "run"})))
         .await;
-    raw.send(accept_frame(&question["id"], json!({"run": true})))
+    raw.send(accept_frame(&question["id"], json!({"answer": "run"})))
         .await;
     raw.sync().await;
     assert_eq!(raw.runs(1), 1, "one question, one run");
@@ -1389,11 +1551,12 @@ async fn a_late_a_duplicate_and_a_foreign_reply_change_nothing() {
 
 #[tokio::test]
 async fn a_switch_turned_off_while_the_question_waits_stops_the_write() {
-    for turned_off in [
-        r#"{"schema_version": 4, "ai": {"mcp_writes": false}}"#,
-        "{ not json",
-        r#"{"schema_version": 4, "ai": {"mcp_writes": "true"}}"#,
-        r#"{"ai": {"mcp_writes": true}}"#,
+    for (turned_off, reason) in [
+        (r#"{"schema_version": 4, "ai": {"mcp_writes": false}}"#, REASON_SWITCH_OFF),
+        (r#"{"schema_version": 6, "ai": {"mcp_writes": false}}"#, REASON_SWITCH_OFF),
+        ("{ not json", REASON_SETTINGS_UNAVAILABLE),
+        (r#"{"schema_version": 4, "ai": {"mcp_writes": "true"}}"#, REASON_SETTINGS_UNAVAILABLE),
+        (r#"{"ai": {"mcp_writes": true}}"#, REASON_SWITCH_OFF),
     ] {
         let (asker, mut desk) = Asker::manual(true);
         let rig = rig(1, false, true, asker).await;
@@ -1418,7 +1581,7 @@ async fn a_switch_turned_off_while_the_question_waits_stops_the_write() {
         assert_eq!(code(&result), "agent.write_refused", "{turned_off}");
         assert_eq!(
             error_message(&result),
-            format!("the change was approved, but it can no longer run: {REASON_SWITCH_OFF}"),
+            format!("the change was approved, but it can no longer run: {}", refusal(reason)),
             "{turned_off}"
         );
         assert!(rig.runs(0).is_empty(), "{turned_off}: not run");
@@ -1429,7 +1592,7 @@ async fn a_switch_turned_off_while_the_question_waits_stops_the_write() {
             .unwrap();
         assert_eq!(
             entry.approval.as_deref(),
-            Some(format!("approved, then refused: {REASON_SWITCH_OFF}").as_str()),
+            Some(format!("approved, then refused: {}", engine_agent::sanitize::clean(&refusal(reason), 200)).as_str()),
             "{turned_off}"
         );
         // And the switch on again lets the next write be asked.
@@ -1505,7 +1668,7 @@ async fn a_statement_too_long_to_review_is_not_asked() {
         "nothing more was asked"
     );
     assert_eq!(rig.runs(0).len(), 3);
-    assert!(REASON_TOO_LONG.contains("the user can run it in the tablex app"));
+    assert!(REASON_TOO_LONG.contains("run it in the tablex app"));
     rig.finish().await;
 }
 
@@ -1530,7 +1693,7 @@ async fn a_connection_declined_three_times_is_closed_to_writes_for_the_session()
         MAX_DECLINES as usize
     );
     // Audited, with the fixed reason.
-    let refused = format!("refused: {REASON_DECLINED_OFTEN}");
+    let refused = format!("refused: {}", engine_agent::sanitize::clean(&refusal(REASON_DECLINED_OFTEN), 200));
     let audited = rig
         .harness
         .fixture

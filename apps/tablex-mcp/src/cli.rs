@@ -1,8 +1,10 @@
-//! The command line: one optional flag, parsed by hand. `--version`, `--help` and `--print-config`
-//! print to stdout and exit; they never start the server.
+//! The command line, parsed by hand: one command flag, and `--allow-remote` with `--http`.
+//! `--version`, `--help`, `--print-config` and `--print-token` print to stdout and exit; they
+//! never start the server.
 
 use std::ffi::OsString;
 use std::io;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 /// What the user asked for.
@@ -10,6 +12,10 @@ use std::path::{Path, PathBuf};
 pub enum Command {
     /// No argument: speak MCP on stdin / stdout.
     Serve,
+    /// `--http [ADDR]`: speak MCP over Streamable HTTP.
+    ServeHttp(HttpArgs),
+    /// Show the bearer token of the HTTP transport (made on first use).
+    PrintToken,
     Version,
     Help,
     PrintConfig,
@@ -19,6 +25,21 @@ pub enum Command {
     /// [`USAGE`]).
     VerifyKeychainAccess,
 }
+
+/// What `--http` asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HttpArgs {
+    pub addr: SocketAddr,
+    /// `--allow-remote`: `addr` may be an address other machines can reach.
+    pub allow_remote: bool,
+}
+
+/// The port of `--http` without an address.
+pub const DEFAULT_HTTP_PORT: u16 = 7717;
+
+/// The address of `--http` without one.
+pub const DEFAULT_HTTP_ADDR: SocketAddr =
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), DEFAULT_HTTP_PORT);
 
 /// An argument the program does not know (the usage goes to stderr, exit code 2).
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -36,14 +57,21 @@ pub enum ConfigError {
 }
 
 pub const USAGE: &str = "\
-Usage: tablex-mcp [OPTION]
+Usage: tablex-mcp [OPTION]...
 
-MCP server (stdio) for tablex. With no option it serves: the MCP client starts it and talks to it
-on stdin / stdout. Access is off by default; set a default for all connections in
+MCP server for tablex. With no option it serves over stdio: the MCP client starts it and talks to
+it on stdin / stdout. Access is off by default; set a default for all connections in
 tablex > Settings > AI > Default agent access, or one per connection in
 tablex > connection > Overrides > Agent access.
 
 Options:
+      --http [ADDR]    serve MCP over Streamable HTTP at http://ADDR/mcp instead of stdio
+                       (default 127.0.0.1:7717; a bare number is a port on 127.0.0.1). Every
+                       request needs the bearer token from the TABLEX_MCP_TOKEN environment
+                       variable or the token file in the tablex data directory
+      --allow-remote   with --http: allow an address that is not loopback (plain HTTP: put TLS or
+                       an SSH tunnel in front, and read the security notes first)
+      --print-token    print the HTTP bearer token (made on first use) and exit
       --print-config   print a ready-to-paste MCP client configuration and exit
       --authorize-keychain
                        let this program read the tablex master key (one Keychain item) and
@@ -56,31 +84,83 @@ Options:
 impl Command {
     /// `args` excludes the program name. An argument that is not valid UTF-8 is an unknown one.
     pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Self, UsageError> {
-        let mut args = args.into_iter();
-        let Some(first) = args.next() else {
+        let args = args
+            .into_iter()
+            .map(|arg| {
+                arg.into_string().map_err(|arg| {
+                    UsageError(format!(
+                        "unknown argument `{}` (not valid UTF-8)",
+                        arg.to_string_lossy()
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let Some(first) = args.first().copied() else {
             return Ok(Self::Serve);
         };
-        if let Some(extra) = args.next() {
-            return Err(UsageError(format!(
-                "unexpected argument `{}`",
-                extra.to_string_lossy()
-            )));
+        if matches!(first.split('=').next(), Some("--http" | "--allow-remote")) {
+            return Self::parse_http(&args);
         }
-        let Some(first) = first.to_str() else {
-            return Err(UsageError(format!(
-                "unknown argument `{}` (not valid UTF-8)",
-                first.to_string_lossy()
-            )));
-        };
+        if let Some(extra) = args.get(1) {
+            return Err(UsageError(format!("unexpected argument `{extra}`")));
+        }
         match first {
             "-V" | "--version" => Ok(Self::Version),
             "-h" | "--help" => Ok(Self::Help),
             "--print-config" => Ok(Self::PrintConfig),
+            "--print-token" => Ok(Self::PrintToken),
             "--authorize-keychain" => Ok(Self::AuthorizeKeychain),
             "--verify-keychain-access" => Ok(Self::VerifyKeychainAccess),
             other => Err(UsageError(format!("unknown argument `{other}`"))),
         }
     }
+
+    /// `--http [ADDR]` (or `--http=ADDR`) and `--allow-remote`, in either order, each once; ADDR is
+    /// the next argument unless that is a flag.
+    fn parse_http(args: &[&str]) -> Result<Self, UsageError> {
+        let mut http = false;
+        let mut addr = None;
+        let mut allow_remote = false;
+        let mut args = args.iter().copied().peekable();
+        while let Some(arg) = args.next() {
+            match arg.split_once('=') {
+                Some(("--http", value)) if !http => {
+                    http = true;
+                    addr = Some(parse_addr(value)?);
+                }
+                None if arg == "--http" && !http => {
+                    http = true;
+                    addr = args
+                        .next_if(|next| !next.starts_with('-'))
+                        .map(parse_addr)
+                        .transpose()?;
+                }
+                None if arg == "--allow-remote" && !allow_remote => allow_remote = true,
+                _ => return Err(UsageError(format!("unexpected argument `{arg}`"))),
+            }
+        }
+        if !http {
+            return Err(UsageError("`--allow-remote` is for `--http`".to_owned()));
+        }
+        Ok(Self::ServeHttp(HttpArgs {
+            addr: addr.unwrap_or(DEFAULT_HTTP_ADDR),
+            allow_remote,
+        }))
+    }
+}
+
+/// `HOST:PORT` with HOST an IP address (`127.0.0.1:7717`, `[::1]:7717`), or a bare port on the
+/// loopback interface. A name is not resolved: what is listened on must be exact.
+fn parse_addr(text: &str) -> Result<SocketAddr, UsageError> {
+    if let Ok(port) = text.parse::<u16>() {
+        return Ok(SocketAddr::new(DEFAULT_HTTP_ADDR.ip(), port));
+    }
+    text.parse().map_err(|_| {
+        UsageError(format!(
+            "`{text}` is not an address: use IP:PORT (for example 127.0.0.1:7717) or a port"
+        ))
+    })
 }
 
 /// `tablex-mcp 0.1.0`.
@@ -142,6 +222,52 @@ mod tests {
             assert!(parse(&["--print-config", flag]).is_err());
         }
         assert!(parse(&["--authorize-keychain", "--verify-keychain-access"]).is_err());
+    }
+
+    fn http(addr: &str, allow_remote: bool) -> Result<Command, UsageError> {
+        Ok(Command::ServeHttp(HttpArgs {
+            addr: addr.parse().unwrap(),
+            allow_remote,
+        }))
+    }
+
+    #[test]
+    fn http_takes_an_optional_address_and_allow_remote_in_either_order() {
+        assert_eq!(parse(&["--http"]), http("127.0.0.1:7717", false));
+        assert_eq!(parse(&["--http", "9000"]), http("127.0.0.1:9000", false));
+        assert_eq!(parse(&["--http", "127.0.0.1:0"]), http("127.0.0.1:0", false));
+        assert_eq!(parse(&["--http=[::1]:8000"]), http("[::1]:8000", false));
+        assert_eq!(
+            parse(&["--http", "0.0.0.0:7717", "--allow-remote"]),
+            http("0.0.0.0:7717", true)
+        );
+        assert_eq!(
+            parse(&["--allow-remote", "--http", "10.0.0.5:80"]),
+            http("10.0.0.5:80", true)
+        );
+        // The next flag is not an address.
+        assert_eq!(parse(&["--http", "--allow-remote"]), http("127.0.0.1:7717", true));
+        assert_eq!(parse(&["--print-token"]), Ok(Command::PrintToken));
+    }
+
+    #[test]
+    fn http_arguments_that_do_not_belong_together_are_usage_errors() {
+        for args in [
+            &["--allow-remote"][..],
+            &["--http", "localhost:80"],
+            &["--http", "99999"],
+            &["--http", "--http"],
+            &["--http", "1.2.3.4:5", "extra"],
+            &["--http", "--allow-remote", "--allow-remote"],
+            &["--http", "--help"],
+            &["--print-token", "--http"],
+            &["--print-token", "--allow-remote"],
+            &["--http=", "--allow-remote"],
+        ] {
+            assert!(parse(args).is_err(), "{args:?}");
+        }
+        assert!(USAGE.contains("--http") && USAGE.contains("--allow-remote"));
+        assert!(USAGE.contains("--print-token"));
     }
 
     #[test]

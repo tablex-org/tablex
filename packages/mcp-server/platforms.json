@@ -1,0 +1,10 @@
+{
+  "platforms": [
+    { "target": "macos-aarch64", "package": "@tablex/mcp-darwin-arm64", "os": "darwin", "cpu": "arm64", "binary": "tablex-mcp" },
+    { "target": "macos-x86_64", "package": "@tablex/mcp-darwin-x64", "os": "darwin", "cpu": "x64", "binary": "tablex-mcp" },
+    { "target": "linux-x86_64", "package": "@tablex/mcp-linux-x64-gnu", "os": "linux", "cpu": "x64", "libc": "glibc", "binary": "tablex-mcp" },
+    { "target": "linux-aarch64", "package": "@tablex/mcp-linux-arm64-gnu", "os": "linux", "cpu": "arm64", "libc": "glibc", "binary": "tablex-mcp" },
+    { "target": "windows-x86_64", "package": "@tablex/mcp-win32-x64", "os": "win32", "cpu": "x64", "binary": "tablex-mcp.exe" },
+    { "target": "windows-aarch64", "package": "@tablex/mcp-win32-arm64", "os": "win32", "cpu": "arm64", "binary": "tablex-mcp.exe" }
+  ]
+}

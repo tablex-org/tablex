@@ -39,6 +39,16 @@ pub const FIXTURE_PASSWORD: &str = "p@ss/w0rd:Zq81-Lm";
 /// A directory name inside every database path: the URI is not to be echoed either.
 pub const URI_MARKER: &str = "uri-marker-9b2e41";
 
+/// A temporary folder only this user can enter (0700): the folder of a channel socket has to be, and
+/// `tempfile`'s builder makes 0755 by default.
+pub fn private_dir() -> tempfile::TempDir {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix("tx");
+    #[cfg(unix)]
+    builder.permissions(<std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700));
+    builder.tempdir().unwrap()
+}
+
 pub struct Shared {
     pub dir: tempfile::TempDir,
     pub drivers: Arc<InstalledDriverStore>,
@@ -210,14 +220,30 @@ impl Fixture {
         Self::build(|_, audit, settings| make(audit, settings))
     }
 
-    /// The app's `settings.json` of this fixture (the file the MCP switch is read from).
+    /// The app's `settings.json` of this fixture (the file the default access and the old switch are read from).
     pub fn settings_path(&self) -> PathBuf {
         self.dir.join("settings.json")
     }
 
-    /// Writes the switch "Let MCP clients run changes" the way the app does.
+    /// Writes the settings of an app that lets MCP clients ask to run changes (`on`: what the
+    /// current app writes, schema 7, with its hidden `mcp_writes: true`) or of an older app whose
+    /// switch "Let MCP clients run changes" is off (schema 6, `mcp_writes: false`), which still
+    /// blocks changes.
     pub fn set_mcp_writes(&self, on: bool) {
-        self.write_settings(&json!({"schema_version": 4, "ai": {"mcp_writes": on}}).to_string());
+        let file = if on {
+            json!({"schema_version": 7, "ai": {"mcp_writes": true}})
+        } else {
+            json!({"schema_version": 6, "ai": {"mcp_writes": false}})
+        };
+        self.write_settings(&file.to_string());
+    }
+
+    /// Writes the settings of the current app (schema 7, no switch) with the default agent access
+    /// `level` for all connections.
+    pub fn set_default_access(&self, level: &str) {
+        self.write_settings(
+            &json!({"schema_version": 7, "ai": {"mcp_writes": true, "agent_access": level}}).to_string(),
+        );
     }
 
     pub fn write_settings(&self, text: &str) {
@@ -617,7 +643,7 @@ impl Question {
 }
 
 pub fn accepted(run: bool) -> ElicitResult {
-    ElicitResult::new(ElicitationAction::Accept).with_content(json!({"run": run}))
+    ElicitResult::new(ElicitationAction::Accept).with_content(json!({"answer": if run { "run" } else { "do_not_run" }}))
 }
 
 /// Everything the client saw of the server's questions.

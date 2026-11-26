@@ -37,9 +37,10 @@ pub enum SetupError {
 
 /// The tool layer over `connector`'s saved connections: the connector is both catalog and session
 /// provider, tunnel questions are refused (no UI: an unknown bastion key is an error telling the
-/// user to connect once from the app), a write is put to the user through MCP elicitation when the
-/// app's switch (`ai.mcp_writes` in the connector's own `settings.json`, read at the time of each
-/// write) allows it and refused otherwise ([`ElicitingApprover`]), things can be shown in the
+/// user to connect once from the app), a write is put to the user through MCP elicitation (or in the
+/// app) when the connector's own `settings.json`, read at the time of each write, allows it (a file
+/// of schema 7 or later always does; an older app's `ai.mcp_writes` still counts for an older file)
+/// and refused otherwise ([`ElicitingApprover`]), things can be shown in the
 /// running app through its socket ([`AppChannel`]), the saved connections can be added, copied and
 /// removed with the user's approval each time ([`ConnectionStore`]), and every call is audited.
 pub fn build_layer(connector: Connector, audit: Arc<AuditLog>) -> ToolLayer {
@@ -78,8 +79,12 @@ pub fn build_layer_with_channel(
         None => connector,
     };
     let settings_path = connector.settings_path().map(Path::to_path_buf);
+    // The tools the user allows, read from `settings.json` at every call.
+    let tools_path = settings_path.clone();
     let admin_connector = connector.clone();
-    let connections = AgentConnections::new(connector, Arc::new(RefusePrompts));
+    // This process holds no connection of the user's own, so a DuckDB file an agent opens can be
+    // opened without file access (an instance has one setting for all its connections).
+    let connections = AgentConnections::new(connector, Arc::new(RefusePrompts)).with_locked_file_access();
     #[cfg(target_os = "macos")]
     let connections = match &exe {
         Some(exe) => connections.with_credential_hint(crate::keychain::credential_hint(exe)),
@@ -88,12 +93,19 @@ pub fn build_layer_with_channel(
     let connections = Arc::new(connections);
     // One approver: the questions of writes and of connection changes share its budget of open
     // questions.
-    let approver = Arc::new(ElicitingApprover::new(settings_path));
+    // A client that cannot ask through MCP gets its questions in the running app (`notify` is the
+    // channel to it, or `None` where there is none).
+    let approver = Arc::new(ElicitingApprover::new(settings_path).with_app(notify.clone()));
     let admin = ConnectionStore::new(admin_connector, approver.clone(), notify);
     ToolLayer::new(connections.clone(), connections, FRONT_END)
-        // Explicit transactions (PostgreSQL, SQLite): every write and the commit are put to the
+        // Explicit transactions (PostgreSQL, MySQL, MariaDB, SQLite): every write and the commit are put to the
         // user, and an abandoned transaction is always rolled back (see `McpServer::serve`).
         .with_transactions()
+        // `open_session` with `pinned`: a connection of its own that keeps `USE` and `SET`s, only
+        // for the client that opened it, closed when idle.
+        .with_pinned_sessions()
+        // `ai.mcp_tools` of `settings.json`: the only tools the user lets through, when it is set.
+        .with_tool_allowlist(Arc::new(move || engine_connect::profile::read_mcp_tools(tools_path.as_deref())))
         // `open_table` and `execute_and_show`: shown in the running app, which applies its own
         // rules to a query it is asked to run.
         .with_app(app)

@@ -1,0 +1,43 @@
+{
+  "name": "@tablex/mcp-server",
+  "version": "0.1.8",
+  "description": "tablex-mcp: an MCP server that gives AI agents governed access to the database connections saved in tablex",
+  "keywords": ["mcp", "model-context-protocol", "database", "sql", "postgresql", "mysql", "sqlite", "mongodb", "redis", "tablex"],
+  "homepage": "https://github.com/tablex-org/tablex/tree/main/apps/tablex-mcp",
+  "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tablex-org/tablex.git",
+    "directory": "packages/mcp-server"
+  },
+  "bugs": "https://github.com/tablex-org/tablex/issues",
+  "bin": {
+    "tablex-mcp": "bin/tablex-mcp.js"
+  },
+  "files": [
+    "bin",
+    "lib",
+    "platforms.json",
+    "checksums.json",
+    "server.json",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test tests/"
+  },
+  "optionalDependencies": {
+    "@tablex/mcp-darwin-arm64": "0.1.8",
+    "@tablex/mcp-darwin-x64": "0.1.8",
+    "@tablex/mcp-linux-arm64-gnu": "0.1.8",
+    "@tablex/mcp-linux-x64-gnu": "0.1.8",
+    "@tablex/mcp-win32-arm64": "0.1.8",
+    "@tablex/mcp-win32-x64": "0.1.8"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "mcpName": "io.github.tablex-org/tablex-mcp",
+  "publishConfig": {
+    "access": "public"
+  }
+}

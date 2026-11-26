@@ -34,7 +34,7 @@ struct FakeApp {
 
 impl FakeApp {
     fn listening() -> Self {
-        let dir = tempfile::Builder::new().prefix("tx").tempdir().unwrap();
+        let dir = private_dir();
         let path = dir.path().join("app.sock");
         let seen = Arc::new(Mutex::new(Vec::new()));
         let log = Arc::clone(&seen);
@@ -88,7 +88,8 @@ struct Rig {
 /// elicitation capability), with the app's switch `switch`.
 async fn rig(capability: bool, answer: Result<ElicitResult, McpError>, switch: bool) -> Rig {
     let app = FakeApp::listening();
-    let fixture = Fixture::with_notify(Some(app.client()));
+    // A client that cannot ask has no app to ask in either (that route has its own tests).
+    let fixture = Fixture::with_notify(capability.then(|| app.client()));
     fixture.set_mcp_writes(switch);
     let asker = Asker::answering(capability, answer);
     let seen = Arc::clone(&asker.seen);
@@ -174,8 +175,8 @@ async fn an_approved_add_stores_the_record_and_keeps_the_password_in_the_secret_
         assert!(message.contains(part), "{part}: {message}");
     }
     assert!(!message.contains("PRODUCTION"));
-    assert_eq!(schema["properties"]["run"]["title"], "Make this change to your connections");
-    assert_eq!(schema["properties"]["run"]["default"], false);
+    assert_eq!(schema["properties"]["answer"]["enumNames"][1], "Make this change to your connections");
+    assert!(schema["properties"]["answer"].get("default").is_none(), "a required choice with no default");
 
     // The audit line names the change and never a password or the full URI with credentials.
     let entries = rig.harness.fixture.audit_entries();
@@ -232,7 +233,7 @@ async fn a_declined_dismissed_or_malformed_answer_changes_nothing() {
         Ok(accepted(false)),
         Ok(ElicitResult::new(ElicitationAction::Decline)),
         Ok(ElicitResult::new(ElicitationAction::Cancel)),
-        Ok(ElicitResult::new(ElicitationAction::Accept).with_content(json!({"run": "true"}))),
+        Ok(ElicitResult::new(ElicitationAction::Accept).with_content(json!({"answer": "yes"}))),
         Err(McpError::internal_error("the client failed", None)),
     ];
     for answer in answers {
@@ -262,7 +263,7 @@ async fn a_client_that_cannot_ask_is_refused_and_so_is_an_app_with_the_switch_of
         let name = unique("no-elicit");
         let result = rig.add(add_args(&name)).await;
         assert_eq!(code(&result), "agent.write_refused");
-        assert!(error_message(&result).contains("cannot ask the user"), "{}", error_message(&result));
+        assert!(error_message(&result).contains("cannot show approval questions"), "{}", error_message(&result));
         assert!(stored(&name).is_none());
         assert!(rig.seen.asked().is_empty());
         assert!(!error_message(&result).contains(PASSWORD));
@@ -283,6 +284,40 @@ async fn a_client_that_cannot_ask_is_refused_and_so_is_an_app_with_the_switch_of
     assert!(error_message(&result).contains("turned off in tablex"), "{}", error_message(&result));
     assert!(stored(&name).is_none());
     assert!(rig.seen.asked().is_empty());
+}
+
+#[tokio::test]
+async fn every_connection_change_asks_with_a_schema_7_file_that_has_no_switch() {
+    // The settings of the current app: no switch to turn on. Each call is asked about, once.
+    for (answer, stored_after) in [(accepted(true), true), (accepted(false), false)] {
+        let app = FakeApp::listening();
+        let fixture = Fixture::with_notify(Some(app.client()));
+        fixture.write_settings(r#"{"schema_version": 7, "ai": {}}"#);
+        let asker = Asker::answering(true, Ok(answer));
+        let seen = Arc::clone(&asker.seen);
+        let rig = Rig { harness: Harness::start_with(fixture, asker).await, seen, app };
+        let name = unique("no-switch");
+        let result = rig.add(add_args(&name)).await;
+        assert_eq!(rig.seen.asked().len(), 1, "asked once: {}", text(&result));
+        assert_eq!(stored(&name).is_some(), stored_after, "{}", text(&result));
+        assert_eq!(code(&result) == "ok", stored_after, "{}", text(&result));
+        if !stored_after {
+            assert_eq!(code(&result), "agent.write_refused");
+        }
+    }
+    // The old switch explicitly off, in a file of this schema (a downgrade and back) or of an older
+    // app, still refuses and asks nobody (see `an_approved_add_stores_the_record...`).
+    let app = FakeApp::listening();
+    let fixture = Fixture::with_notify(Some(app.client()));
+    fixture.write_settings(r#"{"schema_version": 7, "ai": {"mcp_writes": false}}"#);
+    let asker = Asker::answering(true, Ok(accepted(true)));
+    let seen = Arc::clone(&asker.seen);
+    let rig = Rig { harness: Harness::start_with(fixture, asker).await, seen, app };
+    let name = unique("switch-off");
+    let result = rig.add(add_args(&name)).await;
+    assert_eq!(code(&result), "agent.write_refused", "{}", text(&result));
+    assert!(rig.seen.asked().is_empty());
+    assert!(stored(&name).is_none());
 }
 
 #[tokio::test]
@@ -339,6 +374,55 @@ async fn invalid_input_is_refused_before_anything_is_asked() {
     assert_eq!(code(&relative), "agent.invalid_arguments");
     assert!(stored(&name).is_none());
     assert!(rig.seen.asked().is_empty());
+}
+
+/// The `ssl` flag of `add_connection` is the TLS choice in the shape other clients give it: true is
+/// `require` (`verify_full` on MongoDB, which takes no weaker one), false is `disable`.
+#[tokio::test]
+async fn the_ssl_flag_of_an_add_is_a_tls_choice_and_must_agree_with_options_tls() {
+    let rig = approving().await;
+    let uri_of = |name: &str| stored(name).expect("stored").uri;
+    for (kind, ssl, uri_end) in [
+        ("postgresql", json!(true), "?sslmode=require"),
+        ("postgresql", json!(false), "?sslmode=disable"),
+        ("mysql", json!(true), "?ssl-mode=REQUIRED"),
+        ("mariadb", json!(false), "?ssl-mode=DISABLED"),
+        ("mongodb", json!(true), "?tls=true"),
+        ("mongodb", json!(false), "?tls=false"),
+    ] {
+        let name = unique("ssl");
+        let result = rig.add(json!({"name": name, "kind": kind, "host": "db.local", "database": "shop", "ssl": ssl})).await;
+        assert_eq!(code(&result), "ok", "{kind} {ssl}: {}", text(&result));
+        assert!(uri_of(&name).ends_with(uri_end), "{kind} {ssl}: {}", uri_of(&name));
+    }
+    // `options.ssl` is the same flag; both may be given when they agree; `options.tls` may be the finer one.
+    let name = unique("ssl");
+    let both = rig
+        .add(json!({"name": name, "kind": "postgresql", "host": "db.local", "ssl": true, "options": {"ssl": true, "tls": "verify_full"}}))
+        .await;
+    assert_eq!(code(&both), "ok", "{}", text(&both));
+    assert!(uri_of(&name).ends_with("?sslmode=verify-full"), "{}", uri_of(&name));
+    // Disagreeing choices are refused before anyone is asked.
+    let asked = rig.seen.asked().len();
+    for (what, extra) in [
+        ("ssl false with tls require", json!({"ssl": false, "options": {"tls": "require"}})),
+        ("ssl true with tls disable", json!({"ssl": true, "options": {"tls": "disable"}})),
+        ("ssl and options.ssl differ", json!({"ssl": true, "options": {"ssl": false}})),
+        ("ssl for SQLite", json!({"kind": "sqlite", "host": null, "path": "/tmp/x.db", "ssl": true})),
+        ("ssl that is not a flag", json!({"ssl": "yes"})),
+    ] {
+        let mut args = json!({"name": unique("ssl"), "kind": "postgresql", "host": "db.local"});
+        for (key, value) in extra.as_object().unwrap() {
+            if value.is_null() {
+                args.as_object_mut().unwrap().remove(key);
+            } else {
+                args[key] = value.clone();
+            }
+        }
+        let result = rig.add(args).await;
+        assert_eq!(code(&result), "agent.invalid_arguments", "{what}: {}", text(&result));
+    }
+    assert_eq!(rig.seen.asked().len(), asked);
 }
 
 fn everything(rig: &Rig, result: &CallToolResult) -> String {
@@ -557,7 +641,7 @@ async fn a_client_that_cannot_ask_cannot_remove_or_copy() {
     ] {
         let result = rig.harness.call(tool, args).await;
         assert_eq!(code(&result), "agent.write_refused", "{tool}");
-        assert!(error_message(&result).contains("cannot ask the user"));
+        assert!(error_message(&result).contains("cannot show approval questions"));
     }
     assert!(get_connection(&conn.id).unwrap().is_some());
 }

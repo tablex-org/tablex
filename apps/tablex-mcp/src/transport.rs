@@ -27,6 +27,8 @@ pub enum ServeError {
     Initialize(Box<ServerInitializeError>),
     #[error("MCP service failed: {0}")]
     Service(#[from] tokio::task::JoinError),
+    #[error("cannot listen for HTTP connections: {0}")]
+    Listener(io::Error),
     #[error("a client message was longer than {MAX_FRAME_BYTES} bytes; closing the connection")]
     FrameTooLarge,
     #[error(
@@ -39,13 +41,56 @@ pub enum ServeError {
 /// Rolls back transactions nobody has called for the idle timeout, every `interval`, on the
 /// blocking pool (a rollback waits for its server). The layer also does it at the start of every
 /// call; this is for the model that went quiet. Ends when its task is aborted.
-async fn sweep_idle_transactions(layer: Arc<ToolLayer>, interval: std::time::Duration) {
+pub(crate) async fn sweep_idle_transactions(layer: Arc<ToolLayer>, interval: std::time::Duration) {
     let mut ticks = tokio::time::interval(interval);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         ticks.tick().await;
         let layer = Arc::clone(&layer);
         let _ = tokio::task::spawn_blocking(move || layer.expire_idle_transactions()).await;
+    }
+}
+
+/// The end of every serve: closes every session (disconnect and tunnel) of the layer and waits for
+/// the calls that were cancelled to return, and says whether that finished cleanly. The caller
+/// has cancelled the calls already.
+///
+/// `close_all` blocks (drivers disconnect, tunnels close, an open in flight finishes), and a driver
+/// may hang: wait for it, but not past `deadline` or a second signal. A hung blocking thread
+/// cannot keep the process alive (see `main`). `signalled`: the signal itself started the
+/// teardown; when end of input did, the first signal is the user's wish to stop, which it already
+/// does, so it is let by, and the next one ends the teardown.
+pub(crate) async fn close_down(
+    layer: Arc<ToolLayer>,
+    calls: Arc<tokio::sync::Semaphore>,
+    deadline: std::time::Duration,
+    stop: &mut impl AsyncFnMut(),
+    signalled: bool,
+) -> bool {
+    let closing = tokio::task::spawn_blocking(move || layer.close_all());
+    let teardown = async {
+        let closed = closing.await.is_ok();
+        // A call that was cancelled is still on its way back: it has returned, and written
+        // its audit line, once its permit is back. Without this wait the process could exit
+        // between the cancel and that line.
+        let returned = calls
+            .acquire_many(MAX_CONCURRENT_CALLS as u32)
+            .await
+            .is_ok();
+        closed && returned
+    };
+    let timeout = tokio::time::sleep(deadline);
+    tokio::pin!(teardown, timeout);
+    let mut spare_signals = usize::from(!signalled);
+    loop {
+        tokio::select! {
+            closed = &mut teardown => break closed,
+            () = &mut timeout => break false,
+            () = stop() => match spare_signals.checked_sub(1) {
+                Some(left) => spare_signals = left,
+                None => break false,
+            },
+        }
     }
 }
 
@@ -173,36 +218,7 @@ impl McpServer {
             .await;
         gone.cancel();
         sweeper.abort();
-        // `close_all` blocks (drivers disconnect, tunnels close, an open in flight finishes), and
-        // a driver may hang: wait for it, but not past the deadline or a second signal. A hung
-        // blocking thread cannot keep the process alive (see `main`).
-        let closing = tokio::task::spawn_blocking(move || layer.close_all());
-        let teardown = async {
-            let closed = closing.await.is_ok();
-            // A call that was cancelled is still on its way back: it has returned, and written
-            // its audit line, once its permit is back. Without this wait the process could exit
-            // between the cancel and that line.
-            let returned = calls
-                .acquire_many(MAX_CONCURRENT_CALLS as u32)
-                .await
-                .is_ok();
-            closed && returned
-        };
-        let timeout = tokio::time::sleep(deadline);
-        tokio::pin!(teardown, timeout);
-        // End of input started the teardown: the first signal is the user's wish to stop, which
-        // it already does, so it is let by; the next one ends the teardown.
-        let mut spare_signals = usize::from(!signalled);
-        let closed_cleanly = loop {
-            tokio::select! {
-                closed = &mut teardown => break closed,
-                () = &mut timeout => break false,
-                () = stop() => match spare_signals.checked_sub(1) {
-                    Some(left) => spare_signals = left,
-                    None => break false,
-                },
-            }
-        };
+        let closed_cleanly = close_down(layer, calls, deadline, stop, signalled).await;
         result?;
         if oversized.load(Ordering::SeqCst) {
             return Err(ServeError::FrameTooLarge);

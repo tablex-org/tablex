@@ -1,13 +1,13 @@
 //! `add_connection`, `duplicate_connection` and `remove_connection`: the MCP server's
 //! [`ConnectionAdmin`] over the app's saved connections (`tablex.db`) and credential store.
 //!
-//! **Every change is put to the user** through MCP elicitation
-//! ([`ElicitingApprover::ask_connection_change`]) with a question that says what will be added,
+//! **Every change is put to the user** through MCP elicitation, or in the tablex app when the client
+//! cannot ask ([`ElicitingApprover::ask_connection_change`]), with a question that says what will be added,
 //! copied or removed: name, kind, address (the stored URI, which has no password), connection type
 //! (and that it is a production one), whether a password is saved or copied. The password is never
 //! in a question, the audit line, an error or the stored record: it goes to the credential store
 //! only, under the connection's id, as the New Connection dialog saves it. A question that is
-//! declined, dismissed or not answered, or a client that cannot ask, changes nothing.
+//! declined, dismissed or not answered, or a client that can be asked in neither way, changes nothing.
 //!
 //! Records are built by [`engine_connect::new_connection`] (add) and
 //! [`engine_connect::records::duplicate_record`] (duplicate, as the sidebar's Duplicate does:
@@ -23,7 +23,7 @@ use engine_agent::{
     AgentError, ApprovalDecision, CancelToken, ConnectionAdmin, ConnectionChange,
     ConnectionChanged, ConnectionInfo,
 };
-use engine_connect::app_channel::{AppClient, Request};
+use engine_connect::app_channel::{AppClient, ApprovalAsk, Request};
 use engine_connect::connect::{accounts_of, Connector};
 use engine_connect::credentials::{CredentialError, SecretKind};
 use engine_connect::new_connection::{self, NewConnection, Tls};
@@ -31,7 +31,7 @@ use engine_connect::profile::{self, ConnectionType, DEVELOPMENT};
 use engine_connect::records::{self, ConnectionKind};
 use engine_storage::connection::{self, SavedConnectionRecord};
 
-use crate::approver::{code_span, ElicitingApprover};
+use crate::approver::{code_span, ConnectionQuestion, ElicitingApprover, CONNECTION_TITLE};
 
 /// What a change comes to, found before the user is asked and again when it is made.
 enum Plan {
@@ -170,17 +170,48 @@ impl ConnectionStore {
         Err(AgentError::NotConnected(format!("connection `{}` no longer exists", info.name)))
     }
 
+    /// The TLS choice of an `add_connection`: `options.tls`, and/or the `ssl` flag (`true` is
+    /// `require`, or `verify_full` where `require` is not offered; `false` is `disable`). Both
+    /// must say the same.
+    fn tls_choice(request: &engine_agent::tools::AddConnectionRequest, kind: ConnectionKind) -> Result<Option<Tls>, AgentError> {
+        let from_id = match request.options.as_ref().and_then(|options| options.tls.as_deref()) {
+            Some(id) => Some(Tls::from_id(id).ok_or_else(|| {
+                AgentError::invalid(format!("`options.tls` is one of {}", Tls::IDS.join(", ")))
+            })?),
+            None => None,
+        };
+        let flags = [request.ssl, request.options.as_ref().and_then(|options| options.ssl)];
+        let ssl = match (flags[0], flags[1]) {
+            (Some(a), Some(b)) if a != b => {
+                return Err(AgentError::invalid("`ssl` and `options.ssl` disagree"));
+            }
+            (a, b) => a.or(b),
+        };
+        let from_flag = ssl.map(|on| match (on, kind) {
+            (false, _) => Tls::Disable,
+            (true, ConnectionKind::Mongodb) => Tls::VerifyFull,
+            (true, _) => Tls::Require,
+        });
+        match (from_id, from_flag) {
+            (Some(id), Some(flag)) => {
+                let agree = id == flag || (flag == Tls::Require && id == Tls::VerifyFull);
+                if !agree {
+                    return Err(AgentError::invalid(
+                        "`ssl` and `options.tls` disagree: `ssl` true means `require` or `verify_full`, false means `disable`",
+                    ));
+                }
+                Ok(Some(id))
+            }
+            (id, flag) => Ok(id.or(flag)),
+        }
+    }
+
     fn plan(&self, change: &ConnectionChange<'_>) -> Result<Plan, AgentError> {
         match change {
             ConnectionChange::Add(request) => {
                 let kind = ConnectionKind::from_persisted(request.kind.driver_id())
                     .ok_or_else(|| AgentError::invalid("this kind of connection is not supported"))?;
-                let tls = match request.options.as_ref().and_then(|options| options.tls.as_deref()) {
-                    Some(id) => Some(Tls::from_id(id).ok_or_else(|| {
-                        AgentError::invalid(format!("`options.tls` is one of {}", Tls::IDS.join(", ")))
-                    })?),
-                    None => None,
-                };
+                let tls = Self::tls_choice(request, kind)?;
                 if let Some(password) = &request.password {
                     new_connection::check_password(password).map_err(AgentError::invalid)?;
                 }
@@ -278,50 +309,32 @@ impl ConnectionStore {
             text
         };
         let (mut message, shown): (String, Vec<&str>) = match plan {
-            Plan::Add { record, password, type_name, production } => {
+            Plan::Add { record, type_name, production, .. } => {
                 let mut message = format!(
-                    "An MCP client asks to ADD a connection to tablex. Nothing is added unless you accept.\n\nName: {}\n\n{}",
+                    "An MCP client asks to ADD a connection to tablex. Nothing is added unless you accept. To add it, choose \"{CONNECTION_TITLE}\" and accept.\n\nName: {}\n\n{}",
                     label(&record.name),
                     kind_type(record, type_name, *production),
                 );
-                message.push_str(&if password.is_some() && !engine_connect::key_home::passwords_saved() {
-                    "Password: one is given, but passwords are not being saved (Don't save passwords is on); the connection is added without one and tablex asks for it when connecting.\n\n".to_owned()
-                } else if password.is_some() {
-                    "Password: one is given; it is saved in tablex's credential store and not shown here.\n\n".to_owned()
-                } else {
-                    "Password: none is saved; tablex asks for it when connecting.\n\n".to_owned()
-                });
-                message.push_str(
-                    "The connection has no agent access setting of its own: it follows your settings for its connection type.",
-                );
+                message.push_str(&format!("{}\n\n{}", Self::password_note(plan), Self::footer(plan)));
                 (message, vec![&record.name, &record.uri, type_name])
             }
-            Plan::Duplicate { source, copy, source_name, type_name, production } => {
+            Plan::Duplicate { copy, source_name, type_name, production, .. } => {
                 let mut message = format!(
-                    "An MCP client asks to COPY the connection {} as a new connection. Nothing is copied unless you accept.\n\nNew name: {}\n\n{}",
+                    "An MCP client asks to COPY the connection {} as a new connection. Nothing is copied unless you accept. To copy it, choose \"{CONNECTION_TITLE}\" and accept.\n\nNew name: {}\n\n{}",
                     label(source_name),
                     label(&copy.name),
                     kind_type(copy, type_name, *production),
                 );
-                message.push_str(&if source.save_password && !engine_connect::key_home::passwords_saved() {
-                    "Password: passwords are not being saved (Don't save passwords is on), so the copy has none and tablex asks for it when connecting.\n\n".to_owned()
-                } else if source.save_password {
-                    "Password: the saved password of the original is copied; it is not shown here.\n\n".to_owned()
-                } else {
-                    "Password: none (the original has none saved).\n\n".to_owned()
-                });
-                message.push_str(
-                    "The copy has no agent access setting of its own: it follows your settings for its connection type.",
-                );
+                message.push_str(&format!("{}\n\n{}", Self::password_note(plan), Self::footer(plan)));
                 (message, vec![&copy.name, source_name, &copy.uri, type_name])
             }
             Plan::Remove { record, type_name, production } => {
                 let mut message = format!(
-                    "An MCP client asks to REMOVE a connection from tablex. This cannot be undone. Nothing is removed unless you accept.\n\nName: {}\n\n{}",
+                    "An MCP client asks to REMOVE a connection from tablex. This cannot be undone. Nothing is removed unless you accept. To remove it, choose \"{CONNECTION_TITLE}\" and accept.\n\nName: {}\n\n{}",
                     label(&record.name),
                     kind_type(record, type_name, *production),
                 );
-                message.push_str("Its saved passwords and pinned objects are removed with it.");
+                message.push_str(&Self::footer(plan));
                 (message, vec![&record.name, &record.uri, type_name])
             }
         };
@@ -331,6 +344,107 @@ impl ConnectionStore {
             );
         }
         message
+    }
+
+    /// The "Password: ..." line of a question (none for a removal).
+    fn password_note(plan: &Plan) -> String {
+        let saves = engine_connect::key_home::passwords_saved();
+        match plan {
+            Plan::Add { password: Some(_), .. } if !saves => "Password: one is given, but passwords are not being saved (Don't save passwords is on); the connection is added without one and tablex asks for it when connecting.",
+            Plan::Add { password: Some(_), .. } => "Password: one is given; it is saved in tablex's credential store and not shown here.",
+            Plan::Add { .. } => "Password: none is saved; tablex asks for it when connecting.",
+            Plan::Duplicate { source, .. } if source.save_password && !saves => "Password: passwords are not being saved (Don't save passwords is on), so the copy has none and tablex asks for it when connecting.",
+            Plan::Duplicate { source, .. } if source.save_password => "Password: the saved password of the original is copied; it is not shown here.",
+            Plan::Duplicate { .. } => "Password: none (the original has none saved).",
+            Plan::Remove { .. } => "",
+        }
+        .to_owned()
+    }
+
+    /// The closing sentence of a question.
+    fn footer(plan: &Plan) -> String {
+        match plan {
+            Plan::Add { .. } => "The connection has no agent access setting of its own: it follows your settings for its connection type.",
+            Plan::Duplicate { .. } => "The copy has no agent access setting of its own: it follows your settings for its connection type.",
+            Plan::Remove { .. } => "Its saved passwords and pinned objects are removed with it.",
+        }
+        .to_owned()
+    }
+
+    /// What the user can do in the app instead of asking the agent, for a refusal.
+    fn instead(change: &ConnectionChange<'_>) -> &'static str {
+        match change {
+            ConnectionChange::Add(_) => "add the connection in the tablex app (New Connection)",
+            ConnectionChange::Duplicate { .. } => "copy the connection in the tablex app",
+            ConnectionChange::Remove { .. } => "remove the connection in the tablex app",
+        }
+    }
+
+    /// The same facts as [`message`](Self::message) for the app's dialog, as plain text (names are
+    /// spelled, not marked up): the sentence that says what is asked, the production warning as the
+    /// danger line, and the details in the block the dialog shows in monospace.
+    fn app_question(plan: &Plan) -> ApprovalAsk {
+        let name = |text: &str| spell_out(text, false).0;
+        let (what, record, type_name, production, first) = match plan {
+            Plan::Add { record, type_name, production, .. } => (
+                "An MCP client asks to ADD a connection to tablex. Nothing is added unless you approve.",
+                record,
+                type_name,
+                *production,
+                ("Name", name(&record.name)),
+            ),
+            Plan::Duplicate { copy, type_name, production, source_name, .. } => (
+                "An MCP client asks to COPY a connection as a new connection. Nothing is copied unless you approve.",
+                &**copy,
+                type_name,
+                *production,
+                ("Copy of", name(source_name)),
+            ),
+            Plan::Remove { record, type_name, production } => (
+                "An MCP client asks to REMOVE a connection from tablex. This cannot be undone. Nothing is removed unless you approve.",
+                record,
+                type_name,
+                *production,
+                ("Name", name(&record.name)),
+            ),
+        };
+        let mut lines = vec![format!("{}: {}", first.0, first.1)];
+        if matches!(plan, Plan::Duplicate { .. }) {
+            lines.push(format!("New name: {}", name(&record.name)));
+        }
+        lines.push(format!("Kind: {}", name(&record.db_type)));
+        lines.push(format!("Address (the password is never part of it): {}", name(&record.uri)));
+        lines.push(format!(
+            "Connection type: {}",
+            if type_name.trim().is_empty() { "No type".to_owned() } else { name(type_name) }
+        ));
+        let password = Self::password_note(plan);
+        if !password.is_empty() {
+            lines.push(password);
+        }
+        let mut notes = vec![what.to_owned(), Self::footer(plan)];
+        let shown = [&record.name, &record.uri, type_name];
+        if shown.iter().any(|text| text.chars().any(is_right_to_left)) {
+            notes.push("Warning: a name above has right-to-left letters, which can change how the text around it is displayed. Read it with care.".to_owned());
+        }
+        ApprovalAsk {
+            title: CONNECTION_TITLE.to_owned(),
+            danger: production.then(|| "this is a PRODUCTION connection".to_owned()),
+            // Removing cannot be undone: approved by a mouse click only.
+            click_only: matches!(plan, Plan::Remove { .. }),
+            notes,
+            statements: vec![lines.join("\n")],
+            ..ApprovalAsk::default()
+        }
+    }
+
+    /// Both forms of the question about `plan`.
+    fn question(plan: &Plan, change: &ConnectionChange<'_>) -> ConnectionQuestion {
+        ConnectionQuestion {
+            message: Self::message(plan),
+            app: Self::app_question(plan),
+            instead: Self::instead(change),
+        }
     }
 
     /// Tells the running app; whatever comes back, the change was made.
@@ -375,7 +489,7 @@ impl ConnectionAdmin for ConnectionStore {
 
     fn approve(&self, change: &ConnectionChange<'_>, cancel: &CancelToken) -> ApprovalDecision {
         match self.plan(change) {
-            Ok(plan) => self.approver.ask_connection_change(Self::message(&plan), cancel),
+            Ok(plan) => self.approver.ask_connection_change(Self::question(&plan, change), cancel),
             Err(error) => ApprovalDecision::Refuse { reason: error.to_string() },
         }
     }
@@ -384,7 +498,7 @@ impl ConnectionAdmin for ConnectionStore {
         let _one_at_a_time = self.changing.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         // The question may have waited a long time: the app's switch may be off by now.
         self.approver
-            .connection_change_still_allowed()
+            .connection_change_still_allowed(Self::instead(change))
             .map_err(|reason| AgentError::WriteRefused(format!("the change was approved, but it can no longer be made: {reason}")))?;
         // Looked at again: the name may be taken, the connection gone.
         let plan = self.plan(change)?;
@@ -494,5 +608,26 @@ mod tests {
         assert!(!text.contains("cannot read"), "{text}");
         let other = removal_warning(&CredentialError::Platform("keychain locked".into()));
         assert!(other.ends_with("could not be cleared: keychain locked"), "{other}");
+    }
+
+    #[test]
+    fn removing_a_connection_is_click_only_in_the_app_and_adding_is_not() {
+        let new = NewConnection {
+            name: "shop".into(),
+            kind: ConnectionKind::Sqlite,
+            uri: None,
+            host: None,
+            port: None,
+            database: None,
+            user: None,
+            path: Some("/data/shop.db".into()),
+            tls: None,
+            connection_type: "development".into(),
+        };
+        let record = new_connection::build_record(&new, "id-1", 0.0).unwrap();
+        let remove = Plan::Remove { record: record.clone(), type_name: "Development".into(), production: false };
+        assert!(ConnectionStore::app_question(&remove).click_only);
+        let add = Plan::Add { record, password: None, type_name: "Development".into(), production: false };
+        assert!(!ConnectionStore::app_question(&add).click_only);
     }
 }

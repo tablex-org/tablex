@@ -34,6 +34,14 @@ async fn rig(production: bool, switch: bool, asker: Asker) -> Rig {
             "insert" => json!({"n": int(command["documents"].as_array().unwrap().len()), "ok": ok}),
             "update" => json!({"n": int(1), "nModified": int(1), "ok": ok}),
             "delete" => json!({"n": int(1), "ok": ok}),
+            "listIndexes" => json!({
+                "cursor": {"id": {"$numberLong": "0"}, "ns": "shop.orders", "firstBatch": [
+                    {"v": int(2), "key": {"_id": int(1)}, "name": "_id_"},
+                    {"v": int(2), "key": {"sku": int(1)}, "name": "sku_1", "unique": true},
+                ]},
+                "ok": ok,
+            }),
+            "drop" => json!({"ns": "shop.orders", "nIndexesWas": int(1), "ok": ok}),
             other => panic!("unexpected command {other}"),
         })
     });
@@ -230,7 +238,7 @@ async fn a_switch_turned_off_while_the_mongodb_question_waits_sends_nothing() {
     assert_eq!(code(&result), "agent.write_refused");
     assert_eq!(
         message(&result),
-        format!("the change was approved, but it can no longer run: {REASON_SWITCH_OFF}")
+        format!("the change was approved, but it can no longer run: {}", tablex_mcp::approver::refusal(REASON_SWITCH_OFF))
     );
     assert!(rig.sent().is_empty());
     rig.finish().await;
@@ -332,4 +340,89 @@ async fn a_batch_in_a_transaction_is_approved_once_and_committed_without_a_secon
     let Harness { client, server, .. } = harness;
     client.cancel().await.unwrap();
     server.await.unwrap().unwrap();
+}
+
+// ------------------------------------------------------------ execute_query with a shell command
+
+impl Rig {
+    async fn shell(&self, statement: &str, extra: Value) -> rmcp::model::CallToolResult {
+        let mut args = json!({"connection_id": MONGO, "database": "shop", "statement": statement});
+        args.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        self.harness.call("execute_query", args).await
+    }
+}
+
+#[tokio::test]
+async fn a_shell_read_lists_the_indexes_without_a_question_and_without_the_switch() {
+    // The changes switch is off and the client cannot be asked: a read needs neither.
+    let rig = rig(false, false, Asker::answering(false, Ok(accepted(false)))).await;
+    let result = rig.shell("db.getCollection('orders').getIndexes()", json!({})).await;
+    assert_eq!(code(&result), "ok", "{}", text(&result));
+    let body = structured(&result);
+    assert_eq!(body["row_count"], 2);
+    let second: Value = serde_json::from_str(body["rows"][1][0].as_str().unwrap()).unwrap();
+    assert_eq!((second["name"].as_str(), second["unique"].as_bool()), (Some("sku_1"), Some(true)));
+    assert_eq!(rig.sent(), [json!({"listIndexes": "orders", "cursor": {"batchSize": 201}})]);
+    assert!(rig.harness.client.service().seen.asked().is_empty());
+    // The same through describe_table.
+    let described = rig.harness.call("describe_table", json!({"connection_id": MONGO, "database": "shop", "table": "orders"})).await;
+    assert_eq!(code(&described), "ok", "{}", text(&described));
+    assert_eq!(structured(&described)["unique_columns"], json!(["sku"]));
+    rig.finish().await;
+}
+
+#[tokio::test]
+async fn a_shell_change_runs_in_the_one_allowed_cell_and_the_question_shows_the_command() {
+    for (production, switch, capability, answer, allowed) in [
+        (false, true, true, true, true),
+        (false, true, true, false, false),
+        (false, true, false, true, false),
+        (false, false, true, true, false),
+        (true, true, true, true, false),
+    ] {
+        let rig = rig(production, switch, Asker::answering(capability, Ok(accepted(answer)))).await;
+        let result = rig.shell("db.orders.insertOne({sku: 'a-1', stock: 4})", json!({})).await;
+        let cell = format!("production {production}, switch {switch}, capability {capability}, answer {answer}");
+        if allowed {
+            assert_eq!(code(&result), "ok", "{cell}: {}", text(&result));
+            assert_eq!(structured(&result)["affected_rows"], 1);
+            let asked = rig.harness.client.service().seen.asked();
+            let message = &asked[0].0;
+            assert!(message.contains("Database: `shop`\n") && message.contains("Collection: `orders`\n"), "{message}");
+            let block = message.split("\n```\n").nth(1).expect("a code block");
+            let shown: Value = serde_json::from_str(block.trim_end_matches("\n```")).unwrap();
+            assert_eq!(shown, rig.sent()[0]);
+            assert_eq!(shown["documents"], json!([{"sku": "a-1", "stock": 4}]));
+        } else {
+            assert_eq!(code(&result), "agent.write_refused", "{cell}: {}", text(&result));
+            assert!(rig.sent().is_empty(), "{cell}");
+        }
+        rig.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn a_dangerous_shell_command_is_asked_off_production_refused_on_it_and_runcommand_never_runs() {
+    let dev = rig(false, true, Asker::answering(true, Ok(accepted(true)))).await;
+    let plain = dev.shell("db.orders.drop()", json!({})).await;
+    assert_eq!(code(&plain), "agent.dangerous_refused", "{}", text(&plain));
+    assert!(dev.sent().is_empty());
+    let flagged = dev.shell("db.orders.drop()", json!({"dangerous": true})).await;
+    assert_eq!(code(&flagged), "ok", "{}", text(&flagged));
+    let asked = dev.harness.client.service().seen.asked();
+    assert_eq!(asked.len(), 1);
+    assert!(asked[0].0.starts_with("DANGEROUS: an MCP client asks to run a command"), "{}", asked[0].0);
+    assert_eq!(dev.sent(), [json!({"drop": "orders"})]);
+    let run_command = dev.shell("db.runCommand({ping: 1})", json!({"dangerous": true})).await;
+    assert_eq!(code(&run_command), "agent.dangerous_refused", "{}", text(&run_command));
+    assert!(message(&run_command).contains("tablex app"), "{}", message(&run_command));
+    assert_eq!(dev.sent().len(), 1);
+    dev.finish().await;
+    let production = rig(true, true, Asker::answering(true, Ok(accepted(true)))).await;
+    let refused = production.shell("db.orders.drop()", json!({"dangerous": true})).await;
+    assert_eq!(code(&refused), "agent.dangerous_refused", "{}", text(&refused));
+    assert!(message(&refused).contains("does not run dangerous statements on a production connection"), "{}", message(&refused));
+    assert!(production.sent().is_empty());
+    assert!(production.harness.client.service().seen.asked().is_empty());
+    production.finish().await;
 }

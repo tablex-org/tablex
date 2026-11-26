@@ -1,0 +1,25 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.tablex-org/tablex-mcp",
+  "title": "tablex",
+  "description": "Governed AI agent access to your saved database connections: off until enabled, writes ask you.",
+  "websiteUrl": "https://github.com/tablex-org/tablex/tree/main/apps/tablex-mcp",
+  "repository": {
+    "url": "https://github.com/tablex-org/tablex",
+    "source": "github",
+    "subfolder": "packages/mcp-server"
+  },
+  "version": "0.1.8",
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "@tablex/mcp-server",
+      "version": "0.1.8",
+      "runtimeHint": "npx",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

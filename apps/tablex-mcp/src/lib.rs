@@ -9,9 +9,14 @@ pub mod app_port;
 pub mod approver;
 pub mod cli;
 pub mod connection_admin;
+#[cfg(feature = "http")]
+pub mod http;
 pub mod keychain;
+pub mod resources;
 pub mod server;
 pub mod setup;
+#[cfg(feature = "http")]
+pub mod token;
 pub mod transport;
 
 /// The name the server reports in `initialize`, in the audit log's `front_end` and in the

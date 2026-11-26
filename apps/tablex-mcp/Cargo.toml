@@ -1,9 +1,9 @@
 [package]
 name = "tablex-mcp"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2021"
 publish = false
-description = "Standalone MCP server (stdio) for tablex: the engine-agent tool layer over the saved connections, shipped as a separate download"
+description = "Standalone MCP server (stdio, or Streamable HTTP) for tablex: the engine-agent tool layer over the saved connections, shipped as a separate download"
 
 
 # The oldest tablex this build works with (the catalog's minAppVersion; the Driver Manager of an
@@ -20,6 +20,22 @@ name = "tablex-mcp"
 path = "src/main.rs"
 
 [features]
+# `--http`, `--allow-remote` and `--print-token`: the Streamable HTTP transport (`http.rs`,
+# `token.rs`). On by default, so the shipped binary and the npm package have it; it costs about
+# 1.4 MB (+12%) of the stripped Linux x86_64 binary, so `--no-default-features` builds the
+# stdio-only server, the size it was before the transport existed.
+default = ["http"]
+http = [
+    "rmcp/transport-streamable-http-server",
+    "tokio/net",
+    "dep:bytes",
+    "dep:http",
+    "dep:http-body-util",
+    "dep:hyper",
+    "dep:hyper-util",
+    "dep:getrandom",
+    "dep:subtle",
+]
 # TEST BUILDS ONLY: the binary uses an empty in-memory credential store instead of the OS keychain,
 # so the subprocess tests never touch the developer's keychain. Enabled only by the dev-dependency
 # on this crate below (i.e. while building tests); a non-debug build with it is a compile error.
@@ -30,14 +46,25 @@ engine-agent = { path = "../../rust-engine/crates/engine-agent" }
 engine-connect = { path = "../../rust-engine/crates/engine-connect" }
 engine-driver-host = { path = "../../rust-engine/crates/engine-driver-host" }
 engine-storage = { path = "../../rust-engine/crates/engine-storage" }
-# Server side of MCP over any async byte pipe. No client, no HTTP / SSE transports, no macros
-# (the tool list is `ToolLayer::tools()` at runtime, not a declaration), no auth. `elicitation`
-# is how a write is put to the user (`approver.rs`); it adds the `url` crate (already in the tree).
+# Server side of MCP over any async byte pipe (and, with the `http` feature, Streamable HTTP). No
+# client, no macros (the tool list is `ToolLayer::tools()` at runtime, not a declaration), no auth
+# (the bearer token is checked by `http.rs` before a request reaches rmcp). `elicitation` is how a
+# write is put to the user (`approver.rs`); it adds the `url` crate (already in the tree).
 rmcp = { version = "3.9", default-features = false, features = ["server", "elicitation"] }
+# The `http` feature: the listener under rmcp's service (HTTP/1.1 only, no TLS: see the module
+# docs of `http.rs`), all already in the tree through rmcp and the app's HTTP client; and the bearer
+# token: random bytes from the OS, compared in constant time.
+bytes = { version = "1", optional = true }
+http = { version = "1", optional = true }
+http-body-util = { version = "0.1", optional = true }
+hyper = { version = "1", features = ["server", "http1"], optional = true }
+hyper-util = { version = "0.1", features = ["tokio"], optional = true }
+getrandom = { version = "0.3", optional = true }
+subtle = { version = "2", optional = true }
 serde_json = "1"
 thiserror = "2"
-# Only what rmcp already needs plus the standard streams and signals: a current-thread runtime
-# (see `main.rs`), no `rt-multi-thread`, no `net`, no `fs`, no `process`.
+# Only what rmcp already needs plus the standard streams and signals (and, with `http`, sockets): a
+# current-thread runtime (see `main.rs`), no `rt-multi-thread`, no `fs`, no `process`.
 tokio = { version = "1", features = ["rt", "macros", "io-std", "io-util", "signal", "sync", "time"] }
 tokio-util = "0.7"
 
@@ -46,12 +73,16 @@ tokio-util = "0.7"
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3.7"
 
+# The user id of the process, for the owner check of the token file (`token.rs`); already in the tree.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 # Switches on `test-credentials` for the test build (resolver 2 does not unify dev-dependency
 # features into `cargo build`), the same trick `engine-connect` uses for its `testing` feature.
-tablex-mcp = { path = ".", features = ["test-credentials"] }
+tablex-mcp = { path = ".", default-features = false, features = ["test-credentials"] }
 # The client half of rmcp drives the server end to end in the tests; never in the shipped binary.
-rmcp = { version = "3.9", default-features = false, features = ["server", "client", "elicitation"] }
+rmcp = { version = "3.9", default-features = false, features = ["server", "client", "elicitation", "transport-streamable-http-server", "transport-streamable-http-client-reqwest"] }
 # A CommonMark parser (already in the lock file through gpui-component): the tests check that a
 # statement in an approval question is one literal code block.
 markdown = "1"

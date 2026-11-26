@@ -41,6 +41,12 @@ async fn tools_list_is_exactly_what_the_layer_says() {
         "execute_query takes a transaction_id"
     );
     let batch = listed.iter().find(|tool| tool.name == "execute_batch").unwrap();
+    for tool in [execute, batch] {
+        let property = &tool.input_schema["properties"]["lock_timeout_secs"];
+        assert_eq!(property["type"], "integer", "{} takes lock_timeout_secs", tool.name);
+        let text = property["description"].as_str().unwrap();
+        assert!(text.contains("1 to 600") && text.contains("PostgreSQL, MySQL and MariaDB"), "{text}");
+    }
     for name in ["use_transaction", "transaction_id", "continue_on_error"] {
         assert!(batch.input_schema["properties"].get(name).is_some(), "execute_batch takes {name}");
     }
@@ -335,12 +341,19 @@ async fn a_saved_password_and_the_address_never_reach_a_response_or_the_audit_lo
         ("audit log", audit),
     ] {
         for form in password_forms() {
+            // `list_connections` tells where a connection goes (`host:port/database`), and only that.
+            if what == "list_connections" && form == "127.0.0.1" {
+                continue;
+            }
             assert!(
                 !haystack.contains(&form),
                 "{form} in the {what}: {haystack}"
             );
         }
     }
+    let shown = serde_json::to_string(&structured(&listed)).unwrap();
+    assert!(shown.contains(r#""endpoint":"127.0.0.1:1/db""#), "{shown}");
+    assert!(!shown.contains("app@") && !shown.contains("postgresql://"), "no login or URI: {shown}");
 }
 
 #[tokio::test]

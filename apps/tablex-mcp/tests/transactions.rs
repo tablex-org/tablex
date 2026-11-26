@@ -77,13 +77,13 @@ async fn an_accepted_commit_makes_the_changes_final_and_the_question_lists_them(
     let (change, change_schema) = &asked[0];
     assert!(change.contains(&format!("runs inside transaction `{tx}`")), "{change}");
     assert!(change.contains("NOT committed"), "{change}");
-    assert_eq!(change_schema["properties"]["run"]["title"], "Run this statement");
+    assert_eq!(change_schema["properties"]["answer"]["enumNames"][1], "Run this statement");
     let (commit, commit_schema) = &asked[1];
     assert!(commit.starts_with("An MCP client asks to COMMIT a transaction."), "{commit}");
     assert!(commit.contains(&format!("Transaction: `{tx}`")), "{commit}");
     assert!(commit.contains("Change 1 of 1"), "{commit}");
     assert!(commit.ends_with(&format!("\n```\n{INSERT}\n```")), "{commit}");
-    assert_eq!(commit_schema["properties"]["run"]["title"], "Commit this transaction");
+    assert_eq!(commit_schema["properties"]["answer"]["enumNames"][1], "Commit this transaction");
     // The audit log has the whole story.
     let entries = harness.fixture.audit_entries();
     for (tool, outcome) in [

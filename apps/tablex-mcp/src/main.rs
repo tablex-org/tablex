@@ -11,13 +11,37 @@ use tablex_mcp::server::{McpServer, MAX_CONCURRENT_CALLS};
 use tablex_mcp::setup;
 use tablex_mcp::transport::Signals;
 
+#[cfg(feature = "http")]
+mod http_mode;
+#[cfg(feature = "http")]
+use http_mode::{print_token, serve_http, Plan};
+
+/// What `--http` prepared; a build without the `http` feature has none.
+#[cfg(not(feature = "http"))]
+type Plan = std::convert::Infallible;
+
+#[cfg(not(feature = "http"))]
+fn serve_http(_: cli::HttpArgs) -> ExitCode {
+    fail(NO_HTTP)
+}
+
+#[cfg(not(feature = "http"))]
+fn print_token() -> ExitCode {
+    fail(NO_HTTP)
+}
+
+#[cfg(not(feature = "http"))]
+const NO_HTTP: &str = "this build has no HTTP transport (it was built without the `http` feature)";
+
 fn main() -> ExitCode {
     install_panic_hook();
     // Only the app moves the old files into the app database: until it has, this reads them, so
     // an older tablex running beside this one keeps one truth (see `engine_storage::legacy`).
     engine_storage::legacy::set_import_allowed(false);
     match Command::parse(std::env::args_os().skip(1)) {
-        Ok(Command::Serve) => serve(),
+        Ok(Command::Serve) => serve(None),
+        Ok(Command::ServeHttp(args)) => serve_http(args),
+        Ok(Command::PrintToken) => print_token(),
         Ok(Command::Version) => print_and_exit(&cli::version_line()),
         Ok(Command::Help) => print_and_exit(cli::USAGE),
         Ok(Command::PrintConfig) => match cli::current_client_config() {
@@ -71,7 +95,7 @@ fn install_panic_hook() {
 const MAX_BLOCKING_THREADS: usize = 32;
 const _: () = assert!(MAX_CONCURRENT_CALLS + 4 <= MAX_BLOCKING_THREADS);
 
-fn serve() -> ExitCode {
+fn serve(http: Option<Plan>) -> ExitCode {
     // Serving never raises a Keychain dialog (process-wide, until this returns): the user would not
     // see it behind the MCP client, and the agent would hang. A secret macOS would have to ask
     // about is an error that names `--authorize-keychain` (`credentials.keychain_access_needed`).
@@ -105,11 +129,19 @@ fn serve() -> ExitCode {
     };
     let result = runtime.block_on(async {
         let mut signals = Signals::install();
-        server
-            .serve(tokio::io::stdin(), tokio::io::stdout(), async || {
-                signals.next().await;
-            })
-            .await
+        match http {
+            None => {
+                server
+                    .serve(tokio::io::stdin(), tokio::io::stdout(), async || {
+                        signals.next().await;
+                    })
+                    .await
+            }
+            #[cfg(feature = "http")]
+            Some(plan) => http_mode::run(server, plan, &mut signals).await,
+            #[cfg(not(feature = "http"))]
+            Some(never) => match never {},
+        }
     });
     // Queued audit lines reach the file even when a hung call still holds the layer.
     audit.flush();

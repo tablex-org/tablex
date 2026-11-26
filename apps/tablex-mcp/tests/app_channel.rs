@@ -24,7 +24,7 @@ struct FakeApp {
 
 impl FakeApp {
     fn listening(reply: Reply) -> Self {
-        let dir = tempfile::Builder::new().prefix("tx").tempdir().unwrap();
+        let dir = private_dir();
         let path = dir.path().join("app.sock");
         let seen = Arc::new(Mutex::new(Vec::new()));
         let log = Arc::clone(&seen);
@@ -161,7 +161,7 @@ async fn access_below_the_need_is_refused_before_the_app_is_asked() {
 
 #[tokio::test]
 async fn an_app_that_is_not_running_gives_a_clear_error() {
-    let dir = tempfile::Builder::new().prefix("tx").tempdir().unwrap();
+    let dir = private_dir();
     let nobody = Arc::new(AppChannel::at(AppClient::new(dir.path().join("app.sock"))));
     let harness = Harness::start(Fixture::with_app(nobody)).await;
     let conn = harness.fixture.connection(Some("read"));
