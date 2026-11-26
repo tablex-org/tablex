@@ -73,7 +73,7 @@ elif command -v convert >/dev/null; then resize() { convert "$1" -resize "$2x$2"
 else echo "ImageMagick (magick or convert) is needed to scale the icon" >&2; exit 1; fi
 icon_png="apps/tablex-gpui/assets/AppIcon.png"
 [ -f "$icon_png" ] || { echo "missing $icon_png" >&2; exit 1; }
-[ -f licenses/Apache-2.0.txt ] || { echo "missing licenses/Apache-2.0.txt" >&2; exit 1; }
+[ -f licenses/README.md ] || { echo "missing licenses/README.md" >&2; exit 1; }
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT

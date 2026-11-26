@@ -7,19 +7,45 @@
     }
   },
   "packages": {
+    "dbengine-duckdb": {
+      "targets": {
+        "linux-x86_64": {
+          "binary_max_bytes": 73700000,
+          "compressed_max_bytes": 26100000
+        },
+        "macos-arm64": {
+          "binary_max_bytes": 57210000,
+          "compressed_max_bytes": 19425000
+        }
+      },
+      "baseline": {
+        "linux-x86_64": {
+          "date": "2026-11-26",
+          "binary_bytes": 70160000,
+          "compressed_bytes": 24860000,
+          "note": "ESTIMATED, not measured on Linux: the Mac delta of the parquet and json extensions (+3.02 MB binary, +1.24 MB deflated, see macos-arm64) scaled by the Linux / Mac ratio of the build without them (66.27 / 51.46 MB binary, 23.19 / 17.25 MB deflated), on top of the Linux numbers measured before them. The release job's `Size of the DuckDB driver` step reports the real Linux numbers on its first run; replace these then. Measured before the extensions: release profile built by rust-engine/scripts/build-driver.sh duckdb (CARGO_PROFILE_RELEASE_STRIP=none, then the script runs `strip --strip-unneeded` on a Linux .so as it runs `strip -x` on a macOS dylib), measured with `size_report.py --package dbengine-duckdb --binary <that file> --target linux-x86_64`: 85,694,840 bytes / 26,067,288 deflated with its symbol table, 66.27 MB / 23.19 MB after a manual `strip --strip-unneeded` (the numbers here are those two, rounded: the script's own output has not been measured yet, the first release job's size step reports it). It is DuckDB 2.0.1 itself (duckdb 1.20001.0, `bundled`, no parquet / json / icu extension) compiled from C++ into the plugin only, never into the app. The budget is ~5% above. macOS arm64 is not measured yet (no Mac build was made for this entry): the release job's `Size of the DuckDB driver` step reports it on its first run, and its numbers go here as `macos-arm64`."
+        },
+        "macos-arm64": {
+          "date": "2026-11-26",
+          "binary_bytes": 54482712,
+          "compressed_bytes": 18496170,
+          "note": "release profile (CARGO_PROFILE_RELEASE_STRIP=none, then `strip -x`, as rust-engine/scripts/build-driver.sh does), measured with `size_report.py --package dbengine-duckdb --binary <that file> --target macos-arm64`. DuckDB 2.0.1 (duckdb 1.20001.0, `bundled`) with its `parquet` and `json` extensions linked in statically (Open Data File reads CSV, TSV, JSON, NDJSON and Parquet files with no network and no INSTALL): the same build without the two features was 51,464,576 bytes / 17,253,551 deflated, so the extensions are +3,018,136 bytes / +1,242,619 deflated (+5.9% / +7.2%). No icu extension. The budget is ~5% above."
+        }
+      }
+    },
     "tablex-mcp": {
       "targets": {
         "macos-arm64": {
-          "binary_max_bytes": 7530000,
-          "compressed_max_bytes": 3540000
+          "binary_max_bytes": 10950000,
+          "compressed_max_bytes": 5085000
         }
       },
       "baseline": {
         "macos-arm64": {
-          "date": "2026-10-13",
-          "binary_bytes": 7185408,
-          "compressed_bytes": 3366102,
-          "note": "dist profile, after H2 / P1 (rmcp 2.2 server feature only, tokio current_thread); the budget is ~5% above"
+          "date": "2026-11-26",
+          "binary_bytes": 10430576,
+          "compressed_bytes": 4840983,
+          "note": "dist profile (`cargo build --profile dist -p tablex-mcp`), measured with `size_report.py --package tablex-mcp --binary target/dist/tablex-mcp --target macos-arm64`, after the tool parity work (pinned sessions, MongoDB shell commands in execute_query, resources, tool and database limits), the in-app approval channel and the Streamable HTTP transport. The same build with `--no-default-features` (no HTTP: hyper, the bearer token) is 9,123,328 bytes / 4.30 MB deflated, so the transport is +1.31 MB; the rest of the growth since 2026-10-13 (7,185,408 / 3,366,102: after H2 / P1, rmcp 2.2 server feature only, tokio current_thread) is the parity work (~0.45 MB, measured on its own before the merge), the approval channel and the engine-connect / engine-agent features added since. The budget is ~5% above"
         }
       }
     },

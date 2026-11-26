@@ -176,7 +176,7 @@ class PackagingScriptTests(unittest.TestCase):
         for crate in ("mongo", "postgres", "mysql", "mariadb", "redis"):
             block = re.search(rf"dbengine-{crate}\)\n(.*?);;", registry, re.S).group(1)
             self.assertIn("--features abi-v2", block, crate)
-        for v2_only in ("sqlite", "clickhouse"):
+        for v2_only in ("sqlite", "clickhouse", "duckdb", "mssql"):
             block = re.search(rf"dbengine-{v2_only}\)\n(.*?);;", registry, re.S).group(1)
             self.assertNotIn("abi-v2", block, v2_only)
 
@@ -189,6 +189,30 @@ class PackagingScriptTests(unittest.TestCase):
         self.assertIn("operation.cancel", block)
         for script in ("dev-drivers.sh", "build-driver.sh"):
             self.assertIn("clickhouse", (self.scripts / script).read_text(), script)
+
+    def test_duckdb_is_registered_and_packaged(self):
+        registry = (self.scripts / "driver-registry.sh").read_text()
+        self.assertRegex(registry, r'ALL_DRIVER_IDS="[^"]*\bduckdb\b[^"]*"')
+        package = (self.scripts / "package-driver.sh").read_text()
+        block = re.search(r"duckdb\)\n(.*?);;", package, re.S).group(1)
+        self.assertIn("query.arrow_c_data", block)
+        self.assertIn("operation.cancel", block)
+        for script in ("dev-drivers.sh", "build-driver.sh"):
+            self.assertIn("duckdb", (self.scripts / script).read_text(), script)
+
+    def test_every_driver_is_packaged_under_the_repository_licence(self):
+        package = (self.scripts / "package-driver.sh").read_text()
+        self.assertEqual(re.findall(r'LICENSE="([^"]*)"', package), ["AGPL-3.0-only"])
+
+    def test_mssql_is_registered_and_packaged(self):
+        registry = (self.scripts / "driver-registry.sh").read_text()
+        self.assertRegex(registry, r'ALL_DRIVER_IDS="[^"]*\bmssql\b[^"]*"')
+        package = (self.scripts / "package-driver.sh").read_text()
+        block = re.search(r"mssql\)\n(.*?);;", package, re.S).group(1)
+        self.assertIn("query.arrow_c_data", block)
+        self.assertIn("operation.cancel", block)
+        for script in ("dev-drivers.sh", "build-driver.sh"):
+            self.assertIn("mssql", (self.scripts / script).read_text(), script)
 
     def test_build_driver_never_lets_cargo_strip_and_uses_strip_x(self):
         build = (self.scripts / "build-driver.sh").read_text()
@@ -229,7 +253,7 @@ class SchemaV2Tests(unittest.TestCase):
     def test_categories_per_driver(self):
         expected = {
             "postgresql": "sql", "mysql": "sql", "mariadb": "sql", "sqlite": "sql",
-            "mongodb": "nosql", "redis": "key_value", "clickhouse": "analytics",
+            "mongodb": "nosql", "redis": "key_value", "clickhouse": "analytics", "duckdb": "analytics", "mssql": "sql",
         }
         self.assertEqual({k: v[0] for k, v in dm.DRIVER_META.items()}, expected)
         for driver, category in expected.items():

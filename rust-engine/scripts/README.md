@@ -2,7 +2,7 @@
 
 The GPUI host (`engine-driver-host`) loads **ABI v2** driver dylibs, verifies the
 sha256 from the manifest, and installs them from `dist/drivers/`. These scripts
-build, verify and package the seven drivers: `mongodb postgresql mysql mariadb redis sqlite clickhouse`, and the optional MongoDB Shell plugin (an add-on of the MongoDB driver: see `build-plugin.sh` / `package-plugin.sh` below).
+build, verify and package the nine drivers: `mongodb postgresql mysql mariadb redis sqlite clickhouse duckdb mssql`, and the optional MongoDB Shell plugin (an add-on of the MongoDB driver: see `build-plugin.sh` / `package-plugin.sh` below).
 
 ## One command (local testing)
 

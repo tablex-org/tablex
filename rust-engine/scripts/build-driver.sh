@@ -2,11 +2,11 @@
 # Build one driver as an ABI v2 dylib that dyld accepts.
 #
 # Usage: build-driver.sh <driver-id|crate> [--out-dir DIR]
-#   ids: mongodb postgresql mysql mariadb redis sqlite clickhouse
+#   ids: mongodb postgresql mysql mariadb redis sqlite clickhouse duckdb mssql
 # Prints the final dylib path on stdout (everything else goes to stderr).
 #
 # Env:
-#   TABLEX_DRIVER_STRIP   x (default) | none
+#   TABLEX_DRIVER_STRIP   x (default) | none  (macOS `strip -x`, Linux `strip --strip-unneeded`)
 #   TABLEX_DRIVER_TARGET  rust target triple (default: host). Cross-built
 #                         dylibs cannot be dlopen-verified without Rosetta.
 #   CARGO                 cargo binary
@@ -72,11 +72,17 @@ OUT="${OUT_DIR}/${DYLIB_NAME}"
 cp -f "${BUILT}" "${OUT}"
 BEFORE=$(wc -c < "${OUT}" | tr -d ' ')
 
-# Apple's `strip -x` + ad hoc re-sign are macOS-only; ELF / PE builds keep the
-# linker output (cargo's own release profile already drops debuginfo there).
+# Apple's `strip -x` + ad hoc re-sign are macOS-only. An ELF `.so` is stripped
+# with `strip --strip-unneeded` (the symbol table the loader does not use; every
+# exported dbengine_* symbol stays in .dynsym; DuckDB went 85 -> 66 MB), but only
+# for the host's own architecture: a foreign binutils may not read the other
+# one. PE builds keep the linker output (cargo's own release profile already
+# drops debuginfo there).
 if [[ "${STRIP_MODE}" == "x" && "${DYLIB_NAME}" == *.dylib ]]; then
     strip -x "${OUT}"
     codesign --force --sign - "${OUT}" >&2
+elif [[ "${STRIP_MODE}" == "x" && "${DYLIB_NAME}" == *.so && "${ARCH_LABEL}" == "$(host_arch)" ]]; then
+    strip --strip-unneeded "${OUT}"
 fi
 AFTER=$(wc -c < "${OUT}" | tr -d ' ')
 echo "==> ${DRIVER_ID}: ${BEFORE} bytes unstripped -> ${AFTER} bytes (strip=${STRIP_MODE}): ${OUT}" >&2

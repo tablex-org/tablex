@@ -131,6 +131,8 @@ DRIVER_META = {
     "mongodb": ("nosql", "MongoDB document database with find, aggregate and script queries."),
     "redis": ("key_value", "Redis key-value store with typed key browsing and commands."),
     "clickhouse": ("analytics", "ClickHouse column-store analytics database over the HTTP interface."),
+    "duckdb": ("analytics", "DuckDB embedded analytical database files, read and written in place."),
+    "mssql": ("sql", "SQL Server and Azure SQL over TDS, with SQL logins and TLS."),
 }
 
 

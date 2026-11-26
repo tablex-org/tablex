@@ -111,28 +111,33 @@ else
     TEAM_ID=""
 fi
 
-# Per-driver metadata the dylib does not carry (licence) and the minimum feature
-# set packaging must see in the dylib (guards against shipping a driver built
-# without its features). Everything else in the manifest comes from the dylib.
+# Every driver is tablex code, under the licence of the repository. The client
+# libraries a driver bundles keep their own licences, listed in licenses/README.md.
+LICENSE="AGPL-3.0-only"
+
+# The minimum feature set packaging must see in the dylib (guards against shipping
+# a driver built without its features). Everything else in the manifest comes from
+# the dylib.
 case "${DRIVER_ID}" in
     mongodb)
-        LICENSE="Apache-2.0"
         REQUIRED_FEATURES='["navigator", "query.mongo_find", "query.mongo_script", "database.create"]'
         ;;
     sqlite)
-        LICENSE="Public-Domain"
         REQUIRED_FEATURES='["navigator", "query.sql", "query.arrow_c_data"]'
         ;;
     postgresql|mysql|mariadb)
-        LICENSE="GPL-3.0"
         REQUIRED_FEATURES='["navigator", "query.sql", "query.arrow_c_data"]'
         ;;
     clickhouse)
-        LICENSE="Apache-2.0"
+        REQUIRED_FEATURES='["navigator", "query.sql", "query.arrow_c_data", "operation.cancel", "metadata.table_properties"]'
+        ;;
+    duckdb)
+        REQUIRED_FEATURES='["navigator", "query.sql", "query.arrow_c_data", "operation.cancel", "metadata.table_properties"]'
+        ;;
+    mssql)
         REQUIRED_FEATURES='["navigator", "query.sql", "query.arrow_c_data", "operation.cancel", "metadata.table_properties"]'
         ;;
     redis)
-        LICENSE="MIT"
         REQUIRED_FEATURES='["navigator", "query.redis_key", "query.redis_command"]'
         ;;
 esac

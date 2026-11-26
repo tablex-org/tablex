@@ -1,14 +1,15 @@
 name: Release App
-# Builds tablex for macOS (Apple silicon and Intel), Linux (x86_64 and aarch64) and Windows (x86_64) from a
-# `v*` tag, and publishes them as the GitHub Release of that tag, marked latest. One version for all: the
-# tag must be the app version of apps/tablex-gpui/Cargo.toml (`v0.1.0` for 0.1.0).
+# Builds tablex for macOS (Apple silicon and Intel), Linux (x86_64 and aarch64) and Windows (x86_64 and
+# aarch64) from a `v*` tag, and publishes them as the GitHub Release of that tag, marked latest. One version
+# for all: the tag must be the app version of apps/tablex-gpui/Cargo.toml (`v0.1.0` for 0.1.0).
 #   macOS    tablex.app packed into a .dmg (scripts/bundle-macos.sh + scripts/dmg-macos.sh), signed below
 #   Linux    tablex-<version>-linux-<arch>.tar.gz and .AppImage (scripts/package-linux.sh), built in a
 #            Debian 11 container (scripts/linux-container-setup.sh): glibc 2.31 is the oldest it needs, and
 #            OpenSSL is linked statically, so the files run on Debian 11+, Ubuntu 20.04+ and RHEL 9
-#   Windows  tablex-<version>-windows-x86_64-setup.exe (an Inno Setup installer, per user, no administrator
-#            rights: scripts/windows/tablex.iss) and tablex-<version>-windows-x86_64.zip (portable)
-#            (scripts/package-windows.ps1), neither code signed
+#   Windows  tablex-<version>-windows-<arch>-setup.exe (an Inno Setup installer, per user, no administrator
+#            rights: scripts/windows/tablex.iss) and tablex-<version>-windows-<arch>.zip (portable)
+#            (scripts/package-windows.ps1), neither code signed; <arch> is x86_64 (windows-2022) or
+#            aarch64 (the windows-11-arm runner, native build)
 # SHA256SUMS lists the SHA-256 of every file of the release but itself.
 # One failed build job fails the run before anything is published: re-run the failed job.
 #
@@ -16,6 +17,13 @@ name: Release App
 # workflow artifacts (3 days), with the version of Cargo.toml and no tag check. It never publishes: the
 # publish job runs on a pushed `v*` tag only (`github.event_name == 'push'`), so no dispatch, whatever ref it
 # names, reaches the `release` environment (its secrets) or `gh release`.
+#
+# A tag push reuses a dry run: find-dry-run looks for a successful dry run of this workflow on the very
+# commit the tag points to whose artifacts are all still there (scripts/find_dry_run.py). Found, the build
+# jobs are skipped and the publish job downloads those artifacts, so the files published are the ones the
+# dry run built and checked (the size check, the installer smoke test). Not found (no dry run, another
+# commit, expired or missing artifacts), the build jobs run as they always did. The build jobs do the same
+# in both modes (only the version/tag check differs, and the publish job repeats it), and sign nothing.
 #
 # There is no Developer ID: the build jobs make an ad-hoc signed bundle, and the publish job signs it
 # again with the tablex release certificate (self-signed, pinned in scripts/release-signing.sha1; the
@@ -52,10 +60,41 @@ env:
   CARGO_INCREMENTAL: "0"
 
 jobs:
+  # Always runs (the build jobs need it) but looks only on a tag push: on a dry run its output is empty.
+  # `run_id` is the dry run to reuse, empty when the build jobs must run. It only reads (actions: read).
+  find-dry-run:
+    name: find a dry run to reuse
+    if: github.repository_owner == vars.RELEASE_OWNER
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      run_id: ${{ steps.find.outputs.run_id }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        with:
+          persist-credentials: false
+      # Every artifact the build jobs upload: keep this list and their `name:`s the same.
+      - name: Look for a dry run of this commit
+        id: find
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 scripts/find_dry_run.py --repo "${GITHUB_REPOSITORY}" --workflow release-app.yml \
+            --sha "$(git rev-parse HEAD)" \
+            --require app-apple-silicon app-intel app-linux-x86_64 app-linux-aarch64 \
+            app-windows-x86_64 app-windows-aarch64
+
   build:
     name: build (${{ matrix.arch }})
+    needs: find-dry-run
     # Forks skip: RELEASE_OWNER is a repository variable (Settings > Variables).
-    if: github.repository_owner == vars.RELEASE_OWNER && (github.event_name == 'workflow_dispatch' || (github.ref_type == 'tag' && startsWith(github.ref_name, 'v')))
+    if: needs.find-dry-run.outputs.run_id == '' && github.repository_owner == vars.RELEASE_OWNER && (github.event_name == 'workflow_dispatch' || (github.ref_type == 'tag' && startsWith(github.ref_name, 'v')))
     runs-on: macos-15
     timeout-minutes: 60
     strategy:
@@ -110,7 +149,8 @@ jobs:
 
   build-linux:
     name: build (linux-${{ matrix.arch }})
-    if: github.repository_owner == vars.RELEASE_OWNER && (github.event_name == 'workflow_dispatch' || (github.ref_type == 'tag' && startsWith(github.ref_name, 'v')))
+    needs: find-dry-run
+    if: needs.find-dry-run.outputs.run_id == '' && github.repository_owner == vars.RELEASE_OWNER && (github.event_name == 'workflow_dispatch' || (github.ref_type == 'tag' && startsWith(github.ref_name, 'v')))
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     strategy:
@@ -175,10 +215,22 @@ jobs:
           retention-days: ${{ github.event_name == 'workflow_dispatch' && 3 || 7 }}
 
   build-windows:
-    name: build (windows-x86_64)
-    if: github.repository_owner == vars.RELEASE_OWNER && (github.event_name == 'workflow_dispatch' || (github.ref_type == 'tag' && startsWith(github.ref_name, 'v')))
-    runs-on: windows-2022
-    timeout-minutes: 90
+    name: build (windows-${{ matrix.arch }})
+    needs: find-dry-run
+    if: needs.find-dry-run.outputs.run_id == '' && github.repository_owner == vars.RELEASE_OWNER && (github.event_name == 'workflow_dispatch' || (github.ref_type == 'tag' && startsWith(github.ref_name, 'v')))
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: windows-2022
+            target: x86_64-pc-windows-msvc
+          # Native build on GitHub's Windows 11 Arm runner (free for public repositories).
+          - arch: aarch64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
     # The C runtime is linked into the exe: no Visual C++ Redistributable to install. The drivers of the
     # catalog are built the same way (release-drivers.yml); each module owns its own CRT, and memory is
     # always freed by the module that allocated it (engine-driver-api's ABI).
@@ -203,6 +255,29 @@ jobs:
         with:
           toolchain: stable
 
+      # Native builds only: the host of rustc must be the target, or an emulated x86_64 rustup on the Arm
+      # runner would quietly build x64 exes (the paths below are those of a native build).
+      - name: Check the toolchain host
+        run: |
+          rustc -vV | grep -Fq "host: ${{ matrix.target }}"
+
+      # ring 0.17 compiles its C code with clang on aarch64-pc-windows-msvc (its build.rs: "On Windows
+      # AArch64 we currently must use Clang"). The runner image has LLVM 20 installed
+      # (actions/partner-runner-images, images/arm-windows-11-image.md); put it on the PATH if it is not there.
+      - name: Find clang (ring)
+        if: matrix.arch == 'aarch64'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $clang = (Get-Command clang.exe -ErrorAction SilentlyContinue).Source
+          if (-not $clang) {
+            $bin = Join-Path $env:ProgramFiles "LLVM\bin"
+            $clang = Join-Path $bin "clang.exe"
+            if (-not (Test-Path $clang)) { throw "clang.exe is not installed: ring needs it on aarch64-pc-windows-msvc" }
+            $bin | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          }
+          & $clang --version
+
       - name: Build (dist profile)
         run: |
           set -euo pipefail
@@ -224,10 +299,12 @@ jobs:
           done
 
       - name: Package
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-windows.ps1 -Version "${VERSION}" -OutDir dist
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-windows.ps1 -Version "${VERSION}" -OutDir dist -Arch "${{ matrix.arch }}"
 
       # Inno Setup 6.7.4 from its official GitHub release, checked against the SHA-256 of the file (the digest
       # GitHub shows for the asset). To move to another version change the version, the tag in the URL and the hash together.
+      # The same installer on the Arm runner: Setup and ISCC are x86 programs, which Windows 11 on Arm runs
+      # emulated (the arm64 installer they compile is a separate output, ArchitecturesAllowed=arm64).
       - name: Install Inno Setup
         shell: powershell
         run: |
@@ -245,17 +322,17 @@ jobs:
 
       # The installer holds the files of the zip (scripts/package-windows-installer.ps1).
       - name: Installer
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-windows-installer.ps1 -Version "${VERSION}" -OutDir dist -Iscc "${INNO_ISCC}"
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-windows-installer.ps1 -Version "${VERSION}" -OutDir dist -Arch "${{ matrix.arch }}" -Iscc "${INNO_ISCC}"
 
       # Install it for this user into a scratch folder, check the files, uninstall it: it must leave nothing behind.
       - name: Installer smoke test
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
-          $setup = (Resolve-Path "dist\tablex-$env:VERSION-windows-x86_64-setup.exe").Path
+          $setup = (Resolve-Path "dist\tablex-$env:VERSION-windows-${{ matrix.arch }}-setup.exe").Path
           $dir = Join-Path $env:RUNNER_TEMP "tablex-installed"
           Start-Process -FilePath $setup -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CURRENTUSER", "/DIR=`"$dir`"" -Wait
-          foreach ($file in "tablex.exe", "tablex-mcp.exe", "LICENSE", "README.txt", "licenses\Apache-2.0.txt", "unins000.exe") {
+          foreach ($file in "tablex.exe", "tablex-mcp.exe", "LICENSE", "README.txt", "licenses\README.md", "unins000.exe") {
             if (-not (Test-Path (Join-Path $dir $file))) { throw "the installer did not put $file in place" }
           }
           & (Join-Path $dir "tablex-mcp.exe") --version
@@ -265,7 +342,7 @@ jobs:
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: app-windows-x86_64
+          name: app-windows-${{ matrix.arch }}
           path: |
             dist/*.zip
             dist/*-setup.exe
@@ -274,22 +351,50 @@ jobs:
 
   release:
     name: publish
-    needs: [build, build-linux, build-windows]
-    if: github.repository_owner == vars.RELEASE_OWNER && github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    needs: [find-dry-run, build, build-linux, build-windows]
+    # A skipped job skips its dependents unless the `if` has a status function, so `!cancelled()` (which also
+    # lets a failed build through, hence the explicit result checks): publish only when find-dry-run
+    # succeeded and either a dry run is reused and every build job was skipped, or none was found and every
+    # build job succeeded. Anything else (a failed or cancelled build, a skipped one with nothing to reuse) publishes nothing.
+    if: >-
+      !cancelled()
+      && github.repository_owner == vars.RELEASE_OWNER && github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+      && needs.find-dry-run.result == 'success'
+      && (
+        (needs.find-dry-run.outputs.run_id != '' && needs.build.result == 'skipped' && needs.build-linux.result == 'skipped' && needs.build-windows.result == 'skipped')
+        || (needs.find-dry-run.outputs.run_id == '' && needs.build.result == 'success' && needs.build-linux.result == 'success' && needs.build-windows.result == 'success')
+      )
     # macOS, as release-drivers.yml: the signer is built and run there.
     runs-on: macos-15
     # The signing key lives in this environment (required reviewers and the allowed tags are set on it).
     environment: release
     permissions:
       contents: write
+      # Reads the artifacts of the dry run (another run of this workflow).
+      actions: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
+      # The dry run does not check the tag against the version or look for the release notes: fail here,
+      # before anything is signed (when the build jobs ran, they did it too).
+      - name: Check the app version (the tag names it)
+        run: scripts/release-version.sh
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: stable
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - name: Download the files of the dry run of this commit
+        if: needs.find-dry-run.outputs.run_id != ''
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: app-*
+          path: dist
+          merge-multiple: true
+          run-id: ${{ needs.find-dry-run.outputs.run_id }}
+          github-token: ${{ github.token }}
+      - name: Download the files of the build jobs
+        if: needs.find-dry-run.outputs.run_id == ''
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: app-*
           path: dist
@@ -361,9 +466,9 @@ jobs:
           cd dist
           shasum -a 256 "tablex-${version}-"* app-update.json app-update.json.sig > SHA256SUMS
           cat SHA256SUMS
-          # The ten files of the five builds (two .dmg, two .app.zip, two .tar.gz, two .AppImage, one .zip, one
+          # The twelve files of the six builds (two .dmg, two .app.zip, two .tar.gz, two .AppImage, two .zip, two
           # -setup.exe) must all be in it.
-          test "$(grep -c "tablex-${version}-" SHA256SUMS)" -eq 10
+          test "$(grep -c "tablex-${version}-" SHA256SUMS)" -eq 12
 
       - name: Publish the release
         env:
@@ -383,6 +488,7 @@ jobs:
           | Linux, x86_64 | \`tablex-${version}-linux-x86_64.AppImage\` or \`.tar.gz\` |
           | Linux, aarch64 | \`tablex-${version}-linux-aarch64.AppImage\` or \`.tar.gz\` |
           | Windows 10 or later, x86_64 | \`tablex-${version}-windows-x86_64-setup.exe\` (installer), or \`tablex-${version}-windows-x86_64.zip\` (portable) |
+          | Windows 11 on Arm, aarch64 | \`tablex-${version}-windows-aarch64-setup.exe\` (installer), or \`tablex-${version}-windows-aarch64.zip\` (portable) |
 
           **macOS**: open the .dmg and drag tablex to Applications. The app is not notarized by Apple yet, so
           the first launch needs a confirmation: right-click tablex in Applications and choose
@@ -403,7 +509,7 @@ jobs:
           \`SHA256SUMS\` lists the SHA-256 of every file: \`sha256sum -c SHA256SUMS --ignore-missing\`.
 
           Database drivers are installed from the app: **Driver Manager** lists PostgreSQL,
-          MySQL, MariaDB, SQLite, MongoDB, Redis and ClickHouse.
+          MySQL, MariaDB, SQL Server, SQLite, DuckDB, MongoDB, Redis and ClickHouse.
           EOF
           # `-i.bak` is the form GNU and BSD sed (this runner's) both take.
           sed -i.bak 's/^          //' notes.md
@@ -412,3 +518,55 @@ jobs:
           gh release create "${TAG}" --title "tablex ${version}" --notes-file release-notes.md --latest \
             dist/*.dmg dist/*.app.zip dist/*.tar.gz dist/*.AppImage dist/*-windows-*.zip dist/*-setup.exe \
             dist/SHA256SUMS dist/app-update.json dist/app-update.json.sig
+
+  # Optional and OFF by default: runs after the release is published and uploads the files for the package
+  # managers (Homebrew cask, winget manifests, AUR PKGBUILD and .SRCINFO, scripts/package_managers.py) as a
+  # workflow artifact, built from the SHA256SUMS of the release. It needs no secret and submits nothing.
+  # Turn it on with the repository variable PACKAGE_MANAGER_FILES=true (Settings > Variables).
+  #
+  # Auto-submission comes later. To turn this job into one, add a step after "Upload" for each target, each
+  # with its own credential in the `release` environment, and never in a build job:
+  #   Homebrew  a fine-grained token with contents:write on tablex-org/homebrew-tap only; check the tap out
+  #             with it, copy package-managers/homebrew-tap/Casks/tablex.rb in, commit and push (or open a PR).
+  #   winget    once the first version is merged: `wingetcreate update TablexOrg.tablex --version <version>
+  #             --urls <setup.exe URL> --submit --token <classic PAT with public_repo>` (wingetcreate is
+  #             github.com/microsoft/winget-create, Windows only: use a windows runner). It forks
+  #             microsoft/winget-pkgs under the token's account and opens the PR. The first version is
+  #             submitted by hand from package-managers/winget-pkgs/.
+  #   AUR       an SSH key whose public half is on the maintainer's AUR account (aur.archlinux.org > My
+  #             Account); put the private half in a secret, `git clone ssh://aur@aur.archlinux.org/tablex-bin.git`,
+  #             copy PKGBUILD and .SRCINFO in, commit and push to master. Pin the AUR host key.
+  package-managers:
+    name: package-manager files
+    needs: [release]
+    if: github.repository_owner == vars.RELEASE_OWNER && vars.PACKAGE_MANAGER_FILES == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Generate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          gh release download "${TAG}" --pattern SHA256SUMS --dir "${RUNNER_TEMP}"
+          published="$(gh release view "${TAG}" --json publishedAt --jq '.publishedAt[:10]')"
+          python3 scripts/package_managers.py --version "${version}" --repo "${GH_REPO}" \
+            --sha256sums "${RUNNER_TEMP}/SHA256SUMS" --release-date "${published}" --out package-managers
+
+      - name: Upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: package-managers
+          path: package-managers
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 30

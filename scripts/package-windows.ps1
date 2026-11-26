@@ -1,22 +1,23 @@
-# Pack a Windows build of tablex into tablex-<version>-windows-x86_64.zip:
-#   tablex-<version>-windows-x86_64\tablex.exe, tablex-mcp.exe, LICENSE, licenses\, README.txt
+# Pack a Windows build of tablex into tablex-<version>-windows-<arch>.zip (<arch> is x86_64, the default, or aarch64):
+#   tablex-<version>-windows-<arch>\tablex.exe, tablex-mcp.exe, LICENSE, licenses\, README.txt
 #
 # Usage: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\package-windows.ps1 -Version X.Y.Z -OutDir dist
-#            [-Binary target\dist\tablex-gpui.exe] [-Mcp target\dist\tablex-mcp.exe]
+#            [-Arch x86_64|aarch64] [-Binary target\dist\tablex-gpui.exe] [-Mcp target\dist\tablex-mcp.exe]
 param(
     [Parameter(Mandatory = $true)][string]$Version,
     [Parameter(Mandatory = $true)][string]$OutDir,
+    [ValidateSet("x86_64", "aarch64")][string]$Arch = "x86_64",
     [string]$Binary = "target\dist\tablex-gpui.exe",
     [string]$Mcp = "target\dist\tablex-mcp.exe"
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
-foreach ($file in @($Binary, $Mcp, "LICENSE", "licenses\Apache-2.0.txt")) {
+foreach ($file in @($Binary, $Mcp, "LICENSE", "licenses\README.md")) {
     if (-not (Test-Path $file)) { throw "missing: $file" }
 }
 
-$name = "tablex-$Version-windows-x86_64"
+$name = "tablex-$Version-windows-$Arch"
 $work = Join-Path ([System.IO.Path]::GetTempPath()) ("tablex-pack-" + [System.Guid]::NewGuid().ToString("N"))
 $stage = Join-Path $work $name
 New-Item -ItemType Directory -Path $stage | Out-Null
@@ -26,7 +27,7 @@ try {
     Copy-Item "LICENSE" (Join-Path $stage "LICENSE")
     Copy-Item "licenses" (Join-Path $stage "licenses") -Recurse
     $readme = @"
-tablex $Version for Windows (x86_64)
+tablex $Version for Windows ($Arch)
 
 Run tablex.exe. It needs Windows 10 or later and nothing else: the C runtime is part of the program,
 so no Visual C++ Redistributable has to be installed.

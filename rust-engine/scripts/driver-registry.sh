@@ -2,7 +2,7 @@
 # Sourced by the driver build/package scripts. Single place that knows how each
 # driver is built:  id -> crate, cargo feature args, cdylib file name.
 #
-# ABI v2 is what the GPUI host loads. dbengine-sqlite and dbengine-clickhouse are v2-only; every other
+# ABI v2 is what the GPUI host loads. dbengine-sqlite, dbengine-clickhouse, dbengine-duckdb and dbengine-mssql are v2-only; every other
 # crate keeps ABI 1 exports (for the Swift app) unless built with `abi-v2`.
 #
 # resolve_driver <id|alias|crate>  sets: DRIVER_ID CRATE CARGO_FEATURE_ARGS DYLIB_NAME
@@ -12,7 +12,7 @@
 #
 # Bash 3.2 compatible (macOS /bin/bash): no associative arrays.
 
-ALL_DRIVER_IDS="mongodb postgresql mysql mariadb redis sqlite clickhouse"
+ALL_DRIVER_IDS="mongodb postgresql mysql mariadb redis sqlite clickhouse duckdb mssql"
 
 resolve_driver() {
     CARGO_FEATURE_ARGS=""
@@ -31,6 +31,10 @@ resolve_driver() {
             DRIVER_ID=sqlite; CRATE=dbengine-sqlite; CARGO_FEATURE_ARGS="" ;;
         clickhouse|dbengine-clickhouse)
             DRIVER_ID=clickhouse; CRATE=dbengine-clickhouse; CARGO_FEATURE_ARGS="" ;;
+        duckdb|dbengine-duckdb)
+            DRIVER_ID=duckdb; CRATE=dbengine-duckdb; CARGO_FEATURE_ARGS="" ;;
+        mssql|sqlserver|dbengine-mssql)
+            DRIVER_ID=mssql; CRATE=dbengine-mssql; CARGO_FEATURE_ARGS="" ;;
         *)
             echo "Unknown driver '$1' (known: ${ALL_DRIVER_IDS})" >&2
             return 1 ;;

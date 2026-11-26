@@ -1,7 +1,7 @@
 name: Release Drivers
 
-# Builds, verifies, packages, signs and publishes the seven driver plugins
-# (postgresql mysql mariadb sqlite mongodb redis clickhouse) with the same
+# Builds, verifies, packages, signs and publishes the nine driver plugins
+# (postgresql mysql mariadb sqlite mongodb redis clickhouse duckdb mssql) with the same
 # scripts dev packaging uses (rust-engine/scripts, see its README.md), and the
 # standalone MCP server `tablex-mcp` (installed from Driver Manager > Tools) and the
 # MongoDB Shell plugin `tablex-mongo-shell` (an add-on of the MongoDB driver, installed
@@ -30,6 +30,10 @@ name: Release Drivers
 #                                   -> driver_manifest.py merge --release
 #                                   -> driver_manifest.py sign (LAST)
 #                                   -> GitHub Release assets
+#   npm-packages job (after release) -> the npm packages of tablex-mcp, assembled from the
+#                                      published assets and checked against the signed manifest
+#                                      (scripts/build_npm_packages.py); a workflow artifact only
+#   npm-publish job                 -> OFF unless the NPM_PUBLISH variable and NPM_TOKEN secret are set
 #
 # The tool's version is the `version` in apps/tablex-mcp/Cargo.toml and the app
 # offers an update when it differs from the installed one: bump it in the
@@ -43,6 +47,12 @@ name: Release Drivers
 # every build job (all drivers, the MCP server, the plugins) and uploads their files as workflow artifacts
 # (3 days), and nothing else: the release job runs on a pushed tag only (`github.event_name == 'push'`), so no
 # dispatch, whatever ref it names, reaches the `release` environment (its secrets) or `gh release`.
+# A tag push reuses a dry run: find-dry-run looks for a successful dry run of this workflow on the very
+# commit the tag points to that still has the artifact of every target (scripts/find_dry_run.py). Found,
+# the build matrix is skipped and the release job downloads those artifacts, so the files signed and
+# published are the ones the dry run built and checked (verify-driver.sh, the smoke tests, the size check).
+# Not found (no dry run, another commit, a target that did not build, expired artifacts), the matrix runs
+# as it always did. The build job does the same in both modes and uses no event data.
 # Never add pull_request / pull_request_target here.
 on:
   push:
@@ -61,11 +71,46 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Always runs (the build job needs it) but looks only on a tag push: on a dry run its output is empty.
+  # `run_id` is the dry run to reuse, empty when the build matrix must run. It only reads (actions: read).
+  find-dry-run:
+    name: find a dry run to reuse
+    if: github.repository_owner == vars.RELEASE_OWNER
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      run_id: ${{ steps.find.outputs.run_id }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        with:
+          persist-credentials: false
+      # Every artifact the build job uploads (dylibs-<matrix target>): keep this list and the matrix the same.
+      # A target whose build failed (the experimental ones may) uploads nothing, so the matrix runs again.
+      - name: Look for a dry run of this commit
+        id: find
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 scripts/find_dry_run.py --repo "${GITHUB_REPOSITORY}" --workflow release-drivers.yml \
+            --sha "$(git rev-parse HEAD)" \
+            --require dylibs-macos-aarch64 dylibs-macos-x86_64 dylibs-linux-x86_64 dylibs-linux-aarch64 \
+            dylibs-windows-x86_64 dylibs-windows-aarch64
+
   build:
     name: build (${{ matrix.target }})
+    needs: find-dry-run
     # Forks skip: RELEASE_OWNER is a repository variable (Settings > Variables).
-    if: github.repository_owner == vars.RELEASE_OWNER && (github.event_name == 'workflow_dispatch' || (github.ref_type == 'tag' && startsWith(github.ref_name, 'drivers-v')))
+    if: needs.find-dry-run.outputs.run_id == '' && github.repository_owner == vars.RELEASE_OWNER && (github.event_name == 'workflow_dispatch' || (github.ref_type == 'tag' && startsWith(github.ref_name, 'drivers-v')))
     runs-on: ${{ matrix.os }}
+    # The DuckDB driver compiles DuckDB itself (C++, minutes on a runner of 3 to 4 cores, the longest
+    # of the drivers); the rest of the job is a few minutes more.
+    timeout-minutes: 120
     continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
@@ -100,6 +145,12 @@ jobs:
             # The C runtime linked into every library and exe: no Visual C++ Redistributable needed. Each module
             # owns its CRT; the driver ABI frees memory in the module that allocated it (engine-driver-api).
             rustflags: -C target-feature=+crt-static
+          # Native build on GitHub's Windows 11 Arm runner (free for public repositories), the same way.
+          # ring needs clang there (the "Find clang" step).
+          - target: windows-aarch64
+            os: windows-11-arm
+            experimental: true
+            rustflags: -C target-feature=+crt-static
     # Only the Linux entries have an image; the others run on the runner itself.
     container: ${{ matrix.container }}
     env:
@@ -122,6 +173,24 @@ jobs:
         if: ${{ !matrix.container }}
         with:
           toolchain: stable
+      # ring 0.17 compiles its C code with clang on aarch64-pc-windows-msvc (its build.rs: "On Windows
+      # AArch64 we currently must use Clang"). The runner image has LLVM 20 installed
+      # (actions/partner-runner-images, images/arm-windows-11-image.md); put it on the PATH if it is not there.
+      # The rustc host check: an emulated x86_64 rustup would quietly build x64 libraries here.
+      - name: Find clang (ring) and check the toolchain host
+        if: matrix.target == 'windows-aarch64'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $clang = (Get-Command clang.exe -ErrorAction SilentlyContinue).Source
+          if (-not $clang) {
+            $bin = Join-Path $env:ProgramFiles "LLVM\bin"
+            $clang = Join-Path $bin "clang.exe"
+            if (-not (Test-Path $clang)) { throw "clang.exe is not installed: ring needs it on aarch64-pc-windows-msvc" }
+            $bin | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          }
+          & $clang --version
+          if (-not ((rustc -vV) -match "host: aarch64-pc-windows-msvc")) { throw "rustc does not build for aarch64-pc-windows-msvc" }
       - name: Build and verify all drivers
         run: |
           set -euo pipefail
@@ -195,6 +264,14 @@ jobs:
             python3 scripts/size_report.py --package "${package}" --binary "${bin}" --target macos-arm64 --markdown >> "$GITHUB_STEP_SUMMARY"
             python3 scripts/size_report.py --package "${package}" --binary "${bin}" --target macos-arm64 --check
           done
+      # The DuckDB plugin carries the whole DuckDB library: its size is reported on every run (the
+      # budget of scripts/size-budget.json is for a target that was measured; this one never fails).
+      - name: Size of the DuckDB driver
+        if: matrix.target == 'macos-aarch64'
+        run: |
+          set -euo pipefail
+          python3 scripts/size_report.py --package dbengine-duckdb --binary out/libdbengine_duckdb.dylib --target macos-arm64 --markdown >> "$GITHUB_STEP_SUMMARY"
+          python3 scripts/size_report.py --package dbengine-duckdb --binary out/libdbengine_duckdb.dylib --target macos-arm64 --check
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: dylibs-${{ matrix.target }}
@@ -204,14 +281,28 @@ jobs:
 
   release:
     name: sign and publish
-    needs: build
-    if: github.repository_owner == vars.RELEASE_OWNER && github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'drivers-v')
+    needs: [find-dry-run, build]
+    # A skipped job skips its dependents unless the `if` has a status function, so `!cancelled()` (which also
+    # lets a failed build through, hence the explicit result checks): publish only when find-dry-run
+    # succeeded and either a dry run is reused and the build matrix was skipped, or none was found and the
+    # matrix succeeded (its experimental targets may fail without failing the job, see continue-on-error).
+    # Anything else (a cancelled matrix, a skipped one with nothing to reuse) publishes nothing.
+    if: >-
+      !cancelled()
+      && github.repository_owner == vars.RELEASE_OWNER && github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'drivers-v')
+      && needs.find-dry-run.result == 'success'
+      && (
+        (needs.find-dry-run.outputs.run_id != '' && needs.build.result == 'skipped')
+        || (needs.find-dry-run.outputs.run_id == '' && needs.build.result == 'success')
+      )
     runs-on: macos-15
     # Required reviewers + protected-tag restriction are configured on this
     # environment (README: "Release CI"). Secrets live only here.
     environment: release
     permissions:
       contents: write
+      # Reads the artifacts of the dry run (another run of this workflow).
+      actions: read
     env:
       RELEASE_TAG: ${{ github.ref_name }}
       ARTIFACT_BASE_URL: https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}
@@ -223,8 +314,18 @@ jobs:
         with:
           toolchain: stable
       # Every target that built: dylibs/dylibs-<target>/ (a failed experimental
-      # target has no artifact and is skipped below).
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      # target has no artifact and is skipped below). From the dry run of this commit when there is one.
+      - name: Download the files of the dry run of this commit
+        if: needs.find-dry-run.outputs.run_id != ''
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: dylibs-*
+          path: dylibs
+          run-id: ${{ needs.find-dry-run.outputs.run_id }}
+          github-token: ${{ github.token }}
+      - name: Download the files of the build jobs
+        if: needs.find-dry-run.outputs.run_id == ''
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: dylibs-*
           path: dylibs
@@ -484,3 +585,114 @@ jobs:
           if [[ -n "${KEYCHAIN_PATH:-}" ]]; then
             security delete-keychain "${KEYCHAIN_PATH}" || true
           fi
+
+  # The npm packages of tablex-mcp (packages/mcp-server): `@tablex/mcp-server`, a dependency-free
+  # Node launcher, and one package per platform that holds the native binary. They are built from
+  # the files this release just PUBLISHED (downloaded back from the release, so the bytes are the
+  # signed ones, not a second build) and checked against the signed manifest's SHA-256 values by
+  # scripts/build_npm_packages.py. This job only assembles and packs: the tarballs are a workflow
+  # artifact and nothing leaves GitHub. It runs on a pushed tag (the release must exist); a
+  # workflow_dispatch dry run does not reach it.
+  npm-packages:
+    name: npm packages (assembled, not published)
+    needs: release
+    if: github.repository_owner == vars.RELEASE_OWNER && github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'drivers-v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Download what the release published
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p npm/assets
+          gh release download "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --dir npm/assets \
+            --pattern 'tablex-mcp-*' --pattern drivers-manifest.json
+          ls -l npm/assets
+      - name: Test the launcher and the assembly
+        run: |
+          set -euo pipefail
+          node --test packages/mcp-server/tests/
+          python3 scripts/tests/test_build_npm_packages.py
+      # --require: the release target must be in the packages; the experimental targets are
+      # packaged when they built.
+      - name: Assemble and pack
+        run: |
+          set -euo pipefail
+          python3 scripts/build_npm_packages.py \
+            --binaries npm/assets --manifest npm/assets/drivers-manifest.json \
+            --out npm/out --require macos-aarch64 --pack
+          ls -l npm/out/tarballs
+      # What a user would get, on this runner: install the tarballs next to each other and run the
+      # launcher. The Linux build (a Debian 11 image) runs here; skipped when it did not build.
+      - name: Smoke the Linux install
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          tarballs=(npm/out/tarballs/tablex-mcp-linux-x64-gnu-*.tgz)
+          if (( ${#tarballs[@]} == 0 )); then echo "no linux-x86_64 build in this release; skipped"; exit 0; fi
+          work="$(mktemp -d)"
+          (cd "${work}" && npm init -y >/dev/null && npm install --no-audit --no-fund \
+            "${GITHUB_WORKSPACE}"/npm/out/tarballs/tablex-mcp-linux-x64-gnu-*.tgz \
+            "${GITHUB_WORKSPACE}"/npm/out/tarballs/tablex-mcp-server-*.tgz)
+          "${work}/node_modules/.bin/tablex-mcp" --version
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: npm-tarballs
+          path: npm/out/tarballs/*.tgz
+          if-no-files-found: error
+          retention-days: 14
+
+  # Publishing to npm is OFF. To turn it on, a maintainer of the npm organisation (`@tablex`) must:
+  #   1. create an npm automation token that can publish to that organisation and save it as the
+  #      repository secret NPM_TOKEN (Settings > Secrets and variables > Actions);
+  #   2. set the repository variable NPM_PUBLISH to `true` (the same page, Variables).
+  # Then every `drivers-v*` tag publishes the packages from the `npm-packages` job: the platform
+  # packages first, `@tablex/mcp-server` last, a version that is already on npm is skipped. The job
+  # runs in the `release` environment, so its required reviewers approve it; the packages carry npm
+  # provenance. Until both are set this job is skipped, and nothing is ever published by default.
+  npm-publish:
+    name: publish to npm (off unless NPM_PUBLISH is true)
+    needs: npm-packages
+    if: github.repository_owner == vars.RELEASE_OWNER && vars.NPM_PUBLISH == 'true'
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      contents: read
+      id-token: write # npm provenance
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: npm-tarballs
+          path: tarballs
+      - name: Publish
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "${NPM_TOKEN}" || { echo "NPM_PUBLISH is true but the NPM_TOKEN secret is empty" >&2; exit 1; }
+          umask 077
+          rc="${RUNNER_TEMP}/npmrc"
+          printf '//registry.npmjs.org/:_authToken=%s\n' "${NPM_TOKEN}" > "${rc}"
+          shopt -s nullglob
+          platform=()
+          for tarball in tarballs/*.tgz; do
+            [[ "${tarball}" == */tablex-mcp-server-*.tgz ]] || platform+=("${tarball}")
+          done
+          for tarball in "${platform[@]}" tarballs/tablex-mcp-server-*.tgz; do
+            name="$(tar -xzOf "${tarball}" package/package.json | node -e 'const p=JSON.parse(require("fs").readFileSync(0,"utf8"));console.log(p.name+"@"+p.version)')"
+            if npm view "${name}" version --userconfig "${rc}" >/dev/null 2>&1; then
+              echo "${name} is already on npm; skipped"
+              continue
+            fi
+            npm publish "${tarball}" --access public --provenance --userconfig "${rc}"
+          done
+      - name: Remove the npm credentials
+        if: always()
+        run: rm -f "${RUNNER_TEMP}/npmrc"

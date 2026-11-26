@@ -61,9 +61,9 @@ else
     echo "note: $icon_png not found, bundling without an icon" >&2
 fi
 
-# Third-party licence texts (Apache-2.0 for the code adapted from dbx, section 4 of the licence):
-# they ship with the binary, so they go inside the bundle before it is signed.
-[ -f licenses/Apache-2.0.txt ] || { echo "missing licenses/Apache-2.0.txt" >&2; exit 1; }
+# The licence notes of the libraries tablex is built with ship with the binary, so they go inside
+# the bundle before it is signed.
+[ -f licenses/README.md ] || { echo "missing licenses/README.md" >&2; exit 1; }
 cp -R licenses "$contents/Resources/licenses"
 
 cat > "$contents/Info.plist" <<PLIST

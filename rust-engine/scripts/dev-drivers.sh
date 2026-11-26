@@ -2,8 +2,8 @@
 # One command: rebuild + verify + repackage drivers for local testing and write
 # dist/drivers/drivers-manifest.json (what debug GPUI builds read).
 #
-# Usage: rust-engine/scripts/dev-drivers.sh [driver-id ...]   (default: all seven + the plugins)
-#   ids: mongodb postgresql mysql mariadb redis sqlite clickhouse
+# Usage: rust-engine/scripts/dev-drivers.sh [driver-id ...]   (default: all nine + the plugins)
+#   ids: mongodb postgresql mysql mariadb redis sqlite clickhouse duckdb mssql
 #        mongo-shell  (the MongoDB Shell plugin, an add-on of the mongodb driver: build-plugin.sh
 #                      then package-plugin.sh with an ad hoc signature; it requires the mongodb
 #                      driver version of this checkout, so build `mongodb` too)

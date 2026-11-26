@@ -10,6 +10,8 @@
 ;   AppVersion  the app version, major.minor.patch (apps/tablex-gpui/Cargo.toml)
 ;   SourceDir   the unpacked zip
 ;   IconFile    apps/tablex-gpui/assets/AppIcon.ico
+;   Arm64       defined without a value for the Windows on ARM installer, tablex-<version>-windows-aarch64-setup.exe;
+;               without it the installer is the x86_64 one (x64compatible: x64 Windows, and arm64 Windows emulated)
 
 #ifndef AppVersion
   #error "pass /DAppVersion=<version>"
@@ -19,6 +21,13 @@
 #endif
 #ifndef IconFile
   #error "pass /DIconFile=<AppIcon.ico>"
+#endif
+#ifdef Arm64
+  #define ArchName "aarch64"
+  #define SetupArch "arm64"
+#else
+  #define ArchName "x86_64"
+  #define SetupArch "x64compatible"
 #endif
 
 [Setup]
@@ -38,8 +47,8 @@ VersionInfoDescription=tablex setup
 PrivilegesRequired=lowest
 DefaultDirName={autopf}\tablex
 DisableProgramGroupPage=yes
-ArchitecturesAllowed=x64compatible
-ArchitecturesInstallIn64BitMode=x64compatible
+ArchitecturesAllowed={#SetupArch}
+ArchitecturesInstallIn64BitMode={#SetupArch}
 MinVersion=10.0
 ; A running tablex is closed (Restart Manager) before its files are replaced or removed.
 CloseApplications=yes
@@ -47,7 +56,7 @@ RestartApplications=no
 SetupIconFile={#IconFile}
 UninstallDisplayIcon={app}\tablex.exe
 UninstallDisplayName=tablex
-OutputBaseFilename=tablex-{#AppVersion}-windows-x86_64-setup
+OutputBaseFilename=tablex-{#AppVersion}-windows-{#ArchName}-setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
