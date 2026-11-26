@@ -1,27 +1,21 @@
-//! OpenAI, OpenAI-compatible and Ollama chat providers: the Chat Completions API over an injected
-//! [`HttpTransport`].
+//! The Chat Completions API over an injected [`HttpTransport`]: OpenAI itself, any server that
+//! speaks its protocol (vLLM, LM Studio, gateways) and Ollama through its OpenAI-compatible `/v1`.
 //!
-//! # Origin and licence
+//! * [`endpoint`]: the chat, model-list and Ollama show URLs derived from the one base URL.
+//! * [`request`] and [`effort`]: the body of `POST .../chat/completions`, and the model-name rules
+//!   for the token-limit field and the thinking switch.
+//! * [`stream`] and [`body`]: the assembly of one assistant turn from the SSE stream, and the
+//!   grace period for servers that never close it.
+//! * [`models`]: the model list, and Ollama's capability probe.
 //!
-//! This module is adapted from dbx (<https://github.com/t8y2/dbx>), `crates/dbx-core/src/ai.rs`,
-//! `ai_effort.rs` and `ai_model_filter.rs`, which are licensed under the Apache License 2.0 (the
-//! text is in `licenses/Apache-2.0.txt` at the root of this repository; `licenses/README.md` lists
-//! the files that derive from dbx). Changes: dbx's `reqwest`/`tokio` and `String` errors are
-//! replaced by this crate's blocking [`HttpTransport`], [`CancelToken`] and typed
-//! [`ProviderError`]s; the request is written from the stored [`Conversation`](crate::Conversation)
-//! and the response is stored as content blocks; the code is cut to the Chat Completions path of
-//! the `Openai`, `OpenaiCompatible` and `Ollama` providers. Each ported function names its dbx
-//! original.
-//!
-//! * [`request`]: the body of `POST …/chat/completions`.
-//! * [`stream`]: the incremental assembly of one assistant turn.
-//! * [`models`]: `GET …/models` and Ollama's `/api/show` filter.
-//! * [`endpoint`] and [`effort`]: the addresses, and the rules that depend on the model name.
-//!
-//! A base URL must be `https`, or `http` to a loopback host, and carry no credentials, query or
-//! fragment (the rule of the Anthropic provider, shared); the provider keeps it trimmed and
-//! without a trailing `/`. A pasted `…/chat/completions` is accepted, a bare origin gets `/v1`.
+//! The shared parser, retry and error mapping are those of the Anthropic provider
+//! ([`crate::wire`]). A base URL must be `https`, or `http` to a loopback host, and carry no
+//! credentials, query or fragment; the provider keeps it trimmed and without a trailing `/`. The
+//! key (a bearer token) goes to the host of the base URL and nowhere else: every URL the provider
+//! derives is checked to have the origin of the base. Only OpenAI needs a key; a key that is set
+//! is sent to the other flavors too (a proxy may want it).
 
+mod body;
 mod effort;
 mod endpoint;
 mod models;
@@ -30,7 +24,7 @@ mod stream;
 #[cfg(test)]
 mod tests;
 
-use crate::conversation::Message;
+use crate::conversation::{Block, Message};
 use crate::key::ApiKey;
 use crate::provider::{
     ChatProvider, KeyError, KeySource, ModelInfo, ProtocolError, ProviderError, RunSession,
@@ -44,38 +38,34 @@ use crate::wire::{
     next_provider_id, pump, validate_base_url, ConfigError, Exchange, PumpError, StreamError,
     TurnLimits,
 };
+use body::GraceBody;
+use endpoint::Endpoints;
 use engine_agent::CancelToken;
 use request::Body;
 use std::cell::Cell;
+use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Duration;
-use stream::{ChatAssembler, GraceReader};
+use std::time::{Duration, Instant};
+use stream::TurnAssembler;
 
-/// OpenAI's API, the default base URL of [`Flavor::OpenAi`].
 pub const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
-/// Ollama's OpenAI-compatible API on this machine, the default of [`Flavor::Ollama`].
 pub const OLLAMA_BASE_URL: &str = "http://localhost:11434/v1";
-/// dbx asks for 4096 tokens in a tool turn.
-const DEFAULT_MAX_TOKENS: u32 = 4096;
-/// How long the stream may stay silent after its `finish_reason` before it counts as ended
-/// (dbx waits one second).
+
+/// How long the reader waits for the rest of a body once the turn's finish reason has come.
 const FINISH_GRACE: Duration = Duration::from_secs(1);
 
-/// Which server speaks the API; the places where dbx's providers differ.
+/// Which server the provider talks to; they differ in the key, the model list and the thinking
+/// switch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Flavor {
-    /// OpenAI (or a gateway that keeps its semantics): `max_completion_tokens` for reasoning
-    /// models, a key is required, the model list hides non-chat models.
     OpenAi,
-    /// Any other server of the API (LM Studio, vLLM, a gateway): a key is optional.
+    /// Any other server that speaks the protocol.
     Compatible,
-    /// Ollama under `/v1`: a key is optional, `reasoning_effort: "none"` turns thinking off, the
-    /// model list is filtered by `/api/show` capabilities.
     Ollama,
 }
 
 impl Flavor {
-    /// The base URL to start from; none for a compatible server, which can be anywhere.
+    /// The address to start from; there is none for a server of the user's own.
     pub fn default_base_url(self) -> Option<&'static str> {
         match self {
             Self::OpenAi => Some(OPENAI_BASE_URL),
@@ -84,35 +74,31 @@ impl Flavor {
         }
     }
 
-    /// dbx `provider_requires_api_key`: only OpenAI refuses to start without a key.
     pub fn requires_key(self) -> bool {
         self == Self::OpenAi
     }
 }
 
+/// Holds no key: its `Debug` output is safe to log.
 #[derive(Debug, Clone)]
 pub struct OpenAiConfig {
     /// Trimmed, without a trailing `/`, once the provider is built ([`OpenAiProvider::new`]).
     pub base_url: String,
     pub flavor: Flavor,
-    /// `max_tokens` (`max_completion_tokens` for an OpenAI reasoning model) of a turn.
     pub max_tokens: u32,
-    /// dbx `enable_thinking`. On: the effort of the request goes out as `reasoning_effort` for
-    /// the models that take it. Off: the flavor's switch (`reasoning_effort: "none"` for Ollama,
-    /// `extra_body.chat_template_kwargs.enable_thinking: false` for other compatible servers;
-    /// nothing for OpenAI).
+    /// Ask the model to think (with the request's effort where the model has levels); off asks it
+    /// not to, where the server has a way to say so.
     pub enable_thinking: bool,
     pub retry: RetryPolicy,
     pub timeouts: Timeouts,
 }
 
 impl OpenAiConfig {
-    /// The defaults of a flavor; the base URL is empty for [`Flavor::Compatible`] (to be set).
     pub fn for_flavor(flavor: Flavor) -> Self {
         Self {
             base_url: flavor.default_base_url().unwrap_or_default().to_owned(),
             flavor,
-            max_tokens: DEFAULT_MAX_TOKENS,
+            max_tokens: 4096,
             enable_thinking: true,
             retry: RetryPolicy::default(),
             timeouts: Timeouts::default(),
@@ -124,8 +110,9 @@ impl OpenAiConfig {
         self.base_url.trim().trim_end_matches('/')
     }
 
-    /// Checks the base URL with the rule of the Anthropic provider: `https`, or `http` to a
-    /// loopback host, with a host, without credentials, query or fragment.
+    /// Checks the base URL like the Anthropic provider does: `https`, or `http` to a loopback host
+    /// (the key must not travel in clear text), with a host, without credentials, query or
+    /// fragment.
     pub fn validate(&self) -> Result<(), ConfigError> {
         validate_base_url(self.normalized_base_url())
     }
@@ -142,19 +129,16 @@ pub struct OpenAiProvider {
     keys: Arc<dyn KeySource>,
     sleeper: Arc<dyn Sleeper>,
     config: OpenAiConfig,
+    endpoints: Endpoints,
     limits: TurnLimits,
     finish_grace: Duration,
     /// Tells a [`RunSession`] which provider issued it.
     id: u64,
-    chat_url: String,
-    models_url: String,
-    show_url: String,
 }
 
-/// A stream that failed: before anything of the turn was delivered it may be retried like an
-/// HTTP error.
+/// A stream that failed: before anything was delivered it may be retried like an HTTP error.
 enum Failure {
-    BeforeStart(ProviderError),
+    BeforeDelivery(ProviderError),
     Fatal(ProviderError),
 }
 
@@ -167,16 +151,8 @@ impl OpenAiProvider {
         config.validate()?;
         // What was validated is what is used from now on.
         config.base_url = config.normalized_base_url().to_owned();
-        let chat_url = endpoint::chat_url(config.flavor, &config.base_url);
-        let models_url = endpoint::models_url(&config.base_url);
-        let show_url = endpoint::show_url(&models_url);
-        // Whatever the base looks like, the requests go where it points: a derived address on
-        // another scheme, host or port would send the key there.
-        let origin = endpoint::origin(&config.base_url);
-        if [&chat_url, &models_url, &show_url]
-            .iter()
-            .any(|url| endpoint::origin(url) != origin)
-        {
+        let endpoints = Endpoints::new(&config.base_url, config.flavor);
+        if !endpoints.same_origin_as(&config.base_url) {
             return Err(ConfigError::InvalidBaseUrl);
         }
         Ok(Self {
@@ -185,11 +161,9 @@ impl OpenAiProvider {
             sleeper: Arc::new(ThreadSleeper),
             limits: TurnLimits::for_max_tokens(config.max_tokens),
             finish_grace: FINISH_GRACE,
-            id: next_provider_id(),
-            chat_url,
-            show_url,
-            models_url,
             config,
+            endpoints,
+            id: next_provider_id(),
         })
     }
 
@@ -215,6 +189,34 @@ impl OpenAiProvider {
         &self.config
     }
 
+    /// The key to send, if any. OpenAI needs one: none or an empty one is an error before
+    /// anything is sent. The other flavors do without. Any other failure of the key source is
+    /// always returned.
+    fn key(&self) -> Result<Option<ApiKey>, KeyError> {
+        let needed = self.config.flavor.requires_key();
+        match self.keys.api_key() {
+            Ok(key) if !key.is_empty() => Ok(Some(key)),
+            Ok(_) if needed => Err(KeyError::Empty),
+            Err(error @ (KeyError::NotSet | KeyError::Empty)) if needed => Err(error),
+            Ok(_) | Err(KeyError::NotSet | KeyError::Empty) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn headers(&self, key: Option<&ApiKey>, has_body: bool) -> Vec<Header> {
+        let mut headers = Vec::with_capacity(2);
+        if let Some(key) = key {
+            headers.push(Header::secret(
+                "authorization",
+                ApiKey::new(format!("Bearer {}", key.expose())),
+            ));
+        }
+        if has_body {
+            headers.push(Header::plain("content-type", "application/json"));
+        }
+        headers
+    }
+
     fn exchange(&self) -> Exchange<'_> {
         Exchange {
             transport: &*self.transport,
@@ -223,87 +225,53 @@ impl OpenAiProvider {
         }
     }
 
-    /// `Authorization: Bearer <key>` when there is a key (dbx `maybe_bearer_headers`).
-    fn headers(&self, key: Option<&ApiKey>, with_body: bool) -> Vec<Header> {
-        let mut headers = Vec::with_capacity(2);
-        if let Some(key) = key {
-            // One secret value, so it prints as `***` and is wiped when dropped.
-            headers.push(Header::secret(
-                "authorization",
-                ApiKey::new(format!("Bearer {}", key.expose())),
-            ));
-        }
-        if with_body {
-            headers.push(Header::plain("content-type", "application/json"));
-        }
-        headers
-    }
-
-    fn request_id(&self, response: &HttpResponse, scrub: &Scrub) -> Option<String> {
-        response
-            .header("x-request-id")
-            .or_else(|| response.header("request-id"))
-            .map(|id| scrub.bounded(id, MAX_TOKEN_CHARS))
-    }
-
-    /// Asks the key source. A key that is not set is no error for a flavor that does not need
-    /// one (dbx `provider_requires_api_key`); an empty one is refused before anything is sent
-    /// when the flavor needs it.
-    fn key(&self) -> Result<Option<ApiKey>, KeyError> {
-        let required = self.config.flavor.requires_key();
-        match self.keys.api_key() {
-            Ok(key) if !key.is_empty() => Ok(Some(key)),
-            Ok(_) if required => Err(KeyError::Empty),
-            Err(KeyError::NotSet | KeyError::Empty) if !required => Ok(None),
-            Ok(_) => Ok(None),
-            Err(error) => Err(error),
-        }
-    }
-
-    /// Reads the SSE body to `[DONE]` or the end after a `finish_reason`, within the limits of a
-    /// turn.
+    /// Reads the SSE body to `[DONE]`, or to its end once a finish reason was seen, within the
+    /// limits of a turn.
     fn consume(
         &self,
         response: HttpResponse,
         scrub: &Scrub,
+        taken: &HashSet<&str>,
         on_event: &mut dyn FnMut(StreamEvent<'_>),
-        cancel: &CancelToken,
         connection: &CancelToken,
-        history: &[Message],
     ) -> Result<TurnResponse, Failure> {
-        let request_id = self.request_id(&response, scrub);
+        let request_id = request_id(&response, scrub);
         let protocol = |source: ProtocolError, request_id: &Option<String>| {
             Failure::Fatal(ProviderError::Protocol {
                 source,
                 request_id: request_id.clone(),
             })
         };
-        let armed = Cell::new(false);
-        let mut body =
-            GraceReader::new(response.body, &armed, self.finish_grace, connection.clone());
+        let finished_at = Cell::new(None);
+        let mut body = GraceBody::new(
+            response.body,
+            &finished_at,
+            self.finish_grace,
+            connection.clone(),
+        );
         let mut parser = SseParser::default();
-        let mut assembler = ChatAssembler::new(self.limits, scrub.clone(), history);
+        let mut assembler = TurnAssembler::new(self.limits, scrub, taken);
         let fed = pump(
             &mut body,
             &mut parser,
             self.limits.max_bytes,
             scrub,
             &request_id,
-            cancel,
+            connection,
             &mut |event| {
                 let done = assembler.handle(event.data, on_event)?;
-                if assembler.finish_reason_seen() {
-                    armed.set(true);
+                if assembler.has_finish() && finished_at.get().is_none() {
+                    finished_at.set(Some(Instant::now()));
                 }
                 Ok::<_, StreamError>(done)
             },
         );
-        // A helper that still reads the tail of the body ends with the connection.
-        if armed.get() {
+        // The turn is complete: a server that keeps the connection open is let go.
+        if finished_at.get().is_some() {
             connection.cancel_detached();
         }
-        match fed {
-            Ok(_) => {}
+        let done = match fed {
+            Ok(done) => done,
             Err(PumpError::Failed(error)) => return Err(Failure::Fatal(error)),
             Err(PumpError::Event(StreamError::Protocol(source))) => {
                 return Err(protocol(source, &request_id))
@@ -316,22 +284,16 @@ impl OpenAiProvider {
                 let error =
                     ProviderError::from_stream_event(&kind, &message, request_id.as_deref(), scrub);
                 return Err(if before_start {
-                    Failure::BeforeStart(error)
+                    Failure::BeforeDelivery(error)
                 } else {
                     Failure::Fatal(error)
                 });
             }
-        }
-        if !assembler.is_complete() {
+        };
+        if !done && !assembler.has_finish() {
             return Err(protocol(ProtocolError::Truncated, &request_id));
         }
-        let mut turn = assembler
-            .finish(request_id.clone(), on_event)
-            .map_err(|source| protocol(source, &request_id))?;
-        turn.model = turn
-            .model
-            .map(|model| scrub.bounded(&model, MAX_TOKEN_CHARS));
-        Ok(turn)
+        Ok(assembler.finish(request_id, on_event))
     }
 
     fn stream_with_key(
@@ -341,15 +303,17 @@ impl OpenAiProvider {
         on_event: &mut dyn FnMut(StreamEvent<'_>),
         cancel: &CancelToken,
     ) -> Result<TurnResponse, ProviderError> {
-        let scrub = Scrub::new(key.cloned().unwrap_or_else(|| ApiKey::new("")));
+        let scrub = scrub_for(key);
         let body: Arc<[u8]> = serde_json::to_vec(&Body {
             config: &self.config,
             request,
         })
         .map_err(|error| ProviderError::Serialize(error.to_string()))?
         .into();
-        // The token the transport gets: it follows `cancel`, and this provider can also close the
-        // connection with it (see `GraceReader`).
+        let taken = history_ids(request.messages);
+        // One token for the connection of this turn: the transport watches it, the caller's
+        // cancel is linked to it, and it is cancelled by the provider to close a connection the
+        // server keeps open.
         let connection = CancelToken::new();
         let _link = cancel.on_cancel({
             let connection = connection.clone();
@@ -357,7 +321,7 @@ impl OpenAiProvider {
         });
         let build = || HttpRequest {
             method: Method::Post,
-            url: self.chat_url.clone(),
+            url: self.endpoints.chat.clone(),
             headers: self.headers(key, true),
             body: Arc::clone(&body),
             timeouts: self.config.timeouts,
@@ -366,22 +330,44 @@ impl OpenAiProvider {
         let mut state = RetryState::default();
         loop {
             let response = exchange.open(&mut state, &build, &scrub, on_event, &connection)?;
-            match self.consume(
-                response,
-                &scrub,
-                on_event,
-                cancel,
-                &connection,
-                request.messages,
-            ) {
+            match self.consume(response, &scrub, &taken, on_event, &connection) {
                 Ok(turn) => return Ok(turn),
-                Err(Failure::BeforeStart(error)) => {
+                Err(Failure::BeforeDelivery(error)) => {
                     exchange.backoff(error, &mut state, on_event, &connection)?;
                 }
                 Err(Failure::Fatal(error)) => return Err(error),
             }
         }
     }
+}
+
+/// Scrubs `key` from server text; with no key there is nothing to remove, but the text is still
+/// bounded.
+fn scrub_for(key: Option<&ApiKey>) -> Scrub {
+    Scrub::new(key.cloned().unwrap_or_else(|| ApiKey::new("")))
+}
+
+/// The request id the server gave, scrubbed.
+fn request_id(response: &HttpResponse, scrub: &Scrub) -> Option<String> {
+    response
+        .header("x-request-id")
+        .or_else(|| response.header("request-id"))
+        .map(|id| scrub.bounded(id, MAX_TOKEN_CHARS))
+}
+
+/// The ids of the tool calls of the history: a call of the next turn must not take one.
+fn history_ids(messages: &[Message]) -> HashSet<&str> {
+    messages
+        .iter()
+        .filter_map(|message| match message {
+            Message::Assistant { content } => Some(content),
+            _ => None,
+        })
+        .flatten()
+        .map(Block)
+        .filter(|block| block.kind() == "tool_use")
+        .filter_map(|block| block.str("id"))
+        .collect()
 }
 
 impl ChatProvider for OpenAiProvider {
@@ -412,11 +398,14 @@ impl ChatProvider for OpenAiProvider {
         if run.issuer != self.id {
             return Err(ProviderError::ForeignRunSession);
         }
+        if run.key.is_none() && self.config.flavor.requires_key() {
+            return Err(KeyError::NotSet.into());
+        }
         self.stream_with_key(run.key.as_ref(), request, on_event, cancel)
     }
 
     fn list_models(&self, cancel: &CancelToken) -> Result<Vec<ModelInfo>, ProviderError> {
         let key = self.key()?;
-        self.list_models_with(key.as_ref(), cancel)
+        self.list(key.as_ref(), cancel)
     }
 }

@@ -1028,7 +1028,7 @@ fn the_tool_schemas_stay_inside_the_strict_tool_limits() {
     assert!(optional <= MAX_STRICT_OPTIONAL, "{optional} optional parameters");
     assert!(unions <= MAX_STRICT_UNIONS, "{unions} union-typed parameters");
     // The tools that run statements are always strict.
-    for name in ["execute_query", "execute_redis_command", "explain_query"] {
+    for name in ["execute_query", "execute_batch", "execute_redis_command", "explain_query"] {
         let index = tools.iter().position(|tool| tool.name == name).unwrap();
         assert!(strict[index], "{name} is strict");
     }
@@ -1045,9 +1045,6 @@ fn the_tool_schemas_stay_inside_the_strict_tool_limits() {
         let index = tools.iter().position(|tool| tool.name == name).unwrap();
         assert!(!strict[index], "{name} is not strict");
     }
-    // `execute_batch` takes only fixed objects, so it is strict while the budget lasts.
-    let batch = tools.iter().position(|tool| tool.name == "execute_batch").unwrap();
-    assert!(strict[batch], "execute_batch is strict");
 }
 
 #[test]

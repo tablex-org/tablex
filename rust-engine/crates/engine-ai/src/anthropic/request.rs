@@ -139,7 +139,7 @@ pub(crate) const MAX_STRICT_UNIONS: usize = 16;
 
 /// Tools whose input runs something on the database: strict first, so their arguments always
 /// match the schema; the rest are strict while the budget lasts.
-const STRICT_FIRST: [&str; 3] = ["execute_query", "execute_redis_command", "explain_query"];
+const STRICT_FIRST: [&str; 4] = ["execute_query", "execute_batch", "execute_redis_command", "explain_query"];
 
 /// Optional and union-typed parameters of a schema, nested objects and array items included (how
 /// the API counts them).

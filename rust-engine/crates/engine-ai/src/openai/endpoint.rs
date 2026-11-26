@@ -1,222 +1,237 @@
-// Adapted from dbx (https://github.com/t8y2/dbx), Apache-2.0; changed. See `mod.rs` and
-// `licenses/README.md` at the root of the repository.
-
-//! Where the requests go: the chat, model-list and Ollama `/api/show` addresses derived from the
-//! one base URL the user gave.
+//! Where a Chat Completions server is asked: the chat, model-list and Ollama show URLs derived from
+//! the one base URL the user typed. Pure string functions.
+//!
+//! The base URL is split into its origin (`scheme://authority`, brackets and port of an IPv6
+//! host included) and its path; suffixes are only ever looked for in the path, so a host that is
+//! named `chat`, `responses` or `models` is never taken for one.
 
 use super::Flavor;
 
 const CHAT_SUFFIX: &str = "/chat/completions";
+const RESPONSES_SUFFIX: &str = "/responses";
+const MODELS_SUFFIX: &str = "/models";
 
-/// `scheme://authority` and the path (empty, or starting with `/`) of an address. Suffixes are
-/// looked for in the path only: `https://chat/completions` is the host `chat`.
-pub(super) fn split_origin(url: &str) -> (&str, &str) {
-    let after = url.find("://").map_or(0, |at| at + 3);
-    let end = url[after..].find('/').map_or(url.len(), |at| after + at);
-    url.split_at(end)
+/// The URLs one provider talks to, derived once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Endpoints {
+    pub chat: String,
+    pub models: String,
+    pub show: String,
 }
 
-/// `scheme://authority` of an address.
-pub(super) fn origin(url: &str) -> &str {
-    split_origin(url).0
+impl Endpoints {
+    pub fn new(base: &str, flavor: Flavor) -> Self {
+        let models = models_url(base);
+        Self {
+            chat: chat_url(base, flavor),
+            show: show_url(&models),
+            models,
+        }
+    }
+
+    /// Every derived URL stays on the origin of the base, so the key cannot go to another host.
+    pub fn same_origin_as(&self, base: &str) -> bool {
+        let origin = split(base).0;
+        [&self.chat, &self.models, &self.show]
+            .into_iter()
+            .all(|url| split(url).0 == origin)
+    }
 }
 
-/// Adds `/v1` to a bare origin (`https://api.example.com`), the usual omission; an address that
-/// has a path is left alone (the user knows what they are doing). Ported from dbx
-/// `ensure_openai_version_prefix`.
-fn with_version_prefix(origin: &str, path: &str) -> String {
+/// `(origin, path)` of a URL without its trailing slash. The path is empty or starts with `/`.
+fn split(url: &str) -> (&str, &str) {
+    let url = url.trim().trim_end_matches('/');
+    let authority_start = url.find("://").map_or(0, |at| at + 3);
+    match url[authority_start..].find('/') {
+        Some(at) => url.split_at(authority_start + at),
+        None => (url, ""),
+    }
+}
+
+/// An empty path becomes `/v1`; any other path is kept.
+fn versioned(path: &str) -> &str {
     let path = path.trim_end_matches('/');
     if path.is_empty() {
-        format!("{origin}/v1")
+        "/v1"
     } else {
-        format!("{origin}{path}")
+        path
     }
 }
 
-/// The chat completions address. A pasted `…/chat/completions` is accepted; for OpenAI itself a
-/// pasted `…/responses` is too (its base is used). Ported from dbx `resolve_endpoint`.
-pub(super) fn chat_url(flavor: Flavor, base: &str) -> String {
-    let (origin, path) = split_origin(base.trim().trim_end_matches('/'));
+/// The path without a pasted `/chat/completions` or `/responses` ending.
+fn without_endpoint(path: &str) -> &str {
+    path.strip_suffix(CHAT_SUFFIX)
+        .or_else(|| path.strip_suffix(RESPONSES_SUFFIX))
+        .unwrap_or(path)
+}
+
+pub(super) fn chat_url(base: &str, flavor: Flavor) -> String {
+    let (origin, path) = split(base);
     if flavor == Flavor::OpenAi {
-        let path = path
-            .strip_suffix(CHAT_SUFFIX)
-            .or_else(|| path.strip_suffix("/responses"))
-            .unwrap_or(path);
-        return format!("{}{CHAT_SUFFIX}", with_version_prefix(origin, path));
+        let path = versioned(without_endpoint(path));
+        format!("{origin}{path}{CHAT_SUFFIX}")
+    } else if path.ends_with(CHAT_SUFFIX) {
+        format!("{origin}{path}")
+    } else {
+        format!("{origin}{}{CHAT_SUFFIX}", versioned(path))
     }
-    if path.ends_with(CHAT_SUFFIX) {
-        return format!("{origin}{path}");
-    }
-    format!("{}{CHAT_SUFFIX}", with_version_prefix(origin, path))
 }
 
-/// The model list address. Ported from dbx `resolve_model_list_endpoint`.
 pub(super) fn models_url(base: &str) -> String {
-    let (origin, path) = split_origin(base.trim().trim_end_matches('/'));
-    if path.ends_with("/models") {
-        return format!("{origin}{path}");
+    let (origin, path) = split(base);
+    if path.ends_with(MODELS_SUFFIX) {
+        format!("{origin}{path}")
+    } else {
+        format!(
+            "{origin}{}{MODELS_SUFFIX}",
+            versioned(without_endpoint(path))
+        )
     }
-    let path = path
-        .strip_suffix(CHAT_SUFFIX)
-        .or_else(|| path.strip_suffix("/responses"))
-        .unwrap_or(path);
-    format!("{}/models", with_version_prefix(origin, path))
 }
 
-/// Ollama's own `/api/show`, next to its OpenAI-compatible `/v1`. Ported from dbx
-/// `resolve_ollama_show_endpoint`; the base URL has no query or fragment (see `validate`).
+/// Ollama's native `POST /api/show`, next to its OpenAI-compatible `/v1`.
 pub(super) fn show_url(models_url: &str) -> String {
-    let (origin, path) = split_origin(models_url);
-    let path = path.trim_end_matches('/');
-    let base = path
+    let (origin, path) = split(models_url);
+    let path = path
         .strip_suffix("/v1/models")
-        .or_else(|| path.strip_suffix("/models"))
+        .or_else(|| path.strip_suffix(MODELS_SUFFIX))
         .unwrap_or(path)
         .trim_end_matches('/');
-    format!("{origin}{base}/api/show")
+    format!("{origin}{path}/api/show")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use Flavor::{Compatible, Ollama, OpenAi};
 
-    // dbx `auto_adds_v1_to_openai_compatible_endpoints`, `official_openai_endpoint_tracks_api_style`
-    // (chat part), `resolves_model_list_endpoints_from_base_and_completion_urls` and
-    // `resolves_ollama_native_show_endpoint_from_openai_compatibility_url`.
+    const CHAT: &str = "https://api.openai.com/v1/chat/completions";
+
     #[test]
-    fn a_bare_origin_gets_v1_and_a_path_is_left_alone() {
-        use Flavor::*;
-        let cases = [
-            (
-                Compatible,
-                "https://api.example.com",
-                "https://api.example.com/v1/chat/completions",
-            ),
-            (
-                Compatible,
-                "https://api.example.com/v1",
-                "https://api.example.com/v1/chat/completions",
-            ),
-            (
-                Compatible,
-                "https://api.example.com/v1/",
-                "https://api.example.com/v1/chat/completions",
-            ),
-            (
-                Compatible,
-                "https://api.example.com/v2",
-                "https://api.example.com/v2/chat/completions",
-            ),
-            (
-                Compatible,
-                "https://api.openai.com/v1/chat/completions",
-                "https://api.openai.com/v1/chat/completions",
-            ),
-            (
-                Compatible,
-                "https://my-gateway.com/api",
-                "https://my-gateway.com/api/chat/completions",
-            ),
-            (
-                Compatible,
-                "http://localhost:8080",
-                "http://localhost:8080/v1/chat/completions",
-            ),
-            (
-                Ollama,
-                "http://localhost:11434/v1",
-                "http://localhost:11434/v1/chat/completions",
-            ),
-            (
-                OpenAi,
-                "https://api.openai.com/v1",
-                "https://api.openai.com/v1/chat/completions",
-            ),
-            (
-                OpenAi,
-                "https://api.openai.com",
-                "https://api.openai.com/v1/chat/completions",
-            ),
-            (
-                OpenAi,
-                "https://api.openai.com/v1/chat/completions",
-                "https://api.openai.com/v1/chat/completions",
-            ),
-            (
-                OpenAi,
-                "https://api.openai.com/v1/responses",
-                "https://api.openai.com/v1/chat/completions",
-            ),
-        ];
-        for (flavor, base, expected) in cases {
-            assert_eq!(chat_url(flavor, base), expected, "{flavor:?} {base}");
+    fn openai_chat_url_accepts_the_origin_the_v1_base_and_pasted_endpoints() {
+        for base in [
+            "https://api.openai.com",
+            "https://api.openai.com/",
+            "https://api.openai.com/v1",
+            "https://api.openai.com/v1/",
+            "https://api.openai.com/v1/chat/completions",
+            "https://api.openai.com/v1/responses",
+            "  https://api.openai.com/v1/responses/  ",
+        ] {
+            assert_eq!(chat_url(base, OpenAi), CHAT, "{base}");
         }
     }
 
     #[test]
-    fn the_model_list_address_follows_the_base_or_a_pasted_completion_url() {
-        let cases = [
-            (
-                "https://api.openai.com/v1/chat/completions",
-                "https://api.openai.com/v1/models",
-            ),
-            (
-                "https://api.example.com",
-                "https://api.example.com/v1/models",
-            ),
-            (
-                "https://api.example.com/v1",
-                "https://api.example.com/v1/models",
-            ),
-            (
-                "https://my-gateway.com/api",
-                "https://my-gateway.com/api/models",
-            ),
-            (
-                "https://my-gateway.com/api/models",
-                "https://my-gateway.com/api/models",
-            ),
-        ];
-        for (base, expected) in cases {
-            assert_eq!(models_url(base), expected, "{base}");
+    fn openai_chat_url_keeps_a_gateway_path() {
+        assert_eq!(
+            chat_url("https://gw.example/openai/v1/responses", OpenAi),
+            "https://gw.example/openai/v1/chat/completions"
+        );
+        assert_eq!(
+            chat_url("https://gw.example/chat/completions", OpenAi),
+            "https://gw.example/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn other_flavors_use_a_pasted_chat_url_as_it_is() {
+        for flavor in [Compatible, Ollama] {
+            assert_eq!(
+                chat_url("http://localhost:8080/v2/chat/completions", flavor),
+                "http://localhost:8080/v2/chat/completions"
+            );
         }
     }
 
     #[test]
-    fn the_ollama_show_address_sits_beside_the_compatible_api() {
-        let show = |base: &str| show_url(&models_url(base));
-        assert_eq!(
-            show("http://localhost:11434/v1/chat/completions"),
-            "http://localhost:11434/api/show"
-        );
-        assert_eq!(
-            show("http://localhost:11434/v1"),
-            "http://localhost:11434/api/show"
-        );
-        assert_eq!(
-            show("https://example.com/ollama/v1"),
-            "https://example.com/ollama/api/show"
-        );
+    fn other_flavors_add_v1_to_a_bare_origin_and_keep_any_other_path() {
+        for flavor in [Compatible, Ollama] {
+            let cases = [
+                ("http://localhost:8080", "http://localhost:8080/v1/chat/completions"),
+                ("http://localhost:8080/", "http://localhost:8080/v1/chat/completions"),
+                ("http://localhost:8080/v1", "http://localhost:8080/v1/chat/completions"),
+                ("http://localhost:8080/v1/", "http://localhost:8080/v1/chat/completions"),
+                ("http://localhost:8080/v2", "http://localhost:8080/v2/chat/completions"),
+                ("http://localhost:8080/api", "http://localhost:8080/api/chat/completions"),
+            ];
+            for (base, want) in cases {
+                assert_eq!(chat_url(base, flavor), want, "{base}");
+            }
+        }
     }
 
     #[test]
-    fn a_suffix_is_looked_for_in_the_path_not_in_the_scheme_or_host() {
-        // These pass `validate()`: the host is `chat`, `responses`, `models`.
+    fn models_url_is_used_as_it_is_or_derived_for_every_flavor() {
+        let cases = [
+            ("https://api.openai.com", "https://api.openai.com/v1/models"),
+            ("https://api.openai.com/v1", "https://api.openai.com/v1/models"),
+            ("https://api.openai.com/v1/models", "https://api.openai.com/v1/models"),
+            (CHAT, "https://api.openai.com/v1/models"),
+            ("https://api.openai.com/v1/responses", "https://api.openai.com/v1/models"),
+            ("http://127.0.0.1:1234/v1", "http://127.0.0.1:1234/v1/models"),
+            ("https://host.example/api", "https://host.example/api/models"),
+            ("https://host.example/api/models/", "https://host.example/api/models"),
+        ];
+        for (base, want) in cases {
+            assert_eq!(models_url(base), want, "{base}");
+        }
+    }
+
+    #[test]
+    fn show_url_sits_next_to_the_v1_path() {
+        let cases = [
+            ("http://host:11434/v1", "http://host:11434/api/show"),
+            ("http://host:11434", "http://host:11434/api/show"),
+            ("http://host:11434/v1/chat/completions", "http://host:11434/api/show"),
+            ("https://box.example/ollama/v1", "https://box.example/ollama/api/show"),
+            ("https://box.example/ollama/models", "https://box.example/ollama/api/show"),
+        ];
+        for (base, want) in cases {
+            assert_eq!(show_url(&models_url(base)), want, "{base}");
+        }
+    }
+
+    #[test]
+    fn a_host_named_like_a_suffix_is_not_a_suffix() {
+        let compatible = "https://chat/completions";
         assert_eq!(
-            chat_url(Flavor::Compatible, "https://chat/completions"),
+            chat_url(compatible, Compatible),
             "https://chat/completions/chat/completions"
         );
+        assert_eq!(models_url(compatible), "https://chat/completions/models");
+
         assert_eq!(
-            chat_url(Flavor::OpenAi, "https://responses"),
+            chat_url("https://responses", OpenAi),
             "https://responses/v1/chat/completions"
         );
-        assert_eq!(models_url("https://models"), "https://models/v1/models");
-        assert_eq!(
-            show_url(&models_url("https://models")),
-            "https://models/api/show"
-        );
-        assert_eq!(origin("https://chat/completions"), "https://chat");
-        assert_eq!(origin("http://[::1]:8080/v1"), "http://[::1]:8080");
-        assert_eq!(origin("https://host"), "https://host");
+        assert_eq!(models_url("https://responses"), "https://responses/v1/models");
+
+        let ollama = Endpoints::new("https://models", Ollama);
+        assert_eq!(ollama.chat, "https://models/v1/chat/completions");
+        assert_eq!(ollama.models, "https://models/v1/models");
+        assert_eq!(ollama.show, "https://models/api/show");
+    }
+
+    #[test]
+    fn an_ipv6_origin_keeps_its_brackets_and_port() {
+        let endpoints = Endpoints::new("http://[::1]:11434/v1", Ollama);
+        assert_eq!(endpoints.chat, "http://[::1]:11434/v1/chat/completions");
+        assert_eq!(endpoints.models, "http://[::1]:11434/v1/models");
+        assert_eq!(endpoints.show, "http://[::1]:11434/api/show");
+        assert!(endpoints.same_origin_as("http://[::1]:11434/v1"));
+    }
+
+    #[test]
+    fn derived_urls_stay_on_the_origin_of_the_base() {
+        for (base, flavor) in [
+            ("https://api.openai.com", OpenAi),
+            ("https://a.example/x/y/", Compatible),
+            ("http://localhost:11434/v1", Ollama),
+            ("https://models", Ollama),
+        ] {
+            assert!(Endpoints::new(base, flavor).same_origin_as(base), "{base}");
+        }
+        assert!(!Endpoints::new("https://a.example", Compatible).same_origin_as("https://b.example"));
     }
 }

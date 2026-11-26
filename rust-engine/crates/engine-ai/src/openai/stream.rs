@@ -1,694 +1,96 @@
-// Adapted from dbx (https://github.com/t8y2/dbx), Apache-2.0; changed. See `mod.rs` and
-// `licenses/README.md` at the root of the repository.
+//! Turns the chunks of a Chat Completions stream into one assistant turn.
+//!
+//! Each SSE `data:` is one JSON chunk (`choices[0].delta` with `content` or `tool_calls`, a
+//! `finish_reason`, and, with `stream_options.include_usage`, a last chunk with `usage` and no
+//! choices) or `[DONE]`. Servers that speak the protocol loosely are read leniently: a field of the
+//! wrong type reads as absent, a chunk of the wrong shape is skipped, and the text, the reasoning
+//! and the tool arguments may come in the shapes proxies use (see the helpers below).
+//!
+//! A turn is bounded by the shared [`TurnLimits`]: bytes (in the pump), tool calls, and
+//! consecutive chunks that carry nothing. Server text that ends up in an event or a result (ids,
+//! names, model, finish reason, the explanation of an unusable call) is scrubbed of the API key
+//! and cut like a model name.
 
-//! Turns a Chat Completions event stream into one assistant turn.
-//!
-//! Ported from dbx `stream_openai_with_tools` and its helpers (`openai_stream_text`,
-//! `openai_stream_reasoning`, `openai_stream_has_finish_reason`, `text_from_content_value`):
-//! the same fields in the same order of preference, a tool call starts only on a non-empty `id`
-//! (GLM and others send `id: ""` on the later deltas), `[DONE]` ends the stream, and so does a
-//! `finish_reason` followed by silence (see [`GraceReader`]).
-//!
-//! Like the Anthropic assembler, an event is read into one flat struct of borrowed fields: a
-//! delta allocates only when a string holds an escape, and the `choices` and `tool_calls` arrays
-//! are read without a `Vec` for the usual one entry. A field of an unexpected scalar type reads
-//! as absent (dbx reads with `as_str()` and ignores the rest), numbers are read leniently
-//! (`index` and the token counts may be integer-valued floats, anything else is ignored for that
-//! field only) and `function.arguments` may be a JSON object instead of text, so one odd field
-//! does not fail the event. An event whose structure is wrong (`delta` that is not an object,
-//! say) is still skipped as a whole.
-//!
-//! Tool call ids and names are the server's, used only to match the deltas of one response. What
-//! is stored and reported is an id of `[A-Za-z0-9_-]{1,64}` that occurs nowhere else in the
-//! conversation (the server's when it qualifies, otherwise a generated one), and a name of the
-//! same form (an unusable name is stored as [`PLACEHOLDER_NAME`] and reported as an invalid
-//! call, so the assistant answers it as not run). Both Anthropic and OpenAI refuse other forms
-//! when the history is sent back.
-
-use crate::conversation::{Block, Message};
 use crate::provider::{
     InvalidToolInput, ProtocolError, StopReason, StreamEvent, TurnResponse, Usage,
 };
 use crate::wire::errors::{Scrub, MAX_TOKEN_CHARS};
 use crate::wire::{StreamError, TurnLimits};
-use engine_agent::CancelToken;
-use serde::de::value::MapAccessDeserializer;
-use serde::de::{Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
-use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::borrow::Cow;
-use std::cell::Cell;
-use std::collections::hash_map::RandomState;
-use std::fmt;
+use std::collections::HashSet;
 use std::hash::{BuildHasher, Hasher};
-use std::io::{self, Read};
-use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
 
-/// A JSON string, borrowed from the event text when it has no escape; any other JSON value is
-/// absent.
-#[derive(Default)]
-pub(super) struct OptStr<'a>(pub(super) Option<Cow<'a, str>>);
-
-impl<'a> OptStr<'a> {
-    /// The text, when there is some.
-    fn text(&self) -> Option<&str> {
-        self.0.as_deref().filter(|text| !text.is_empty())
-    }
-}
-
-struct OptStrVisitor<'a>(PhantomData<&'a ()>);
-
-impl<'de: 'a, 'a> Visitor<'de> for OptStrVisitor<'a> {
-    type Value = OptStr<'a>;
-
-    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("any JSON value")
-    }
-
-    fn visit_borrowed_str<E>(self, v: &'de str) -> Result<Self::Value, E> {
-        Ok(OptStr(Some(Cow::Borrowed(v))))
-    }
-
-    fn visit_str<E>(self, v: &str) -> Result<Self::Value, E> {
-        Ok(OptStr(Some(Cow::Owned(v.to_owned()))))
-    }
-
-    fn visit_string<E>(self, v: String) -> Result<Self::Value, E> {
-        Ok(OptStr(Some(Cow::Owned(v))))
-    }
-
-    fn visit_unit<E>(self) -> Result<Self::Value, E> {
-        Ok(OptStr(None))
-    }
-
-    fn visit_none<E>(self) -> Result<Self::Value, E> {
-        Ok(OptStr(None))
-    }
-
-    fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
-        Ok(OptStr(None))
-    }
-
-    fn visit_i64<E>(self, _: i64) -> Result<Self::Value, E> {
-        Ok(OptStr(None))
-    }
-
-    fn visit_u64<E>(self, _: u64) -> Result<Self::Value, E> {
-        Ok(OptStr(None))
-    }
-
-    fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E> {
-        Ok(OptStr(None))
-    }
-
-    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
-        while seq.next_element::<IgnoredAny>()?.is_some() {}
-        Ok(OptStr(None))
-    }
-
-    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-        while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
-        Ok(OptStr(None))
-    }
-}
-
-impl<'de: 'a, 'a> Deserialize<'de> for OptStr<'a> {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_any(OptStrVisitor(PhantomData))
-    }
-}
-
-/// Message content: a string, or a list of parts whose `text` / `content` / `input_text` /
-/// `output_text` are joined (dbx `text_from_content_value`). Empty is absent.
-#[derive(Default)]
-struct Content<'a>(Option<Cow<'a, str>>);
-
-struct ContentVisitor<'a>(PhantomData<&'a ()>);
-
-impl<'de: 'a, 'a> Visitor<'de> for ContentVisitor<'a> {
-    type Value = Content<'a>;
-
-    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("any JSON value")
-    }
-
-    fn visit_borrowed_str<E>(self, v: &'de str) -> Result<Self::Value, E> {
-        Ok(Content((!v.is_empty()).then_some(Cow::Borrowed(v))))
-    }
-
-    fn visit_str<E>(self, v: &str) -> Result<Self::Value, E> {
-        Ok(Content((!v.is_empty()).then(|| Cow::Owned(v.to_owned()))))
-    }
-
-    fn visit_string<E>(self, v: String) -> Result<Self::Value, E> {
-        Ok(Content((!v.is_empty()).then_some(Cow::Owned(v))))
-    }
-
-    fn visit_unit<E>(self) -> Result<Self::Value, E> {
-        Ok(Content(None))
-    }
-
-    fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
-        Ok(Content(None))
-    }
-
-    fn visit_i64<E>(self, _: i64) -> Result<Self::Value, E> {
-        Ok(Content(None))
-    }
-
-    fn visit_u64<E>(self, _: u64) -> Result<Self::Value, E> {
-        Ok(Content(None))
-    }
-
-    fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E> {
-        Ok(Content(None))
-    }
-
-    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
-        let mut joined = String::new();
-        while let Some(part) = seq.next_element::<Value>()? {
-            let text = ["text", "content", "input_text", "output_text"]
-                .iter()
-                .find_map(|field| part.get(field).and_then(Value::as_str));
-            joined.push_str(text.unwrap_or(""));
-        }
-        Ok(Content((!joined.is_empty()).then_some(Cow::Owned(joined))))
-    }
-
-    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-        while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
-        Ok(Content(None))
-    }
-}
-
-impl<'de: 'a, 'a> Deserialize<'de> for Content<'a> {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_any(ContentVisitor(PhantomData))
-    }
-}
-
-/// A non-negative whole number; a float with an integer value is accepted, anything else is
-/// absent.
-#[derive(Default)]
-struct Count(Option<u64>);
-
-struct CountVisitor;
-
-impl<'de> Visitor<'de> for CountVisitor {
-    type Value = Count;
-
-    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("any JSON value")
-    }
-
-    fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E> {
-        Ok(Count(Some(v)))
-    }
-
-    fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E> {
-        Ok(Count(u64::try_from(v).ok()))
-    }
-
-    fn visit_f64<E>(self, v: f64) -> Result<Self::Value, E> {
-        // 2^53: the whole numbers a float holds exactly.
-        let whole = v.is_finite() && v >= 0.0 && v.fract() == 0.0 && v <= 9_007_199_254_740_992.0;
-        Ok(Count(whole.then_some(v as u64)))
-    }
-
-    fn visit_str<E>(self, _: &str) -> Result<Self::Value, E> {
-        Ok(Count(None))
-    }
-
-    fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
-        Ok(Count(None))
-    }
-
-    fn visit_unit<E>(self) -> Result<Self::Value, E> {
-        Ok(Count(None))
-    }
-
-    fn visit_none<E>(self) -> Result<Self::Value, E> {
-        Ok(Count(None))
-    }
-
-    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
-        while seq.next_element::<IgnoredAny>()?.is_some() {}
-        Ok(Count(None))
-    }
-
-    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-        while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
-        Ok(Count(None))
-    }
-}
-
-impl<'de> Deserialize<'de> for Count {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_any(CountVisitor)
-    }
-}
-
-/// `function.arguments`: the text of the JSON input, or (some servers) the input itself as an
-/// object, which is taken as its JSON text. Anything else is absent.
-#[derive(Default)]
-struct ArgsText<'a>(Option<Cow<'a, str>>);
-
-impl ArgsText<'_> {
-    fn text(&self) -> Option<&str> {
-        self.0.as_deref().filter(|text| !text.is_empty())
-    }
-}
-
-struct ArgsVisitor<'a>(PhantomData<&'a ()>);
-
-impl<'de: 'a, 'a> Visitor<'de> for ArgsVisitor<'a> {
-    type Value = ArgsText<'a>;
-
-    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("any JSON value")
-    }
-
-    fn visit_borrowed_str<E>(self, v: &'de str) -> Result<Self::Value, E> {
-        Ok(ArgsText(Some(Cow::Borrowed(v))))
-    }
-
-    fn visit_str<E>(self, v: &str) -> Result<Self::Value, E> {
-        Ok(ArgsText(Some(Cow::Owned(v.to_owned()))))
-    }
-
-    fn visit_string<E>(self, v: String) -> Result<Self::Value, E> {
-        Ok(ArgsText(Some(Cow::Owned(v))))
-    }
-
-    fn visit_unit<E>(self) -> Result<Self::Value, E> {
-        Ok(ArgsText(None))
-    }
-
-    fn visit_none<E>(self) -> Result<Self::Value, E> {
-        Ok(ArgsText(None))
-    }
-
-    fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
-        Ok(ArgsText(None))
-    }
-
-    fn visit_i64<E>(self, _: i64) -> Result<Self::Value, E> {
-        Ok(ArgsText(None))
-    }
-
-    fn visit_u64<E>(self, _: u64) -> Result<Self::Value, E> {
-        Ok(ArgsText(None))
-    }
-
-    fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E> {
-        Ok(ArgsText(None))
-    }
-
-    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
-        while seq.next_element::<IgnoredAny>()?.is_some() {}
-        Ok(ArgsText(None))
-    }
-
-    fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
-        let input = Value::deserialize(MapAccessDeserializer::new(map))?;
-        Ok(ArgsText(Some(Cow::Owned(input.to_string()))))
-    }
-}
-
-impl<'de: 'a, 'a> Deserialize<'de> for ArgsText<'a> {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_any(ArgsVisitor(PhantomData))
-    }
-}
-
-/// The first entry of a JSON array, the rest skipped (a request never asks for `n > 1`).
-struct First<T>(Option<T>);
-
-impl<T> Default for First<T> {
-    fn default() -> Self {
-        Self(None)
-    }
-}
-
-struct FirstVisitor<T>(PhantomData<T>);
-
-impl<'de, T: Deserialize<'de>> Visitor<'de> for FirstVisitor<T> {
-    type Value = First<T>;
-
-    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("an array")
-    }
-
-    fn visit_unit<E>(self) -> Result<Self::Value, E> {
-        Ok(First(None))
-    }
-
-    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
-        let first = seq.next_element::<T>()?;
-        while seq.next_element::<IgnoredAny>()?.is_some() {}
-        Ok(First(first))
-    }
-}
-
-impl<'de, T: Deserialize<'de>> Deserialize<'de> for First<T> {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_any(FirstVisitor(PhantomData))
-    }
-}
-
-/// The calls of one delta: the first inline, the others (parallel calls in one event are rare)
-/// in a `Vec` that stays unallocated when empty.
-#[derive(Default)]
-struct Calls<'a> {
-    first: Option<WireToolCall<'a>>,
-    rest: Vec<WireToolCall<'a>>,
-}
-
-struct CallsVisitor<'a>(PhantomData<&'a ()>);
-
-impl<'de: 'a, 'a> Visitor<'de> for CallsVisitor<'a> {
-    type Value = Calls<'a>;
-
-    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("an array")
-    }
-
-    fn visit_unit<E>(self) -> Result<Self::Value, E> {
-        Ok(Calls::default())
-    }
-
-    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
-        let mut calls = Calls::default();
-        while let Some(call) = seq.next_element::<WireToolCall<'a>>()? {
-            if calls.first.is_none() {
-                calls.first = Some(call);
-            } else {
-                calls.rest.push(call);
-            }
-        }
-        Ok(calls)
-    }
-}
-
-impl<'de: 'a, 'a> Deserialize<'de> for Calls<'a> {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_any(CallsVisitor(PhantomData))
-    }
-}
-
-impl<'a> Calls<'a> {
-    fn iter(&self) -> impl Iterator<Item = &WireToolCall<'a>> {
-        self.first.iter().chain(self.rest.iter())
-    }
-}
-
-/// `error`: `{"message", "type", "code"}` (OpenAI and most servers) or the bare text (Ollama).
-#[derive(Default)]
-struct WireError<'a> {
-    present: bool,
-    kind: OptStr<'a>,
-    code: OptStr<'a>,
-    message: OptStr<'a>,
-}
-
-struct WireErrorVisitor<'a>(PhantomData<&'a ()>);
-
-impl<'de: 'a, 'a> Visitor<'de> for WireErrorVisitor<'a> {
-    type Value = WireError<'a>;
-
-    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("an error object or text")
-    }
-
-    fn visit_borrowed_str<E>(self, v: &'de str) -> Result<Self::Value, E> {
-        Ok(WireError {
-            present: true,
-            message: OptStr(Some(Cow::Borrowed(v))),
-            ..WireError::default()
-        })
-    }
-
-    fn visit_str<E>(self, v: &str) -> Result<Self::Value, E> {
-        Ok(WireError {
-            present: true,
-            message: OptStr(Some(Cow::Owned(v.to_owned()))),
-            ..WireError::default()
-        })
-    }
-
-    fn visit_unit<E>(self) -> Result<Self::Value, E> {
-        Ok(WireError::default())
-    }
-
-    fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
-        Ok(WireError::default())
-    }
-
-    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-        let mut error = WireError {
-            present: true,
-            ..WireError::default()
-        };
-        while let Some(key) = map.next_key::<OptStr<'a>>()? {
-            match key.0.as_deref() {
-                Some("message") => error.message = map.next_value()?,
-                Some("type") => error.kind = map.next_value()?,
-                Some("code") => error.code = map.next_value()?,
-                _ => {
-                    map.next_value::<IgnoredAny>()?;
-                }
-            }
-        }
-        Ok(error)
-    }
-}
-
-impl<'de: 'a, 'a> Deserialize<'de> for WireError<'a> {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_any(WireErrorVisitor(PhantomData))
-    }
-}
-
-#[derive(Deserialize, Default)]
-struct WireChunk<'a> {
-    #[serde(default, borrow)]
-    choices: First<WireChoice<'a>>,
-    /// Some gateways put the text at the top level (dbx reads `event.content` and `event.delta`).
-    #[serde(default, borrow)]
-    content: Content<'a>,
-    #[serde(default, borrow)]
-    delta: OptStr<'a>,
-    #[serde(default, borrow)]
-    model: OptStr<'a>,
-    #[serde(default)]
-    usage: Option<WireUsage>,
-    #[serde(default, borrow)]
-    error: WireError<'a>,
-}
-
-#[derive(Deserialize)]
-struct WireChoice<'a> {
-    #[serde(default, borrow)]
-    delta: Option<WireDelta<'a>>,
-    #[serde(default, borrow)]
-    message: Option<WireMessage<'a>>,
-    #[serde(default, borrow)]
-    text: Content<'a>,
-    #[serde(default, borrow)]
-    finish_reason: OptStr<'a>,
-}
-
-#[derive(Deserialize)]
-struct WireDelta<'a> {
-    #[serde(default, borrow)]
-    content: Content<'a>,
-    #[serde(default, borrow)]
-    reasoning_content: OptStr<'a>,
-    #[serde(default, borrow)]
-    reasoning: OptStr<'a>,
-    #[serde(default, borrow)]
-    thinking: OptStr<'a>,
-    #[serde(default, borrow)]
-    tool_calls: Calls<'a>,
-}
-
-#[derive(Deserialize)]
-struct WireMessage<'a> {
-    #[serde(default, borrow)]
-    content: Content<'a>,
-}
-
-#[derive(Deserialize)]
-struct WireToolCall<'a> {
-    #[serde(default)]
-    index: Count,
-    #[serde(default, borrow)]
-    id: OptStr<'a>,
-    #[serde(default, borrow)]
-    function: Option<WireFunction<'a>>,
-}
-
-#[derive(Deserialize)]
-struct WireFunction<'a> {
-    #[serde(default, borrow)]
-    name: OptStr<'a>,
-    #[serde(default, borrow)]
-    arguments: ArgsText<'a>,
-}
-
-#[derive(Deserialize)]
-struct WireUsage {
-    #[serde(default)]
-    prompt_tokens: Count,
-    #[serde(default)]
-    completion_tokens: Count,
-    #[serde(default)]
-    prompt_tokens_details: Option<WireTokenDetails>,
-}
-
-#[derive(Deserialize)]
-struct WireTokenDetails {
-    #[serde(default)]
-    cached_tokens: Count,
-}
-
-/// A tool call being assembled, found by its `index` (and the server's `id`).
-struct ToolSlot {
-    index: u32,
-    /// The id the server gave, only to match the deltas of this call.
-    wire_id: Option<String>,
-    /// The id that is stored and reported (see the module docs); a call the server never named
-    /// gets it when the stream ends.
+/// The name stored, and reported, for a tool call whose name cannot be used.
+pub(super) const PLACEHOLDER_NAME: &str = "invalid_tool_name";
+
+/// The largest integer a float holds exactly.
+const MAX_FLOAT_COUNT: f64 = 9_007_199_254_740_992.0;
+
+/// A tool call under assembly.
+struct Call {
+    index: u64,
+    /// The id the server gave it, if it did.
+    server_id: Option<String>,
+    /// The id that is stored and reported.
     id: Option<String>,
     name: String,
     arguments: String,
-    /// `ToolCallStarted` was sent.
     started: bool,
 }
 
-/// What an unusable tool name is stored as.
-const PLACEHOLDER_NAME: &str = "invalid_tool_name";
-
-/// Ids given to calls the server did not name (or named in a form that cannot be stored).
-static GENERATED_IDS: AtomicU64 = AtomicU64::new(1);
-
-/// The random part of generated ids, drawn once per process from the standard library's hash
-/// keys: a conversation opened after a restart does not meet the ids of an earlier run.
-fn process_part() -> u32 {
-    static PART: OnceLock<u32> = OnceLock::new();
-    *PART.get_or_init(|| (RandomState::new().build_hasher().finish() & 0xffff_ffff) as u32)
-}
-
-/// The ids the next `count` generated calls would get (for a test that plays a restart).
-#[cfg(test)]
-pub(super) fn next_generated_ids_for_test(count: u64) -> Vec<String> {
-    let first = GENERATED_IDS.load(Ordering::Relaxed);
-    (first..first + count)
-        .map(|n| format!("call_{:08x}_{n}", process_part()))
-        .collect()
-}
-
-/// `[A-Za-z0-9_-]{1,64}`: what Anthropic requires of a `tool_use` id and a tool name, and OpenAI
-/// of a function name.
-fn has_wire_form(text: &str) -> bool {
-    (1..=64).contains(&text.len())
-        && text
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
-}
-
-/// Text of the server that may be stored and reported: of the wire form, and without the key.
-fn is_storable(scrub: &Scrub, text: &str) -> bool {
-    has_wire_form(text) && scrub.bounded(text, MAX_TOKEN_CHARS) == text
-}
-
-pub(super) struct ChatAssembler<'h> {
+pub(super) struct TurnAssembler<'a> {
     limits: TurnLimits,
-    scrub: Scrub,
-    /// The conversation so far: the ids of its tool calls are taken.
-    history: &'h [Message],
-    /// Something of the turn was passed on: an `error` now is not a failure of the request itself.
+    scrub: &'a Scrub,
+    /// Ids of the tool calls of the history: no new call may take one.
+    taken: &'a HashSet<&'a str>,
+    model: Option<String>,
+    usage: Option<Usage>,
+    reasoning: String,
+    text: String,
+    calls: Vec<Call>,
+    finish: Option<String>,
+    /// Something of the turn reached the caller: an error now is final.
     delivered: bool,
     idle: usize,
-    done: bool,
-    model: Option<String>,
-    usage: Usage,
-    finish: Option<String>,
-    text: String,
-    reasoning: String,
-    tools: Vec<ToolSlot>,
 }
 
-impl<'h> ChatAssembler<'h> {
-    pub fn new(limits: TurnLimits, scrub: Scrub, history: &'h [Message]) -> Self {
+impl<'a> TurnAssembler<'a> {
+    pub fn new(limits: TurnLimits, scrub: &'a Scrub, taken: &'a HashSet<&'a str>) -> Self {
         Self {
             limits,
             scrub,
-            history,
+            taken,
+            model: None,
+            usage: None,
+            reasoning: String::new(),
+            text: String::new(),
+            calls: Vec::new(),
+            finish: None,
             delivered: false,
             idle: 0,
-            done: false,
-            model: None,
-            usage: Usage::default(),
-            finish: None,
-            text: String::new(),
-            reasoning: String::new(),
-            tools: Vec::new(),
         }
     }
 
-    fn clean(&self, text: &str) -> String {
-        self.scrub.bounded(text, MAX_TOKEN_CHARS)
-    }
-
-    /// `id` is the id of a tool call of the history or of this response so far.
-    fn id_taken(&self, id: &str) -> bool {
-        self.tools.iter().any(|slot| slot.id.as_deref() == Some(id))
-            || self.history.iter().any(|message| match message {
-                Message::Assistant { content } => content.iter().any(|block| {
-                    let block = Block(block);
-                    block.kind() == "tool_use" && block.str("id") == Some(id)
-                }),
-                _ => false,
-            })
-    }
-
-    /// An id nobody has: `call_<process part>_<counter>`.
-    fn fresh_id(&self) -> String {
-        loop {
-            let n = GENERATED_IDS.fetch_add(1, Ordering::Relaxed);
-            let id = format!("call_{:08x}_{n}", process_part());
-            if !self.id_taken(&id) {
-                return id;
-            }
-        }
-    }
-
-    /// The id to store for a call the server named `wire`: that one when it may be stored and
-    /// is new, otherwise a generated one.
-    fn stored_id_for(&self, wire: &str) -> String {
-        if is_storable(&self.scrub, wire) && !self.id_taken(wire) {
-            wire.to_owned()
-        } else {
-            self.fresh_id()
-        }
-    }
-
-    /// A `finish_reason` has been seen: the stream may end without `[DONE]`.
-    pub fn finish_reason_seen(&self) -> bool {
+    /// A finish reason was seen: the turn is complete even if the body does not say `[DONE]`.
+    pub fn has_finish(&self) -> bool {
         self.finish.is_some()
     }
 
-    /// The stream ended the way a stream may: `[DONE]`, or a `finish_reason`.
-    pub fn is_complete(&self) -> bool {
-        self.done || self.finish.is_some()
+    fn idle_event(&mut self) -> Result<bool, StreamError> {
+        self.idle += 1;
+        if self.idle > self.limits.max_idle_events {
+            return Err(ProtocolError::TooManyIdleEvents {
+                limit: self.limits.max_idle_events,
+            }
+            .into());
+        }
+        Ok(false)
     }
 
-    /// Handles one SSE event; `Ok(true)` at `[DONE]`.
+    /// Handles the `data` of one event; `Ok(true)` at `[DONE]`.
     pub fn handle(
         &mut self,
         data: &str,
@@ -696,91 +98,51 @@ impl<'h> ChatAssembler<'h> {
     ) -> Result<bool, StreamError> {
         let data = data.trim();
         if data == "[DONE]" {
-            self.done = true;
             return Ok(true);
         }
-        // dbx skips an event that is no JSON; here too, within the bound on idle events.
-        let Ok(chunk) = serde_json::from_str::<WireChunk<'_>>(data) else {
-            self.note_idle()?;
-            return Ok(false);
+        let Ok(Value::Object(event)) = serde_json::from_str::<Value>(data) else {
+            return self.idle_event();
         };
-        if chunk.error.present {
-            let error = &chunk.error;
+        if let Some((kind, message)) = event.get("error").and_then(error_payload) {
             return Err(StreamError::Api {
-                kind: error_kind(
-                    error.kind.0.as_deref().unwrap_or(""),
-                    error.code.0.as_deref().unwrap_or(""),
-                )
-                .to_owned(),
-                message: error.message.0.as_deref().unwrap_or("").to_owned(),
+                kind,
+                message,
                 before_start: !self.delivered,
             });
         }
-        let mut progress = false;
-        if let Some(usage) = &chunk.usage {
-            // As dbx: only a chunk that has both counts.
-            if let (Some(prompt), Some(completion)) =
-                (usage.prompt_tokens.0, usage.completion_tokens.0)
-            {
-                let cached = usage
-                    .prompt_tokens_details
-                    .as_ref()
-                    .and_then(|details| details.cached_tokens.0)
-                    .unwrap_or(0);
-                // `prompt_tokens` counts the cached ones; `Usage::input_tokens` does not.
-                self.usage = Usage {
-                    input_tokens: prompt.saturating_sub(cached),
-                    output_tokens: completion,
-                    cache_read_input_tokens: cached,
-                    cache_creation_input_tokens: 0,
-                };
-                progress = true;
-            }
-        }
+        let Some(chunk) = Chunk::of(&event) else {
+            return self.idle_event();
+        };
         if self.model.is_none() {
-            self.model = chunk.model.text().map(str::to_owned);
-        }
-        let choice = chunk.choices.0.as_ref();
-        let delta = choice.and_then(|choice| choice.delta.as_ref());
-        let reasoning = delta.and_then(|delta| {
-            delta
-                .reasoning_content
-                .text()
-                .or_else(|| delta.reasoning.text())
-                .or_else(|| delta.thinking.text())
-        });
-        if let Some(reasoning) = reasoning {
-            emit(StreamEvent::ThinkingDelta(reasoning));
-            self.reasoning.push_str(reasoning);
-            progress = true;
-        }
-        let text = choice
-            .and_then(|choice| {
-                delta
-                    .and_then(|delta| delta.content.0.as_deref())
-                    .or_else(|| {
-                        choice
-                            .message
-                            .as_ref()
-                            .and_then(|message| message.content.0.as_deref())
-                    })
-                    .or(choice.text.0.as_deref())
-            })
-            .or(chunk.content.0.as_deref())
-            .or_else(|| chunk.delta.text());
-        if let Some(text) = text {
-            emit(StreamEvent::TextDelta(text));
-            self.text.push_str(text);
-            progress = true;
-        }
-        if let Some(delta) = delta {
-            for call in delta.tool_calls.iter() {
-                progress |= self.tool_call(call, emit)?;
+            if let Some(model) = event
+                .get("model")
+                .and_then(Value::as_str)
+                .filter(|model| !model.is_empty())
+            {
+                self.model = Some(model.to_owned());
             }
         }
-        if let Some(reason) = choice.and_then(|choice| choice.finish_reason.text()) {
+        let mut progress = false;
+        if let Some(usage) = usage_of(&event) {
+            self.usage = Some(usage);
+            progress = true;
+        }
+        if let Some(text) = chunk.reasoning() {
+            emit(StreamEvent::ThinkingDelta(text));
+            self.reasoning.push_str(text);
+            progress = true;
+        }
+        if let Some(text) = chunk.text(&event) {
+            emit(StreamEvent::TextDelta(&text));
+            self.text.push_str(&text);
+            progress = true;
+        }
+        for entry in chunk.tool_calls {
+            progress |= self.tool_call_entry(entry, emit)?;
+        }
+        if let Some(reason) = chunk.finish_reason() {
             if self.finish.is_none() {
-                self.finish = Some(self.clean(reason));
+                self.finish = Some(self.scrub.bounded(reason, MAX_TOKEN_CHARS));
             }
             progress = true;
         }
@@ -789,370 +151,1068 @@ impl<'h> ChatAssembler<'h> {
             self.delivered = true;
             Ok(false)
         } else {
-            self.note_idle()?;
-            Ok(false)
+            self.idle_event()
         }
-    }
-
-    fn note_idle(&mut self) -> Result<(), ProtocolError> {
-        self.idle += 1;
-        if self.idle > self.limits.max_idle_events {
-            return Err(ProtocolError::TooManyIdleEvents {
-                limit: self.limits.max_idle_events,
-            });
-        }
-        Ok(())
     }
 
     /// One entry of `delta.tool_calls`; true when it carried something.
-    fn tool_call(
+    fn tool_call_entry(
         &mut self,
-        call: &WireToolCall<'_>,
+        entry: &Value,
         emit: &mut dyn FnMut(StreamEvent<'_>),
-    ) -> Result<bool, ProtocolError> {
-        let index = call
-            .index
-            .0
-            .and_then(|i| u32::try_from(i).ok())
-            .unwrap_or(0);
-        let id = call.id.text();
-        let function = call.function.as_ref();
-        let name = function.and_then(|function| function.name.text());
-        let arguments = function.and_then(|function| function.arguments.text());
+    ) -> Result<bool, StreamError> {
+        let Some(entry) = entry.as_object() else {
+            return Ok(false);
+        };
+        let index = entry.get("index").and_then(count).unwrap_or(0);
+        let id = non_empty(entry.get("id"));
+        let function = entry.get("function").and_then(Value::as_object);
+        let name = non_empty(function.and_then(|function| function.get("name")));
+        let arguments = function
+            .and_then(|function| function.get("arguments"))
+            .and_then(arguments_text);
         if id.is_none() && name.is_none() && arguments.is_none() {
             return Ok(false);
         }
-        // A call is found by its index and id; one without an id belongs to the latest call of
-        // its index (a call that has no id yet takes the first id that comes). A new id is a new
-        // call even on a used index (some servers number every call 0), and the same id on
-        // another index is another call.
-        let found = match id {
-            Some(id) => self
-                .tools
-                .iter()
-                .rposition(|slot| slot.index == index && slot.wire_id.as_deref() == Some(id))
-                .or_else(|| {
-                    self.tools
-                        .iter()
-                        .rposition(|slot| slot.index == index && slot.wire_id.is_none())
-                }),
-            None => self.tools.iter().rposition(|slot| slot.index == index),
-        };
-        let at = match found {
-            Some(at) => at,
+        let position = match self.find(index, id) {
+            Some(position) => position,
             None => {
-                if self.tools.len() >= self.limits.max_blocks {
+                if self.calls.len() >= self.limits.max_blocks {
                     return Err(ProtocolError::TooManyBlocks {
                         limit: self.limits.max_blocks,
-                    });
+                    }
+                    .into());
                 }
-                self.tools.push(ToolSlot {
+                self.calls.push(Call {
                     index,
-                    wire_id: None,
+                    server_id: None,
                     id: None,
                     name: String::new(),
                     arguments: String::new(),
                     started: false,
                 });
-                self.tools.len() - 1
+                self.calls.len() - 1
             }
         };
-        let stored = match id {
-            Some(wire) if self.tools[at].wire_id.is_none() => {
-                Some((wire, self.stored_id_for(wire)))
+        if let Some(id) = id {
+            if self.calls[position].server_id.is_none() {
+                let stored = self.stored_id(id);
+                let call = &mut self.calls[position];
+                call.server_id = Some(id.to_owned());
+                call.id = Some(stored);
             }
-            _ => None,
-        };
-        let scrub = &self.scrub;
-        let slot = &mut self.tools[at];
+        }
+        let call = &mut self.calls[position];
         if let Some(name) = name {
-            if slot.name != name {
-                name.clone_into(&mut slot.name);
-            }
-        }
-        if let Some((wire, stored)) = stored {
-            slot.wire_id = Some(wire.to_owned());
-            slot.id = Some(stored);
-        }
-        // Reported once there is an id and a name (a name that comes later is waited for).
-        if let (Some(id), false, false) = (&slot.id, slot.started, slot.name.is_empty()) {
-            slot.started = true;
-            emit(StreamEvent::ToolCallStarted {
-                id,
-                name: if is_storable(scrub, &slot.name) {
-                    &slot.name
-                } else {
-                    PLACEHOLDER_NAME
-                },
-            });
+            name.clone_into(&mut call.name);
         }
         if let Some(arguments) = arguments {
-            slot.arguments.push_str(arguments);
+            call.arguments.push_str(&arguments);
+        }
+        if let (false, Some(id), false) = (call.started, &call.id, call.name.is_empty()) {
+            call.started = true;
+            emit(StreamEvent::ToolCallStarted {
+                id,
+                name: reported_name(self.scrub, &call.name),
+            });
         }
         Ok(true)
     }
 
-    /// The turn, once the stream ended. Text without text (blank) is left out: the API rejects
-    /// such a block when it comes back. Calls are reported ready here, in order.
+    /// The call a delta belongs to. With an id: the latest call of that index with that server id,
+    /// else the latest of the index that has none yet (a new id on a used index is a new call:
+    /// some servers number every call 0). Without one: the latest call of the index.
+    fn find(&self, index: u64, id: Option<&str>) -> Option<usize> {
+        let latest = |matches: &dyn Fn(&Call) -> bool| {
+            self.calls
+                .iter()
+                .rposition(|call| call.index == index && matches(call))
+        };
+        match id {
+            Some(id) => latest(&|call| call.server_id.as_deref() == Some(id))
+                .or_else(|| latest(&|call| call.server_id.is_none())),
+            None => latest(&|_| true),
+        }
+    }
+
+    fn is_taken(&self, id: &str) -> bool {
+        self.taken.contains(id) || self.calls.iter().any(|call| call.id.as_deref() == Some(id))
+    }
+
+    /// The id to store for a call the server named `server_id`: that one, when it can be stored
+    /// and no other call has it, else a generated one.
+    fn stored_id(&self, server_id: &str) -> String {
+        if is_storable(self.scrub, server_id) && !self.is_taken(server_id) {
+            server_id.to_owned()
+        } else {
+            generated_id(|id| self.is_taken(id))
+        }
+    }
+
+    fn stop_reason(&self) -> StopReason {
+        match self.finish.as_deref() {
+            Some("length") => StopReason::MaxTokens,
+            Some("content_filter") => StopReason::Refusal { category: None },
+            // Whatever the reason says, a turn with calls is a tool turn.
+            _ if !self.calls.is_empty() => StopReason::ToolUse,
+            None | Some("stop") => StopReason::EndTurn,
+            Some("tool_calls" | "function_call") => StopReason::ToolUse,
+            Some(other) => StopReason::Other(other.to_owned()),
+        }
+    }
+
+    /// The turn: reasoning, text, then the tool calls, each reported complete.
     pub fn finish(
         mut self,
         request_id: Option<String>,
         emit: &mut dyn FnMut(StreamEvent<'_>),
-    ) -> Result<TurnResponse, ProtocolError> {
-        let has_calls = !self.tools.is_empty();
-        let stop_reason = match self.finish.as_deref() {
-            Some("length") => StopReason::MaxTokens,
-            Some("content_filter") => StopReason::Refusal { category: None },
-            // As dbx: calls that were collected are run whatever else the reason says.
-            _ if has_calls => StopReason::ToolUse,
-            None | Some("stop") => StopReason::EndTurn,
-            Some("tool_calls" | "function_call") => StopReason::ToolUse,
-            Some(other) => StopReason::Other(other.to_owned()),
-        };
-        let mut content = Vec::with_capacity(2 + self.tools.len());
+    ) -> TurnResponse {
+        let stop_reason = self.stop_reason();
+        let mut content = Vec::new();
         if !self.reasoning.trim().is_empty() {
             content.push(json!({"type": "reasoning", "text": self.reasoning}));
         }
         if !self.text.trim().is_empty() {
             content.push(json!({"type": "text", "text": self.text}));
         }
-        // A call the server never named gets its id now, one nobody else has.
-        for at in 0..self.tools.len() {
-            if self.tools[at].id.is_none() {
-                let id = self.fresh_id();
-                self.tools[at].id = Some(id);
-            }
-        }
         let mut invalid = Vec::new();
-        for slot in std::mem::take(&mut self.tools) {
-            let id = slot.id.unwrap_or_default();
-            let usable_name = is_storable(&self.scrub, &slot.name);
-            let name = if usable_name {
-                slot.name.as_str()
-            } else {
-                PLACEHOLDER_NAME
-            };
-            if !slot.started {
-                emit(StreamEvent::ToolCallStarted { id: &id, name });
+        for position in 0..self.calls.len() {
+            if self.calls[position].id.is_none() {
+                let id = generated_id(|id| self.is_taken(id));
+                self.calls[position].id = Some(id);
             }
-            let mut valid = true;
-            let input = if !usable_name {
-                // Not a tool this app offered, and a name that cannot go back to either API:
-                // stored under a placeholder, answered as not run.
-                valid = false;
-                let shown = if slot.name.is_empty() {
-                    "(none)".to_owned()
-                } else {
-                    format!("{:?}", self.clean(&slot.name))
-                };
+            let call = &self.calls[position];
+            let id = call.id.as_deref().unwrap_or_default();
+            let usable = is_storable(self.scrub, &call.name);
+            let name = if usable { call.name.as_str() } else { PLACEHOLDER_NAME };
+            if !call.started {
+                emit(StreamEvent::ToolCallStarted { id, name });
+            }
+            let (input, valid) = if !usable {
                 invalid.push(InvalidToolInput {
-                    tool_use_id: id.clone(),
-                    raw: format!(
-                        "the tool name {shown} cannot be used (a name has 1 to 64 letters, digits, \
-                         _ or -, and must be one of the tools offered)"
-                    ),
+                    tool_use_id: id.to_owned(),
+                    raw: unusable_name(self.scrub, &call.name),
                 });
-                Value::Object(serde_json::Map::new())
-            } else if slot.arguments.is_empty() {
-                Value::Object(serde_json::Map::new())
+                (json!({}), false)
             } else {
-                match serde_json::from_str::<Value>(&slot.arguments) {
-                    Ok(input @ Value::Object(_)) => input,
-                    _ => {
-                        valid = false;
+                match parse_arguments(&call.arguments) {
+                    Some(input) => (input, true),
+                    None => {
                         invalid.push(InvalidToolInput {
-                            tool_use_id: id.clone(),
-                            raw: slot.arguments,
+                            tool_use_id: id.to_owned(),
+                            raw: self.scrub.bounded(&call.arguments, usize::MAX),
                         });
-                        Value::Object(serde_json::Map::new())
+                        (json!({}), false)
                     }
                 }
             };
             emit(StreamEvent::ToolInputReady {
-                id: &id,
+                id,
                 name,
                 input: &input,
                 valid,
             });
             content.push(json!({"type": "tool_use", "id": id, "name": name, "input": input}));
         }
-        // The same check the stored turn goes through later.
-        debug_assert!(content.iter().all(|block| Block(block).kind() != ""));
-        Ok(TurnResponse {
+        TurnResponse {
             content,
             stop_reason,
-            usage: self.usage,
-            model: self.model,
+            usage: self.usage.unwrap_or_default(),
+            model: self
+                .model
+                .map(|model| self.scrub.bounded(&model, MAX_TOKEN_CHARS)),
             served_by_fallback: false,
             fallback_to: None,
             invalid_tool_inputs: invalid,
             request_id,
             thinking_dropped: 0,
+        }
+    }
+}
+
+/// The parts of a chunk the assembler reads, once its shape is known to be right.
+struct Chunk<'v> {
+    choice: Option<&'v Map<String, Value>>,
+    delta: Option<&'v Map<String, Value>>,
+    tool_calls: &'v [Value],
+}
+
+impl<'v> Chunk<'v> {
+    /// `None` when `choices`, the first choice, its `delta` or `delta.tool_calls` has the wrong
+    /// kind of value.
+    fn of(event: &'v Map<String, Value>) -> Option<Self> {
+        let choice = match event.get("choices") {
+            None | Some(Value::Null) => None,
+            // Only the first choice is used (`n` is never asked for).
+            Some(Value::Array(choices)) => match choices.first() {
+                None => None,
+                Some(Value::Object(choice)) => Some(choice),
+                Some(_) => return None,
+            },
+            Some(_) => return None,
+        };
+        let delta = match choice.and_then(|choice| choice.get("delta")) {
+            None | Some(Value::Null) => None,
+            Some(Value::Object(delta)) => Some(delta),
+            Some(_) => return None,
+        };
+        let tool_calls = match delta.and_then(|delta| delta.get("tool_calls")) {
+            None | Some(Value::Null) => &[][..],
+            Some(Value::Array(calls)) => calls,
+            Some(_) => return None,
+        };
+        Some(Self {
+            choice,
+            delta,
+            tool_calls,
         })
     }
-}
 
-/// What an `error` object stands for, in the words [`crate::ProviderError::from_stream_event`]
-/// maps: OpenAI's own `type` / `code` values, then what the other servers send.
-fn error_kind<'a>(kind: &'a str, code: &'a str) -> &'a str {
-    match (kind, code) {
-        ("invalid_request_error", _) | (_, "context_length_exceeded") => "invalid_request_error",
-        ("authentication_error", _) | (_, "invalid_api_key") => "authentication_error",
-        ("rate_limit_error" | "rate_limit_exceeded" | "insufficient_quota", _)
-        | (_, "rate_limit_exceeded" | "insufficient_quota") => "rate_limit_error",
-        ("server_error" | "api_error", _) => "api_error",
-        ("overloaded_error" | "engine_overloaded_error", _) => "overloaded_error",
-        (kind, _) => kind,
+    /// The first non-empty of `reasoning_content`, `reasoning` and `thinking`.
+    fn reasoning(&self) -> Option<&'v str> {
+        let delta = self.delta?;
+        ["reasoning_content", "reasoning", "thinking"]
+            .iter()
+            .find_map(|key| non_empty(delta.get(*key)))
+    }
+
+    /// The first non-empty text among the places servers put it.
+    fn text(&self, event: &'v Map<String, Value>) -> Option<Cow<'v, str>> {
+        let choice = self.choice;
+        [
+            self.delta.and_then(|delta| delta.get("content")),
+            choice
+                .and_then(|choice| choice.get("message"))
+                .and_then(|message| message.get("content")),
+            choice.and_then(|choice| choice.get("text")),
+            event.get("content"),
+            event.get("delta"),
+        ]
+        .into_iter()
+        .flatten()
+        .find_map(content_text)
+    }
+
+    fn finish_reason(&self) -> Option<&'v str> {
+        non_empty(self.choice?.get("finish_reason"))
     }
 }
 
-/// Ends a stream that went quiet after its `finish_reason`: some servers (LM Studio, gateways)
-/// keep the connection open and send no `[DONE]`. dbx waits a second for the next chunk and
-/// ends the stream then; a blocking read cannot be given a deadline, so once the assembler has
-/// seen a `finish_reason` (`armed`) the rest of the body is read on a helper thread and this
-/// reader reports the end of the body when no chunk comes within `grace`. The helper ends with
-/// the connection, which `abort` (the token given to the transport) closes.
-pub(super) struct GraceReader<'a> {
-    source: Source,
-    armed: &'a Cell<bool>,
-    grace: Duration,
-    abort: CancelToken,
+/// A non-empty string value; anything else reads as absent.
+fn non_empty(value: Option<&Value>) -> Option<&str> {
+    value.and_then(Value::as_str).filter(|text| !text.is_empty())
 }
 
-enum Source {
-    Direct(Box<dyn Read + Send>),
-    Relay(Relay),
-    Gone,
-}
-
-struct Relay {
-    chunks: Receiver<io::Result<Vec<u8>>>,
-    pending: Vec<u8>,
-    at: usize,
-    deadline: Instant,
-}
-
-impl<'a> GraceReader<'a> {
-    pub fn new(
-        body: Box<dyn Read + Send>,
-        armed: &'a Cell<bool>,
-        grace: Duration,
-        abort: CancelToken,
-    ) -> Self {
-        Self {
-            source: Source::Direct(body),
-            armed,
-            grace,
-            abort,
+/// Text from a string, or from a list of parts (the first string of `text`, `content`,
+/// `input_text` and `output_text` of each, joined). Empty is absent.
+fn content_text(value: &Value) -> Option<Cow<'_, str>> {
+    match value {
+        Value::String(text) if !text.is_empty() => Some(Cow::Borrowed(text)),
+        Value::Array(parts) => {
+            let joined: String = parts
+                .iter()
+                .filter_map(|part| {
+                    ["text", "content", "input_text", "output_text"]
+                        .iter()
+                        .find_map(|key| part.get(key).and_then(Value::as_str))
+                })
+                .collect();
+            (!joined.is_empty()).then_some(Cow::Owned(joined))
         }
+        _ => None,
     }
+}
 
-    fn relay(&mut self) {
-        let Source::Direct(mut body) = std::mem::replace(&mut self.source, Source::Gone) else {
-            return;
-        };
-        let (sender, chunks) = mpsc::channel();
-        let spawned = std::thread::Builder::new()
-            .name("ai-stream-tail".into())
-            .spawn(move || {
-                let mut buffer = vec![0u8; 16 * 1024];
-                loop {
-                    let sent = match body.read(&mut buffer) {
-                        Ok(0) => return,
-                        Ok(read) => sender.send(Ok(buffer[..read].to_vec())),
-                        Err(error) => {
-                            let _ = sender.send(Err(error));
-                            return;
-                        }
-                    };
-                    if sent.is_err() {
-                        return;
-                    }
+/// A count: a non-negative integer, or a float that is one (up to 2^53).
+fn count(value: &Value) -> Option<u64> {
+    let Value::Number(number) = value else {
+        return None;
+    };
+    if let Some(count) = number.as_u64() {
+        return Some(count);
+    }
+    let float = number.as_f64()?;
+    (float >= 0.0 && float.fract() == 0.0 && float <= MAX_FLOAT_COUNT).then_some(float as u64)
+}
+
+/// `function.arguments`: the text of a string, or a JSON object taken as its compact text.
+fn arguments_text(value: &Value) -> Option<Cow<'_, str>> {
+    match value {
+        Value::String(text) if !text.is_empty() => Some(Cow::Borrowed(text)),
+        Value::Object(_) => Some(Cow::Owned(value.to_string())),
+        _ => None,
+    }
+}
+
+/// `usage`, when both `prompt_tokens` and `completion_tokens` are counts. The prompt tokens the
+/// server served from its cache are counted apart from the others.
+fn usage_of(event: &Map<String, Value>) -> Option<Usage> {
+    let usage = event.get("usage")?.as_object()?;
+    let prompt = count(usage.get("prompt_tokens")?)?;
+    let completion = count(usage.get("completion_tokens")?)?;
+    let cached = usage
+        .get("prompt_tokens_details")
+        .and_then(|details| details.get("cached_tokens"))
+        .and_then(count)
+        .unwrap_or(0);
+    Some(Usage {
+        input_tokens: prompt.saturating_sub(cached),
+        output_tokens: completion,
+        cache_read_input_tokens: cached,
+        cache_creation_input_tokens: 0,
+    })
+}
+
+/// The error of a chunk, as the `(kind, message)` of an Anthropic-style error event: `error` is an
+/// object (`message`, `type`, `code`) or, from Ollama, a bare string. `null` and the rest are no
+/// error.
+fn error_payload(value: &Value) -> Option<(String, String)> {
+    match value {
+        Value::String(message) => Some((String::new(), message.clone())),
+        Value::Object(error) => {
+            let field = |key: &str| error.get(key).and_then(Value::as_str).unwrap_or("");
+            let kind = match (field("type"), field("code")) {
+                ("invalid_request_error", _) | (_, "context_length_exceeded") => {
+                    "invalid_request_error"
                 }
-            });
-        // No thread, no more of the body: the turn has its `finish_reason`, so it ends here.
-        if spawned.is_ok() {
-            self.source = Source::Relay(Relay {
-                chunks,
-                pending: Vec::new(),
-                at: 0,
-                deadline: Instant::now() + self.grace,
-            });
-        } else {
-            self.abort.cancel_detached();
+                ("authentication_error", _) | (_, "invalid_api_key") => "authentication_error",
+                ("rate_limit_error" | "rate_limit_exceeded" | "insufficient_quota", _)
+                | (_, "rate_limit_exceeded" | "insufficient_quota") => "rate_limit_error",
+                ("server_error" | "api_error", _) => "api_error",
+                ("overloaded_error" | "engine_overloaded_error", _) => "overloaded_error",
+                (other, _) => other,
+            };
+            Some((kind.to_owned(), field("message").to_owned()))
         }
+        _ => None,
     }
 }
 
-impl Read for GraceReader<'_> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if self.armed.get() && matches!(self.source, Source::Direct(_)) {
-            self.relay();
-        }
-        match &mut self.source {
-            Source::Direct(body) => body.read(buf),
-            Source::Gone => Ok(0),
-            Source::Relay(relay) => {
-                if relay.at >= relay.pending.len() {
-                    let left = relay.deadline.saturating_duration_since(Instant::now());
-                    match relay.chunks.recv_timeout(left) {
-                        Ok(Ok(chunk)) => {
-                            relay.pending = chunk;
-                            relay.at = 0;
-                        }
-                        Ok(Err(error)) => return Err(error),
-                        // The body ended.
-                        Err(RecvTimeoutError::Disconnected) => return Ok(0),
-                        // Silence: close the connection, which ends the helper.
-                        Err(RecvTimeoutError::Timeout) => {
-                            self.abort.cancel_detached();
-                            return Ok(0);
-                        }
-                    }
-                }
-                let n = buf.len().min(relay.pending.len() - relay.at);
-                buf[..n].copy_from_slice(&relay.pending[relay.at..relay.at + n]);
-                relay.at += n;
-                Ok(n)
-            }
+/// 1 to 64 letters, digits, `_` or `-`, and nothing the scrub would change (the key).
+fn is_storable(scrub: &Scrub, text: &str) -> bool {
+    (1..=64).contains(&text.len())
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        && scrub.bounded(text, MAX_TOKEN_CHARS) == text
+}
+
+fn reported_name<'n>(scrub: &Scrub, name: &'n str) -> &'n str {
+    if is_storable(scrub, name) {
+        name
+    } else {
+        PLACEHOLDER_NAME
+    }
+}
+
+fn unusable_name(scrub: &Scrub, name: &str) -> String {
+    let shown = if name.is_empty() {
+        "(none)".to_owned()
+    } else {
+        format!("\"{}\"", scrub.bounded(name, MAX_TOKEN_CHARS))
+    };
+    format!(
+        "the tool name {shown} cannot be used (a name has 1 to 64 letters, digits, _ or -, and must be one of the tools offered)"
+    )
+}
+
+/// The arguments of a call as its input: empty is `{}`, a JSON object is that object; anything else
+/// (cut-off JSON, an array, a scalar) is `None`.
+fn parse_arguments(arguments: &str) -> Option<Value> {
+    if arguments.trim().is_empty() {
+        return Some(json!({}));
+    }
+    match serde_json::from_str::<Value>(arguments) {
+        Ok(input @ Value::Object(_)) => Some(input),
+        _ => None,
+    }
+}
+
+/// `call_<8 hex digits, fixed for the process>_<counter>`, skipping what `taken` says is in use.
+/// The counter is process-wide, so ids do not repeat across turns or providers.
+pub(super) fn generated_id(taken: impl Fn(&str) -> bool) -> String {
+    static PREFIX: OnceLock<u32> = OnceLock::new();
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let prefix = *PREFIX.get_or_init(|| {
+        // `RandomState` is seeded by the operating system, once per process.
+        std::collections::hash_map::RandomState::new()
+            .build_hasher()
+            .finish() as u32
+    });
+    loop {
+        let id = format!("call_{prefix:08x}_{}", COUNTER.fetch_add(1, Ordering::Relaxed));
+        if !taken(&id) {
+            return id;
         }
     }
 }
 
 #[cfg(test)]
-mod wire_tests {
+mod tests {
     use super::*;
+    use crate::key::ApiKey;
+    use crate::wire::errors::Scrub;
 
-    fn borrowed(text: &OptStr<'_>) -> bool {
-        matches!(text.0, Some(Cow::Borrowed(_)))
+    const KEY: &str = "sk-test-SECRETKEY-12345";
+
+    struct Run {
+        events: Vec<String>,
+        result: Result<(bool, Option<TurnResponse>), StreamError>,
+    }
+
+    impl Run {
+        fn turn(&self) -> &TurnResponse {
+            match &self.result {
+                Ok((_, Some(turn))) => turn,
+                other => panic!("no turn: {:?}", other.as_ref().map(|(done, _)| done)),
+            }
+        }
+
+        fn content(&self) -> Vec<Value> {
+            self.turn().content.clone()
+        }
+    }
+
+    /// Feeds `chunks` (JSON or raw text) through an assembler and finishes it.
+    fn run_with(chunks: &[&str], limits: TurnLimits, taken: &[&str]) -> Run {
+        let scrub = Scrub::new(ApiKey::new(KEY));
+        let taken: HashSet<&str> = taken.iter().copied().collect();
+        let mut assembler = TurnAssembler::new(limits, &scrub, &taken);
+        let mut events = Vec::new();
+        let mut done = false;
+        for chunk in chunks {
+            match assembler.handle(chunk, &mut |event| events.push(format!("{event:?}"))) {
+                Ok(true) => {
+                    done = true;
+                    break;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    return Run {
+                        events,
+                        result: Err(error),
+                    }
+                }
+            }
+        }
+        let turn = assembler.finish(Some("req_1".into()), &mut |event| {
+            events.push(format!("{event:?}"))
+        });
+        Run {
+            events,
+            result: Ok((done, Some(turn))),
+        }
+    }
+
+    fn run(chunks: &[&str]) -> Run {
+        run_with(chunks, TurnLimits::default(), &[])
+    }
+
+    fn error_of(run: &Run) -> &StreamError {
+        run.result.as_ref().expect_err("the stream fails")
+    }
+
+    fn call(index: u64, id: &str, name: &str, args: &str) -> String {
+        json!({"choices": [{"delta": {"tool_calls": [{
+            "index": index, "id": id, "type": "function",
+            "function": {"name": name, "arguments": args}}]}}]})
+        .to_string()
+    }
+
+    fn finish(reason: &str) -> String {
+        json!({"choices": [{"delta": {}, "finish_reason": reason}]}).to_string()
+    }
+
+    fn text(piece: &str) -> String {
+        json!({"choices": [{"delta": {"content": piece}}]}).to_string()
     }
 
     #[test]
-    fn a_delta_without_escapes_borrows_its_strings_and_a_odd_field_reads_as_absent() {
-        let plain = r#"{"choices":[{"delta":{"content":"plain ü text","reasoning_content":null,"tool_calls":[{"index":0,"id":"c1","function":{"name":"f","arguments":"{}"}}]},"finish_reason":null}],"usage":null}"#;
-        let chunk: WireChunk<'_> = serde_json::from_str(plain).unwrap();
-        let choice = chunk.choices.0.unwrap();
-        let delta = choice.delta.unwrap();
+    fn text_deltas_are_emitted_and_joined() {
+        let run = run(&[&text("Hel"), &text("lo "), &text("world"), &finish("stop"), "[DONE]"]);
+        assert_eq!(
+            run.events,
+            ["TextDelta(\"Hel\")", "TextDelta(\"lo \")", "TextDelta(\"world\")"]
+        );
+        assert_eq!(run.content(), [json!({"type": "text", "text": "Hello world"})]);
+        assert_eq!(run.turn().stop_reason, StopReason::EndTurn);
+        assert_eq!(run.turn().request_id.as_deref(), Some("req_1"));
+        assert!(!run.turn().served_by_fallback);
+        assert_eq!(run.turn().thinking_dropped, 0);
+    }
+
+    #[test]
+    fn a_done_without_a_finish_reason_is_an_end_of_turn() {
+        let run = run(&[&text("x"), "[DONE]"]);
+        assert!(matches!(run.result, Ok((true, _))));
+        assert_eq!(run.turn().stop_reason, StopReason::EndTurn);
+    }
+
+    #[test]
+    fn text_is_stored_untrimmed_and_blank_text_is_left_out() {
+        let kept = run(&[&text("  a  "), &finish("stop")]);
+        assert_eq!(kept.content(), [json!({"type": "text", "text": "  a  "})]);
+        let blank = run(&[&text("  \n"), &finish("stop")]);
+        assert!(blank.content().is_empty());
+    }
+
+    #[test]
+    fn reasoning_comes_first_from_the_first_non_empty_field() {
+        let chunk = |field: &str, value: &str| {
+            json!({"choices": [{"delta": {field: value, "content": ""}}]}).to_string()
+        };
+        let run = run(&[
+            &chunk("reasoning_content", "a"),
+            &chunk("reasoning", "b"),
+            &chunk("thinking", "c"),
+            &json!({"choices": [{"delta": {"reasoning_content": "", "reasoning": "d",
+                                           "thinking": "e"}}]})
+            .to_string(),
+            &text("answer"),
+            &finish("stop"),
+        ]);
+        assert_eq!(
+            run.events[..4],
+            ["ThinkingDelta(\"a\")", "ThinkingDelta(\"b\")", "ThinkingDelta(\"c\")", "ThinkingDelta(\"d\")"]
+        );
+        assert_eq!(
+            run.content(),
+            [
+                json!({"type": "reasoning", "text": "abcd"}),
+                json!({"type": "text", "text": "answer"})
+            ]
+        );
+    }
+
+    #[test]
+    fn blank_reasoning_is_not_stored() {
+        let run = run(&[
+            &json!({"choices": [{"delta": {"reasoning": " \n"}}]}).to_string(),
+            &finish("stop"),
+        ]);
+        assert!(run.content().is_empty());
+    }
+
+    #[test]
+    fn text_is_found_where_servers_put_it() {
+        let chunks = [
+            json!({"choices": [{"delta": {"content": "a"}}]}),
+            json!({"choices": [{"message": {"content": "b"}}]}),
+            json!({"choices": [{"text": "c"}]}),
+            json!({"content": "d"}),
+            json!({"delta": "e"}),
+            json!({"choices": [{"delta": {"content": [
+                {"type": "text", "text": "f"}, {"content": "g"},
+                {"input_text": "h"}, {"output_text": "i"}, {"other": "x"}, 7]}}]}),
+            // The first non-empty place wins: no double text.
+            json!({"choices": [{"delta": {"content": "j"}, "text": "XX"}], "content": "YY"}),
+        ]
+        .map(|chunk| chunk.to_string());
+        let stop = finish("stop");
+        let mut refs: Vec<&str> = chunks.iter().map(String::as_str).collect();
+        refs.push(&stop);
+        let run = run(&refs);
+        assert_eq!(run.content(), [json!({"type": "text", "text": "abcdefghij"})]);
+    }
+
+    #[test]
+    fn a_field_of_the_wrong_type_reads_as_absent() {
+        let run = run(&[
+            &json!({"choices": [{"delta": {"content": 5, "reasoning": true, "thinking": {"a": 1}},
+                                 "finish_reason": 3}], "model": 7}).to_string(),
+            &text("ok"),
+            &finish("stop"),
+        ]);
+        assert_eq!(run.content(), [json!({"type": "text", "text": "ok"})]);
+        assert_eq!(run.turn().model, None);
+    }
+
+    #[test]
+    fn a_chunk_of_the_wrong_shape_is_skipped_and_counts_as_idle() {
+        let limits = TurnLimits {
+            max_idle_events: 3,
+            ..TurnLimits::default()
+        };
+        let skipped = [
+            "not json",
+            "{",
+            "[1,2]",
+            "7",
+            r#"{"choices": "x"}"#,
+            r#"{"choices": {"a": 1}}"#,
+            r#"{"choices": ["x"]}"#,
+            r#"{"choices": [{"delta": "x"}]}"#,
+            r#"{"choices": [{"delta": {"tool_calls": {"a": 1}}}]}"#,
+        ];
+        for chunk in skipped {
+            let run = run_with(&[chunk, &text("ok"), &finish("stop")], limits, &[]);
+            assert_eq!(run.content(), [json!({"type": "text", "text": "ok"})], "{chunk}");
+        }
+    }
+
+    #[test]
+    fn too_many_idle_chunks_in_a_row_fail_and_progress_resets_the_count() {
+        let limits = TurnLimits {
+            max_idle_events: 3,
+            ..TurnLimits::default()
+        };
+        let idle = r#"{"choices": [{"delta": {"role": "assistant"}}]}"#;
+        let ok = run_with(&[idle, idle, idle, &text("a"), idle, idle, idle, &finish("stop")], limits, &[]);
+        assert!(ok.result.is_ok());
+        let failed = run_with(&[idle, idle, "junk", idle, &text("late")], limits, &[]);
         assert!(matches!(
-            delta.content.0,
-            Some(Cow::Borrowed("plain ü text"))
+            error_of(&failed),
+            StreamError::Protocol(ProtocolError::TooManyIdleEvents { limit: 3 })
         ));
-        assert!(delta.reasoning_content.0.is_none());
-        let call = delta.tool_calls.first.as_ref().unwrap();
-        assert!(borrowed(&call.id));
-        assert!(delta.tool_calls.rest.is_empty());
-        assert!(borrowed(&call.function.as_ref().unwrap().name));
+    }
 
-        let escaped = r#"{"choices":[{"delta":{"content":"line\nbreak"}}]}"#;
-        let chunk: WireChunk<'_> = serde_json::from_str(escaped).unwrap();
-        let delta = chunk.choices.0.unwrap().delta.unwrap();
-        assert!(matches!(delta.content.0, Some(Cow::Owned(ref t)) if t == "line\nbreak"));
+    #[test]
+    fn a_model_alone_is_not_progress_and_the_first_one_is_kept_scrubbed() {
+        let limits = TurnLimits {
+            max_idle_events: 1,
+            ..TurnLimits::default()
+        };
+        let named = |model: &str| json!({"model": model, "choices": []}).to_string();
+        let failed = run_with(&[&named("m"), &named("m"), &text("x")], limits, &[]);
+        assert!(matches!(
+            error_of(&failed),
+            StreamError::Protocol(ProtocolError::TooManyIdleEvents { .. })
+        ));
+        let run = run(&[&named(""), &named(&format!("gpt-{KEY}-x")), &named("later"), &finish("stop")]);
+        let model = run.turn().model.clone().unwrap();
+        assert_eq!(model, "gpt-***-x");
+    }
 
-        // Numbers, objects and arrays where a string is expected are absent, not an error.
-        let odd = r#"{"choices":[{"delta":{"content":7,"reasoning":{"a":1},"thinking":[1,2]},"finish_reason":3}],"model":false}"#;
-        let chunk: WireChunk<'_> = serde_json::from_str(odd).unwrap();
-        let choice = chunk.choices.0.unwrap();
-        assert!(choice.finish_reason.text().is_none());
-        assert!(choice.delta.unwrap().content.0.is_none());
+    #[test]
+    fn usage_needs_both_counts_and_the_last_one_wins() {
+        let usage = |value: Value| json!({"choices": [], "usage": value}).to_string();
+        let run = run(&[
+            &text("x"),
+            &finish("stop"),
+            &usage(json!({"prompt_tokens": 10, "completion_tokens": 2})),
+            &usage(json!({"prompt_tokens": 100, "completion_tokens": 5,
+                          "prompt_tokens_details": {"cached_tokens": 40}})),
+            // Not both counts: ignored.
+            &usage(json!({"prompt_tokens": 1})),
+            &usage(json!({"prompt_tokens": "9", "completion_tokens": 1})),
+            &usage(json!({"prompt_tokens": -3, "completion_tokens": 1})),
+        ]);
+        assert_eq!(
+            run.turn().usage,
+            Usage {
+                input_tokens: 60,
+                output_tokens: 5,
+                cache_read_input_tokens: 40,
+                cache_creation_input_tokens: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn counts_accept_integer_floats_and_a_cache_larger_than_the_prompt_saturates() {
+        let run = run(&[
+            &text("x"),
+            &json!({"usage": {"prompt_tokens": 12.0, "completion_tokens": 3.0,
+                              "prompt_tokens_details": {"cached_tokens": 20.0}}}).to_string(),
+            &finish("stop"),
+        ]);
+        assert_eq!(run.turn().usage.input_tokens, 0);
+        assert_eq!(run.turn().usage.cache_read_input_tokens, 20);
+        assert_eq!(run.turn().usage.output_tokens, 3);
+        // A fractional cached count is absent for that field only.
+        let run = run_with(
+            &[
+                &json!({"usage": {"prompt_tokens": 12, "completion_tokens": 3,
+                                  "prompt_tokens_details": {"cached_tokens": 1.5}}}).to_string(),
+                &finish("stop"),
+            ],
+            TurnLimits::default(),
+            &[],
+        );
+        assert_eq!(run.turn().usage.input_tokens, 12);
+        assert_eq!(run.turn().usage.cache_read_input_tokens, 0);
+        assert_eq!(count(&json!(9_007_199_254_740_992.0)), Some(9_007_199_254_740_992));
+        assert_eq!(count(&json!(1.0e300)), None);
+        assert_eq!(count(&json!(-0.5)), None);
+        assert_eq!(count(&json!("3")), None);
+    }
+
+    #[test]
+    fn only_the_first_choice_is_used() {
+        let run = run(&[
+            &json!({"choices": [{"delta": {"content": "one"}}, {"delta": {"content": "two"}}]})
+                .to_string(),
+            &finish("stop"),
+        ]);
+        assert_eq!(run.content(), [json!({"type": "text", "text": "one"})]);
+    }
+
+    #[test]
+    fn the_stop_reason_follows_the_finish_reason_and_the_calls() {
+        let reason = |reason: &str, with_call: bool| {
+            let mut chunks = vec![text("x")];
+            if with_call {
+                chunks.push(call(0, "c1", "list_tables", "{}"));
+            }
+            chunks.push(finish(reason));
+            let refs: Vec<&str> = chunks.iter().map(String::as_str).collect();
+            run(&refs).turn().stop_reason.clone()
+        };
+        assert_eq!(reason("stop", false), StopReason::EndTurn);
+        assert_eq!(reason("length", false), StopReason::MaxTokens);
+        assert_eq!(reason("length", true), StopReason::MaxTokens);
+        assert_eq!(reason("content_filter", false), StopReason::Refusal { category: None });
+        assert_eq!(reason("tool_calls", false), StopReason::ToolUse);
+        assert_eq!(reason("function_call", false), StopReason::ToolUse);
+        assert_eq!(reason("weird", false), StopReason::Other("weird".into()));
+        for word in ["stop", "eos", "end_turn", "tool_calls", "weird"] {
+            assert_eq!(reason(word, true), StopReason::ToolUse, "{word}");
+        }
+    }
+
+    #[test]
+    fn a_tool_call_arrives_in_pieces_and_is_reported_once_started_and_once_ready() {
+        let first = json!({"choices": [{"delta": {"tool_calls": [{
+            "index": 0, "id": "call_abc", "type": "function",
+            "function": {"name": "list_tables", "arguments": ""}}]}}]}).to_string();
+        let piece = |args: &str| {
+            json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": args}}]}}]})
+                .to_string()
+        };
+        let run = run(&[&first, &piece("{\"connec"), &piece("tion_id\":\"c1\"}"), &finish("tool_calls"), "[DONE]"]);
+        assert_eq!(
+            run.events,
+            [
+                "ToolCallStarted { id: \"call_abc\", name: \"list_tables\" }",
+                "ToolInputReady { id: \"call_abc\", name: \"list_tables\", input: Object {\"connection_id\": String(\"c1\")}, valid: true }"
+            ]
+        );
+        assert_eq!(
+            run.content(),
+            [json!({"type": "tool_use", "id": "call_abc", "name": "list_tables",
+                    "input": {"connection_id": "c1"}})]
+        );
+        assert_eq!(run.turn().stop_reason, StopReason::ToolUse);
+    }
+
+    #[test]
+    fn a_name_that_comes_later_is_waited_for() {
+        let run = run(&[
+            &call(0, "c1", "", ""),
+            &json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"name": "list_tables"}}]}}]})
+                .to_string(),
+            &finish("tool_calls"),
+        ]);
+        assert!(run.events[0].starts_with("ToolCallStarted { id: \"c1\", name: \"list_tables\""));
+        assert_eq!(run.events.iter().filter(|e| e.starts_with("ToolCallStarted")).count(), 1);
+    }
+
+    #[test]
+    fn an_entry_with_nothing_in_it_is_ignored_and_is_not_progress() {
+        let limits = TurnLimits {
+            max_idle_events: 1,
+            ..TurnLimits::default()
+        };
+        let empty = call(0, "", "", "");
+        let failed = run_with(&[&empty, &empty, &text("x")], limits, &[]);
+        assert!(matches!(
+            error_of(&failed),
+            StreamError::Protocol(ProtocolError::TooManyIdleEvents { .. })
+        ));
+        let run = run(&[&empty, &text("x"), &finish("stop")]);
+        assert_eq!(run.content().len(), 1);
+    }
+
+    #[test]
+    fn an_empty_id_on_a_later_delta_counts_as_no_id() {
+        let run = run(&[
+            &call(0, "c1", "list_tables", "{\"a\":"),
+            &call(0, "", "", "1}"),
+            &finish("tool_calls"),
+        ]);
+        assert_eq!(
+            run.content(),
+            [json!({"type": "tool_use", "id": "c1", "name": "list_tables", "input": {"a": 1}})]
+        );
+    }
+
+    #[test]
+    fn a_new_id_on_a_used_index_is_a_new_call_and_an_index_may_be_missing() {
+        let run = run(&[
+            &call(0, "a", "one", "{}"),
+            &call(0, "b", "two", "{}"),
+            // No index at all counts as 0: it continues the latest call at 0, which is `b`.
+            &json!({"choices": [{"delta": {"tool_calls": [{"function": {"arguments": " "}}]}}]})
+                .to_string(),
+            &finish("tool_calls"),
+        ]);
+        let ids: Vec<_> = run
+            .content()
+            .iter()
+            .map(|b| (b["id"].as_str().unwrap().to_owned(), b["name"].as_str().unwrap().to_owned()))
+            .collect();
+        assert_eq!(ids, [("a".into(), "one".into()), ("b".into(), "two".into())]);
+    }
+
+    #[test]
+    fn the_same_server_id_on_two_indexes_is_two_calls_with_distinct_stored_ids() {
+        let run = run(&[
+            &call(0, "dup", "one", "{\"x\":1}"),
+            &call(1, "dup", "two", "{\"y\":2}"),
+            &finish("tool_calls"),
+        ]);
+        let blocks = run.content();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0]["id"], "dup");
+        assert_eq!(blocks[0]["input"], json!({"x": 1}));
+        assert_ne!(blocks[1]["id"], "dup");
+        assert!(blocks[1]["id"].as_str().unwrap().starts_with("call_"));
+        assert_eq!(blocks[1]["input"], json!({"y": 2}));
+    }
+
+    #[test]
+    fn arguments_may_be_a_json_object() {
+        let chunk = json!({"choices": [{"delta": {"tool_calls": [{
+            "index": 0, "id": "c1", "function": {"name": "list_tables", "arguments": {"a": [1, 2]}}}]}}]})
+        .to_string();
+        let run = run(&[&chunk, &finish("tool_calls")]);
+        assert_eq!(run.content()[0]["input"], json!({"a": [1, 2]}));
+    }
+
+    #[test]
+    fn an_index_that_is_not_a_count_is_zero_and_a_float_index_is_a_count() {
+        let entry = |index: Value, id: &str| {
+            json!({"choices": [{"delta": {"tool_calls": [{
+                "index": index, "id": id, "function": {"name": "n", "arguments": "{}"}}]}}]})
+            .to_string()
+        };
+        let run = run(&[&entry(json!(1.0), "a"), &entry(json!("x"), "b"), &entry(json!(-1), "c"), &finish("tool_calls")]);
+        assert_eq!(run.content().len(), 3);
+        // `b` and `c` are both at index 0, with different ids: two calls.
+        let again = run_with(
+            &[&entry(json!(1.0), "a"), &entry(json!(1), "a"), &finish("tool_calls")],
+            TurnLimits::default(),
+            &[],
+        );
+        assert_eq!(again.content().len(), 1);
+    }
+
+    #[test]
+    fn an_unstorable_server_id_is_replaced_by_a_generated_one() {
+        let long = "x".repeat(65);
+        let with_key = format!("id-{KEY}");
+        for bad in ["call.1", "a:b", "", "has space", long.as_str(), with_key.as_str()] {
+            let run = run(&[&call(0, bad, "list_tables", "{}"), &finish("tool_calls")]);
+            let id = run.content()[0]["id"].as_str().unwrap().to_owned();
+            assert!(id.starts_with("call_"), "{bad:?} -> {id}");
+            assert!(is_storable(&Scrub::new(ApiKey::new(KEY)), &id));
+            assert!(!run.events.join("").contains(bad) || bad.is_empty(), "{bad}");
+        }
+        let run = run(&[&call(0, &"y".repeat(64), "list_tables", "{}"), &finish("tool_calls")]);
+        assert_eq!(run.content()[0]["id"], "y".repeat(64));
+    }
+
+    #[test]
+    fn a_server_id_taken_by_the_history_or_the_response_is_not_reused() {
+        let run = run_with(
+            &[
+                &call(0, "0", "one", "{}"),
+                &call(1, "1", "two", "{}"),
+                &finish("tool_calls"),
+            ],
+            TurnLimits::default(),
+            &["0"],
+        );
+        let blocks = run.content();
+        assert!(blocks[0]["id"].as_str().unwrap().starts_with("call_"));
+        assert_eq!(blocks[1]["id"], "1");
+    }
+
+    #[test]
+    fn a_call_without_a_server_id_gets_a_generated_one_at_the_end() {
+        let chunk = json!({"choices": [{"delta": {"tool_calls": [{
+            "index": 0, "function": {"name": "list_tables", "arguments": "{}"}}]}}]})
+        .to_string();
+        let run = run(&[&chunk, &finish("tool_calls")]);
+        let id = run.content()[0]["id"].as_str().unwrap().to_owned();
+        assert!(id.starts_with("call_"));
+        assert!(run.events[0].contains(&id));
+        assert!(run.events[0].starts_with("ToolCallStarted"));
+    }
+
+    #[test]
+    fn generated_ids_do_not_repeat_and_skip_what_is_taken() {
+        let a = generated_id(|_| false);
+        let b = generated_id(|_| false);
+        assert_ne!(a, b);
+        let (prefix, counter) = a.rsplit_once('_').unwrap();
+        assert!(prefix.starts_with("call_") && prefix.len() == "call_".len() + 8);
+        let next: u64 = counter.parse().unwrap();
+        let busy: HashSet<String> = (next + 1..next + 500).map(|n| format!("{prefix}_{n}")).collect();
+        let fresh = generated_id(|id| busy.contains(id));
+        assert!(!busy.contains(&fresh) && fresh.starts_with(prefix));
+    }
+
+    #[test]
+    fn an_unusable_tool_name_is_replaced_and_reported() {
+        let long = "n".repeat(65);
+        let with_key = format!("tool{KEY}");
+        for bad in ["list tables", "a.b", long.as_str(), with_key.as_str()] {
+            let run = run(&[&call(0, "c1", bad, "{\"a\":1}"), &finish("tool_calls")]);
+            let block = &run.content()[0];
+            assert_eq!(block["name"], PLACEHOLDER_NAME, "{bad}");
+            assert_eq!(block["input"], json!({}));
+            assert!(run.events.iter().any(|e| e.contains("valid: false")));
+            let invalid = &run.turn().invalid_tool_inputs;
+            assert_eq!(invalid.len(), 1);
+            assert_eq!(invalid[0].tool_use_id, "c1");
+            assert!(invalid[0].raw.starts_with("the tool name \""), "{}", invalid[0].raw);
+            assert!(invalid[0].raw.ends_with(
+                "cannot be used (a name has 1 to 64 letters, digits, _ or -, and must be one of the tools offered)"
+            ));
+            assert!(!invalid[0].raw.contains(KEY));
+            assert!(!run.events.join("").contains(KEY));
+        }
+    }
+
+    #[test]
+    fn a_call_without_a_name_is_reported_as_none() {
+        let chunk = json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "c1",
+            "function": {"arguments": "{}"}}]}}]}).to_string();
+        let run = run(&[&chunk, &finish("tool_calls")]);
+        assert_eq!(run.content()[0]["name"], PLACEHOLDER_NAME);
+        assert!(run.turn().invalid_tool_inputs[0].raw.starts_with("the tool name (none) cannot be used"));
+        assert!(run.events[0].contains("invalid_tool_name"));
+    }
+
+    #[test]
+    fn arguments_that_are_not_a_json_object_are_reported_invalid() {
+        for (args, raw) in [("{\"a\":", "{\"a\":"), ("[1]", "[1]"), ("7", "7"), ("\"s\"", "\"s\"")] {
+            let run = run(&[&call(0, "c1", "list_tables", args), &finish("tool_calls")]);
+            assert_eq!(run.content()[0]["input"], json!({}), "{args}");
+            assert_eq!(
+                run.turn().invalid_tool_inputs,
+                [InvalidToolInput { tool_use_id: "c1".into(), raw: raw.into() }]
+            );
+            assert!(run.events.last().unwrap().contains("valid: false"));
+        }
+        let key_raw = run(&[&call(0, "c1", "list_tables", &format!("{{\"k\":\"{KEY}")), &finish("tool_calls")]);
+        assert!(!key_raw.turn().invalid_tool_inputs[0].raw.contains(KEY));
+    }
+
+    #[test]
+    fn empty_arguments_are_an_empty_input_and_valid() {
+        let run = run(&[&call(0, "c1", "list_tables", ""), &finish("tool_calls")]);
+        assert_eq!(run.content()[0]["input"], json!({}));
+        assert!(run.turn().invalid_tool_inputs.is_empty());
+        assert!(run.events.last().unwrap().contains("valid: true"));
+    }
+
+    #[test]
+    fn calls_are_in_order_of_first_appearance_behind_reasoning_and_text() {
+        let run = run(&[
+            &call(1, "b", "two", "{}"),
+            &call(0, "a", "one", "{}"),
+            &json!({"choices": [{"delta": {"reasoning": "r", "content": "t"}}]}).to_string(),
+            &finish("tool_calls"),
+        ]);
+        let kinds: Vec<_> = run.content().iter().map(|b| b["type"].as_str().unwrap().to_owned()).collect();
+        assert_eq!(kinds, ["reasoning", "text", "tool_use", "tool_use"]);
+        assert_eq!(run.content()[2]["id"], "b");
+    }
+
+    #[test]
+    fn more_calls_than_the_limit_fail() {
+        let limits = TurnLimits {
+            max_blocks: 2,
+            ..TurnLimits::default()
+        };
+        let run = run_with(
+            &[&call(0, "a", "n", "{}"), &call(1, "b", "n", "{}"), &call(2, "c", "n", "{}")],
+            limits,
+            &[],
+        );
+        assert!(matches!(
+            error_of(&run),
+            StreamError::Protocol(ProtocolError::TooManyBlocks { limit: 2 })
+        ));
+    }
+
+    #[test]
+    fn the_finish_reason_is_kept_scrubbed_and_the_first_one_stands() {
+        let run = run(&[&text("x"), &finish("stop"), &finish("length")]);
+        assert_eq!(run.turn().stop_reason, StopReason::EndTurn);
+        let run = run_with(&[&text("x"), &finish(&format!("odd-{KEY}"))], TurnLimits::default(), &[]);
+        assert_eq!(run.turn().stop_reason, StopReason::Other("odd-***".into()));
+    }
+
+    fn api_error(run: &Run) -> (String, String, bool) {
+        match error_of(run) {
+            StreamError::Api { kind, message, before_start } => (kind.clone(), message.clone(), *before_start),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_payloads_map_to_kinds() {
+        let kind = |error: Value| {
+            let run = run(&[&json!({"error": error}).to_string()]);
+            api_error(&run).0
+        };
+        let cases = [
+            (json!({"type": "invalid_request_error", "message": "m"}), "invalid_request_error"),
+            (json!({"code": "context_length_exceeded"}), "invalid_request_error"),
+            (json!({"type": "authentication_error"}), "authentication_error"),
+            (json!({"code": "invalid_api_key"}), "authentication_error"),
+            (json!({"type": "rate_limit_error"}), "rate_limit_error"),
+            (json!({"type": "rate_limit_exceeded"}), "rate_limit_error"),
+            (json!({"type": "insufficient_quota"}), "rate_limit_error"),
+            (json!({"code": "rate_limit_exceeded"}), "rate_limit_error"),
+            (json!({"code": "insufficient_quota"}), "rate_limit_error"),
+            (json!({"type": "server_error"}), "api_error"),
+            (json!({"type": "api_error"}), "api_error"),
+            (json!({"type": "overloaded_error"}), "overloaded_error"),
+            (json!({"type": "engine_overloaded_error"}), "overloaded_error"),
+            (json!({"type": "something_else"}), "something_else"),
+            (json!({"message": "only a message"}), ""),
+            (json!("bare ollama text"), ""),
+        ];
+        for (error, want) in cases {
+            assert_eq!(kind(error.clone()), want, "{error}");
+        }
+    }
+
+    #[test]
+    fn an_error_carries_its_message_and_is_retryable_only_before_anything_was_delivered() {
+        let run1 = run(&[&json!({"error": {"message": "boom", "type": "server_error"}}).to_string()]);
+        assert_eq!(api_error(&run1), ("api_error".into(), "boom".into(), true));
+        let run2 = run(&["\"junk\"", &json!({"error": "model gone"}).to_string()]);
+        assert_eq!(api_error(&run2), (String::new(), "model gone".into(), true));
+        let run3 = run(&[&text("hi"), &json!({"error": {"message": "late"}}).to_string()]);
+        assert_eq!(api_error(&run3), (String::new(), "late".into(), false));
+    }
+
+    #[test]
+    fn error_null_or_bool_is_no_error_and_is_checked_before_anything_else() {
+        let run = run(&[
+            &json!({"error": null, "choices": [{"delta": {"content": "a"}}]}).to_string(),
+            &json!({"error": false, "choices": [{"delta": {"content": "b"}}]}).to_string(),
+            &finish("stop"),
+        ]);
+        assert_eq!(run.content(), [json!({"type": "text", "text": "ab"})]);
+        let first = run_with(
+            &[&json!({"error": {"message": "x"}, "choices": [{"delta": {"content": "a"}}]}).to_string()],
+            TurnLimits::default(),
+            &[],
+        );
+        assert!(first.events.is_empty());
+        assert!(matches!(error_of(&first), StreamError::Api { .. }));
+    }
+
+    #[test]
+    fn data_is_trimmed_and_done_ends_the_stream() {
+        let run = run(&[&format!("  {}\n", text("a")), " [DONE] ", &text("never")]);
+        assert!(matches!(run.result, Ok((true, _))));
+        assert_eq!(run.content(), [json!({"type": "text", "text": "a"})]);
     }
 }

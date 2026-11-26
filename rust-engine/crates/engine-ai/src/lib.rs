@@ -3,8 +3,8 @@
 //! * [`transport`]: the HTTP seam ([`HttpTransport`]); the app brings the client, tests script it.
 //! * [`provider`]: the provider-neutral types and [`ChatProvider`], [`ProviderError`], [`KeySource`].
 //! * [`anthropic`]: the Messages API (request, incremental SSE, retry) over the transport.
-//! * [`openai`]: the Chat Completions API for OpenAI, OpenAI-compatible servers and Ollama (adapted
-//!   from dbx, Apache-2.0), over the same transport, parser and retry.
+//! * [`openai`]: the Chat Completions API for OpenAI, OpenAI-compatible servers and Ollama, over the
+//!   same transport, parser and retry.
 //! * [`conversation`]: the append-only [`Conversation`], persisted as JSON.
 //! * [`assistant`]: [`Assistant::run`], the tool loop over the agent [`engine_agent::ToolLayer`].
 //!

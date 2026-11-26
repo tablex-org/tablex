@@ -1,44 +1,69 @@
-// Adapted from dbx (https://github.com/t8y2/dbx), Apache-2.0; changed. Ports dbx tests and
-// samples. See `mod.rs` and `licenses/README.md` at the root of the repository.
+//! The provider over a scripted transport: configuration, the key, the request body, retries,
+//! cancellation, the end of a stream, and the model list. The pieces below the transport have
+//! their own tests next to them (`endpoint`, `effort`, `stream`).
 
-//! The OpenAI-compatible provider on the scripted transport: request shapes, streams (the dbx
-//! samples included), errors, retries, cancel, keys, flavors, model lists. No network.
-
-use super::stream::ChatAssembler;
 use super::*;
-use crate::conversation::{HistoryForm, Message, UserBlock};
-use crate::provider::{ContextBlock, Effort, StopReason, SystemPrompt, Usage};
-use crate::test_support::*;
+use crate::anthropic::{AnthropicConfig, AnthropicProvider};
+use crate::conversation::{HistoryForm, UserBlock};
+use crate::provider::{ContextBlock, Effort, ProviderError, StopReason, SystemPrompt, Usage};
+use crate::test_support::{
+    lock, End, FixedKey, Reply, ScriptedSleeper, ScriptedTransport, Step, FAKE_KEY,
+};
 use crate::transport::TransportError;
-use crate::wire::sse::SseParser;
-use crate::wire::TurnLimits;
 use engine_agent::ToolSpec;
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
-use std::time::Instant;
+use std::sync::Mutex;
 
 // ------------------------------------------------------------------------------------- helpers
 
-struct NoKey;
+struct Keys {
+    answer: Result<ApiKey, KeyError>,
+    asked: AtomicUsize,
+}
 
-impl KeySource for NoKey {
-    fn api_key(&self) -> Result<ApiKey, KeyError> {
-        Err(KeyError::NotSet)
+impl Keys {
+    fn new(answer: Result<ApiKey, KeyError>) -> Arc<Self> {
+        Arc::new(Self {
+            answer,
+            asked: AtomicUsize::new(0),
+        })
+    }
+
+    fn asked(&self) -> usize {
+        self.asked.load(Ordering::SeqCst)
     }
 }
 
-struct EmptyKey;
-
-impl KeySource for EmptyKey {
+impl KeySource for Keys {
     fn api_key(&self) -> Result<ApiKey, KeyError> {
-        Ok(ApiKey::new("  "))
+        self.asked.fetch_add(1, Ordering::SeqCst);
+        self.answer.clone()
+    }
+}
+
+/// Keeps the token each request was sent with.
+struct Spy {
+    inner: Arc<ScriptedTransport>,
+    tokens: Mutex<Vec<CancelToken>>,
+}
+
+impl HttpTransport for Spy {
+    fn send(
+        &self,
+        request: HttpRequest,
+        cancel: &CancelToken,
+    ) -> Result<HttpResponse, TransportError> {
+        lock(&self.tokens).push(cancel.clone());
+        self.inner.send(request, cancel)
     }
 }
 
 struct Rig {
-    provider: OpenAiProvider,
     transport: Arc<ScriptedTransport>,
     sleeper: Arc<ScriptedSleeper>,
+    provider: OpenAiProvider,
 }
 
 fn config(flavor: Flavor, base_url: &str) -> OpenAiConfig {
@@ -57,47 +82,81 @@ fn rig_with(config: OpenAiConfig, keys: Arc<dyn KeySource>, steps: Vec<Step>) ->
         config,
     )
     .expect("a valid test configuration")
-    .with_sleeper(Arc::clone(&sleeper) as Arc<dyn Sleeper>)
-    .with_finish_grace(Duration::from_millis(60));
+    .with_sleeper(Arc::clone(&sleeper) as Arc<dyn Sleeper>);
     Rig {
-        provider,
         transport,
         sleeper,
+        provider,
     }
 }
 
-fn rig(flavor: Flavor, steps: Vec<Step>) -> Rig {
-    let keys: Arc<dyn KeySource> = if flavor.requires_key() {
-        Arc::new(FixedKey)
-    } else {
-        Arc::new(NoKey)
-    };
-    let base = flavor
-        .default_base_url()
-        .unwrap_or("http://localhost:1234/v1");
-    rig_with(config(flavor, base), keys, steps)
+fn rig(flavor: Flavor, base_url: &str, steps: Vec<Step>) -> Rig {
+    rig_with(config(flavor, base_url), Arc::new(FixedKey), steps)
 }
 
-fn spec() -> ToolSpec {
-    ToolSpec {
-        name: "list_tables",
-        description: "Lists tables.",
-        input_schema: json!({"type": "object", "properties": {"connection_id": {"type": "string"}}}),
-        output_schema: json!({}),
-        example: json!({}),
-    }
+fn openai(steps: Vec<Step>) -> Rig {
+    rig(Flavor::OpenAi, OPENAI_BASE_URL, steps)
 }
 
-fn request<'a>(model: &'a str, messages: &'a [Message], tools: &'a [ToolSpec]) -> TurnRequest<'a> {
+fn no_key() -> Arc<Keys> {
+    Keys::new(Err(KeyError::NotSet))
+}
+
+// SSE fixtures: the chunks of a Chat Completions stream.
+
+fn sse(chunks: &[Value]) -> String {
+    chunks
+        .iter()
+        .map(|chunk| format!("data: {chunk}\n\n"))
+        .collect()
+}
+
+fn text_chunk(text: &str) -> Value {
+    json!({"id": "c1", "object": "chat.completion.chunk", "model": "gpt-4o-2024",
+           "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": null}]})
+}
+
+fn finish_chunk(reason: &str) -> Value {
+    json!({"choices": [{"index": 0, "delta": {}, "finish_reason": reason}]})
+}
+
+fn usage_chunk(prompt: u64, completion: u64, cached: u64) -> Value {
+    json!({"choices": [], "usage": {"prompt_tokens": prompt, "completion_tokens": completion,
+           "prompt_tokens_details": {"cached_tokens": cached}}})
+}
+
+fn tool_chunk(index: u64, id: &str, name: &str, arguments: &str) -> Value {
+    json!({"choices": [{"index": 0, "delta": {"tool_calls": [{
+        "index": index, "id": id, "type": "function",
+        "function": {"name": name, "arguments": arguments}}]}, "finish_reason": null}]})
+}
+
+/// A complete turn: text, the finish reason, the usage, `[DONE]`.
+fn full_turn(text: &str) -> String {
+    sse(&[
+        text_chunk(text),
+        finish_chunk("stop"),
+        usage_chunk(100, 7, 40),
+    ]) + "data: [DONE]\n\n"
+}
+
+fn reply(text: &str) -> Reply {
+    Reply::ok(full_turn(text))
+}
+
+// Requests.
+
+fn request<'a>(
+    model: &'a str,
+    messages: &'a [Message],
+    tools: &'a [ToolSpec],
+) -> TurnRequest<'a> {
     TurnRequest {
         model,
         effort: Effort::Medium,
         system: SystemPrompt {
             core: "CORE",
-            context: Some(ContextBlock {
-                text: "CTX",
-                cacheable: true,
-            }),
+            context: None,
         },
         tools,
         messages,
@@ -105,1959 +164,1336 @@ fn request<'a>(model: &'a str, messages: &'a [Message], tools: &'a [ToolSpec]) -
     }
 }
 
-fn hello() -> Vec<Message> {
+struct Outcome {
+    result: Result<TurnResponse, ProviderError>,
+    events: Vec<String>,
+}
+
+impl Outcome {
+    fn ok(&self) -> &TurnResponse {
+        self.result.as_ref().expect("the turn succeeds")
+    }
+
+    fn err(&self) -> &ProviderError {
+        self.result.as_ref().expect_err("the turn fails")
+    }
+
+    /// `{:?}` of everything the turn produced.
+    fn everything(&self) -> String {
+        format!("{:?} {:?}", self.result, self.events)
+    }
+}
+
+fn ask_in(provider: &OpenAiProvider, request: &TurnRequest<'_>, cancel: &CancelToken) -> Outcome {
+    let mut events = Vec::new();
+    let result = provider.stream_turn(request, &mut |e| events.push(format!("{e:?}")), cancel);
+    Outcome { result, events }
+}
+
+fn ask(provider: &OpenAiProvider, messages: &[Message]) -> Outcome {
+    ask_in(
+        provider,
+        &request("gpt-4o", messages, &[]),
+        &CancelToken::new(),
+    )
+}
+
+fn hi() -> Vec<Message> {
     vec![Message::user_text("hi")]
 }
 
-/// One `chat.completion.chunk` event.
-fn chunk(delta: Value, finish: Option<&str>) -> Value {
-    json!({"id": "chatcmpl-1", "object": "chat.completion.chunk", "model": "gpt-test",
-           "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]})
-}
-
-fn text_chunk(text: &str) -> Value {
-    chunk(json!({"content": text}), None)
-}
-
-fn usage_chunk(prompt: u64, completion: u64, cached: Option<u64>) -> Value {
-    let mut usage = json!({"prompt_tokens": prompt, "completion_tokens": completion});
-    if let Some(cached) = cached {
-        usage["prompt_tokens_details"] = json!({"cached_tokens": cached});
+fn spec(name: &'static str) -> ToolSpec {
+    ToolSpec {
+        name,
+        description: "Lists tables.",
+        input_schema: json!({"type": "object", "properties": {"connection_id": {"type": "string"}}}),
+        output_schema: json!({}),
+        example: json!({}),
     }
-    json!({"id": "chatcmpl-1", "model": "gpt-test", "choices": [], "usage": usage})
 }
 
-fn sse(events: &[Value]) -> String {
-    events
-        .iter()
-        .map(|event| format!("data: {event}\n\n"))
-        .collect()
+fn body_of(transport: &ScriptedTransport, index: usize) -> String {
+    String::from_utf8(transport.request(index).body).unwrap()
 }
 
-const DONE: &str = "data: [DONE]\n\n";
-
-fn complete(events: &[Value]) -> Reply {
-    Reply::ok(format!("{}{DONE}", sse(events)))
+fn json_body(transport: &ScriptedTransport, index: usize) -> Value {
+    transport.request(index).json()
 }
 
-type Turn = (Result<TurnResponse, ProviderError>, Vec<String>);
-
-fn run(rig: &Rig, request: &TurnRequest<'_>) -> Turn {
-    let mut events = Vec::new();
-    let result = rig.provider.stream_turn(
-        request,
-        &mut |event| events.push(format!("{event:?}")),
-        &CancelToken::new(),
-    );
-    (result, events)
+fn assert_protocol(error: &ProviderError, want: &ProtocolError) {
+    match error {
+        ProviderError::Protocol { source, .. } => assert_eq!(source, want),
+        other => panic!("expected {want:?}, got {other:?}"),
+    }
 }
 
-fn turn(rig: &Rig, model: &str) -> Turn {
-    let messages = hello();
-    run(rig, &request(model, &messages, &[]))
+// ------------------------------------------------------------------- flavors and configuration
+
+#[test]
+fn flavors_know_their_address_and_whether_they_need_a_key() {
+    assert_eq!(Flavor::OpenAi.default_base_url(), Some("https://api.openai.com/v1"));
+    assert_eq!(Flavor::Ollama.default_base_url(), Some("http://localhost:11434/v1"));
+    assert_eq!(Flavor::Compatible.default_base_url(), None);
+    assert!(Flavor::OpenAi.requires_key());
+    assert!(!Flavor::Compatible.requires_key());
+    assert!(!Flavor::Ollama.requires_key());
+    let as_path: fn(Flavor) -> bool = Flavor::requires_key;
+    assert!(as_path(Flavor::OpenAi));
 }
 
-fn ok(turn: Turn) -> (TurnResponse, Vec<String>) {
-    (turn.0.expect("the turn completes"), turn.1)
+#[test]
+fn a_config_starts_from_the_flavor() {
+    for flavor in [Flavor::OpenAi, Flavor::Compatible, Flavor::Ollama] {
+        let config = OpenAiConfig::for_flavor(flavor);
+        assert_eq!(config.flavor, flavor);
+        assert_eq!(config.base_url, flavor.default_base_url().unwrap_or(""));
+        assert_eq!(config.max_tokens, 4096);
+        assert!(config.enable_thinking);
+        assert_eq!(config.retry, RetryPolicy::default());
+        assert_eq!(config.timeouts, Timeouts::default());
+    }
+    let default = OpenAiConfig::default();
+    assert_eq!(default.flavor, Flavor::OpenAi);
+    assert_eq!(default.base_url, OPENAI_BASE_URL);
 }
 
-fn err(turn: Turn) -> ProviderError {
-    turn.0.expect_err("the turn fails")
-}
-
-trait Text {
-    fn text(&self) -> String;
-}
-
-impl Text for TurnResponse {
-    /// The text blocks, joined.
-    fn text(&self) -> String {
-        Message::Assistant {
-            content: self.content.clone(),
+#[test]
+fn validation_gives_what_the_anthropic_provider_gives() {
+    let inputs = [
+        "https://api.openai.com/v1",
+        "  https://api.openai.com/v1///  ",
+        "",
+        "   ",
+        "/",
+        "localhost:11434",
+        "api.openai.com",
+        "http://localhost:11434/v1",
+        "http://127.0.0.1:1234/v1/",
+        "http://[::1]:8080",
+        "http://example.com/v1",
+        "http://10.0.0.5:8000",
+        "https://user:pass@example.com/v1",
+        "https://user@example.com",
+        "https://example.com/v1?key=1",
+        "https://example.com/v1#frag",
+        "ftp://example.com",
+        "https://",
+        "https:///v1",
+        "https://exa mple.com",
+        "HTTPS://Example.com",
+        "HTTP://LOCALHOST:1",
+    ];
+    for input in inputs {
+        for flavor in [Flavor::OpenAi, Flavor::Compatible, Flavor::Ollama] {
+            let ours = config(flavor, input).validate();
+            let theirs = AnthropicConfig {
+                base_url: input.to_owned(),
+                ..AnthropicConfig::default()
+            }
+            .validate();
+            assert_eq!(ours, theirs, "{input:?}");
         }
-        .assistant_text()
+    }
+    assert_eq!(config(Flavor::Compatible, "").validate(), Err(ConfigError::InvalidBaseUrl));
+    assert_eq!(
+        config(Flavor::Compatible, "http://example.com").validate(),
+        Err(ConfigError::InsecureBaseUrl)
+    );
+    assert_eq!(
+        config(Flavor::OpenAi, "https://u:p@example.com").validate(),
+        Err(ConfigError::BaseUrlHasUserinfo)
+    );
+    assert_eq!(
+        config(Flavor::OpenAi, "https://example.com/?x").validate(),
+        Err(ConfigError::BaseUrlHasQueryOrFragment)
+    );
+    assert_eq!(config(Flavor::Ollama, "http://localhost:11434/v1").validate(), Ok(()));
+}
+
+#[test]
+fn a_provider_keeps_the_base_url_trimmed_and_refuses_a_bad_one() {
+    let transport = ScriptedTransport::new(vec![]);
+    let make = |url: &str| {
+        OpenAiProvider::new(
+            Arc::clone(&transport) as Arc<dyn HttpTransport>,
+            Arc::new(FixedKey),
+            config(Flavor::Compatible, url),
+        )
+    };
+    let provider = make("  https://llm.example/v1///\n").unwrap();
+    assert_eq!(provider.config().base_url, "https://llm.example/v1");
+    assert!(matches!(make("http://llm.example"), Err(ConfigError::InsecureBaseUrl)));
+    assert!(matches!(make(""), Err(ConfigError::InvalidBaseUrl)));
+    assert_eq!(transport.request_count(), 0);
+}
+
+#[test]
+fn the_config_debug_output_has_no_key() {
+    let rig = openai(vec![reply("x").into()]);
+    ask(&rig.provider, &hi());
+    let shown = format!("{:?}", rig.provider.config());
+    assert!(!shown.contains(FAKE_KEY) && !shown.contains("ZZSECRETZZ"), "{shown}");
+}
+
+#[test]
+fn each_flavor_asks_the_urls_derived_from_its_base() {
+    let cases = [
+        (Flavor::OpenAi, "https://api.openai.com/v1", "https://api.openai.com/v1/chat/completions", "https://api.openai.com/v1/models"),
+        (Flavor::OpenAi, "https://api.openai.com", "https://api.openai.com/v1/chat/completions", "https://api.openai.com/v1/models"),
+        (Flavor::OpenAi, "https://api.openai.com/v1/responses", "https://api.openai.com/v1/chat/completions", "https://api.openai.com/v1/models"),
+        (Flavor::Compatible, "http://127.0.0.1:1234/v1", "http://127.0.0.1:1234/v1/chat/completions", "http://127.0.0.1:1234/v1/models"),
+        (Flavor::Compatible, "http://localhost:8080", "http://localhost:8080/v1/chat/completions", "http://localhost:8080/v1/models"),
+        (Flavor::Compatible, "https://gw.example/api/", "https://gw.example/api/chat/completions", "https://gw.example/api/models"),
+        (Flavor::Compatible, "https://gw.example/v2/chat/completions", "https://gw.example/v2/chat/completions", "https://gw.example/v2/models"),
+        (Flavor::Ollama, "http://localhost:11434/v1", "http://localhost:11434/v1/chat/completions", "http://localhost:11434/v1/models"),
+    ];
+    for (flavor, base, chat, models) in cases {
+        let steps = vec![reply("x").into(), Reply::ok(json!({"data": []}).to_string()).into()];
+        let rig = rig(flavor, base, steps);
+        ask(&rig.provider, &hi()).ok();
+        rig.provider.list_models(&CancelToken::new()).unwrap();
+        assert_eq!(rig.transport.request(0).url, chat, "{base}");
+        assert_eq!(rig.transport.request(0).method, "POST");
+        assert_eq!(rig.transport.request(1).url, models, "{base}");
+        assert_eq!(rig.transport.request(1).method, "GET");
     }
 }
 
-fn assert_no_key(text: &str) {
-    assert!(
-        !text.contains(FAKE_KEY) && !text.contains("ZZSECRETZZ"),
-        "the API key leaked into: {text}"
-    );
+// ------------------------------------------------------------------------- key and run sessions
+
+#[test]
+fn openai_without_a_key_or_with_an_empty_one_sends_nothing() {
+    let cases = [
+        (Err(KeyError::NotSet), KeyError::NotSet),
+        (Err(KeyError::Empty), KeyError::Empty),
+        (Ok(ApiKey::new("")), KeyError::Empty),
+        (Ok(ApiKey::new(" \n\t ")), KeyError::Empty),
+    ];
+    for (answer, want) in cases {
+        let rig = rig_with(
+            config(Flavor::OpenAi, OPENAI_BASE_URL),
+            Keys::new(answer),
+            vec![reply("x").into()],
+        );
+        let turn = ask(&rig.provider, &hi());
+        assert!(matches!(turn.err(), ProviderError::Key(k) if *k == want), "{:?}", turn.err());
+        assert!(matches!(rig.provider.begin_run(), Err(ProviderError::Key(k)) if k == want));
+        let listed = rig.provider.list_models(&CancelToken::new());
+        assert!(matches!(listed, Err(ProviderError::Key(k)) if k == want));
+        assert_eq!(rig.transport.request_count(), 0);
+    }
 }
 
-// -------------------------------------------------------------------------------------- request
+#[test]
+fn compatible_and_ollama_work_without_a_key_and_send_no_credentials() {
+    for flavor in [Flavor::Compatible, Flavor::Ollama] {
+        for answer in [Err(KeyError::NotSet), Err(KeyError::Empty), Ok(ApiKey::new("  "))] {
+            let steps = vec![reply("x").into(), Reply::ok(json!({"data": [{"id": "m"}]}).to_string()).into()];
+            let rig = rig_with(config(flavor, "http://localhost:9/v1"), Keys::new(answer), steps);
+            assert_eq!(ask(&rig.provider, &hi()).ok().content.len(), 1);
+            // Ollama probes the model: the script has no answer, which keeps it.
+            let models = rig.provider.list_models(&CancelToken::new()).unwrap();
+            assert_eq!(models.len(), 1);
+            for index in 0..rig.transport.request_count() {
+                let sent = rig.transport.request(index);
+                assert!(sent.header("authorization").is_none(), "{flavor:?}");
+                assert!(sent.header("x-api-key").is_none());
+            }
+        }
+    }
+}
 
-fn history() -> Vec<Message> {
+#[test]
+fn any_other_key_error_is_always_returned() {
+    for flavor in [Flavor::OpenAi, Flavor::Compatible, Flavor::Ollama] {
+        let rig = rig_with(
+            config(flavor, "http://localhost:9/v1"),
+            Keys::new(Err(KeyError::Unavailable("locked".into()))),
+            vec![reply("x").into()],
+        );
+        let error = ask(&rig.provider, &hi());
+        assert!(
+            matches!(error.err(), ProviderError::Key(KeyError::Unavailable(_))),
+            "{flavor:?}"
+        );
+        assert!(matches!(
+            rig.provider.list_models(&CancelToken::new()),
+            Err(ProviderError::Key(KeyError::Unavailable(_)))
+        ));
+        assert_eq!(rig.transport.request_count(), 0);
+    }
+}
+
+#[test]
+fn a_key_goes_out_as_one_secret_bearer_header_to_every_flavor() {
+    for flavor in [Flavor::OpenAi, Flavor::Compatible, Flavor::Ollama] {
+        let steps = vec![reply("x").into(), Reply::ok(json!({"data": []}).to_string()).into()];
+        let rig = rig(flavor, "http://localhost:9/v1", steps);
+        // Plain http to localhost is fine for every flavor.
+        ask(&rig.provider, &hi()).ok();
+        rig.provider.list_models(&CancelToken::new()).unwrap();
+        let (chat, list) = (rig.transport.request(0), rig.transport.request(1));
+        for sent in [&chat, &list] {
+            assert_eq!(sent.header("authorization"), Some(format!("Bearer {FAKE_KEY}").as_str()));
+            assert!(sent.header("x-api-key").is_none());
+            assert!(!sent.debug.contains("ZZSECRETZZ"), "{}", sent.debug);
+            assert!(sent.debug.contains("***"));
+        }
+        assert_eq!(chat.header("content-type"), Some("application/json"));
+        assert!(list.header("content-type").is_none());
+        assert!(list.body.is_empty());
+    }
+}
+
+#[test]
+fn a_run_asks_the_key_once_for_all_its_turns() {
+    let keys = Keys::new(Ok(ApiKey::new(FAKE_KEY)));
+    let rig = rig_with(
+        config(Flavor::OpenAi, OPENAI_BASE_URL),
+        Arc::clone(&keys) as Arc<dyn KeySource>,
+        vec![reply("a").into(), reply("b").into(), reply("c").into()],
+    );
+    let messages = hi();
+    let run = rig.provider.begin_run().unwrap();
+    let cancel = CancelToken::new();
+    for _ in 0..2 {
+        rig.provider
+            .stream_turn_in_run(&run, &request("gpt-4o", &messages, &[]), &mut |_| {}, &cancel)
+            .unwrap();
+    }
+    assert_eq!(keys.asked(), 1);
+    ask(&rig.provider, &messages).ok();
+    assert_eq!(keys.asked(), 2, "stream_turn is begin_run and a turn");
+}
+
+#[test]
+fn a_run_session_of_another_provider_is_refused_without_a_request() {
+    let first = openai(vec![reply("a").into()]);
+    let second = openai(vec![reply("b").into()]);
+    let anthropic = AnthropicProvider::new(
+        Arc::clone(&second.transport) as Arc<dyn HttpTransport>,
+        Arc::new(FixedKey),
+        AnthropicConfig::default(),
+    )
+    .unwrap();
+    let messages = hi();
+    let cancel = CancelToken::new();
+    for session in [
+        first.provider.begin_run().unwrap(),
+        anthropic.begin_run().unwrap(),
+        RunSession::default(),
+    ] {
+        let error = second
+            .provider
+            .stream_turn_in_run(&session, &request("gpt-4o", &messages, &[]), &mut |_| {}, &cancel)
+            .unwrap_err();
+        assert!(matches!(error, ProviderError::ForeignRunSession), "{error:?}");
+    }
+    assert_eq!(second.transport.request_count(), 0);
+    // Its own session works.
+    let own = second.provider.begin_run().unwrap();
+    second
+        .provider
+        .stream_turn_in_run(&own, &request("gpt-4o", &messages, &[]), &mut |_| {}, &cancel)
+        .unwrap();
+}
+
+// ------------------------------------------------------------------------------------ the body
+
+fn golden_conversation() -> Vec<Message> {
     vec![
-        Message::user_text("How many users?"),
+        Message::user_text("list tables"),
         Message::System {
-            content: "Writes are off.".into(),
+            content: "note one".into(),
         },
         Message::Assistant {
             content: vec![
-                json!({"type": "thinking", "thinking": "hmm", "signature": "s"}),
-                json!({"type": "redacted_thinking", "data": "x"}),
-                json!({"type": "reasoning", "text": "shown only"}),
-                json!({"type": "text", "text": "Let me look."}),
+                json!({"type": "reasoning", "text": "SECRET-REASONING"}),
+                json!({"type": "thinking", "thinking": "SECRET-THINKING", "signature": "SIG"}),
+                json!({"type": "redacted_thinking", "data": "SECRET-REDACTED"}),
+                json!({"type": "text", "text": "Looking."}),
                 json!({"type": "tool_use", "id": "call_1", "name": "list_tables",
                        "input": {"connection_id": "c1"}}),
-                json!({"type": "tool_use", "id": "call_2", "name": "list_tables",
-                       "input": {"note": "quo\"te"}}),
             ],
         },
         Message::User {
             content: vec![
                 UserBlock::ToolResult {
                     tool_use_id: "call_1".into(),
-                    content: "users".into(),
-                    is_error: false,
-                },
-                UserBlock::ToolResult {
-                    tool_use_id: "call_2".into(),
-                    content: "boom".into(),
+                    content: "[\"users\"]".into(),
                     is_error: true,
+                },
+                UserBlock::Text {
+                    text: "thanks".into(),
                 },
             ],
         },
         Message::Assistant {
-            content: vec![json!({"type": "text", "text": "There are 3."})],
+            content: vec![json!({"type": "text", "text": "Done"})],
         },
-        Message::user_text("Thanks"),
+        Message::user_text("next"),
     ]
 }
 
 #[test]
-fn the_history_is_written_as_chat_completions_wants_it() {
-    let rig = rig(Flavor::Compatible, vec![complete(&[]).into()]);
-    let messages = history();
-    let tools = [spec()];
-    let _ = run(&rig, &request("local-model", &messages, &tools));
-    let sent = rig.transport.request(0);
-    assert_eq!(sent.method, "POST");
-    assert_eq!(sent.url, "http://localhost:1234/v1/chat/completions");
-    let expected = json!({
-        "model": "local-model",
-        "messages": [
-            {"role": "system", "content": "CORE\n\nCTX"},
-            {"role": "user", "content":
-                "How many users?\n\n<system-reminder>\nWrites are off.\n</system-reminder>"},
-            {"role": "assistant", "content": "Let me look.", "tool_calls": [
-                {"id": "call_1", "type": "function", "function":
-                    {"name": "list_tables", "arguments": "{\"connection_id\":\"c1\"}"}},
-                {"id": "call_2", "type": "function", "function":
-                    {"name": "list_tables", "arguments": "{\"note\":\"quo\\\"te\"}"}}]},
-            {"role": "tool", "tool_call_id": "call_1", "content": "users"},
-            {"role": "tool", "tool_call_id": "call_2", "content": "boom"},
-            {"role": "assistant", "content": "There are 3."},
-            {"role": "user", "content": "Thanks"}],
-        "tools": [{"type": "function", "function": {"name": "list_tables",
-            "description": "Lists tables.",
-            "parameters": {"type": "object", "properties": {"connection_id": {"type": "string"}}}}}],
-        "tool_choice": "auto",
-        "stream": true,
-        "stream_options": {"include_usage": true},
-        "max_tokens": 4096,
+fn the_body_has_a_fixed_key_order_and_the_documented_message_shapes() {
+    let rig = openai(vec![reply("x").into()]);
+    let messages = golden_conversation();
+    let tools = [spec("list_tables")];
+    let mut turn = request("gpt-4o", &messages, &tools);
+    turn.system.context = Some(ContextBlock {
+        text: "CTX",
+        cacheable: true,
     });
-    // The exact bytes, key order included.
-    assert_eq!(
-        String::from_utf8(sent.body.clone()).unwrap(),
-        expected.to_string()
+    ask_in(&rig.provider, &turn, &CancelToken::new()).ok();
+    let expected = concat!(
+        r#"{"model":"gpt-4o","messages":["#,
+        r#"{"role":"system","content":"CORE\n\nCTX"},"#,
+        r#"{"role":"user","content":"list tables\n\n<system-reminder>\nnote one\n</system-reminder>"},"#,
+        r#"{"role":"assistant","content":"Looking.","tool_calls":[{"id":"call_1","type":"function","function":{"name":"list_tables","arguments":"{\"connection_id\":\"c1\"}"}}]},"#,
+        r#"{"role":"tool","tool_call_id":"call_1","content":"[\"users\"]"},"#,
+        r#"{"role":"user","content":"thanks"},"#,
+        r#"{"role":"assistant","content":"Done"},"#,
+        r#"{"role":"user","content":"next"}],"#,
+        r#""tools":[{"type":"function","function":{"name":"list_tables","description":"Lists tables.","parameters":{"type":"object","properties":{"connection_id":{"type":"string"}}}}}],"#,
+        r#""tool_choice":"auto","stream":true,"stream_options":{"include_usage":true},"max_tokens":4096}"#,
     );
-    let body = String::from_utf8_lossy(&sent.body);
-    for hidden in ["hmm", "redacted_thinking", "shown only", "reasoning"] {
-        assert!(!body.contains(hidden), "{hidden} was sent");
+    assert_eq!(body_of(&rig.transport, 0), expected);
+}
+
+#[test]
+fn no_trace_of_reasoning_is_sent_back() {
+    let rig = openai(vec![reply("x").into()]);
+    ask(&rig.provider, &golden_conversation()).ok();
+    let body = body_of(&rig.transport, 0);
+    for secret in ["SECRET-REASONING", "SECRET-THINKING", "SECRET-REDACTED", "reasoning", "thinking", "SIG"] {
+        assert!(!body.contains(secret), "{secret}");
     }
 }
 
 #[test]
-fn a_turn_of_tool_calls_only_has_an_empty_content_and_a_note_behind_tool_results_is_a_user_turn() {
-    let rig = rig(Flavor::Compatible, vec![complete(&[]).into()]);
+fn a_request_without_tools_has_neither_tools_nor_tool_choice() {
+    let rig = openai(vec![reply("x").into()]);
+    ask(&rig.provider, &hi()).ok();
+    let body = json_body(&rig.transport, 0);
+    assert!(body.get("tools").is_none() && body.get("tool_choice").is_none());
+    assert_eq!(body["stream"], true);
+    assert_eq!(body["stream_options"], json!({"include_usage": true}));
+    assert_eq!(body["messages"], json!([
+        {"role": "system", "content": "CORE"}, {"role": "user", "content": "hi"}]));
+}
+
+#[test]
+fn the_system_message_is_the_core_alone_or_the_core_and_the_context() {
+    let rig = openai(vec![reply("x").into(), reply("x").into(), reply("x").into()]);
+    let messages = hi();
+    let cases = [(None, "CORE"), (Some(false), "CORE\n\nCTX"), (Some(true), "CORE\n\nCTX")];
+    for (index, (context, want)) in cases.into_iter().enumerate() {
+        let mut turn = request("gpt-4o", &messages, &[]);
+        turn.system.context = context.map(|cacheable| ContextBlock { text: "CTX", cacheable });
+        ask_in(&rig.provider, &turn, &CancelToken::new()).ok();
+        assert_eq!(json_body(&rig.transport, index)["messages"][0]["content"], want);
+    }
+}
+
+#[test]
+fn tool_results_become_tool_messages_before_the_user_text() {
+    let rig = openai(vec![reply("x").into()]);
     let messages = vec![
         Message::user_text("go"),
         Message::Assistant {
             content: vec![
-                json!({"type": "tool_use", "id": "c1", "name": "list_tables", "input": {}}),
+                json!({"type": "tool_use", "id": "a", "name": "one", "input": {}}),
+                json!({"type": "tool_use", "id": "b", "name": "two", "input": {"x": 1}}),
             ],
         },
         Message::User {
-            content: vec![UserBlock::ToolResult {
-                tool_use_id: "c1".into(),
-                content: "[]".into(),
-                is_error: false,
-            }],
+            content: vec![
+                UserBlock::ToolResult { tool_use_id: "a".into(), content: "A".into(), is_error: false },
+                UserBlock::ToolResult { tool_use_id: "b".into(), content: "B".into(), is_error: true },
+                UserBlock::Text { text: "first".into() },
+                UserBlock::Text { text: "second".into() },
+            ],
         },
-        Message::System {
-            content: "Resumed.".into(),
+        Message::Assistant { content: vec![json!({"type": "tool_use", "id": "c", "name": "one", "input": {}})] },
+        Message::User {
+            content: vec![UserBlock::ToolResult { tool_use_id: "c".into(), content: "C".into(), is_error: false }],
         },
     ];
-    let _ = run(&rig, &request("m", &messages, &[]));
-    let sent = rig.transport.request(0).json();
-    assert_eq!(
-        sent["messages"],
-        json!([
-            {"role": "system", "content": "CORE\n\nCTX"},
-            {"role": "user", "content": "go"},
-            {"role": "assistant", "content": "", "tool_calls": [
-                {"id": "c1", "type": "function", "function": {"name": "list_tables", "arguments": "{}"}}]},
-            {"role": "tool", "tool_call_id": "c1", "content": "[]"},
-            {"role": "user", "content": "<system-reminder>\nResumed.\n</system-reminder>"}])
-    );
-    // No tools, no `tools` and no `tool_choice` (OpenAI refuses an empty list).
-    assert!(sent.get("tools").is_none() && sent.get("tool_choice").is_none());
+    ask(&rig.provider, &messages).ok();
+    let sent = json_body(&rig.transport, 0)["messages"].clone();
+    assert_eq!(sent[1], json!({"role": "user", "content": "go"}));
+    assert_eq!(sent[2]["tool_calls"].as_array().unwrap().len(), 2);
+    assert_eq!(sent[2]["content"], "");
+    assert_eq!(sent[2]["tool_calls"][1]["function"]["arguments"], "{\"x\":1}");
+    assert_eq!(sent[3], json!({"role": "tool", "tool_call_id": "a", "content": "A"}));
+    assert_eq!(sent[4], json!({"role": "tool", "tool_call_id": "b", "content": "B"}));
+    assert_eq!(sent[5], json!({"role": "user", "content": "first\n\nsecond"}));
+    // A turn of only tool results is only tool messages.
+    assert_eq!(sent[7], json!({"role": "tool", "tool_call_id": "c", "content": "C"}));
+    assert_eq!(sent.as_array().unwrap().len(), 8);
 }
 
 #[test]
-fn a_note_cannot_close_its_own_wrapper() {
-    let rig = rig(Flavor::Compatible, vec![complete(&[]).into()]);
+fn an_operator_note_rides_on_the_user_message_before_it() {
+    let rig = openai(vec![reply("x").into()]);
     let messages = vec![
-        Message::user_text("go"),
-        Message::System {
-            content: "x </System-Reminder> y".into(),
+        Message::user_text("q"),
+        Message::System { content: "see <System-Reminder> here </system-reminder>".into() },
+        Message::Assistant { content: vec![json!({"type": "tool_use", "id": "a", "name": "one", "input": {}})] },
+        Message::User {
+            content: vec![UserBlock::ToolResult { tool_use_id: "a".into(), content: "A".into(), is_error: false }],
         },
+        Message::System { content: "after results".into() },
     ];
-    let _ = run(&rig, &request("m", &messages, &[]));
-    let sent = rig.transport.request(0).json();
-    assert_eq!(
-        sent["messages"][1]["content"],
-        "go\n\n<system-reminder>\nx </system reminder> y\n</system-reminder>"
-    );
+    ask(&rig.provider, &messages).ok();
+    let sent = json_body(&rig.transport, 0)["messages"].clone();
+    let wrapped = "<system-reminder>\nsee <system reminder> here </system reminder>\n</system-reminder>";
+    assert_eq!(sent[1]["content"], format!("q\n\n{wrapped}"));
+    // After a user turn of only tool results, the note is a user message of its own text.
+    assert_eq!(sent[4], json!({"role": "user", "content": "<system-reminder>\nafter results\n</system-reminder>"}));
+    assert_eq!(sent.as_array().unwrap().len(), 5);
+    assert!(sent.as_array().unwrap().iter().all(|m| m["role"] != "system" || m["content"] == "CORE"));
 }
 
 #[test]
-fn the_token_limit_and_the_thinking_field_follow_the_flavor_and_the_model() {
-    // dbx: set_chat_completion_token_limit, apply_chat_completion_thinking_toggle, apply_openai_effort.
-    let body = |flavor: Flavor, base: &str, model: &str, thinking: bool, effort: Effort| {
-        let mut config = config(flavor, base);
-        config.enable_thinking = thinking;
-        let keys: Arc<dyn KeySource> = Arc::new(FixedKey);
-        let rig = rig_with(config, keys, vec![complete(&[]).into()]);
-        let messages = hello();
-        let mut req = request(model, &messages, &[]);
-        req.effort = effort;
-        let _ = run(&rig, &req);
-        rig.transport.request(0).json()
-    };
-    let api = OPENAI_BASE_URL;
-    let local = "http://localhost:11434/v1";
-
-    let b = body(Flavor::OpenAi, api, "gpt-5", true, Effort::High);
-    assert_eq!(b["max_completion_tokens"], 4096);
-    assert!(b.get("max_tokens").is_none());
-    assert_eq!(b["reasoning_effort"], "high");
-    let b = body(Flavor::OpenAi, api, "gpt-4o", true, Effort::High);
-    assert_eq!(b["max_tokens"], 4096);
-    assert!(b.get("max_completion_tokens").is_none() && b.get("reasoning_effort").is_none());
-    // OpenAI semantics stay through a gateway; a compatible server on this machine is not OpenAI.
-    let b = body(Flavor::OpenAi, local, "gpt-5-proxy", true, Effort::Low);
-    assert_eq!(b["max_completion_tokens"], 4096);
-    let b = body(Flavor::Compatible, local, "gpt-5-local", true, Effort::Low);
-    assert_eq!(b["max_tokens"], 4096);
-    assert!(b.get("reasoning_effort").is_none());
-
-    // Thinking off: nothing for OpenAI, `reasoning_effort: none` for Ollama, the template switch
-    // for other compatible servers, unless the model is a Kimi K2.5+.
-    let b = body(Flavor::OpenAi, api, "gpt-5", false, Effort::High);
-    assert!(b.get("extra_body").is_none() && b.get("reasoning_effort").is_none());
-    let b = body(Flavor::Compatible, api, "gpt-5", false, Effort::High);
-    assert!(b.get("extra_body").is_none() && b.get("reasoning_effort").is_none());
-    let b = body(
-        Flavor::Ollama,
-        local,
-        "deepseek-r1:14b",
-        false,
-        Effort::High,
-    );
-    assert_eq!(b["reasoning_effort"], "none");
-    assert!(b.get("extra_body").is_none());
-    let b = body(
-        Flavor::Compatible,
-        "https://example.com/v1",
-        "qwen3",
-        false,
-        Effort::High,
-    );
-    assert_eq!(
-        b["extra_body"],
-        json!({"chat_template_kwargs": {"enable_thinking": false}})
-    );
-    assert!(b.get("reasoning_effort").is_none());
-    let b = body(
-        Flavor::Compatible,
-        "https://example.com/v1",
-        "kimi-k2.6",
-        false,
-        Effort::High,
-    );
-    assert!(b.get("extra_body").is_none());
-
-    // Ollama with thinking on: the effort its model lists.
-    let b = body(Flavor::Ollama, local, "gpt-oss:20b", true, Effort::Medium);
-    assert_eq!(b["reasoning_effort"], "medium");
-    let b = body(Flavor::Ollama, local, "qwen3:0.6b", true, Effort::Low);
-    assert_eq!(b["reasoning_effort"], "high");
-    let b = body(Flavor::Ollama, local, "llama3.2", true, Effort::Low);
-    assert!(b.get("reasoning_effort").is_none());
+fn a_note_that_does_not_follow_a_user_message_is_dropped() {
+    let rig = openai(vec![reply("x").into()]);
+    let messages = vec![
+        Message::System { content: "orphan".into() },
+        Message::user_text("q"),
+        Message::Assistant { content: vec![json!({"type": "text", "text": "a"})] },
+        Message::System { content: "after assistant".into() },
+        Message::user_text("r"),
+    ];
+    ask(&rig.provider, &messages).ok();
+    let body = body_of(&rig.transport, 0);
+    assert!(!body.contains("orphan") && !body.contains("after assistant"));
 }
 
 #[test]
-fn the_key_goes_out_as_a_bearer_header_only() {
-    let rig = rig(Flavor::OpenAi, vec![complete(&[]).into()]);
-    let _ = turn(&rig, "gpt-4o");
-    let sent = rig.transport.request(0);
-    assert_eq!(sent.url, "https://api.openai.com/v1/chat/completions");
-    assert_eq!(
-        sent.header("authorization"),
-        Some(format!("Bearer {FAKE_KEY}").as_str())
-    );
-    assert_eq!(sent.header("content-type"), Some("application/json"));
-    assert!(sent.header("x-api-key").is_none());
-    assert_no_key(&sent.debug);
-    assert_no_key(&String::from_utf8_lossy(&sent.body));
+fn assistant_text_is_joined_and_an_empty_assistant_message_is_left_out() {
+    let rig = openai(vec![reply("x").into()]);
+    let messages = vec![
+        Message::user_text("q"),
+        Message::Assistant {
+            content: vec![
+                json!({"type": "text", "text": "one"}),
+                json!({"type": "thinking", "thinking": "t"}),
+                json!({"type": "text", "text": "two"}),
+            ],
+        },
+        Message::user_text("r"),
+        Message::Assistant { content: vec![json!({"type": "thinking", "thinking": "only"})] },
+        Message::user_text("s"),
+    ];
+    ask(&rig.provider, &messages).ok();
+    let sent = json_body(&rig.transport, 0)["messages"].clone();
+    assert_eq!(sent[2], json!({"role": "assistant", "content": "one\ntwo"}));
+    assert!(sent[2].get("tool_calls").is_none());
+    let roles: Vec<_> = sent.as_array().unwrap().iter().map(|m| m["role"].as_str().unwrap()).collect();
+    assert_eq!(roles, ["system", "user", "assistant", "user", "user"]);
 }
 
 #[test]
-fn a_key_is_needed_as_dbx_says_and_a_missing_one_sends_nothing() {
-    // dbx provider_requires_api_key: OpenAI only.
-    let openai = OpenAiProvider::new(
-        ScriptedTransport::new(vec![]),
-        Arc::new(NoKey),
-        OpenAiConfig::default(),
-    )
-    .unwrap();
-    let messages = hello();
-    let req = request("gpt-4o", &messages, &[]);
-    let result = openai.stream_turn(&req, &mut |_| {}, &CancelToken::new());
-    assert!(matches!(result, Err(ProviderError::Key(KeyError::NotSet))));
-    let empty = OpenAiProvider::new(
-        ScriptedTransport::new(vec![]),
-        Arc::new(EmptyKey),
-        OpenAiConfig::default(),
-    )
-    .unwrap();
-    let result = empty.stream_turn(&req, &mut |_| {}, &CancelToken::new());
-    assert!(matches!(result, Err(ProviderError::Key(KeyError::Empty))));
-    assert!(matches!(
-        openai.list_models(&CancelToken::new()),
-        Err(ProviderError::Key(KeyError::NotSet))
-    ));
+fn the_history_form_is_not_consulted() {
+    let rig = openai(vec![reply("x").into(), reply("x").into()]);
+    let messages = golden_conversation();
+    let plain = request("gpt-4o", &messages, &[]);
+    let mut odd = plain;
+    odd.history = HistoryForm { drop_thinking_before: 99, notes_in_user_turn: true };
+    ask_in(&rig.provider, &plain, &CancelToken::new()).ok();
+    ask_in(&rig.provider, &odd, &CancelToken::new()).ok();
+    assert_eq!(body_of(&rig.transport, 0), body_of(&rig.transport, 1));
+}
 
-    for flavor in [Flavor::Ollama, Flavor::Compatible] {
-        let rig = rig(flavor, vec![complete(&[text_chunk("ok")]).into()]);
-        let (response, _) = ok(turn(&rig, "m"));
-        assert_eq!(
-            response.content,
-            vec![json!({"type": "text", "text": "ok"})]
+#[test]
+fn the_token_limit_and_the_thinking_field_close_the_body() {
+    let cases = [
+        (Flavor::OpenAi, OPENAI_BASE_URL, true, "o4-mini", r#""max_completion_tokens":4096,"reasoning_effort":"medium"}"#),
+        (Flavor::OpenAi, OPENAI_BASE_URL, true, "gpt-4o", r#""max_tokens":4096}"#),
+        (Flavor::OpenAi, OPENAI_BASE_URL, false, "o4-mini", r#""max_completion_tokens":4096}"#),
+        (Flavor::Compatible, "http://localhost:8080/v1", true, "gpt-5", r#""max_tokens":4096}"#),
+        (Flavor::Compatible, "https://api.openai.com/v1", true, "gpt-5", r#""max_completion_tokens":4096}"#),
+        (Flavor::Compatible, "http://localhost:8080/v1", false, "qwen3", r#""max_tokens":4096,"extra_body":{"chat_template_kwargs":{"enable_thinking":false}}}"#),
+        (Flavor::Compatible, "http://localhost:8080/v1", false, "kimi-k2.5", r#""max_tokens":4096}"#),
+        (Flavor::Ollama, OLLAMA_BASE_URL, true, "qwen3:0.6b", r#""max_tokens":4096,"reasoning_effort":"high"}"#),
+        (Flavor::Ollama, OLLAMA_BASE_URL, false, "llama3.2", r#""max_tokens":4096,"reasoning_effort":"none"}"#),
+    ];
+    for (flavor, base, thinking, model, tail) in cases {
+        let rig = rig_with(
+            OpenAiConfig { enable_thinking: thinking, max_tokens: 4096, ..config(flavor, base) },
+            Arc::new(FixedKey),
+            vec![reply("x").into()],
         );
-        assert!(rig.transport.request(0).header("authorization").is_none());
+        let messages = hi();
+        ask_in(&rig.provider, &request(model, &messages, &[]), &CancelToken::new()).ok();
+        let body = body_of(&rig.transport, 0);
+        assert!(
+            body.ends_with(&format!(r#""stream_options":{{"include_usage":true}},{tail}"#)),
+            "{flavor:?} {model}: {body}"
+        );
     }
-    // A key that is there is sent to Ollama too (a remote one behind a proxy).
-    let keyed = rig_with(
-        config(Flavor::Ollama, OLLAMA_BASE_URL),
-        Arc::new(FixedKey),
-        vec![complete(&[]).into()],
-    );
-    let _ = turn(&keyed, "m");
-    assert!(keyed.transport.request(0).header("authorization").is_some());
 }
 
-// --------------------------------------------------------------------------------------- stream
+#[test]
+fn the_configured_token_limit_is_sent() {
+    let rig = rig_with(
+        OpenAiConfig { max_tokens: 777, ..config(Flavor::OpenAi, OPENAI_BASE_URL) },
+        Arc::new(FixedKey),
+        vec![reply("x").into()],
+    );
+    ask(&rig.provider, &hi()).ok();
+    assert_eq!(json_body(&rig.transport, 0)["max_tokens"], 777);
+}
+
+// ------------------------------------------------------------------------------------ one turn
 
 #[test]
-fn a_text_turn_with_usage_becomes_one_text_block() {
-    let reply = complete(&[
-        chunk(json!({"role": "assistant", "content": ""}), None),
-        text_chunk("Hel"),
-        text_chunk("lo \"world\"\nline2 😀"),
-        chunk(json!({}), Some("stop")),
-        usage_chunk(120, 30, Some(100)),
-    ]);
-    let rig = rig(Flavor::OpenAi, vec![reply.into()]);
-    let (response, events) = ok(turn(&rig, "gpt-4o"));
-    assert_eq!(
-        response.content,
-        vec![json!({"type": "text", "text": "Hello \"world\"\nline2 😀"})]
-    );
+fn a_turn_streams_events_and_returns_content_usage_model_and_request_id() {
+    let rig = openai(vec![Reply::ok(
+        sse(&[
+            text_chunk("Hel"),
+            text_chunk("lo"),
+            finish_chunk("stop"),
+            usage_chunk(100, 7, 40),
+        ]) + "data: [DONE]\n\n",
+    )
+    .header("x-request-id", "req_from_x")
+    .into()]);
+    let turn = ask(&rig.provider, &hi());
+    let response = turn.ok();
+    assert_eq!(turn.events, ["TextDelta(\"Hel\")", "TextDelta(\"lo\")"]);
+    assert_eq!(response.content, [json!({"type": "text", "text": "Hello"})]);
     assert_eq!(response.stop_reason, StopReason::EndTurn);
     assert_eq!(
         response.usage,
-        Usage {
-            input_tokens: 20,
-            output_tokens: 30,
-            cache_read_input_tokens: 100,
-            cache_creation_input_tokens: 0,
-        }
+        Usage { input_tokens: 60, output_tokens: 7, cache_read_input_tokens: 40, cache_creation_input_tokens: 0 }
     );
-    assert_eq!(response.model.as_deref(), Some("gpt-test"));
-    assert_eq!(response.request_id.as_deref(), Some("req_scripted"));
-    assert_eq!(
-        events,
-        vec![
-            "TextDelta(\"Hel\")".to_owned(),
-            "TextDelta(\"lo \\\"world\\\"\\nline2 😀\")".to_owned()
-        ]
-    );
-}
-
-#[test]
-fn the_request_id_comes_from_the_header() {
-    let reply = complete(&[text_chunk("x"), chunk(json!({}), Some("stop"))])
-        .header("x-request-id", "req_oai");
-    let rig = rig(Flavor::OpenAi, vec![reply.into()]);
-    let (response, _) = ok(turn(&rig, "gpt-4o"));
-    assert_eq!(response.request_id.as_deref(), Some("req_oai"));
-}
-
-#[test]
-fn reasoning_is_streamed_as_thinking_and_stored_in_front_of_the_text() {
-    // dbx parses_ollama_openai_reasoning_stream_chunks: `reasoning`, `thinking`, and the
-    // `reasoning_content` of DeepSeek-style servers.
-    let reply = complete(&[
-        chunk(json!({"reasoning_content": "plan "}), None),
-        chunk(json!({"reasoning": "more "}), None),
-        chunk(json!({"thinking": "done"}), None),
-        text_chunk("Answer"),
-        chunk(json!({}), Some("stop")),
-    ]);
-    let rig = rig(Flavor::Ollama, vec![reply.into()]);
-    let (response, events) = ok(turn(&rig, "qwen3"));
-    assert_eq!(
-        response.content,
-        vec![
-            json!({"type": "reasoning", "text": "plan more done"}),
-            json!({"type": "text", "text": "Answer"})
-        ]
-    );
-    assert_eq!(
-        events,
-        vec![
-            "ThinkingDelta(\"plan \")",
-            "ThinkingDelta(\"more \")",
-            "ThinkingDelta(\"done\")",
-            "TextDelta(\"Answer\")"
-        ]
-    );
-}
-
-#[test]
-fn proxy_response_shapes_are_read_as_dbx_reads_them() {
-    // dbx parses_openai_compatible_proxy_response_shapes, plus the other places `openai_stream_text`
-    // looks: `choices[0].text`, the top-level `content`, a part list with the four field names.
-    let reply = complete(&[
-        json!({"choices": [{"delta": {"content": [{"type": "text", "text": "SELECT "},
-                                                  {"type": "text", "text": "1;"}]}}]}),
-        json!({"choices": [{"message": {"content": " a"}}]}),
-        json!({"choices": [{"text": " b"}]}),
-        json!({"type": "response.output_text.delta", "delta": " c"}),
-        json!({"content": " d"}),
-        json!({"choices": [{"delta": {"content": [{"output_text": " e"}, {"input_text": "f"}]}}]}),
-        json!({"choices": [{"delta": {}, "finish_reason": "stop"}]}),
-    ]);
-    let rig = rig(Flavor::Compatible, vec![reply.into()]);
-    let (response, _) = ok(turn(&rig, "m"));
-    assert_eq!(
-        response.content,
-        vec![json!({"type": "text", "text": "SELECT 1; a b c d ef"})]
-    );
-}
-
-#[test]
-fn parallel_tool_calls_split_across_chunks_become_tool_use_blocks() {
-    let reply = complete(&[
-        text_chunk("Looking."),
-        chunk(
-            json!({"tool_calls": [{"index": 0, "id": "call_a", "type": "function",
-                    "function": {"name": "list_tables", "arguments": ""}}]}),
-            None,
-        ),
-        // GLM and others send an empty id on the later deltas: not a new call.
-        chunk(
-            json!({"tool_calls": [{"index": 0, "id": "", "function": {"arguments": "{\"connec"}}]}),
-            None,
-        ),
-        chunk(
-            json!({"tool_calls": [
-                {"index": 0, "function": {"arguments": "tion_id\": \"c1\"}"}},
-                {"index": 1, "id": "call_b", "type": "function",
-                 "function": {"name": "execute_query", "arguments": "{\"statement\":"}}]}),
-            None,
-        ),
-        chunk(
-            json!({"tool_calls": [{"index": 1, "id": "", "function": {"arguments": " \"SELECT 1\"}"}}]}),
-            None,
-        ),
-        chunk(json!({}), Some("tool_calls")),
-        usage_chunk(10, 20, None),
-    ]);
-    let rig = rig(Flavor::Compatible, vec![reply.into()]);
-    let (response, events) = ok(turn(&rig, "m"));
-    assert_eq!(response.stop_reason, StopReason::ToolUse);
-    assert_eq!(
-        response.content,
-        vec![
-            json!({"type": "text", "text": "Looking."}),
-            json!({"type": "tool_use", "id": "call_a", "name": "list_tables",
-                   "input": {"connection_id": "c1"}}),
-            json!({"type": "tool_use", "id": "call_b", "name": "execute_query",
-                   "input": {"statement": "SELECT 1"}}),
-        ]
-    );
+    assert_eq!(response.model.as_deref(), Some("gpt-4o-2024"));
+    // `x-request-id` wins over `request-id` (the script sets both).
+    assert_eq!(response.request_id.as_deref(), Some("req_from_x"));
+    assert!(!response.served_by_fallback && response.fallback_to.is_none());
+    assert_eq!(response.thinking_dropped, 0);
     assert!(response.invalid_tool_inputs.is_empty());
-    assert_eq!(
-        events
-            .iter()
-            .filter(|e| e.starts_with("ToolCallStarted"))
-            .count(),
-        2
-    );
-    assert!(events[1].contains("ToolCallStarted") && events[1].contains("call_a"));
-    assert!(events.iter().any(|e| e.contains("ToolInputReady")
-        && e.contains("call_b")
-        && e.contains("valid: true")));
 }
 
 #[test]
-fn arguments_that_are_not_an_object_become_an_empty_input_and_are_reported() {
-    let reply = complete(&[
-        chunk(
-            json!({"tool_calls": [{"index": 0, "id": "c1",
-                "function": {"name": "list_tables", "arguments": "{\"connec"}}]}),
-            None,
-        ),
-        chunk(
-            json!({"tool_calls": [{"index": 1, "id": "c2",
-                "function": {"name": "list_tables", "arguments": "[1]"}}]}),
-            None,
-        ),
-        chunk(
-            json!({"tool_calls": [{"index": 2, "id": "c3", "function": {"name": "list_tables"}}]}),
-            None,
-        ),
-        chunk(json!({}), Some("stop")),
-    ]);
-    let rig = rig(Flavor::Compatible, vec![reply.into()]);
-    let (response, events) = ok(turn(&rig, "m"));
-    // `stop` with calls is a tool turn.
+fn the_request_id_falls_back_to_request_id() {
+    let rig = openai(vec![reply("x").into()]);
+    assert_eq!(ask(&rig.provider, &hi()).ok().request_id.as_deref(), Some("req_scripted"));
+}
+
+#[test]
+fn a_tool_turn_reports_started_and_ready_and_keeps_calls_in_order() {
+    let rig = openai(vec![Reply::ok(
+        sse(&[
+            json!({"choices": [{"delta": {"reasoning_content": "think "}}]}),
+            json!({"choices": [{"delta": {"reasoning_content": "hard"}}]}),
+            text_chunk("Let me look."),
+            tool_chunk(0, "call_a", "list_tables", "{\"connection_id\":"),
+            json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": "\"c1\"}"}}]}}]}),
+            tool_chunk(1, "call_b", "describe_table", "{broken"),
+            finish_chunk("tool_calls"),
+        ]) + "data: [DONE]\n\n",
+    )
+    .into()]);
+    let turn = ask(&rig.provider, &hi());
+    let response = turn.ok();
     assert_eq!(response.stop_reason, StopReason::ToolUse);
     assert_eq!(
-        response
-            .content
-            .iter()
-            .map(|b| b["input"].clone())
-            .collect::<Vec<_>>(),
-        vec![json!({}), json!({}), json!({})]
-    );
-    let invalid: Vec<_> = response
-        .invalid_tool_inputs
-        .iter()
-        .map(|i| (i.tool_use_id.as_str(), i.raw.as_str()))
-        .collect();
-    assert_eq!(invalid, vec![("c1", "{\"connec"), ("c2", "[1]")]);
-    assert!(events
-        .iter()
-        .any(|e| e.contains("ToolInputReady") && e.contains("c1") && e.contains("valid: false")));
-    assert!(events
-        .iter()
-        .any(|e| e.contains("ToolInputReady") && e.contains("c3") && e.contains("valid: true")));
-}
-
-#[test]
-fn a_new_id_on_a_used_index_is_a_new_call_and_a_call_without_an_id_gets_a_generated_one() {
-    let call = |index: u32, id: Option<&str>, name: Option<&str>, args: &str| {
-        let mut call = json!({"index": index, "function": {"arguments": args}});
-        if let Some(id) = id {
-            call["id"] = json!(id);
-        }
-        if let Some(name) = name {
-            call["function"]["name"] = json!(name);
-        }
-        chunk(json!({"tool_calls": [call]}), None)
-    };
-    let reply = complete(&[
-        // Some servers number every call 0.
-        call(0, Some("x1"), Some("list_tables"), "{}"),
-        call(0, Some("x2"), Some("list_tables"), "{\"a\":1}"),
-        // Never named: the index and the name are all there is.
-        call(1, None, Some("list_tables"), "{\"b\""),
-        call(1, None, None, ":2}"),
-        call(2, None, Some("list_tables"), "{}"),
-        chunk(json!({}), Some("tool_calls")),
-    ]);
-    let rig = rig(Flavor::Ollama, vec![reply.into()]);
-    let (response, events) = ok(turn(&rig, "m"));
-    let ids: Vec<_> = response
-        .content
-        .iter()
-        .map(|b| b["id"].as_str().unwrap().to_owned())
-        .collect();
-    assert_eq!(ids[0], "x1");
-    assert_eq!(ids[1], "x2");
-    assert!(ids[2].starts_with("call_") && ids[3].starts_with("call_"));
-    assert_ne!(ids[2], ids[3]);
-    let inputs: Vec<_> = response
-        .content
-        .iter()
-        .map(|b| b["input"].clone())
-        .collect();
-    assert_eq!(
-        inputs,
-        vec![json!({}), json!({"a": 1}), json!({"b": 2}), json!({})]
-    );
-    assert_eq!(
-        events
-            .iter()
-            .filter(|e| e.starts_with("ToolCallStarted"))
-            .count(),
-        4
-    );
-
-    // Another turn never repeats a generated id.
-    let again = ok(turn(
-        &self::rig(
-            Flavor::Ollama,
-            vec![complete(&[
-                call(0, None, Some("t"), "{}"),
-                chunk(json!({}), Some("stop")),
-            ])
-            .into()],
-        ),
-        "m",
-    ))
-    .0;
-    assert!(!ids.contains(&again.content[0]["id"].as_str().unwrap().to_owned()));
-}
-
-#[test]
-fn finish_reasons_map_to_stop_reasons() {
-    for (reason, expected) in [
-        ("stop", StopReason::EndTurn),
-        ("length", StopReason::MaxTokens),
-        ("content_filter", StopReason::Refusal { category: None }),
-        ("tool_calls", StopReason::ToolUse),
-        ("function_call", StopReason::ToolUse),
-        ("something_new", StopReason::Other("something_new".into())),
-    ] {
-        let reply = complete(&[text_chunk("x"), chunk(json!({}), Some(reason))]);
-        let rig = rig(Flavor::Compatible, vec![reply.into()]);
-        assert_eq!(ok(turn(&rig, "m")).0.stop_reason, expected, "{reason}");
-    }
-    // No finish reason but `[DONE]`: an end of turn.
-    let rig = rig(
-        Flavor::Compatible,
-        vec![complete(&[text_chunk("x")]).into()],
-    );
-    assert_eq!(ok(turn(&rig, "m")).0.stop_reason, StopReason::EndTurn);
-}
-
-#[test]
-fn blank_text_is_not_stored() {
-    let reply = complete(&[text_chunk(" \n"), chunk(json!({}), Some("stop"))]);
-    let rig = rig(Flavor::Compatible, vec![reply.into()]);
-    assert!(ok(turn(&rig, "m")).0.content.is_empty());
-}
-
-#[test]
-fn the_stream_ends_shortly_after_a_finish_reason_when_no_done_comes() {
-    // dbx openai_tool_stream_finishes_without_done_marker_after_finish_reason: the server sends a
-    // finish reason, then keeps the connection open.
-    let (blocked, entered) = mpsc::channel();
-    let reply = Reply::ok(sse(&[text_chunk("done"), chunk(json!({}), Some("stop"))]))
-        .end(End::BlockUntilCancel(Some(blocked)));
-    let rig = rig(Flavor::Compatible, vec![reply.into()]);
-    let started = Instant::now();
-    let (response, _) = ok(turn(&rig, "m"));
-    assert_eq!(
         response.content,
-        vec![json!({"type": "text", "text": "done"})]
-    );
-    assert!(started.elapsed() < Duration::from_secs(5));
-    // The helper that was reading the rest of the body is released: the connection was closed.
-    assert!(entered.recv_timeout(Duration::from_secs(5)).is_ok());
-}
-
-#[test]
-fn the_usage_chunk_that_follows_the_finish_reason_is_kept_without_done() {
-    let reply = Reply::ok(sse(&[
-        text_chunk("x"),
-        chunk(json!({}), Some("stop")),
-        usage_chunk(5, 6, None),
-    ]));
-    let rig = rig(Flavor::Compatible, vec![reply.into()]);
-    let (response, _) = ok(turn(&rig, "m"));
-    assert_eq!(response.usage.input_tokens, 5);
-    assert_eq!(response.usage.output_tokens, 6);
-}
-
-#[test]
-fn a_stream_that_ends_with_neither_done_nor_a_finish_reason_is_truncated() {
-    for body in [
-        String::new(),
-        sse(&[text_chunk("half")]),
-        ": keep-alive\n\n".to_owned(),
-    ] {
-        let rig = rig(Flavor::Compatible, vec![Reply::ok(body).into()]);
-        assert!(matches!(
-            err(turn(&rig, "m")),
-            ProviderError::Protocol {
-                source: ProtocolError::Truncated,
-                ..
-            }
-        ));
-        assert_eq!(
-            rig.transport.request_count(),
-            1,
-            "a broken stream is not sent again"
-        );
-    }
-}
-
-#[test]
-fn a_stream_that_breaks_is_a_transport_error() {
-    let reply = Reply::ok(sse(&[text_chunk("half")])).end(End::Break);
-    let rig = rig(Flavor::Compatible, vec![reply.into()]);
-    assert!(matches!(
-        err(turn(&rig, "m")),
-        ProviderError::Transport { .. }
-    ));
-    assert_eq!(rig.transport.request_count(), 1);
-}
-
-#[test]
-fn an_error_in_the_stream_is_an_api_failure_in_both_shapes() {
-    let after_text = |error: Value| {
-        let reply = Reply::ok(format!("{}data: {error}\n\n", sse(&[text_chunk("so far")])));
-        let rig = rig(Flavor::Compatible, vec![reply.into()]);
-        let error = err(turn(&rig, "m"));
-        assert_eq!(
-            rig.transport.request_count(),
-            1,
-            "after text: no new request"
-        );
-        error
-    };
-    let error = after_text(
-        json!({"error": {"message": "The server had an error", "type": "server_error", "code": null}}),
-    );
-    assert!(
-        matches!(&error, ProviderError::Server(f) if f.message == "The server had an error" && f.status.is_none())
-    );
-    // Ollama: the error is the text.
-    let error = after_text(json!({"error": "model runner has unexpectedly stopped"}));
-    assert!(
-        matches!(&error, ProviderError::Rejected(f) if f.message == "model runner has unexpectedly stopped")
-    );
-    let error = after_text(
-        json!({"error": {"message": "slow down", "type": "tokens", "code": "rate_limit_exceeded"}}),
-    );
-    assert!(matches!(error, ProviderError::RateLimited(_)));
-    let error = after_text(json!({"error": {"message": "bad key", "code": "invalid_api_key"}}));
-    assert!(matches!(error, ProviderError::Authentication(_)));
-    // `error: null` on a normal chunk is no error.
-    let reply = complete(&[
-        json!({"error": null, "choices": [{"delta": {"content": "fine"}, "finish_reason": "stop"}]}),
-    ]);
-    let rig = rig(Flavor::Compatible, vec![reply.into()]);
-    assert_eq!(ok(turn(&rig, "m")).0.text(), "fine");
-}
-
-#[test]
-fn an_error_before_any_content_is_retried_like_the_http_error_it_stands_for() {
-    let failing = Reply::ok(format!(
-        "data: {}\n\n",
-        json!({"error": {"message": "Rate limit reached", "type": "rate_limit_exceeded"}})
-    ));
-    let good = complete(&[text_chunk("ok"), chunk(json!({}), Some("stop"))]);
-    let rig = rig(Flavor::Compatible, vec![failing.into(), good.into()]);
-    let (response, events) = ok(turn(&rig, "m"));
-    assert_eq!(
-        response.content,
-        vec![json!({"type": "text", "text": "ok"})]
-    );
-    assert_eq!(rig.transport.request_count(), 2);
-    assert_eq!(rig.sleeper.waits().len(), 1);
-    assert!(events[0].starts_with("Retrying") && events[0].contains("RateLimited"));
-}
-
-#[test]
-fn a_chunk_that_is_no_json_is_skipped_within_the_bound_on_idle_events() {
-    let reply = Reply::ok(format!(
-        "data: not json\n\n{}{DONE}",
-        sse(&[text_chunk("ok"), chunk(json!({}), Some("stop"))])
-    ));
-    let rig = rig(Flavor::Compatible, vec![reply.into()]);
-    assert_eq!(ok(turn(&rig, "m")).0.text(), "ok");
-
-    let junk = "data: nope\n\n".repeat(30);
-    let rig = self::rig(Flavor::Compatible, vec![Reply::ok(junk).into()]);
-    let provider = OpenAiProvider::new(
-        Arc::clone(&rig.transport) as Arc<dyn HttpTransport>,
-        Arc::new(NoKey),
-        config(Flavor::Compatible, "http://localhost:1/v1"),
-    )
-    .unwrap()
-    .with_limits(TurnLimits {
-        max_idle_events: 10,
-        ..TurnLimits::default()
-    });
-    let messages = hello();
-    let result = provider.stream_turn(
-        &request("m", &messages, &[]),
-        &mut |_| {},
-        &CancelToken::new(),
-    );
-    assert!(matches!(
-        result,
-        Err(ProviderError::Protocol {
-            source: ProtocolError::TooManyIdleEvents { limit: 10 },
-            ..
-        })
-    ));
-}
-
-#[test]
-fn the_size_of_a_turn_is_bounded() {
-    let big = sse(&[
-        text_chunk(&"x".repeat(2000)),
-        chunk(json!({}), Some("stop")),
-    ]);
-    let transport = ScriptedTransport::new(vec![Reply::ok(big).into()]);
-    let provider = OpenAiProvider::new(
-        transport as Arc<dyn HttpTransport>,
-        Arc::new(NoKey),
-        config(Flavor::Compatible, "http://localhost:1/v1"),
-    )
-    .unwrap()
-    .with_limits(TurnLimits {
-        max_bytes: 1000,
-        ..TurnLimits::default()
-    });
-    let messages = hello();
-    let result = provider.stream_turn(
-        &request("m", &messages, &[]),
-        &mut |_| {},
-        &CancelToken::new(),
-    );
-    assert!(matches!(
-        result,
-        Err(ProviderError::Protocol {
-            source: ProtocolError::TurnTooLarge { limit: 1000 },
-            ..
-        })
-    ));
-    let too_many: Vec<Value> = (0..5)
-        .map(|i| chunk(json!({"tool_calls": [{"index": i, "id": format!("c{i}"), "function": {"name": "t"}}]}), None))
-        .collect();
-    let transport = ScriptedTransport::new(vec![complete(&too_many).into()]);
-    let provider = OpenAiProvider::new(
-        transport as Arc<dyn HttpTransport>,
-        Arc::new(NoKey),
-        config(Flavor::Compatible, "http://localhost:1/v1"),
-    )
-    .unwrap()
-    .with_limits(TurnLimits {
-        max_blocks: 3,
-        ..TurnLimits::default()
-    });
-    let result = provider.stream_turn(
-        &request("m", &messages, &[]),
-        &mut |_| {},
-        &CancelToken::new(),
-    );
-    assert!(matches!(
-        result,
-        Err(ProviderError::Protocol {
-            source: ProtocolError::TooManyBlocks { limit: 3 },
-            ..
-        })
-    ));
-}
-
-/// Every stream the assembler reads gives the same events and turn however it is chunked.
-fn assemble(chunks: &[&[u8]]) -> (Vec<String>, TurnResponse) {
-    let mut parser = SseParser::default();
-    let mut assembler = ChatAssembler::new(
-        TurnLimits::default(),
-        crate::wire::errors::Scrub::new(ApiKey::new("")),
-        &[],
-    );
-    let mut events = Vec::new();
-    for chunk in chunks {
-        let done = parser
-            .feed::<crate::wire::StreamError>(chunk, &mut |event| {
-                assembler.handle(event.data, &mut |e| events.push(format!("{e:?}")))
-            })
-            .unwrap();
-        if done {
-            break;
-        }
-    }
-    let turn = assembler
-        .finish(Some("req".into()), &mut |e| events.push(format!("{e:?}")))
-        .unwrap();
-    (events, turn)
-}
-
-fn fixture() -> String {
-    format!(
-        "{}{DONE}",
-        sse(&[
-            chunk(json!({"reasoning_content": "Hmm, ü — 日本"}), None),
-            text_chunk("Hello \"world\"\nline2 "),
-            text_chunk("😀"),
-            chunk(
-                json!({"tool_calls": [{"index": 0, "id": "c1", "function": {"name": "list_tables", "arguments": "{\"connec"}}]}),
-                None
-            ),
-            chunk(
-                json!({"tool_calls": [{"index": 0, "function": {"arguments": "tion_id\":\"c1\"}"}}]}),
-                None
-            ),
-            chunk(
-                json!({"tool_calls": [{"index": 1, "id": "c2", "function": {"name": "t", "arguments": "{"}}]}),
-                None
-            ),
-            chunk(json!({}), Some("tool_calls")),
-            usage_chunk(7, 8, Some(2)),
-        ])
-    )
-}
-
-#[test]
-fn the_result_does_not_depend_on_the_chunking_or_the_line_ends() {
-    let text = fixture();
-    let bytes = text.as_bytes();
-    let whole = assemble(&[bytes]);
-    assert_eq!(whole.1.content.len(), 4);
-    for at in 0..=bytes.len() {
-        assert_eq!(
-            assemble(&[&bytes[..at], &bytes[at..]]),
-            whole,
-            "split at {at}"
-        );
-    }
-    let singles: Vec<&[u8]> = bytes.chunks(1).collect();
-    assert_eq!(assemble(&singles), whole);
-    for replaced in [text.replace('\n', "\r\n"), text.replace('\n', "\r")] {
-        let bytes = replaced.as_bytes();
-        assert_eq!(assemble(&[bytes]), whole);
-        let singles: Vec<&[u8]> = bytes.chunks(1).collect();
-        assert_eq!(assemble(&singles), whole);
-    }
-}
-
-// --------------------------------------------------------------------------------------- errors
-
-#[test]
-fn http_statuses_map_to_typed_errors_with_the_message_of_either_body_shape() {
-    type Check = fn(&ProviderError) -> bool;
-    let cases: [(u16, &str, Check); 7] = [
-        (400, "bad", |e| matches!(e, ProviderError::BadRequest(_))),
-        (401, "no", |e| matches!(e, ProviderError::Authentication(_))),
-        (403, "no", |e| matches!(e, ProviderError::Permission(_))),
-        (404, "no", |e| matches!(e, ProviderError::NotFound(_))),
-        (413, "no", |e| matches!(e, ProviderError::TooLarge(_))),
-        (402, "no", |e| matches!(e, ProviderError::Rejected(_))),
-        (422, "no", |e| matches!(e, ProviderError::Rejected(_))),
-    ];
-    for (status, message, matches) in cases {
-        let rig = rig(
-            Flavor::OpenAi,
-            vec![Reply::error(status, "invalid_request_error", message).into()],
-        );
-        let error = err(turn(&rig, "m"));
-        assert!(matches(&error), "{status}: {error:?}");
-        assert_eq!(error.api_failure().unwrap().message, message);
-        assert_eq!(error.api_failure().unwrap().status, Some(status));
-        assert_eq!(rig.transport.request_count(), 1, "{status} is not retried");
-    }
-    // Ollama: `{"error": "text"}`.
-    let body = json!({"error": "model 'nope' not found"}).to_string();
-    let rig = rig(Flavor::Ollama, vec![Reply::with_status(404, body).into()]);
-    let error = err(turn(&rig, "nope"));
-    assert!(matches!(&error, ProviderError::NotFound(f) if f.message == "model 'nope' not found"));
-    // A body that is no JSON still gives a typed error.
-    let rig = self::rig(
-        Flavor::OpenAi,
-        vec![Reply::with_status(400, "<html>").into()],
-    );
-    assert_eq!(
-        err(turn(&rig, "m")).api_failure().unwrap().message,
-        "the server answered HTTP 400"
-    );
-}
-
-#[test]
-fn a_429_and_the_5xx_are_retried_within_the_policy_then_the_typed_error() {
-    let reply = || complete(&[text_chunk("ok"), chunk(json!({}), Some("stop"))]);
-    let rig = rig(
-        Flavor::OpenAi,
-        vec![
-            Reply::error(429, "rate_limit_exceeded", "slow")
-                .header("retry-after", "7")
-                .into(),
-            Reply::error(500, "server_error", "oops").into(),
-            Reply::error(529, "overloaded_error", "busy").into(),
-            reply().into(),
-        ],
-    );
-    let (response, events) = ok(turn(&rig, "m"));
-    assert_eq!(response.text(), "ok");
-    assert_eq!(rig.transport.request_count(), 4);
-    assert_eq!(
-        rig.sleeper.waits(),
-        vec![
-            Duration::from_secs(7),
-            Duration::from_secs(2),
-            Duration::from_secs(4)
+        [
+            json!({"type": "reasoning", "text": "think hard"}),
+            json!({"type": "text", "text": "Let me look."}),
+            json!({"type": "tool_use", "id": "call_a", "name": "list_tables", "input": {"connection_id": "c1"}}),
+            json!({"type": "tool_use", "id": "call_b", "name": "describe_table", "input": {}}),
         ]
     );
-    assert_eq!(events.len(), 3 + 1);
-    assert!(
-        events[0].contains("RateLimited")
-            && events[1].contains("Server")
-            && events[2].contains("Overloaded")
-    );
-
-    let rig = self::rig(
-        Flavor::OpenAi,
-        (0..5)
-            .map(|_| Reply::error(503, "server_error", "down").into())
-            .collect(),
-    );
-    assert!(matches!(err(turn(&rig, "m")), ProviderError::Server(_)));
     assert_eq!(
-        rig.transport.request_count(),
-        4,
-        "the first try and three retries"
+        response.invalid_tool_inputs,
+        [crate::provider::InvalidToolInput { tool_use_id: "call_b".into(), raw: "{broken".into() }]
     );
+    assert_eq!(turn.events[0], "ThinkingDelta(\"think \")");
+    let started: Vec<_> = turn.events.iter().filter(|e| e.starts_with("ToolCallStarted")).collect();
+    assert_eq!(started.len(), 2);
+    assert!(turn.events.last().unwrap().contains("valid: false"));
+}
 
-    // A connection that fails before the first byte is tried once more.
-    let rig = self::rig(
-        Flavor::OpenAi,
-        vec![
-            Step::Fail(TransportError::Failed("reset".into())),
-            reply().into(),
-        ],
-    );
-    assert_eq!(ok(turn(&rig, "m")).0.text(), "ok");
+#[test]
+fn a_server_that_repeats_an_id_gets_the_plain_id_once_and_generated_ones_after() {
+    let call = || {
+        Reply::ok(
+            sse(&[tool_chunk(0, "0", "list_tables", "{}"), finish_chunk("tool_calls")])
+                + "data: [DONE]\n\n",
+        )
+    };
+    let rig = openai(vec![call().into(), call().into(), call().into()]);
+    let mut messages = hi();
+    let mut ids = Vec::new();
+    for _ in 0..3 {
+        let turn = ask(&rig.provider, &messages);
+        let content = turn.ok().content.clone();
+        let id = content[0]["id"].as_str().unwrap().to_owned();
+        messages.push(Message::Assistant { content });
+        messages.push(Message::User {
+            content: vec![UserBlock::ToolResult { tool_use_id: id.clone(), content: "ok".into(), is_error: false }],
+        });
+        ids.push(id);
+    }
+    assert_eq!(ids[0], "0");
+    assert!(ids[1].starts_with("call_") && ids[2].starts_with("call_"));
+    assert_ne!(ids[1], ids[2]);
+    // A result is written with the id its call carries.
+    let last = json_body(&rig.transport, 2)["messages"].clone();
+    let calls: Vec<_> = last.as_array().unwrap().iter().filter_map(|m| m["tool_calls"][0]["id"].as_str()).collect();
+    let results: Vec<_> = last.as_array().unwrap().iter().filter_map(|m| m["tool_call_id"].as_str()).collect();
+    assert_eq!(calls, ["0", ids[1].as_str()]);
+    assert_eq!(calls, results);
+}
+
+#[test]
+fn the_result_does_not_depend_on_chunking_or_line_endings() {
+    let stream = full_turn("héllo 日本");
+    let variants = [
+        stream.clone(),
+        stream.replace('\n', "\r\n"),
+        stream.replace('\n', "\r"),
+    ];
+    let mut results = Vec::new();
+    for (index, variant) in variants.iter().enumerate() {
+        for size in [1usize, 2, 3, 7, 64, 10_000] {
+            let rig = openai(vec![Reply::ok(variant).chunked(size).into()]);
+            let turn = ask(&rig.provider, &hi());
+            results.push((format!("{:?}", turn.ok()), turn.events.clone(), index, size));
+        }
+    }
+    let (first, events, ..) = results[0].clone();
+    for (result, evs, index, size) in &results {
+        assert_eq!(result, &first, "variant {index} chunked by {size}");
+        assert_eq!(evs, &events, "variant {index} chunked by {size}");
+    }
+}
+
+#[test]
+fn nothing_after_done_is_read() {
+    let body = full_turn("a") + &sse(&[text_chunk("never")]);
+    let rig = openai(vec![Reply::ok(body).into()]);
+    let turn = ask(&rig.provider, &hi());
+    assert_eq!(turn.ok().content, [json!({"type": "text", "text": "a"})]);
+}
+
+#[test]
+fn a_body_that_ends_without_done_or_a_finish_reason_is_truncated_and_not_sent_again() {
+    let bodies = [
+        String::new(),
+        sse(&[text_chunk("partial")]),
+        ": only a comment\n\n".to_owned(),
+        "data: {\"choices\":[{\"delta\":{\"content\":\"cut".to_owned(),
+    ];
+    for body in bodies {
+        let rig = openai(vec![Reply::ok(body).into(), reply("again").into()]);
+        let turn = ask(&rig.provider, &hi());
+        assert_protocol(turn.err(), &ProtocolError::Truncated);
+        assert_eq!(rig.transport.request_count(), 1);
+        assert_eq!(rig.transport.steps_left(), 1);
+    }
+}
+
+#[test]
+fn a_finish_reason_ends_the_turn_without_done_when_the_body_ends() {
+    let spy = Arc::new(Spy {
+        inner: ScriptedTransport::new(vec![Reply::ok(sse(&[
+            text_chunk("a"),
+            finish_chunk("stop"),
+            usage_chunk(5, 2, 0),
+        ]))
+        .into()]),
+        tokens: Mutex::default(),
+    });
+    let provider = OpenAiProvider::new(
+        Arc::clone(&spy) as Arc<dyn HttpTransport>,
+        Arc::new(FixedKey),
+        config(Flavor::OpenAi, OPENAI_BASE_URL),
+    )
+    .unwrap();
+    let caller = CancelToken::new();
+    let messages = hi();
+    let turn = ask_in(&provider, &request("gpt-4o", &messages, &[]), &caller);
+    assert_eq!(turn.ok().usage.output_tokens, 2);
+    assert_eq!(turn.ok().stop_reason, StopReason::EndTurn);
+    // The connection is let go once the turn is complete; the caller's token is not touched.
+    assert!(lock(&spy.tokens)[0].is_cancelled());
+    assert!(!caller.is_cancelled());
+}
+
+#[test]
+fn a_server_that_keeps_the_connection_open_after_the_finish_reason_is_let_go_after_the_grace() {
+    for _ in 0..5 {
+        let head = sse(&[text_chunk("answer"), finish_chunk("stop")]);
+        let tail = sse(&[usage_chunk(30, 4, 10)]);
+        let spy = Arc::new(Spy {
+            inner: ScriptedTransport::new(vec![Reply::ok(format!("{head}{tail}"))
+                .split_at(head.len())
+                .end(End::BlockUntilCancel(None))
+                .into()]),
+            tokens: Mutex::default(),
+        });
+        let provider = OpenAiProvider::new(
+            Arc::clone(&spy) as Arc<dyn HttpTransport>,
+            Arc::new(FixedKey),
+            config(Flavor::OpenAi, OPENAI_BASE_URL),
+        )
+        .unwrap()
+        .with_finish_grace(Duration::from_millis(100));
+        let messages = hi();
+        let started = Instant::now();
+        let turn = ask_in(&provider, &request("gpt-4o", &messages, &[]), &CancelToken::new());
+        assert!(started.elapsed() < Duration::from_secs(10), "the turn waited for the server");
+        // What came within the grace is used: the trailing usage chunk.
+        assert_eq!(turn.ok().usage, Usage { input_tokens: 20, output_tokens: 4, cache_read_input_tokens: 10, cache_creation_input_tokens: 0 });
+        assert_eq!(turn.ok().content, [json!({"type": "text", "text": "answer"})]);
+        assert!(lock(&spy.tokens)[0].is_cancelled(), "the connection is closed");
+    }
+}
+
+#[test]
+fn a_read_error_in_the_middle_of_a_stream_is_a_transport_error_and_is_not_retried() {
+    let rig = openai(vec![
+        Reply::ok(sse(&[text_chunk("half")])).end(End::Break).into(),
+        reply("again").into(),
+    ]);
+    let turn = ask(&rig.provider, &hi());
+    assert!(matches!(turn.err(), ProviderError::Transport { request_id: Some(_), .. }), "{:?}", turn.err());
+    assert_eq!(rig.transport.request_count(), 1);
+}
+
+#[test]
+fn a_turn_over_its_byte_budget_fails() {
+    let rig = openai(vec![reply(&"x".repeat(500)).into()]);
+    let provider = rig.provider.with_limits(TurnLimits { max_bytes: 200, ..TurnLimits::default() });
+    let turn = ask(&provider, &hi());
+    assert_protocol(turn.err(), &ProtocolError::TurnTooLarge { limit: 200 });
+}
+
+#[test]
+fn too_many_calls_or_idle_chunks_fail_the_turn() {
+    let calls: Vec<Value> = (0..4).map(|n| tool_chunk(n, &format!("id{n}"), "t", "{}")).collect();
+    let rig = openai(vec![Reply::ok(sse(&calls)).into()]);
+    let provider = rig.provider.with_limits(TurnLimits { max_blocks: 3, ..TurnLimits::default() });
+    assert_protocol(ask(&provider, &hi()).err(), &ProtocolError::TooManyBlocks { limit: 3 });
+
+    let idle = "data: {\"choices\":[]}\n\n".repeat(5);
+    let rig = openai(vec![Reply::ok(idle).into()]);
+    let provider = rig.provider.with_limits(TurnLimits { max_idle_events: 4, ..TurnLimits::default() });
+    assert_protocol(ask(&provider, &hi()).err(), &ProtocolError::TooManyIdleEvents { limit: 4 });
+}
+
+// ----------------------------------------------------------------------- errors and retrying
+
+#[test]
+fn an_http_error_is_typed() {
+    let cases = [
+        (400, "invalid_request_error", "BadRequest"),
+        (401, "invalid_api_key", "Authentication"),
+        (403, "x", "Permission"),
+        (404, "x", "NotFound"),
+        (413, "x", "TooLarge"),
+        (402, "x", "Rejected"),
+    ];
+    for (status, kind, name) in cases {
+        let rig = openai(vec![Reply::error(status, kind, "no").into()]);
+        let turn = ask(&rig.provider, &hi());
+        let error = turn.err();
+        assert!(format!("{error:?}").starts_with(name), "{status}: {error:?}");
+        assert_eq!(error.api_failure().unwrap().status, Some(status));
+        assert_eq!(rig.transport.request_count(), 1);
+    }
+}
+
+#[test]
+fn a_429_or_5xx_is_retried_honouring_retry_after_and_reported() {
+    let rig = openai(vec![
+        Reply::error(429, "rate_limit_exceeded", "slow down").header("retry-after", "2").into(),
+        Reply::error(503, "server_error", "down").into(),
+        reply("finally").into(),
+    ]);
+    let turn = ask(&rig.provider, &hi());
+    assert_eq!(turn.ok().content[0]["text"], "finally");
+    assert_eq!(rig.transport.request_count(), 3);
+    assert_eq!(rig.sleeper.waits(), [Duration::from_secs(2), Duration::from_secs(2)]);
+    assert!(turn.events[0].starts_with("Retrying { attempt: 1, after: 2s, cause: RateLimited"), "{:?}", turn.events);
+    assert!(turn.events[1].contains("cause: Server"));
+}
+
+#[test]
+fn retries_run_out_with_the_last_error() {
+    let steps = (0..4).map(|_| Reply::error(500, "server_error", "down").into()).collect();
+    let rig = openai(steps);
+    let turn = ask(&rig.provider, &hi());
+    assert!(matches!(turn.err(), ProviderError::Server(_)));
+    assert_eq!(rig.transport.request_count(), 4);
+}
+
+#[test]
+fn a_connection_failure_before_the_first_byte_is_retried_once() {
+    let rig = openai(vec![
+        Step::Fail(TransportError::Failed("refused".into())),
+        reply("ok").into(),
+    ]);
+    let turn = ask(&rig.provider, &hi());
+    turn.ok();
+    assert!(turn.events[0].contains("cause: Transport"));
+    let rig = openai(vec![
+        Step::Fail(TransportError::Failed("refused".into())),
+        Step::Fail(TransportError::Timeout),
+        reply("ok").into(),
+    ]);
+    assert!(matches!(ask(&rig.provider, &hi()).err(), ProviderError::Transport { .. }));
     assert_eq!(rig.transport.request_count(), 2);
 }
 
 #[test]
-fn cancel_ends_a_stream_that_is_blocked() {
-    let (blocked, entered) = mpsc::channel();
-    let reply = Reply::ok(sse(&[text_chunk("so far")])).end(End::BlockUntilCancel(Some(blocked)));
-    let rig = rig(Flavor::Compatible, vec![reply.into()]);
-    let cancel = CancelToken::new();
-    let messages = hello();
-    let req = request("m", &messages, &[]);
-    let started = Instant::now();
-    let result = std::thread::scope(|scope| {
-        let worker = scope.spawn(|| rig.provider.stream_turn(&req, &mut |_| {}, &cancel));
-        entered
-            .recv_timeout(Duration::from_secs(10))
-            .expect("the read blocks");
-        cancel.cancel();
-        worker.join().unwrap()
-    });
-    assert!(matches!(result, Err(ProviderError::Cancelled)));
-    assert!(started.elapsed() < Duration::from_secs(10));
-    assert_eq!(rig.transport.request_count(), 1);
+fn an_error_event_before_anything_arrived_is_retried_like_the_http_error_it_stands_for() {
+    let error_stream = |error: Value| Reply::ok(sse(&[json!({"error": error})]));
+    let rig = openai(vec![
+        error_stream(json!({"message": "busy", "type": "server_error"})).into(),
+        error_stream(json!({"message": "quota", "code": "rate_limit_exceeded"})).into(),
+        error_stream(json!({"message": "busy", "type": "engine_overloaded_error"})).into(),
+        reply("done").into(),
+    ]);
+    let turn = ask(&rig.provider, &hi());
+    assert_eq!(turn.ok().content[0]["text"], "done");
+    assert_eq!(rig.transport.request_count(), 4);
+    let causes: Vec<_> = turn.events.iter().filter(|e| e.starts_with("Retrying")).map(|e| e.rsplit("cause: ").next().unwrap().trim_end_matches(" }").to_owned()).collect();
+    assert_eq!(causes, ["Server", "RateLimited", "Overloaded"]);
+}
 
-    // Cancelled before the request: nothing is sent.
-    let rig = self::rig(Flavor::Compatible, vec![complete(&[]).into()]);
+#[test]
+fn an_error_event_after_content_is_final() {
+    let body = sse(&[text_chunk("start"), json!({"error": {"message": "died", "type": "server_error"}})]);
+    let rig = openai(vec![Reply::ok(body).into(), reply("again").into()]);
+    let turn = ask(&rig.provider, &hi());
+    let error = turn.err();
+    assert!(matches!(error, ProviderError::Server(f) if f.status.is_none() && f.message == "died"), "{error:?}");
+    assert_eq!(rig.transport.request_count(), 1);
+}
+
+#[test]
+fn error_events_are_typed_and_a_bare_string_is_a_rejection() {
+    let cases = [
+        (json!({"message": "too long", "code": "context_length_exceeded"}), "BadRequest"),
+        (json!({"message": "x", "type": "invalid_request_error"}), "BadRequest"),
+        (json!({"message": "x", "code": "invalid_api_key"}), "Authentication"),
+        (json!({"message": "x", "type": "authentication_error"}), "Authentication"),
+        (json!({"message": "x", "type": "mystery"}), "Rejected"),
+        (json!("model \"zz\" not found"), "Rejected"),
+    ];
+    for (error, name) in cases {
+        let rig = openai(vec![Reply::ok(sse(&[json!({"error": error})])).into()]);
+        let turn = ask(&rig.provider, &hi());
+        assert!(format!("{:?}", turn.err()).starts_with(name), "{error}: {:?}", turn.err());
+        assert_eq!(rig.transport.request_count(), 1);
+    }
+    let rig = openai(vec![Reply::ok(sse(&[json!({"error": "model \"zz\" not found"})])).into()]);
+    let turn = ask(&rig.provider, &hi());
+    assert_eq!(turn.err().api_failure().unwrap().message, "model \"zz\" not found");
+}
+
+// ------------------------------------------------------------------------------- cancellation
+
+#[test]
+fn a_cancel_before_sending_sends_nothing() {
+    let rig = openai(vec![reply("x").into()]);
     let cancel = CancelToken::new();
     cancel.cancel();
-    let result = rig.provider.stream_turn(&req, &mut |_| {}, &cancel);
+    let messages = hi();
+    let turn = ask_in(&rig.provider, &request("gpt-4o", &messages, &[]), &cancel);
+    assert!(matches!(turn.err(), ProviderError::Cancelled));
+    assert_eq!(rig.transport.request_count(), 0);
+}
+
+#[test]
+fn a_cancel_while_the_stream_is_blocked_ends_the_turn_promptly() {
+    for _ in 0..20 {
+        let (blocked_tx, blocked_rx) = mpsc::channel();
+        let rig = openai(vec![Reply::ok(sse(&[text_chunk("half")])).end(End::BlockUntilCancel(Some(blocked_tx))).into()]);
+        let cancel = CancelToken::new();
+        let messages = hi();
+        let started = Instant::now();
+        let turn = std::thread::scope(|scope| {
+            let worker = scope.spawn(|| ask_in(&rig.provider, &request("gpt-4o", &messages, &[]), &cancel));
+            blocked_rx.recv().unwrap();
+            cancel.cancel();
+            worker.join().unwrap()
+        });
+        assert!(matches!(turn.err(), ProviderError::Cancelled), "{:?}", turn.err());
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_eq!(rig.transport.request_count(), 1);
+        assert_eq!(turn.events, ["TextDelta(\"half\")"]);
+    }
+}
+
+#[test]
+fn a_cancel_during_a_retry_wait_sends_no_further_request() {
+    for _ in 0..20 {
+        let rig = openai(vec![Reply::error(503, "server_error", "down").into(), reply("x").into()]);
+        let (entered_tx, entered_rx) = mpsc::channel();
+        rig.sleeper.block_on_cancel(entered_tx);
+        let cancel = CancelToken::new();
+        let messages = hi();
+        let turn = std::thread::scope(|scope| {
+            let worker = scope.spawn(|| ask_in(&rig.provider, &request("gpt-4o", &messages, &[]), &cancel));
+            entered_rx.recv().unwrap();
+            cancel.cancel();
+            worker.join().unwrap()
+        });
+        assert!(matches!(turn.err(), ProviderError::Cancelled), "{:?}", turn.err());
+        assert_eq!(rig.transport.request_count(), 1);
+    }
+}
+
+// ----------------------------------------------------------------------------------- the key
+
+#[test]
+fn the_key_is_in_no_error_event_stored_text_or_debug_output() {
+    // A server that echoes the key everywhere it can.
+    let key = FAKE_KEY;
+    let body = sse(&[
+        json!({"model": format!("m-{key}"), "choices": [{"delta": {"tool_calls": [{
+            "index": 0, "id": format!("id-{key}"), "function": {"name": format!("tool-{key}"),
+            "arguments": format!("{{\"k\":\"{key}")}}]}}]}),
+        tool_chunk(1, "ok_id", &format!("n{key}"), "{}"),
+        finish_chunk(&format!("odd-{key}")),
+    ]) + "data: [DONE]\n\n";
+    let rig = openai(vec![Reply::ok(body).header("x-request-id", &format!("req-{key}")).into()]);
+    let turn = ask(&rig.provider, &hi());
+    let response = turn.ok();
+    assert_eq!(response.model.as_deref(), Some("m-***"));
+    assert_eq!(response.request_id.as_deref(), Some("req-***"));
+    for block in &response.content {
+        assert_eq!(block["name"], "invalid_tool_name");
+        assert!(block["id"].as_str().unwrap().starts_with("call_") || block["id"] == "ok_id");
+    }
+    assert_eq!(response.invalid_tool_inputs.len(), 2);
+    for output in [turn.everything(), format!("{:?}", rig.transport.request(0).debug)] {
+        assert!(!output.contains(key) && !output.contains("ZZSECRETZZ"), "{output}");
+    }
+    // The next request holds the stored history, and no key either.
+    let mut messages = hi();
+    messages.push(Message::Assistant { content: response.content.clone() });
+    messages.push(Message::user_text("again"));
+    let rig = openai(vec![reply("x").into()]);
+    ask(&rig.provider, &messages).ok();
+    assert!(!body_of(&rig.transport, 0).contains("ZZSECRETZZ"));
+
+    // An HTTP error that quotes the key.
+    let rig = openai(vec![Reply::error(401, "invalid_api_key", &format!("bad key {key}")).into()]);
+    let turn = ask(&rig.provider, &hi());
+    assert!(!turn.everything().contains("ZZSECRETZZ"), "{}", turn.everything());
+    assert!(turn.err().to_string().contains("***"));
+    // And one that arrives as an error event.
+    let rig = openai(vec![Reply::ok(sse(&[json!({"error": format!("nope {key}")})])).into()]);
+    assert!(!ask(&rig.provider, &hi()).everything().contains("ZZSECRETZZ"));
+}
+
+// -------------------------------------------------------------------------------- model list
+
+fn list_reply(body: Value) -> Step {
+    Reply::ok(body.to_string()).into()
+}
+
+fn ids(models: &[ModelInfo]) -> Vec<&str> {
+    models.iter().map(|m| m.id.as_str()).collect()
+}
+
+#[test]
+fn the_openai_list_drops_what_cannot_chat() {
+    let all = [
+        "gpt-4o", "gpt-5.6", "o4-mini", "ft:gpt-4o-mini:acme::abc123", "models/gpt-4.1", "GPT-4.1-mini",
+        "text-embedding-3-small", "gpt-image-1", "sora-2", "omni-moderation-latest", "gpt-4o-transcribe",
+        "gpt-4o-realtime-preview", "tts-1-hd", "whisper-1", "dall-e-3", "babbage-002", "davinci-002",
+        "gpt-4o-audio-preview", "gpt-4o-mini-tts", "computer-use-preview", "chatgpt-image-latest",
+        "text-moderation-latest", "ft:whisper-1:acme::x", "org/tts-1",
+    ];
+    let data: Vec<Value> = all.iter().map(|id| json!({"id": id, "object": "model"})).collect();
+    let rig = openai(vec![list_reply(json!({"object": "list", "data": data}))]);
+    let models = rig.provider.list_models(&CancelToken::new()).unwrap();
+    assert_eq!(
+        ids(&models),
+        ["gpt-4o", "gpt-5.6", "o4-mini", "ft:gpt-4o-mini:acme::abc123", "models/gpt-4.1", "GPT-4.1-mini"]
+    );
+    let sent = rig.transport.request(0);
+    assert_eq!(sent.method, "GET");
+    assert_eq!(sent.url, "https://api.openai.com/v1/models");
+    assert!(sent.body.is_empty() && sent.header("content-type").is_none());
+}
+
+#[test]
+fn a_compatible_list_is_not_filtered() {
+    let rig = rig(Flavor::Compatible, "http://localhost:1234/v1", vec![list_reply(json!({"data": [
+        {"id": "text-embedding-nomic"}, {"id": "whisper-large"}, {"id": "llama-3"}]}))]);
+    let models = rig.provider.list_models(&CancelToken::new()).unwrap();
+    assert_eq!(ids(&models), ["text-embedding-nomic", "whisper-large", "llama-3"]);
+    assert_eq!(rig.transport.request_count(), 1);
+}
+
+#[test]
+fn list_entries_are_read_leniently() {
+    let rig = openai(vec![list_reply(json!({"data": [
+        {"id": "a", "display_name": "Model A"},
+        {"id": "b", "name": "Model B"},
+        {"id": "c", "display_name": "Shown", "name": "Ignored"},
+        {"id": "d", "display_name": "d"},
+        {"id": "e", "name": "  "},
+        {"id": "a", "display_name": "Again"},
+        {"id": 7},
+        {"id": "  "},
+        {"id": null},
+        {"name": "no id"},
+        "junk",
+        {"id": "f", "max_tokens": 5, "created_at": "x"},
+    ]}))]);
+    let models = rig.provider.list_models(&CancelToken::new()).unwrap();
+    assert_eq!(ids(&models), ["a", "b", "c", "d", "e", "f"]);
+    let names: Vec<_> = models.iter().map(|m| m.display_name.as_deref()).collect();
+    assert_eq!(names, [Some("Model A"), Some("Model B"), Some("Shown"), None, None, None]);
+    for model in &models {
+        assert!(model.max_input_tokens.is_none() && model.max_tokens.is_none() && model.created_at.is_none());
+    }
+}
+
+#[test]
+fn list_entries_are_scrubbed_of_the_key() {
+    let rig = openai(vec![list_reply(json!({"data": [
+        {"id": format!("m-{FAKE_KEY}"), "display_name": format!("n {FAKE_KEY}")}]}))]);
+    let models = rig.provider.list_models(&CancelToken::new()).unwrap();
+    assert_eq!(models[0].id, "m-***");
+    assert_eq!(models[0].display_name.as_deref(), Some("n ***"));
+}
+
+#[test]
+fn a_list_of_the_wrong_shape_is_a_protocol_error() {
+    for body in ["{}", r#"{"data": null}"#, r#"{"data": {"a": 1}}"#, "[1]", "[[]]", r#"[[{"id":"a"}]]"#, "not json", "", r#"{"data": "x"}"#] {
+        let rig = openai(vec![Reply::ok(body).into()]);
+        let error = rig.provider.list_models(&CancelToken::new()).unwrap_err();
+        assert!(
+            matches!(&error, ProviderError::Protocol { source: ProtocolError::MalformedBody(d), .. } if !d.is_empty()),
+            "{body:?}: {error:?}"
+        );
+    }
+}
+
+#[test]
+fn a_list_body_over_four_mebibytes_is_refused() {
+    let big = format!(r#"{{"data": [], "pad": "{}"}}"#, "x".repeat(4 * 1024 * 1024));
+    let rig = openai(vec![Reply::ok(big).into()]);
+    let error = rig.provider.list_models(&CancelToken::new()).unwrap_err();
+    assert_protocol(&error, &ProtocolError::TurnTooLarge { limit: 4 * 1024 * 1024 });
+}
+
+#[test]
+fn a_list_request_is_typed_and_retried_like_a_turn() {
+    let rig = openai(vec![Reply::error(401, "invalid_api_key", "no").into()]);
+    assert!(matches!(
+        rig.provider.list_models(&CancelToken::new()),
+        Err(ProviderError::Authentication(_))
+    ));
+    let rig = openai(vec![Reply::error(429, "rate_limit_exceeded", "slow").into(), list_reply(json!({"data": [{"id": "gpt-4o"}]}))]);
+    let models = rig.provider.list_models(&CancelToken::new()).unwrap();
+    assert_eq!(ids(&models), ["gpt-4o"]);
+    assert_eq!(rig.transport.request_count(), 2);
+    assert_eq!(rig.sleeper.waits().len(), 1);
+}
+
+// ------------------------------------------------------------------------------------- Ollama
+
+fn show(capabilities: Value) -> Step {
+    Reply::ok(json!({"capabilities": capabilities}).to_string()).into()
+}
+
+fn ollama(steps: Vec<Step>) -> Rig {
+    rig(Flavor::Ollama, OLLAMA_BASE_URL, steps)
+}
+
+fn listing(ids: &[&str]) -> Step {
+    list_reply(json!({"data": ids.iter().map(|id| json!({"id": id})).collect::<Vec<_>>()}))
+}
+
+#[test]
+fn the_ollama_list_probes_each_model_and_keeps_what_can_complete() {
+    let rig = ollama(vec![
+        listing(&["chat", "embed", "old", "broken", "down", "bad-json", "vision"]),
+        show(json!(["completion", "tools"])),
+        show(json!(["embedding"])),
+        show(json!([])),
+        Reply::error(500, "server_error", "boom").into(),
+        Step::Fail(TransportError::Failed("refused".into())),
+        Reply::ok("{").into(),
+        show(json!(["completion", "vision"])),
+    ]);
+    let models = rig.provider.list_models(&CancelToken::new()).unwrap();
+    assert_eq!(ids(&models), ["chat", "old", "broken", "down", "bad-json", "vision"]);
+    // One list request, one probe per model, one attempt each: a failed probe is not retried.
+    assert_eq!(rig.transport.request_count(), 8);
+    assert!(rig.sleeper.waits().is_empty());
+    for (index, id) in ["chat", "embed", "old", "broken", "down", "bad-json", "vision"].iter().enumerate() {
+        let probe = rig.transport.request(index + 1);
+        assert_eq!(probe.method, "POST");
+        assert_eq!(probe.url, "http://localhost:11434/api/show");
+        assert_eq!(probe.json(), json!({"model": id}));
+        assert_eq!(probe.header("content-type"), Some("application/json"));
+        assert_eq!(probe.header("authorization"), Some(format!("Bearer {FAKE_KEY}").as_str()));
+    }
+}
+
+#[test]
+fn a_probe_has_short_timeouts_and_no_credentials_without_a_key() {
+    let rig = rig_with(
+        config(Flavor::Ollama, OLLAMA_BASE_URL),
+        no_key(),
+        vec![listing(&["m"]), show(json!(["completion"]))],
+    );
+    rig.provider.list_models(&CancelToken::new()).unwrap();
+    let probe = rig.transport.request(1);
+    assert!(probe.header("authorization").is_none());
+    assert!(probe.debug.contains("connect: 5s") && probe.debug.contains("first_byte: 5s") && probe.debug.contains("idle: 5s"), "{}", probe.debug);
+    // The list itself uses the configured timeouts.
+    assert!(rig.transport.request(0).debug.contains("connect: 15s"));
+}
+
+#[test]
+fn at_most_sixty_four_models_are_probed_and_the_rest_are_kept() {
+    let names: Vec<String> = (0..70).map(|n| format!("m{n}")).collect();
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let mut steps = vec![listing(&refs)];
+    steps.extend((0..64).map(|_| show(json!(["embedding"]))));
+    let rig = ollama(steps);
+    let models = rig.provider.list_models(&CancelToken::new()).unwrap();
+    assert_eq!(rig.transport.request_count(), 65);
+    // The 64 probed are all dropped, the 6 beyond the bound are kept.
+    assert_eq!(ids(&models), ["m64", "m65", "m66", "m67", "m68", "m69"]);
+}
+
+fn model(id: &str) -> ModelInfo {
+    ModelInfo { id: id.into(), display_name: None, max_input_tokens: None, max_tokens: None, created_at: None }
+}
+
+#[test]
+fn probing_stops_when_the_time_budget_is_spent() {
+    let rig = ollama(vec![show(json!(["embedding"]))]);
+    let key = ApiKey::new(FAKE_KEY);
+    let scrub = scrub_for(Some(&key));
+    let kept = rig
+        .provider
+        .with_completion(Some(&key), &scrub, vec![model("a")], models::MAX_PROBES, Duration::ZERO, &CancelToken::new())
+        .unwrap();
+    assert_eq!(ids(&kept), ["a"]);
+    assert_eq!(rig.transport.request_count(), 0);
+}
+
+/// Cancels the caller's token when the second request (the first probe) is sent.
+struct CancelOnProbe {
+    inner: Arc<ScriptedTransport>,
+    token: CancelToken,
+    sent: AtomicUsize,
+}
+
+impl HttpTransport for CancelOnProbe {
+    fn send(
+        &self,
+        request: HttpRequest,
+        cancel: &CancelToken,
+    ) -> Result<HttpResponse, TransportError> {
+        if self.sent.fetch_add(1, Ordering::SeqCst) == 1 {
+            self.token.cancel();
+            return Err(TransportError::Failed("cut by the cancel".into()));
+        }
+        self.inner.send(request, cancel)
+    }
+}
+
+#[test]
+fn a_cancel_inside_a_probe_ends_the_whole_list() {
+    let cancel = CancelToken::new();
+    let inner = ScriptedTransport::new(vec![listing(&["a", "b"]), show(json!(["completion"]))]);
+    let transport = Arc::new(CancelOnProbe {
+        inner: Arc::clone(&inner),
+        token: cancel.clone(),
+        sent: AtomicUsize::new(0),
+    });
+    let provider = OpenAiProvider::new(
+        transport as Arc<dyn HttpTransport>,
+        Arc::new(FixedKey),
+        config(Flavor::Ollama, OLLAMA_BASE_URL),
+    )
+    .unwrap();
+    assert!(matches!(provider.list_models(&cancel), Err(ProviderError::Cancelled)));
+    // Only the list reached the script: the probe was cut, and `b` was never asked.
+    assert_eq!(inner.request_count(), 1);
+}
+
+#[test]
+fn a_cancel_before_a_probe_ends_the_whole_list() {
+    let rig = ollama(vec![listing(&["a"]), show(json!(["completion"]))]);
+    let key = ApiKey::new(FAKE_KEY);
+    let scrub = scrub_for(Some(&key));
+    let cancel = CancelToken::new();
+    cancel.cancel();
+    let models = vec![model("a")];
+    let result = rig
+        .provider
+        .with_completion(Some(&key), &scrub, models, models::MAX_PROBES, models::PROBE_BUDGET, &cancel);
     assert!(matches!(result, Err(ProviderError::Cancelled)));
     assert_eq!(rig.transport.request_count(), 0);
 }
 
 #[test]
-fn a_cancel_during_the_wait_before_a_retry_ends_the_turn() {
-    let rig = rig(
-        Flavor::OpenAi,
-        vec![
-            Reply::error(429, "rate_limit_exceeded", "slow").into(),
-            complete(&[]).into(),
-        ],
-    );
-    let (entered, waiting) = mpsc::channel();
-    rig.sleeper.block_on_cancel(entered);
-    let cancel = CancelToken::new();
-    let messages = hello();
-    let req = request("m", &messages, &[]);
-    let result = std::thread::scope(|scope| {
-        let worker = scope.spawn(|| rig.provider.stream_turn(&req, &mut |_| {}, &cancel));
-        waiting.recv_timeout(Duration::from_secs(10)).unwrap();
-        cancel.cancel();
-        worker.join().unwrap()
-    });
-    assert!(matches!(result, Err(ProviderError::Cancelled)));
-    assert_eq!(rig.transport.request_count(), 1);
-}
-
-#[test]
-fn the_key_is_in_no_error_event_or_debug_text() {
-    let leak = format!("the key {FAKE_KEY} is wrong");
-    let mut texts = Vec::new();
-    let mut check = |turn: Turn| {
-        let (result, events) = turn;
-        if let Ok(response) = &result {
-            texts.push(format!("{response:?}"));
-        }
-        if let Err(error) = &result {
-            texts.push(format!("{error}"));
-            texts.push(format!("{error:?}"));
-        }
-        texts.extend(events);
-    };
-    // The key in an HTTP error body, a stream error, a model name, a tool name or id, a request
-    // id, a transport failure.
-    let rig1 = rig(
-        Flavor::OpenAi,
-        vec![Reply::error(400, "invalid_request_error", &leak).into()],
-    );
-    check(turn(&rig1, "m"));
-    let stream_error = Reply::ok(format!(
-        "data: {}\n\n",
-        json!({"error": {"message": leak, "type": "server_error"}})
-    ));
-    let rig2 = rig(Flavor::OpenAi, vec![stream_error.into()]);
-    check(turn(&rig2, "m"));
-    let mut named = chunk(json!({"content": "x"}), Some("stop"));
-    named["model"] = json!(format!("{FAKE_KEY}-model"));
-    let rig3 = rig(
-        Flavor::OpenAi,
-        vec![complete(&[named]).header("x-request-id", FAKE_KEY).into()],
-    );
-    check(turn(&rig3, "m"));
-    let call = |id: &str, name: &str| {
-        chunk(
-            json!({"tool_calls": [{"index": 0, "id": id, "function": {"name": name, "arguments": "{}"}}]}),
-            Some("tool_calls"),
-        )
-    };
-    let rig4 = rig(
-        Flavor::OpenAi,
-        vec![complete(&[call(FAKE_KEY, "t")]).into()],
-    );
-    check(turn(&rig4, "m"));
-    let rig5 = rig(
-        Flavor::OpenAi,
-        vec![complete(&[call("c1", FAKE_KEY)]).into()],
-    );
-    check(turn(&rig5, "m"));
-    let rig6 = rig(
-        Flavor::OpenAi,
-        vec![
-            Step::Fail(TransportError::Failed(leak.clone())),
-            Step::Fail(TransportError::Failed(leak.clone())),
-        ],
-    );
-    check(turn(&rig6, "m"));
-    let rig7 = rig(
-        Flavor::OpenAi,
-        vec![Reply::with_status(200, format!("data: {}\n\n", leak)).into()],
-    );
-    check(turn(&rig7, "m"));
-    let rig8 = rig(
-        Flavor::OpenAi,
-        vec![Reply::error(401, "authentication_error", &leak)
-            .header("request-id", FAKE_KEY)
-            .into()],
-    );
-    check(turn(&rig8, "m"));
-    for r in [&rig1, &rig2, &rig3, &rig4, &rig5, &rig6, &rig7, &rig8] {
-        for index in 0..r.transport.request_count() {
-            let sent = r.transport.request(index);
-            texts.push(sent.debug);
-            texts.push(String::from_utf8_lossy(&sent.body).into_owned());
-        }
-        texts.push(format!("{:?}", r.provider.config()));
-    }
-    assert!(!texts.is_empty());
-    for text in texts {
-        assert_no_key(&text);
-    }
-}
-
-// ------------------------------------------------------------------------------------ run sessions
-
-#[test]
-fn a_run_session_belongs_to_the_provider_that_issued_it() {
-    let one = rig(Flavor::OpenAi, vec![complete(&[]).into()]);
-    let two = rig(Flavor::OpenAi, vec![complete(&[]).into()]);
-    let session = one.provider.begin_run().unwrap();
-    let messages = hello();
-    let req = request("m", &messages, &[]);
-    let result = two
-        .provider
-        .stream_turn_in_run(&session, &req, &mut |_| {}, &CancelToken::new());
-    assert!(matches!(result, Err(ProviderError::ForeignRunSession)));
-    assert_eq!(two.transport.request_count(), 0);
-    // An Anthropic provider's session is refused too (its key would go to another host).
-    let anthropic = crate::AnthropicProvider::new(
-        ScriptedTransport::new(vec![]),
-        Arc::new(FixedKey),
-        crate::AnthropicConfig::default(),
-    )
-    .unwrap();
-    let foreign = anthropic.begin_run().unwrap();
-    let result = one
-        .provider
-        .stream_turn_in_run(&foreign, &req, &mut |_| {}, &CancelToken::new());
-    assert!(matches!(result, Err(ProviderError::ForeignRunSession)));
-    assert!(one
-        .provider
-        .stream_turn_in_run(&session, &req, &mut |_| {}, &CancelToken::new())
-        .is_ok());
-}
-
-// -------------------------------------------------------------------------------------- config
-
-#[test]
-fn the_address_rule_is_the_one_of_the_anthropic_provider() {
-    for url in [
-        "https://api.openai.com/v1",
-        "http://localhost:11434/v1",
-        "http://127.0.0.1:8080",
-        "http://[::1]:8080/v1",
-        "HTTP://LOCALHOST/v1",
-        "http://192.168.1.5:11434/v1",
-        "http://example.com/v1",
-        "https://user:pw@example.com/v1",
-        "https://example.com/v1?x=1",
-        "https://example.com/v1#frag",
-        "ftp://example.com",
-        "example.com/v1",
-        "https://",
-        "https://exa mple.com",
-        "  https://example.com/v1/  ",
-        "",
-    ] {
-        let anthropic = crate::AnthropicConfig {
-            base_url: url.to_owned(),
-            ..crate::AnthropicConfig::default()
-        };
-        let openai = OpenAiConfig {
-            base_url: url.to_owned(),
-            ..OpenAiConfig::default()
-        };
-        assert_eq!(openai.validate(), anthropic.validate(), "{url:?}");
-    }
-    assert_eq!(
-        OpenAiConfig::for_flavor(Flavor::Compatible).validate(),
-        Err(ConfigError::InvalidBaseUrl)
-    );
-    assert_eq!(
-        config(Flavor::OpenAi, "http://example.com/v1").validate(),
-        Err(ConfigError::InsecureBaseUrl)
-    );
-    let refused = OpenAiProvider::new(
-        ScriptedTransport::new(vec![]),
-        Arc::new(NoKey),
-        config(Flavor::OpenAi, "http://example.com/v1"),
-    );
-    assert!(matches!(refused, Err(ConfigError::InsecureBaseUrl)));
-}
-
-#[test]
-fn the_defaults_and_the_provider_keep_the_address_trimmed() {
-    assert_eq!(
-        OpenAiConfig::default().base_url,
-        "https://api.openai.com/v1"
-    );
-    assert_eq!(
-        OpenAiConfig::for_flavor(Flavor::Ollama).base_url,
-        "http://localhost:11434/v1"
-    );
-    assert_eq!(OpenAiConfig::for_flavor(Flavor::Compatible).base_url, "");
-    assert!(
-        Flavor::OpenAi.requires_key()
-            && !Flavor::Ollama.requires_key()
-            && !Flavor::Compatible.requires_key()
-    );
-    let rig = rig_with(
-        config(Flavor::Compatible, "  http://localhost:8080/ "),
-        Arc::new(NoKey),
-        vec![complete(&[]).into()],
-    );
-    assert_eq!(rig.provider.config().base_url, "http://localhost:8080");
-    let _ = turn(&rig, "m");
-    assert_eq!(
-        rig.transport.request(0).url,
-        "http://localhost:8080/v1/chat/completions"
-    );
-    // A pasted completion address is accepted.
-    let rig = self::rig_with(
-        config(Flavor::OpenAi, "https://api.openai.com/v1/chat/completions"),
-        Arc::new(FixedKey),
-        vec![complete(&[]).into()],
-    );
-    let _ = turn(&rig, "m");
-    assert_eq!(
-        rig.transport.request(0).url,
-        "https://api.openai.com/v1/chat/completions"
-    );
-}
-
-// ------------------------------------------------------------------------------------ model lists
-
-fn list_reply(ids: &[&str]) -> Reply {
-    let data: Vec<Value> = ids
-        .iter()
-        .map(|id| json!({"id": id, "object": "model"}))
-        .collect();
-    Reply::ok(json!({"object": "list", "data": data}).to_string())
-}
-
-#[test]
-fn the_openai_list_is_filtered_and_sent_with_the_key() {
-    let rig = rig(
-        Flavor::OpenAi,
-        vec![list_reply(&[
-            "gpt-4o",
-            "text-embedding-3-small",
-            "whisper-1",
-            "o4-mini",
-            "gpt-4o",
-        ])
-        .into()],
-    );
-    let models = rig.provider.list_models(&CancelToken::new()).unwrap();
-    assert_eq!(
-        models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
-        vec!["gpt-4o", "o4-mini"]
-    );
-    let sent = rig.transport.request(0);
-    assert_eq!(
-        (sent.method, sent.url.as_str()),
-        ("GET", "https://api.openai.com/v1/models")
-    );
-    assert_eq!(
-        sent.header("authorization"),
-        Some(format!("Bearer {FAKE_KEY}").as_str())
-    );
-}
-
-#[test]
-fn a_compatible_list_is_not_filtered_and_names_are_read() {
-    let body = json!({"data": [{"id": "text-embedding-private-chat"}, {"id": "future-model", "name": "Future"}]});
-    let rig = rig(Flavor::Compatible, vec![Reply::ok(body.to_string()).into()]);
-    let models = rig.provider.list_models(&CancelToken::new()).unwrap();
-    assert_eq!(models.len(), 2);
-    assert_eq!(models[1].display_name.as_deref(), Some("Future"));
-    assert!(rig.transport.request(0).header("authorization").is_none());
-}
-
-#[test]
-fn list_errors_are_typed() {
-    let rig = rig(
-        Flavor::OpenAi,
-        vec![Reply::error(401, "authentication_error", "bad key").into()],
-    );
-    assert!(matches!(
-        rig.provider.list_models(&CancelToken::new()),
-        Err(ProviderError::Authentication(_))
-    ));
-    let rig = self::rig(Flavor::OpenAi, vec![Reply::ok("{\"models\": []}").into()]);
-    assert!(matches!(
-        rig.provider.list_models(&CancelToken::new()),
-        Err(ProviderError::Protocol {
-            source: ProtocolError::MalformedBody(_),
-            ..
-        })
-    ));
-    let rig = self::rig(
-        Flavor::OpenAi,
-        vec![Reply::ok("x".repeat(5 * 1024 * 1024)).into()],
-    );
-    assert!(matches!(
-        rig.provider.list_models(&CancelToken::new()),
-        Err(ProviderError::Protocol {
-            source: ProtocolError::TurnTooLarge { .. },
-            ..
-        })
-    ));
-    // 429 is retried.
-    let rig = self::rig(
-        Flavor::OpenAi,
-        vec![
-            Reply::error(429, "rate_limit_exceeded", "x").into(),
-            list_reply(&["gpt-4o"]).into(),
-        ],
-    );
-    assert_eq!(
-        rig.provider.list_models(&CancelToken::new()).unwrap().len(),
-        1
-    );
-}
-
-fn show_reply(capabilities: &[&str]) -> Reply {
-    Reply::ok(json!({"capabilities": capabilities, "details": {"family": "x"}}).to_string())
-}
-
-fn probed(rig: &Rig) -> Vec<String> {
-    let mut models: Vec<String> = (1..rig.transport.request_count())
-        .map(|i| {
-            let sent = rig.transport.request(i);
-            assert_eq!(sent.method, "POST");
-            assert_eq!(sent.url, "http://localhost:11434/api/show");
-            sent.json()["model"].as_str().unwrap().to_owned()
-        })
-        .collect();
-    models.sort();
-    models
-}
-
-#[test]
-fn the_ollama_list_drops_models_that_say_they_cannot_complete() {
-    // dbx ollama_catalog_excludes_models_with_explicit_non_completion_capability.
-    let rig = rig(
-        Flavor::Ollama,
-        vec![
-            list_reply(&[
-                "qwen3:0.6b",
-                "embeddinggemma:latest",
-                "legacy-model",
-                "broken",
-            ])
-            .into(),
-            show_reply(&["completion", "tools"]).into(),
-            show_reply(&["embedding"]).into(),
-            Reply::ok(json!({"details": {"family": "legacy"}}).to_string()).into(),
-            Reply::error(500, "server_error", "probe failed").into(),
-        ],
-    );
-    let models = rig.provider.list_models(&CancelToken::new()).unwrap();
-    assert_eq!(
-        models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
-        vec!["qwen3:0.6b", "legacy-model", "broken"]
-    );
-    assert_eq!(
-        probed(&rig),
-        vec![
-            "broken",
-            "embeddinggemma:latest",
-            "legacy-model",
-            "qwen3:0.6b"
-        ]
-    );
-    // One attempt per model: the 500 was not retried; no key, no authorization.
-    assert_eq!(rig.transport.request_count(), 5);
-    assert!(rig.transport.request(1).header("authorization").is_none());
-    assert_eq!(
-        rig.transport.request(0).url,
-        "http://localhost:11434/v1/models"
-    );
-}
-
-#[test]
-fn the_ollama_probes_are_bounded_in_number() {
-    let ids: Vec<String> = (0..models::MAX_PROBES + 6)
-        .map(|i| format!("m{i:03}"))
-        .collect();
-    let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
-    let mut steps: Vec<Step> = vec![list_reply(&id_refs).into()];
-    // The first probed model is an embedding model; every other one completes.
-    steps.push(show_reply(&["embedding"]).into());
-    steps.extend((1..models::MAX_PROBES).map(|_| Step::from(show_reply(&["completion"]))));
-    let rig = rig(Flavor::Ollama, steps);
-    let models = rig.provider.list_models(&CancelToken::new()).unwrap();
-    assert_eq!(rig.transport.request_count(), 1 + models::MAX_PROBES);
-    // The one dropped model, and the six past the cap kept unfiltered.
-    assert_eq!(models.len(), ids.len() - 1);
-    assert_eq!(rig.transport.steps_left(), 0);
-}
-
-#[test]
-fn a_cancel_ends_the_ollama_list_before_the_next_probe() {
-    let cancel = CancelToken::new();
-    let reply = list_reply(&["a", "b"]);
-    let hook = {
-        let cancel = cancel.clone();
-        move || cancel.cancel()
-    };
-    let rig = rig(
-        Flavor::Ollama,
-        vec![
-            reply.hook_at(10, hook).into(),
-            show_reply(&["completion"]).into(),
-        ],
-    );
-    assert!(matches!(
-        rig.provider.list_models(&cancel),
-        Err(ProviderError::Cancelled)
-    ));
-    assert_eq!(rig.transport.request_count(), 1);
-}
-
-#[test]
-fn the_selected_ollama_model_can_be_asked_for_tools() {
-    // dbx ollama_selected_model_tool_support_reads_show_capabilities.
-    let rig = rig(
-        Flavor::Ollama,
-        vec![
-            show_reply(&["completion", "tools"]).into(),
-            show_reply(&["completion"]).into(),
-            show_reply(&[]).into(),
-        ],
-    );
-    let cancel = CancelToken::new();
-    assert_eq!(
-        rig.provider
-            .model_supports_tools(" qwen3:0.6b ", &cancel)
-            .unwrap(),
-        Some(true)
-    );
-    assert_eq!(
-        rig.transport.request(0).json(),
-        json!({"model": "qwen3:0.6b"})
-    );
-    assert_eq!(
-        rig.provider.model_supports_tools("x", &cancel).unwrap(),
-        Some(false)
-    );
-    assert_eq!(
-        rig.provider.model_supports_tools("x", &cancel).unwrap(),
-        None
-    );
-    let other = self::rig(Flavor::OpenAi, vec![]);
-    assert_eq!(
-        other
-            .provider
-            .model_supports_tools("gpt-4o", &cancel)
-            .unwrap(),
-        None
-    );
-    assert_eq!(other.transport.request_count(), 0);
-}
-
-// ------------------------------------------------------------- stored ids and names (B1)
-
-fn fits(text: &str) -> bool {
-    (1..=64).contains(&text.len())
-        && text
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-}
-
-fn call_chunk(index: u32, id: Option<&str>, name: Option<&str>, args: &str) -> Value {
-    let mut call = json!({"index": index, "function": {"arguments": args}});
-    if let Some(id) = id {
-        call["id"] = json!(id);
-    }
-    if let Some(name) = name {
-        call["function"]["name"] = json!(name);
-    }
-    chunk(json!({"tool_calls": [call]}), None)
-}
-
-fn calls_reply(calls: Vec<Value>) -> Reply {
-    let mut events = calls;
-    events.push(chunk(json!({}), Some("tool_calls")));
-    complete(&events)
-}
-
-fn stored_ids(response: &TurnResponse) -> Vec<String> {
-    response
-        .content
-        .iter()
-        .filter(|block| block["type"] == "tool_use")
-        .map(|block| block["id"].as_str().unwrap().to_owned())
-        .collect()
-}
-
-/// The history after a tool turn: the user message, the turn, and an answer to each call.
-fn after_tool_turn(before: &[Message], response: &TurnResponse) -> Vec<Message> {
-    let mut messages = before.to_vec();
-    messages.push(Message::Assistant {
-        content: response.content.clone(),
-    });
-    messages.push(Message::User {
-        content: stored_ids(response)
-            .into_iter()
-            .map(|id| UserBlock::ToolResult {
-                tool_use_id: id,
-                content: "ok".into(),
-                is_error: false,
-            })
-            .collect(),
-    });
-    messages
-}
-
-#[test]
-fn an_id_that_cannot_be_stored_is_replaced_and_the_history_then_suits_anthropic() {
-    let reply = calls_reply(vec![
-        call_chunk(
-            0,
-            Some("functions.list_tables:0"),
-            Some("list_tables"),
-            "{\"a\":1}",
-        ),
-        call_chunk(1, Some("call:2"), Some("list_tables"), "{}"),
-        call_chunk(2, Some(&"x".repeat(65)), Some("list_tables"), "{}"),
-    ]);
-    let rig = rig(Flavor::Compatible, vec![reply.into()]);
-    let (response, events) = ok(turn(&rig, "m"));
-    let ids = stored_ids(&response);
-    assert_eq!(ids.len(), 3);
-    assert!(ids.iter().all(|id| fits(id)), "{ids:?}");
-    assert_eq!(
-        ids.iter().collect::<std::collections::HashSet<_>>().len(),
-        3
-    );
-    // The events say the stored id, never the server's.
-    let started: Vec<_> = events
-        .iter()
-        .filter(|e| e.starts_with("ToolCallStarted"))
-        .collect();
-    assert_eq!(started.len(), 3);
-    for (event, id) in started.iter().zip(&ids) {
-        assert!(event.contains(id.as_str()), "{event}");
-    }
-    assert!(!events
-        .iter()
-        .any(|e| e.contains("functions.") || e.contains("call:2")));
-    assert_eq!(response.content[0]["input"], json!({"a": 1}));
-
-    // The conversation then goes to Anthropic: the ids are valid there, and the answers match.
-    let messages = after_tool_turn(&[Message::user_text("go")], &response);
-    let mut harness = Harness::new(vec![text_reply("fine").into()]);
-    harness.conversation = serde_json::from_value(json!({
-        "scope": {"connection_id": CONNECTION}, "context": null, "messages": messages}))
-    .unwrap();
-    harness.run("next").unwrap();
-    let body = harness.transport.request(0).json();
-    let mut used = Vec::new();
-    for message in body["messages"].as_array().unwrap() {
-        for block in message["content"].as_array().unwrap() {
-            for field in ["id", "tool_use_id"] {
-                if let Some(id) = block[field].as_str() {
-                    assert!(fits(id), "{id}");
-                    used.push(id.to_owned());
-                }
-            }
-        }
-    }
-    assert_eq!(used.len(), 6);
-    for id in &ids {
-        assert_eq!(used.iter().filter(|u| *u == id).count(), 2);
+fn tools_are_only_asked_of_ollama() {
+    for flavor in [Flavor::OpenAi, Flavor::Compatible] {
+        let keys = Keys::new(Err(KeyError::Unavailable("must not be asked".into())));
+        let rig = rig_with(config(flavor, "http://localhost:9/v1"), Arc::clone(&keys) as Arc<dyn KeySource>, vec![]);
+        assert_eq!(rig.provider.model_supports_tools("gpt-4o", &CancelToken::new()).unwrap(), None);
+        assert_eq!(rig.transport.request_count(), 0);
+        assert_eq!(keys.asked(), 0);
     }
 }
 
 #[test]
-fn an_id_that_the_conversation_already_has_is_replaced() {
-    let first = calls_reply(vec![call_chunk(
-        0,
-        Some("call_1"),
-        Some("list_tables"),
-        "{}",
-    )]);
-    let rig1 = rig(Flavor::Compatible, vec![first.into()]);
-    let (response, _) = ok(turn(&rig1, "m"));
-    assert_eq!(stored_ids(&response), vec!["call_1"], "a fresh id is kept");
-
-    let history = after_tool_turn(&[Message::user_text("go")], &response);
-    let second = calls_reply(vec![
-        call_chunk(0, Some("call_1"), Some("list_tables"), "{}"),
-        // The same id again later in this response, on another index.
-        call_chunk(1, Some("call_9"), Some("list_tables"), "{}"),
-        call_chunk(2, Some("call_9"), Some("list_tables"), "{}"),
-    ]);
-    let rig2 = self::rig(Flavor::Compatible, vec![second.into()]);
-    let result = run(&rig2, &request("m", &history, &[]));
-    let ids = stored_ids(&result.0.unwrap());
-    assert_eq!(ids.len(), 3);
-    assert_ne!(ids[0], "call_1");
-    assert_eq!(ids[1], "call_9");
-    assert_ne!(ids[2], "call_9");
-    assert!(ids.iter().all(|id| fits(id)));
-}
-
-#[test]
-fn a_server_that_numbers_its_calls_the_same_every_turn_gets_different_stored_ids() {
-    let reply = || calls_reply(vec![call_chunk(0, Some("0"), Some("list_tables"), "{}")]);
-    let rig = rig(
-        Flavor::Compatible,
-        vec![reply().into(), reply().into(), reply().into()],
-    );
-    let mut messages = vec![Message::user_text("go")];
-    let mut seen = Vec::new();
-    for _ in 0..3 {
-        let result = run(&rig, &request("m", &messages, &[]));
-        let response = result.0.unwrap();
-        seen.extend(stored_ids(&response));
-        messages = after_tool_turn(&messages, &response);
-        messages.push(Message::user_text("again"));
-        messages.pop();
-    }
-    assert_eq!(seen.len(), 3);
-    assert_eq!(seen[0], "0", "the first one fits and is new");
-    assert_eq!(
-        seen.iter().collect::<std::collections::HashSet<_>>().len(),
-        3,
-        "{seen:?}"
-    );
-    assert!(seen.iter().all(|id| fits(id)));
-}
-
-#[test]
-fn generated_ids_never_meet_the_ids_of_the_history_or_of_another_provider() {
-    let nameless = || calls_reply(vec![call_chunk(0, None, Some("list_tables"), "{}")]);
-    // Two provider instances, the second continuing the history of the first, as after a restart.
-    let one = rig(Flavor::Ollama, vec![nameless().into()]);
-    let first = ok(turn(&one, "m")).0;
-    let history = after_tool_turn(&[Message::user_text("go")], &first);
-    let two = self::rig(Flavor::Ollama, vec![nameless().into()]);
-    let second = run(&two, &request("m", &history, &[])).0.unwrap();
-    let (a, b) = (stored_ids(&first), stored_ids(&second));
-    assert!(fits(&a[0]) && fits(&b[0]));
-    assert_ne!(a, b);
-
-    // A restart restarts the counter: put the next ids the counter would give into the history.
-    let next = super::stream::next_generated_ids_for_test(300);
-    let crowded: Vec<Message> = vec![
-        Message::user_text("go"),
-        Message::Assistant {
-            content: next
-                .iter()
-                .map(|id| json!({"type": "tool_use", "id": id, "name": "list_tables", "input": {}}))
-                .collect(),
-        },
-        Message::User {
-            content: next
-                .iter()
-                .map(|id| UserBlock::ToolResult {
-                    tool_use_id: id.clone(),
-                    content: "ok".into(),
-                    is_error: false,
-                })
-                .collect(),
-        },
-    ];
-    let three = self::rig(Flavor::Ollama, vec![nameless().into()]);
-    let third = run(&three, &request("m", &crowded, &[])).0.unwrap();
-    assert!(!next.contains(&stored_ids(&third)[0]));
-}
-
-#[test]
-fn the_same_id_on_two_indexes_is_two_calls_with_their_own_arguments() {
-    let reply = calls_reply(vec![
-        call_chunk(0, Some("dup"), Some("list_tables"), "{\"a\":"),
-        call_chunk(1, Some("dup"), Some("execute_query"), "{\"b\":"),
-        call_chunk(0, None, None, "1}"),
-        call_chunk(1, None, None, "2}"),
-    ]);
-    let rig = rig(Flavor::Compatible, vec![reply.into()]);
-    let (response, _) = ok(turn(&rig, "m"));
-    let calls: Vec<_> = response
-        .content
-        .iter()
-        .filter(|b| b["type"] == "tool_use")
-        .collect();
-    assert_eq!(calls.len(), 2);
-    assert_eq!(
-        (calls[0]["name"].as_str(), &calls[0]["input"]),
-        (Some("list_tables"), &json!({"a": 1}))
-    );
-    assert_eq!(
-        (calls[1]["name"].as_str(), &calls[1]["input"]),
-        (Some("execute_query"), &json!({"b": 2}))
-    );
-    assert_ne!(calls[0]["id"], calls[1]["id"]);
-}
-
-#[test]
-fn a_tool_name_that_cannot_be_stored_is_kept_out_and_answered_as_not_run() {
-    let reply = calls_reply(vec![
-        call_chunk(0, Some("c1"), Some("functions.list_tables"), "{\"a\":1}"),
-        call_chunk(1, Some("c2"), Some(&"n".repeat(65)), "{}"),
-        call_chunk(2, Some("c3"), Some(FAKE_KEY), "{}"),
-        call_chunk(3, Some("c4"), None, "{}"),
-        call_chunk(4, Some("c5"), Some("list_tables"), "{}"),
-    ]);
-    let rig = rig(Flavor::OpenAi, vec![reply.into()]);
-    let (response, events) = ok(turn(&rig, "m"));
-    assert_eq!(response.stop_reason, StopReason::ToolUse);
-    let names: Vec<_> = response
-        .content
-        .iter()
-        .map(|b| b["name"].as_str().unwrap())
-        .collect();
-    assert_eq!(
-        names,
-        vec!["invalid_tool_name"; 4]
-            .into_iter()
-            .chain(["list_tables"])
-            .collect::<Vec<_>>()
-    );
-    assert!(response.content.iter().all(|b| b["input"] == json!({})));
-    let invalid: Vec<_> = response
-        .invalid_tool_inputs
-        .iter()
-        .map(|i| i.tool_use_id.as_str())
-        .collect();
-    assert_eq!(invalid, vec!["c1", "c2", "c3", "c4"]);
-    assert!(response.invalid_tool_inputs[0]
-        .raw
-        .contains("functions.list_tables"));
-    assert!(events
-        .iter()
-        .any(|e| e.contains("ToolInputReady") && e.contains("c1") && e.contains("valid: false")));
-    assert!(!events.iter().any(|e| e.contains("functions.")));
-    for text in events
-        .iter()
-        .chain(response.invalid_tool_inputs.iter().map(|i| &i.raw))
-    {
-        assert_no_key(text);
-    }
-    // The stored turn is valid for both providers.
-    assert!(response
-        .content
-        .iter()
-        .all(|b| fits(b["name"].as_str().unwrap())));
-}
-
-#[test]
-fn the_tool_result_is_written_with_the_stored_id_on_both_sides() {
-    let reply = calls_reply(vec![call_chunk(
-        0,
-        Some("functions.list_tables:0"),
-        Some("list_tables"),
-        "{}",
-    )]);
-    let rig1 = rig(Flavor::Compatible, vec![reply.into()]);
-    let (response, _) = ok(turn(&rig1, "m"));
-    let id = stored_ids(&response).remove(0);
-    let history = after_tool_turn(&[Message::user_text("go")], &response);
-    let rig2 = self::rig(Flavor::Compatible, vec![complete(&[]).into()]);
-    let _ = run(&rig2, &request("m", &history, &[]));
-    let sent = rig2.transport.request(0).json();
-    let messages = sent["messages"].as_array().unwrap();
-    let call = messages.iter().find(|m| m["role"] == "assistant").unwrap();
-    let result = messages.iter().find(|m| m["role"] == "tool").unwrap();
-    assert_eq!(call["tool_calls"][0]["id"], id.as_str());
-    assert_eq!(result["tool_call_id"], id.as_str());
-    assert!(fits(&id));
-}
-
-// ------------------------------------------------------------------------------- nits
-
-#[test]
-fn an_unknown_finish_reason_with_calls_still_runs_them() {
-    for reason in ["tool_use", "eos", "stop", "end_turn"] {
-        let reply = complete(&[
-            call_chunk(0, Some("c1"), Some("list_tables"), "{}"),
-            chunk(json!({}), Some(reason)),
-        ]);
-        let rig = rig(Flavor::Compatible, vec![reply.into()]);
-        assert_eq!(
-            ok(turn(&rig, "m")).0.stop_reason,
-            StopReason::ToolUse,
-            "{reason}"
-        );
-    }
-    // Without calls an unknown reason stays what it is; the output limit wins over the calls.
-    let reply = complete(&[text_chunk("x"), chunk(json!({}), Some("eos"))]);
-    let rig1 = rig(Flavor::Compatible, vec![reply.into()]);
-    assert_eq!(
-        ok(turn(&rig1, "m")).0.stop_reason,
-        StopReason::Other("eos".into())
-    );
-    let reply = complete(&[
-        call_chunk(0, Some("c1"), Some("t"), "{"),
-        chunk(json!({}), Some("length")),
-    ]);
-    let rig2 = self::rig(Flavor::Compatible, vec![reply.into()]);
-    assert_eq!(ok(turn(&rig2, "m")).0.stop_reason, StopReason::MaxTokens);
-}
-
-#[test]
-fn arguments_as_an_object_and_odd_numbers_do_not_lose_the_delta() {
-    let reply = complete(&[
-        // The input as an object, in one piece.
-        chunk(
-            json!({"tool_calls": [{"index": 0, "id": "c1",
-                "function": {"name": "list_tables", "arguments": {"connection_id": "c1"}}}]}),
-            None,
-        ),
-        // `index` as a float with an integer value, a string (ignored: index 0 is the first call).
-        chunk(
-            json!({"tool_calls": [{"index": 1.0, "id": "c2",
-                "function": {"name": "list_tables", "arguments": "{\"x\":1}"}}]}),
-            None,
-        ),
-        chunk(
-            json!({"tool_calls": [{"index": "1", "function": {"arguments": ""}}]}),
-            None,
-        ),
-        chunk(json!({}), Some("tool_calls")),
-        json!({"choices": [], "usage": {"prompt_tokens": 12.0, "completion_tokens": 3.0,
-            "prompt_tokens_details": {"cached_tokens": 2.5}}}),
-    ]);
-    let rig = rig(Flavor::Compatible, vec![reply.into()]);
-    let (response, events) = ok(turn(&rig, "m"));
-    assert_eq!(response.content[0]["input"], json!({"connection_id": "c1"}));
-    assert_eq!(response.content[1]["input"], json!({"x": 1}));
-    assert!(response.invalid_tool_inputs.is_empty());
-    assert!(events
-        .iter()
-        .any(|e| e.contains("ToolInputReady") && e.contains("c1") && e.contains("valid: true")));
-    // 12.0 and 3.0 are counts; 2.5 is not one and is ignored for that field only.
-    assert_eq!(response.usage.input_tokens, 12);
-    assert_eq!(response.usage.output_tokens, 3);
-    assert_eq!(response.usage.cache_read_input_tokens, 0);
-    // Wrong types elsewhere cost that field, not the chunk.
-    let reply = complete(&[
-        json!({"choices": [{"delta": {"content": "kept"}, "finish_reason": null}],
-               "usage": {"prompt_tokens": "x", "completion_tokens": []}}),
-        chunk(json!({}), Some("stop")),
-    ]);
-    let rig2 = self::rig(Flavor::Compatible, vec![reply.into()]);
-    assert_eq!(ok(turn(&rig2, "m")).0.text(), "kept");
-}
-
-#[test]
-fn an_address_whose_host_looks_like_a_path_suffix_keeps_its_host() {
+fn ollama_says_whether_a_model_takes_tools() {
     let cases = [
-        (
-            Flavor::Compatible,
-            "https://chat/completions",
-            "https://chat/completions/chat/completions",
-            "https://chat/completions/models",
-        ),
-        (
-            Flavor::OpenAi,
-            "https://responses",
-            "https://responses/v1/chat/completions",
-            "https://responses/v1/models",
-        ),
-        (
-            Flavor::Ollama,
-            "https://models",
-            "https://models/v1/chat/completions",
-            "https://models/v1/models",
-        ),
+        (json!(["completion", "tools"]), Some(true)),
+        (json!(["completion"]), Some(false)),
+        (json!(["completion", "vision"]), Some(false)),
+        (json!([]), None),
+        (json!(null), None),
     ];
-    for (flavor, base, chat, models) in cases {
-        let rig = rig_with(
-            config(flavor, base),
-            Arc::new(FixedKey),
-            vec![
-                complete(&[]).into(),
-                list_reply(&["m"]).into(),
-                show_reply(&["completion"]).into(),
-            ],
-        );
-        let _ = turn(&rig, "m");
-        assert_eq!(rig.transport.request(0).url, chat, "{base}");
-        let _ = rig.provider.list_models(&CancelToken::new()).unwrap();
-        assert_eq!(rig.transport.request(1).url, models, "{base}");
-        if flavor == Flavor::Ollama {
-            assert_eq!(rig.transport.request(2).url, "https://models/api/show");
-        }
+    for (capabilities, want) in cases {
+        let rig = ollama(vec![show(capabilities.clone())]);
+        let got = rig.provider.model_supports_tools("  qwen3:8b \n", &CancelToken::new()).unwrap();
+        assert_eq!(got, want, "{capabilities}");
+        assert_eq!(rig.transport.request(0).json(), json!({"model": "qwen3:8b"}));
+        assert_eq!(rig.transport.request_count(), 1);
     }
+    // No capabilities field at all.
+    let rig = ollama(vec![Reply::ok("{}").into()]);
+    assert_eq!(rig.provider.model_supports_tools("m", &CancelToken::new()).unwrap(), None);
+}
+
+#[test]
+fn a_failed_tools_probe_is_an_error_and_so_is_a_key_error() {
+    let rig = ollama(vec![Reply::error(404, "x", "model not found").into()]);
+    assert!(matches!(rig.provider.model_supports_tools("m", &CancelToken::new()), Err(ProviderError::NotFound(_))));
+    let rig = ollama(vec![Reply::ok("not json").into()]);
+    assert!(matches!(rig.provider.model_supports_tools("m", &CancelToken::new()), Err(ProviderError::Protocol { .. })));
+    let rig = ollama(vec![Step::Fail(TransportError::Failed("down".into()))]);
+    assert!(matches!(rig.provider.model_supports_tools("m", &CancelToken::new()), Err(ProviderError::Transport { .. })));
+    assert_eq!(rig.transport.request_count(), 1);
+    let rig = rig_with(
+        config(Flavor::Ollama, OLLAMA_BASE_URL),
+        Keys::new(Err(KeyError::Unavailable("locked".into()))),
+        vec![],
+    );
+    assert!(matches!(rig.provider.model_supports_tools("m", &CancelToken::new()), Err(ProviderError::Key(KeyError::Unavailable(_)))));
+    assert_eq!(rig.transport.request_count(), 0);
 }
