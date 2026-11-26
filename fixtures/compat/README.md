@@ -89,3 +89,22 @@ checked against `git show v0.1.10:<path>` for `Settings` and its five sections,
 `SidebarPreferences`, `GpuiSession` and `SessionTab`. The driver store records were written by hand
 from `InstalledDriverRecord` (camelCase) of v0.1.10. From the next release on, use the steps above
 on the release commit.
+
+### v0.1.9 was written by the release binary (settings, sidebar preferences, session only)
+
+`v0.1.9/tablex/` is a small set, checked by one test of its own
+(`the_files_of_v0_1_9_load_with_every_value_and_the_settings_added_since_read_as_defaults` in
+`apps/tablex-gpui/src/app/upgrade_compat.rs`), not by the `VERSIONS` loops: it has no connections,
+so the checks of the other test files that expect rows do not apply.
+
+* `settings.json`: every setting of v0.1.9 away from its default, in v0.1.9's key set. It was made by
+  starting the released `TableX.app` 0.1.9 with `TABLEX_DATA_DIR` (and a throwaway `HOME`) on a file
+  filled from the v0.1.10 fixture minus `appearance.error_log_place`; the build read the file and
+  wrote it back with the same keys (only the copy-format setting moved, from the old
+  `grid-copy-default.json`), so the keys are the ones 0.1.9 itself writes.
+* `sidebar-preferences.json`: the format did not change from 0.1.9 to 0.1.10, so this is the
+  v0.1.10 file (no `folder_filters`, no `bookmarks`).
+* `tablex.db`: created by the same 0.1.9 run (it moved a made-up `gpui-workspace-session.json` in);
+  its only content is the session of two tabs. `VACUUM INTO` made it one file. The session text was
+  then written out with every field of v0.1.9's `SessionTab` (the run had kept the short made-up
+  file as it was), so a load and save leaves it as it is, as with a session 0.1.9 saved itself.
