@@ -989,6 +989,8 @@ pub struct AgentConnections {
     /// What to do about a credential store that cannot be read, appended to the error the model
     /// sees (the standalone MCP server names its one-time authorisation command here).
     credential_hint: Option<String>,
+    /// Open DuckDB sessions with file access off (see [`Self::with_locked_file_access`]).
+    lock_file_access: bool,
 }
 
 /// The record and the saved secrets of one open: the texts to mask and the values the open
@@ -1028,7 +1030,23 @@ impl AgentConnections {
             newest_open: AtomicU64::new(0),
             prefetched: Mutex::new(HashMap::new()),
             credential_hint: None,
+            lock_file_access: false,
         }
+    }
+
+    /// Opens the DuckDB sessions of agents with `enable_external_access = false` and a locked
+    /// configuration, so SQL cannot read or write any file or URL besides the database
+    /// (`read_csv`, `COPY`, `ATTACH`, `FROM 'x.csv'`, `INSTALL`: the engine refuses them, whatever
+    /// the classifier misses). DuckDB keeps that setting per instance, and an instance is shared by
+    /// every connection of one file in the process: so this is for a process that holds no
+    /// connection of the user's own (the standalone MCP server). In the app, where the user's
+    /// connection to the same file needs file access, it would be refused (the driver does not
+    /// narrow or widen an open instance), and the assistant there runs no SQL on DuckDB at all (the
+    /// tool layer refuses it on a session whose instance is not locked: `SessionInfo::
+    /// file_access_locked`).
+    pub fn with_locked_file_access(mut self) -> Self {
+        self.lock_file_access = true;
+        self
     }
 
     /// Appends `hint` to the `credentials.unavailable` error of an open (what the user can do
@@ -1114,7 +1132,10 @@ impl AgentConnections {
                 .into_owned()
         };
         let mut names = vec![decode(url.username())];
-        if connection.kind != engine_agent::ConnectionKind::Sqlite {
+        if !matches!(
+            connection.kind,
+            engine_agent::ConnectionKind::Sqlite | engine_agent::ConnectionKind::DuckDb
+        ) {
             names.push(decode(url.path().trim_matches('/')));
             names.extend(
                 url.query_pairs()
@@ -1193,10 +1214,15 @@ impl ConnectionCatalog for AgentConnections {
         let Ok(records) = engine_storage::connection::list_connections() else {
             return Vec::new();
         };
+        let folders = crate::sidebar_groups::folders_by_connection();
         match self.connector.profile_settings() {
             Ok(settings) => records
                 .iter()
                 .filter_map(|record| settings.agent_info(record))
+                .map(|mut info| {
+                    info.group = folders.get(&info.id.to_ascii_lowercase()).cloned().unwrap_or_default();
+                    info
+                })
                 .collect(),
             // Without the types there is no way to know which connections are read-only or
             // production: nothing may be used.
@@ -1218,7 +1244,7 @@ impl ConnectionCatalog for AgentConnections {
 
 impl ConnectFailure {
     /// What the model is told about a connect failure of `connection`. **No address detail**:
-    /// `list_connections` promises the model no host, port, login or path, so none reaches it here -
+    /// `list_connections` tells the model a connection's `host:port/database` and nothing more (no login, path or tunnel), so no other address detail reaches it here -
     /// not the bastion's `host:port`, the SSH login or key path, the SQLite file path or the driver
     /// store path, which the interactive messages (and the driver's own error text) carry. The
     /// message names the connection, gives the typed code and says what to do in tablex, where the
@@ -1310,6 +1336,10 @@ impl SessionProvider for AgentConnections {
                 ReadFailure::Record(failure) => failure.agent_error(connection),
                 ReadFailure::Credentials(error) => self.credentials_unavailable(&error),
             })?;
+        let mut record = record;
+        if self.lock_file_access && connection.kind == engine_agent::ConnectionKind::DuckDb {
+            record.uri = without_external_access(&record.uri);
+        }
         let OpenedConnection {
             session,
             tunnel,
@@ -1372,17 +1402,30 @@ impl SessionProvider for AgentConnections {
     }
 
     fn transactions_unavailable(&self, connection: &ConnectionInfo) -> Option<String> {
-        if connection.kind != engine_agent::ConnectionKind::Sqlite {
-            return None;
-        }
+        let (engine, in_memory): (_, fn(&str) -> bool) = match connection.kind {
+            engine_agent::ConnectionKind::Sqlite => ("SQLite", is_in_memory_sqlite),
+            engine_agent::ConnectionKind::DuckDb => ("DuckDB", is_in_memory_duckdb),
+            _ => return None,
+        };
         // A record that cannot be read fails the open that follows, with its own error.
         let record = Connector::record(&connection.id).ok()?;
-        is_in_memory_sqlite(&record.uri).then(|| {
-            "an in-memory SQLite database exists for one session only, so a transaction's own \
-             session would not see it; transactions are available on SQLite database files"
-                .to_owned()
+        in_memory(&record.uri).then(|| {
+            format!(
+                "an in-memory {engine} database exists for one session only, so a transaction's own \
+                 session would not see it; transactions are available on {engine} database files"
+            )
         })
     }
+}
+
+/// The DuckDB URI with the option that opens its instance without external access.
+fn without_external_access(uri: &str) -> String {
+    format!("{uri}{}external_access=off", if uri.contains('?') { '&' } else { '?' })
+}
+
+/// A DuckDB URI of `:memory:`: every connection to it is a database of its own.
+fn is_in_memory_duckdb(uri: &str) -> bool {
+    uri.trim().to_ascii_lowercase().starts_with("duckdb://:memory:")
 }
 
 /// A SQLite URI of a database that lives in memory or is private to one connection: `:memory:`,
@@ -1949,6 +1992,10 @@ mod tests {
             connection_type: Default::default(),
             agent_access: None,
             statement_timeout_secs: None,
+            allowed_databases: None,
+            endpoint: None,
+            group: Vec::new(),
+            notes: None,
             revision: Default::default(),
         };
         agent.close(&info);
@@ -1963,6 +2010,10 @@ mod tests {
             connection_type: Default::default(),
             agent_access: None,
             statement_timeout_secs: None,
+            allowed_databases: None,
+            endpoint: None,
+            group: Vec::new(),
+            notes: None,
             revision: Default::default(),
         }
     }
@@ -1981,6 +2032,18 @@ mod tests {
                 &prompts,
             ),
         }
+    }
+
+    #[test]
+    fn duckdb_sessions_of_agents_ask_for_a_locked_instance_and_memory_is_per_session() {
+        assert_eq!(without_external_access("duckdb:///d/x.duckdb"), "duckdb:///d/x.duckdb?external_access=off");
+        assert_eq!(
+            without_external_access("duckdb:///d/x.duckdb?mode=ro"),
+            "duckdb:///d/x.duckdb?mode=ro&external_access=off"
+        );
+        assert!(is_in_memory_duckdb("duckdb://:memory:"));
+        assert!(is_in_memory_duckdb("DUCKDB://:MEMORY:"));
+        assert!(!is_in_memory_duckdb("duckdb:///tmp/x.duckdb"));
     }
 
     #[test]

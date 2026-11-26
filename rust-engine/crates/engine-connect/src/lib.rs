@@ -35,5 +35,6 @@ pub mod profile;
 pub mod records;
 pub mod secret_store;
 pub mod session_passwords;
+pub mod sidebar_groups;
 pub mod tool_endpoint;
 pub mod tunnel;

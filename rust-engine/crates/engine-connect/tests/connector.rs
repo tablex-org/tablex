@@ -548,7 +548,7 @@ fn the_agent_tools_run_end_to_end_over_connections_opened_by_the_connector() {
     success(layer.call("close_session", json!({"connection_id": SHOWN})));
     assert!(!layer.is_open(SHOWN));
 
-    // 5. The type's preset applies to connections that set nothing, capped by the type.
+    // 5. The type's preset applies to connections that set nothing (a read-only type caps it at read).
     upsert_connection(&record(ID, &db, "{}", "", "test")).unwrap();
     let info = agent.get(SHOWN).unwrap();
     assert_eq!(info.effective_access(), AgentAccess::Read);

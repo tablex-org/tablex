@@ -32,23 +32,47 @@ pub fn default_settings_path() -> Option<std::path::PathBuf> {
     crate::platform::config_dir().map(|dir| dir.join(SETTINGS_FILE))
 }
 
-/// The app's switch "Let MCP clients run changes" in `settings.json`: `{"ai": {"mcp_writes": true}}`.
+/// The app's old switch "Let MCP clients run changes" in `settings.json`: `{"ai": {"mcp_writes": true}}`.
+/// **Deprecated**: the app (schema 7 and later) no longer shows it and keeps writing `true` so that
+/// an older `tablex-mcp` paired with it still allows writes on a connection set to Read and write.
+/// `tablex-mcp` honours it only for a file written by an older app (see [`read_mcp_writes`]).
 pub const MCP_WRITES_KEY: &str = "ai.mcp_writes";
 
 /// The first `schema_version` of `settings.json` that has `ai.mcp_writes` (the app's `SCHEMA_VERSION`
 /// when the switch was added). `true` in a file with a lower or no version is not honoured.
 pub const MCP_WRITES_SCHEMA_VERSION: u64 = 4;
 
-/// Reads the switch from the file the app writes. A missing file or key is `false` (the default);
-/// a file that cannot be read, is not a JSON object, or holds anything but a boolean there is an
-/// error; a `true` needs a numeric `schema_version` of at least [`MCP_WRITES_SCHEMA_VERSION`], else
-/// it reads as `false`. (Walked by hand rather than deserialized: serde would also read a struct out of a JSON
-/// array, and only an object may switch anything on.)
-pub fn read_mcp_writes(path: &Path) -> Result<bool, ProfileError> {
+/// The first `schema_version` of `settings.json` for which a missing or `true` `ai.mcp_writes` is
+/// ignored: from there on every write is put to the user per statement and no switch gates it. An
+/// explicit `false` still blocks (see [`read_mcp_writes`]).
+pub const MCP_WRITES_IGNORED_FROM_SCHEMA: u64 = 7;
+
+/// Whether `tablex-mcp` may put changes to the user, as far as `settings.json` says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpWrites {
+    /// Each change is asked about (a file of schema 7 or later, or an older one with the switch on).
+    Allowed,
+    /// A file written by an older app (schema below 7) with the switch "Let MCP clients run changes" off.
+    SwitchOff,
+    /// No file, or one that cannot be read or understood: nothing is asked (fails closed).
+    Unavailable,
+}
+
+/// Reads [`McpWrites`] from the file the app writes. A missing file is [`McpWrites::Unavailable`]; a file
+/// that cannot be read, is not a JSON object, or holds anything but a boolean in `ai.mcp_writes` is
+/// an error. With a numeric `schema_version` of at least [`MCP_WRITES_IGNORED_FROM_SCHEMA`] a missing
+/// or `true` switch is ignored (writes are allowed) but an explicit `false` is honoured; below it (or
+/// with no or a non-numeric version) it is honoured as before: only a `true` with a `schema_version`
+/// of at least [`MCP_WRITES_SCHEMA_VERSION`] allows writes. (Walked by
+/// hand rather than deserialized: serde would also read a struct out of a JSON array, and only an
+/// object may allow anything.)
+pub fn read_mcp_writes(path: &Path) -> Result<McpWrites, ProfileError> {
     let shown = path.display().to_string();
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(McpWrites::Unavailable)
+        }
         Err(source) => {
             return Err(ProfileError::Unreadable {
                 path: shown,
@@ -65,30 +89,84 @@ pub fn read_mcp_writes(path: &Path) -> Result<bool, ProfileError> {
     let root = value
         .as_object()
         .ok_or_else(|| invalid("the file is not a JSON object".into()))?;
-    let Some(ai) = root.get("ai") else {
-        return Ok(false);
-    };
-    let ai = ai
-        .as_object()
-        .ok_or_else(|| invalid("`ai` is not an object".into()))?;
-    let on = match ai.get("mcp_writes") {
-        None => return Ok(false),
-        Some(serde_json::Value::Bool(on)) => *on,
-        Some(_) => return Err(invalid("`ai.mcp_writes` is not a boolean".into())),
-    };
-    // The app's migration to this schema forces the switch off; a `true` in a file that has not
-    // been through it (an older `schema_version`, or none) is not something the app wrote.
     let version = root
         .get("schema_version")
         .and_then(serde_json::Value::as_u64);
-    Ok(on && version.is_some_and(|version| version >= MCP_WRITES_SCHEMA_VERSION))
+    let switch = match root.get("ai") {
+        None => None,
+        Some(ai) => {
+            let ai = ai
+                .as_object()
+                .ok_or_else(|| invalid("`ai` is not an object".into()))?;
+            match ai.get("mcp_writes") {
+                None => None,
+                Some(serde_json::Value::Bool(on)) => Some(*on),
+                Some(_) => return Err(invalid("`ai.mcp_writes` is not a boolean".into())),
+            }
+        }
+    };
+    let on = switch == Some(true);
+    // From schema 7 the app keeps the switch `true` and a missing key means nothing; an explicit
+    // `false` is the old switch turned off (an older app opened the file after a newer one wrote
+    // it): the user's "no" still stands, whatever the version says.
+    let ignored = version.is_some_and(|version| version >= MCP_WRITES_IGNORED_FROM_SCHEMA)
+        && switch != Some(false);
+    // An older app's migration forces the switch off when it adds it; a `true` in a file that has
+    // not been through it (an older `schema_version`, or none) is not something the app wrote.
+    let honoured = on && version.is_some_and(|version| version >= MCP_WRITES_SCHEMA_VERSION);
+    Ok(if ignored || honoured {
+        McpWrites::Allowed
+    } else {
+        McpWrites::SwitchOff
+    })
 }
 
-/// Whether MCP clients may be asked to run changes right now, for `tablex-mcp`, which reads it at
-/// the time of each write. **Fails closed**: no path, a missing or unreadable file, a missing key,
-/// a value that is not a boolean, all read as `false`. Only `true` in the file turns it on.
+/// [`McpWrites`] right now, for `tablex-mcp`, which reads it at the time of each write. **Fails
+/// closed**: no path, a missing or unreadable file, a value that is not a boolean, all read as
+/// [`McpWrites::Unavailable`].
+pub fn mcp_writes_state(path: Option<&Path>) -> McpWrites {
+    path.and_then(|path| read_mcp_writes(path).ok())
+        .unwrap_or(McpWrites::Unavailable)
+}
+
+/// Whether MCP clients may be asked to run changes right now ([`mcp_writes_state`] is `Allowed`).
 pub fn mcp_writes_enabled(path: Option<&Path>) -> bool {
-    path.is_some_and(|path| matches!(read_mcp_writes(path), Ok(true)))
+    mcp_writes_state(path) == McpWrites::Allowed
+}
+
+/// The tools the user lets MCP clients use, in `settings.json`: `{"ai": {"mcp_tools": ["list_tables",
+/// "execute_query"]}}`. Absent: every tool.
+pub const MCP_TOOLS_KEY: &str = "ai.mcp_tools";
+
+/// The tools [`MCP_TOOLS_KEY`] allows, read from the file at the time of each call: `None` allows
+/// every tool (no file, no key, or `null`). **Fails closed** for what is there but unusable: a
+/// file that cannot be read or parsed, or a value that is not a list of strings, allows no tool at
+/// all, so a typo narrows the agent rather than widening it.
+pub fn read_mcp_tools(path: Option<&Path>) -> Option<Vec<String>> {
+    let path = path?;
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(_) => return Some(Vec::new()),
+    };
+    let Ok(serde_json::Value::Object(root)) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Some(Vec::new());
+    };
+    match root.get("ai")? {
+        serde_json::Value::Object(ai) => match ai.get("mcp_tools")? {
+            serde_json::Value::Null => None,
+            serde_json::Value::Array(tools) => Some(
+                tools
+                    .iter()
+                    .filter_map(|tool| tool.as_str().map(str::to_owned))
+                    .collect(),
+            )
+            .filter(|names: &Vec<String>| names.len() == tools.len())
+            .or(Some(Vec::new())),
+            _ => Some(Vec::new()),
+        },
+        _ => Some(Vec::new()),
+    }
 }
 
 /// Rows per page when nothing says otherwise (the app's `DEFAULT_OUTPUT_LIMIT`).
@@ -109,6 +187,68 @@ pub const KEEP_ALIVE_SECS: &str = "query.keep_alive_secs";
 pub const CONFIRM_DANGEROUS: &str = "editor.confirm_dangerous";
 /// How far an AI agent may go on the connection (see [`AgentLevel`]).
 pub const AGENT_ACCESS: &str = "agent.access";
+/// The databases an AI agent may use on the connection: names separated by commas (`app,reports`).
+/// Absent or empty: every database. Present but not text: none (it fails closed, like
+/// [`AGENT_ACCESS`]).
+pub const AGENT_DATABASES: &str = "agent.databases";
+/// The user's note on the connection, shown to an AI agent in the connection list.
+pub const CONNECTION_NOTES: &str = "connection.notes";
+
+/// The most characters of a note an agent is shown.
+const NOTES_MAX_CHARS: usize = 1000;
+
+/// `host:port/database` of a saved URI, for the engines that have a host, with no user, password,
+/// query or path: what an agent may be told about where a connection goes. `None` for SQLite,
+/// a URI that cannot be read, and anything with no host.
+pub fn endpoint_of(uri: &str) -> Option<String> {
+    let (scheme, rest) = uri.split_once("://")?;
+    if scheme.eq_ignore_ascii_case("sqlite") || scheme.eq_ignore_ascii_case("file") {
+        return None;
+    }
+    let rest = rest.split(['?', '#']).next().unwrap_or(rest);
+    let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+    // The user and password come before the last `@`.
+    let hosts = authority.rsplit_once('@').map_or(authority, |(_, hosts)| hosts);
+    if hosts.is_empty() || hosts.chars().any(|ch| ch.is_whitespace() || ch.is_control()) {
+        return None;
+    }
+    let database = path.split('/').next().unwrap_or_default();
+    let mut endpoint = hosts.to_owned();
+    if !database.is_empty() {
+        endpoint.push('/');
+        endpoint.push_str(database);
+    }
+    Some(endpoint.chars().take(200).collect())
+}
+
+impl Overrides {
+    /// The databases agents may use ([`AGENT_DATABASES`]); `None` is all of them.
+    pub fn agent_databases(&self) -> Option<Vec<String>> {
+        match self.get(AGENT_DATABASES)? {
+            OverrideValue::Text(text) => {
+                let names: Vec<String> = text
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_owned)
+                    .collect();
+                (!names.is_empty()).then_some(names)
+            }
+            _ => Some(Vec::new()),
+        }
+    }
+
+    /// The user's note on the connection ([`CONNECTION_NOTES`]).
+    pub fn notes(&self) -> Option<String> {
+        match self.get(CONNECTION_NOTES)? {
+            OverrideValue::Text(text) => {
+                let text = text.trim();
+                (!text.is_empty()).then(|| text.chars().take(NOTES_MAX_CHARS).collect())
+            }
+            _ => None,
+        }
+    }
+}
 
 /// Stored beside the overrides, but not a setting (it is not in the registry, nothing resolves it
 /// against a global value): `true` = the connection lists only the database its address names.
@@ -123,6 +263,7 @@ pub const fn supports_database_scope(kind: ConnectionKind) -> bool {
             | ConnectionKind::Mysql
             | ConnectionKind::Mariadb
             | ConnectionKind::Clickhouse
+            | ConnectionKind::Mssql
     )
 }
 
@@ -154,8 +295,6 @@ pub enum AgentLevel {
 
 impl AgentLevel {
     pub const ALL: [Self; 4] = [Self::Off, Self::Schema, Self::Read, Self::ReadWrite];
-    /// What a connection type can preset: never more than `read`.
-    pub const TYPE_PRESETS: [Self; 3] = [Self::Off, Self::Schema, Self::Read];
 
     pub const fn id(self) -> &'static str {
         match self {
@@ -185,15 +324,7 @@ impl AgentLevel {
             Self::Off => "No AI agent can use this connection.",
             Self::Schema => "Agents see table, column and routine definitions, never rows.",
             Self::Read => "Agents may also run statements that only read data.",
-            Self::ReadWrite => "Agents may propose writes; each one is approved first.",
-        }
-    }
-
-    /// The level a connection type can preset: `read_write` shows (and acts) as `read`.
-    pub const fn type_preset(self) -> Self {
-        match self {
-            Self::ReadWrite => Self::Read,
-            other => other,
+            Self::ReadWrite => "Agents may propose writes; each one is put to you for approval first.",
         }
     }
 
@@ -253,9 +384,9 @@ pub struct ConnectionType {
     /// defaults (see [`Self::idle_secs`]), so a type saved before this existed gets them too.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idle_transaction_secs: Option<u32>,
-    /// What an AI agent may do on connections of this type that set nothing themselves. Capped at
-    /// `read` by [`AgentAccess::effective`], and a production type never grants it (the
-    /// connection has to say so itself).
+    /// What an AI agent may do on connections of this type that set nothing themselves. A production
+    /// type never grants it (the connection has to say so itself); a read-only type caps it at
+    /// `read` ([`AgentAccess::effective`]).
     pub agent_access: AgentLevel,
 }
 
@@ -379,20 +510,20 @@ impl ConnectionType {
     /// affected.
     ///
     /// `global` is the default level of Settings -> AI: a type that is not production gets
-    /// `max(its preset, global)` (capped at `read`), and so does a connection without a type.
-    /// A production type keeps its own (the policy gives it no preset without a setting).
+    /// `max(its preset, global)`, and so does a connection without a type. A production type
+    /// keeps its own (the policy gives it no preset without a setting).
     pub fn agent_info_in(types: &[Self], type_id: &str, global: AgentLevel) -> ConnectionTypeInfo {
         match find_type(types, type_id) {
             Some(ty) => {
                 let mut info = ty.agent_info();
                 if !info.production {
                     let preset = ty.agent_access.access().max(global.access());
-                    info.default_agent_access = Some(AgentLevel::from_access(preset).type_preset().access());
+                    info.default_agent_access = Some(preset);
                 }
                 info
             }
             None if type_id.is_empty() => ConnectionTypeInfo {
-                default_agent_access: Some(global.type_preset().access()),
+                default_agent_access: Some(global.access()),
                 ..ConnectionTypeInfo::default()
             },
             None => ConnectionTypeInfo {
@@ -676,8 +807,8 @@ impl ConnectionProfile {
 }
 
 /// `overrides_json` without the agent access level (a record made from another record starts from
-/// the default: the preset of its connection type, which is `off` unless the type says otherwise,
-/// and never more than `read`); every other override stays.
+/// the default: the preset of its connection type, which is `off` unless the type says otherwise);
+/// every other override stays.
 pub fn without_agent_access(overrides_json: &str) -> String {
     let mut overrides = Overrides::from_json(overrides_json);
     overrides.clear(AGENT_ACCESS);
@@ -806,7 +937,7 @@ pub struct Globals {
     pub keep_alive_secs: u32,
     pub page_size: u32,
     pub confirm_dangerous: bool,
-    /// Settings -> AI "Default agent access" (never `read_write`).
+    /// Settings -> AI "Default agent access".
     pub agent_access: AgentLevel,
 }
 
@@ -929,19 +1060,50 @@ pub struct ProfileSettings {
 #[derive(Debug, Clone, Default, PartialEq)]
 struct AiValues {
     agent_access: AgentLevel,
+    /// `ai.mcp_databases`: connection id or name (lower case) to the databases agents may use.
+    databases: Vec<(String, Vec<String>)>,
 }
 
-/// The `ai` section as far as this reader needs it. Lenient: `read_write` reads as `read`, and a
-/// value that is not a level id (or an `ai` that is not an object) is `off`; a bad value never
-/// fails the whole file.
+impl AiValues {
+    /// The databases the settings file limits the connection to (`None`: it says nothing).
+    fn databases_of(&self, id: &str, name: &str) -> Option<Vec<String>> {
+        let (id, name) = (id.to_ascii_lowercase(), name.to_lowercase());
+        self.databases
+            .iter()
+            .find(|(key, _)| *key == id || *key == name)
+            .map(|(_, databases)| databases.clone())
+    }
+}
+
+/// The `ai` section as far as this reader needs it. Lenient: a value that is not a level id (or an
+/// `ai` that is not an object) is `off`; a bad value never fails the whole file.
 fn lenient_ai<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<AiValues, D::Error> {
     let value = serde_json::Value::deserialize(deserializer)?;
     let agent_access = value
         .get("agent_access")
         .and_then(serde_json::Value::as_str)
         .and_then(AgentLevel::from_id)
-        .map_or(AgentLevel::Off, AgentLevel::type_preset);
-    Ok(AiValues { agent_access })
+        .unwrap_or(AgentLevel::Off);
+    // `{"mcp_databases": {"<connection id or name>": ["shop", "reports"]}}`. An entry that is not
+    // a list of names allows no database at all (it fails closed, like the tool list).
+    let databases = match value.get("mcp_databases") {
+        Some(serde_json::Value::Object(entries)) => entries
+            .iter()
+            .map(|(key, names)| {
+                let names = match names {
+                    serde_json::Value::Array(names) => names
+                        .iter()
+                        .map(|name| name.as_str().map(str::to_owned))
+                        .collect::<Option<Vec<String>>>()
+                        .unwrap_or_default(),
+                    _ => Vec::new(),
+                };
+                (key.to_lowercase(), names)
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    Ok(AiValues { agent_access, databases })
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -1074,6 +1236,15 @@ impl ProfileSettings {
             ),
             agent_access: profile.agent_level().map(AgentLevel::access),
             statement_timeout_secs: effective.query_timeout.map(|timeout| timeout.as_secs()),
+            // The connection's own setting wins; else the list the settings file keeps for it.
+            allowed_databases: profile.overrides.agent_databases().or_else(|| {
+                self.ai
+                    .databases_of(&crate::records::display_connection_id(&record.id), &record.name)
+            }),
+            endpoint: endpoint_of(&record.uri),
+            // The folders come from the sidebar's own file, which the catalog reads.
+            group: Vec::new(),
+            notes: profile.overrides.notes(),
             revision: revision_of(record),
         })
     }
@@ -1126,6 +1297,7 @@ mod tests {
             (ConnectionKind::Mysql, true),
             (ConnectionKind::Mariadb, true),
             (ConnectionKind::Clickhouse, true),
+            (ConnectionKind::Mssql, true),
             (ConnectionKind::Sqlite, false),
             (ConnectionKind::Mongodb, false),
             (ConnectionKind::Redis, false),
@@ -1334,10 +1506,6 @@ mod tests {
         assert_eq!(AgentLevel::default(), AgentLevel::Off);
         assert_eq!(AgentLevel::from_id("everything"), None);
         assert_eq!(AgentLevel::Schema.access(), AgentAccess::SchemaOnly);
-        assert!(
-            !AgentLevel::TYPE_PRESETS.contains(&AgentLevel::ReadWrite),
-            "a preset never writes"
-        );
     }
 
     #[test]
@@ -1394,7 +1562,7 @@ mod tests {
     }
 
     #[test]
-    fn a_type_preset_applies_to_unset_connections_capped_at_read_and_never_on_production() {
+    fn a_type_preset_applies_to_unset_connections_up_to_read_write_and_never_on_production() {
         let mut types = ConnectionType::builtins();
         for ty in &mut types {
             ty.agent_access = AgentLevel::Read;
@@ -1415,8 +1583,13 @@ mod tests {
             effective(&types, DEVELOPMENT, Some("off")),
             AgentAccess::Off
         );
-        // A hand-edited `read_write` preset is capped at read.
+        // A type may preset Read and write; production still has no preset.
         types[0].agent_access = AgentLevel::ReadWrite;
+        types[2].agent_access = AgentLevel::ReadWrite;
+        assert_eq!(effective(&types, DEVELOPMENT, None), AgentAccess::ReadWrite);
+        assert_eq!(effective(&types, PRODUCTION, None), AgentAccess::Off);
+        // A read-only type still caps it at read.
+        types[0].read_only = true;
         assert_eq!(effective(&types, DEVELOPMENT, None), AgentAccess::Read);
         // An unknown type id has no preset.
         assert_eq!(effective(&types, "gone", None), AgentAccess::Off);
@@ -1593,6 +1766,121 @@ mod tests {
     }
 
     #[test]
+    fn an_endpoint_is_host_port_and_database_and_never_the_login_the_query_or_a_path() {
+        for (uri, endpoint) in [
+            ("postgresql://app:s3cret@db.internal:5432/shop?sslmode=require", Some("db.internal:5432/shop")),
+            ("postgresql://app@db.internal/shop", Some("db.internal/shop")),
+            ("mysql://db.internal:3306", Some("db.internal:3306")),
+            ("mongodb://u:p@h1:27017,h2:27017/app?replicaSet=rs0&authSource=admin", Some("h1:27017,h2:27017/app")),
+            ("mongodb+srv://u@cluster.example.net/app", Some("cluster.example.net/app")),
+            ("redis://:pw@cache.internal:6379/2", Some("cache.internal:6379/2")),
+            ("clickhouse://default@ch.internal:8123/analytics?secure=true", Some("ch.internal:8123/analytics")),
+            ("sqlite:///var/data/app.db", None),
+            ("SQLITE:///x.db", None),
+            ("not a uri", None),
+            ("postgresql:///shop", None),
+        ] {
+            assert_eq!(endpoint_of(uri).as_deref(), endpoint, "{uri}");
+        }
+        let shown = endpoint_of("postgresql://app:s3cret@db.internal:5432/shop").unwrap();
+        assert!(!shown.contains("s3cret") && !shown.contains("app@"));
+    }
+
+    #[test]
+    fn the_databases_agents_may_use_and_the_note_come_from_the_overrides_of_the_connection() {
+        let overrides = |json: &str| Overrides::from_json(json);
+        assert_eq!(overrides("").agent_databases(), None);
+        assert_eq!(overrides(r#"{"results.page_size":5}"#).agent_databases(), None);
+        assert_eq!(
+            overrides(r#"{"agent.databases":" shop , reports,,"}"#).agent_databases(),
+            Some(vec!["shop".to_owned(), "reports".to_owned()])
+        );
+        // Empty text is "no limit" (the box was cleared); anything that is not text is none at all.
+        assert_eq!(overrides(r#"{"agent.databases":"  "}"#).agent_databases(), None);
+        assert_eq!(overrides(r#"{"agent.databases":true}"#).agent_databases(), Some(Vec::new()));
+        assert_eq!(overrides(r#"{"agent.databases":5}"#).agent_databases(), Some(Vec::new()));
+        assert_eq!(overrides(r#"{"connection.notes":"  the orders replica "}"#).notes().as_deref(), Some("the orders replica"));
+        assert_eq!(overrides(r#"{"connection.notes":""}"#).notes(), None);
+        assert_eq!(overrides(r#"{"connection.notes":7}"#).notes(), None);
+        let long = format!(r#"{{"connection.notes":"{}"}}"#, "n".repeat(5000));
+        assert_eq!(overrides(&long).notes().unwrap().chars().count(), NOTES_MAX_CHARS);
+    }
+
+    #[test]
+    fn the_agent_view_of_a_connection_has_its_endpoint_note_and_allowed_databases() {
+        let record = SavedConnectionRecord {
+            uri: "postgresql://app:pw@db.internal:5432/shop?sslmode=require".into(),
+            db_type: "postgresql".into(),
+            overrides_json: r#"{"agent.access":"read","agent.databases":"shop,reports","connection.notes":"replica"}"#.into(),
+            ..crate::records::tests_record_for("X")
+        };
+        let info = ProfileSettings::default().agent_info(&record).expect("a connection");
+        assert_eq!(info.endpoint.as_deref(), Some("db.internal:5432/shop"));
+        assert_eq!(info.allowed_databases, Some(vec!["shop".to_owned(), "reports".to_owned()]));
+        assert_eq!(info.notes.as_deref(), Some("replica"));
+        let shown = format!("{info:?}");
+        assert!(!shown.contains("pw@") && !shown.contains("sslmode"), "{shown}");
+        // A connection without any of them has none.
+        let plain = SavedConnectionRecord { uri: "sqlite:///x".into(), db_type: "sqlite".into(), overrides_json: String::new(), ..record };
+        let info = ProfileSettings::default().agent_info(&plain).expect("a connection");
+        assert_eq!((info.endpoint, info.allowed_databases, info.notes), (None, None, None));
+    }
+
+    #[test]
+    fn the_settings_file_can_limit_the_databases_of_a_connection_by_id_or_name() {
+        let settings: ProfileSettings = serde_json::from_str(
+            r#"{"ai": {"mcp_databases": {"Orders DB": ["shop", "reports"], "7B1D3F0E-3A55-4D8E-9A54-0C6F2F4E9A11": ["a"], "broken": "shop", "mixed": ["a", 1]}}}"#,
+        )
+        .unwrap();
+        let record = |id: &str, name: &str, overrides: &str| SavedConnectionRecord {
+            id: id.into(),
+            name: name.into(),
+            uri: "postgresql://h/db".into(),
+            db_type: "postgresql".into(),
+            overrides_json: overrides.into(),
+            ..crate::records::tests_record_for("X")
+        };
+        let databases = |record: &SavedConnectionRecord| settings.agent_info(record).unwrap().allowed_databases;
+        assert_eq!(databases(&record("1", "orders db", "")), Some(vec!["shop".to_owned(), "reports".to_owned()]), "by name, any case");
+        assert_eq!(databases(&record("7b1d3f0e-3a55-4d8e-9a54-0c6f2f4e9a11", "x", "")), Some(vec!["a".to_owned()]), "by id, any case");
+        assert_eq!(databases(&record("2", "broken", "")), Some(Vec::new()), "not a list: none");
+        assert_eq!(databases(&record("3", "mixed", "")), Some(Vec::new()), "not only names: none");
+        assert_eq!(databases(&record("4", "other", "")), None);
+        // The connection's own override wins over the file.
+        assert_eq!(databases(&record("5", "orders db", r#"{"agent.databases":"only"}"#)), Some(vec!["only".to_owned()]));
+        // No `ai.mcp_databases`, or one that is not an object: nothing is limited.
+        let plain: ProfileSettings = serde_json::from_str(r#"{"ai": {"mcp_databases": []}}"#).unwrap();
+        assert_eq!(plain.agent_info(&record("6", "orders db", "")).unwrap().allowed_databases, None);
+    }
+
+    #[test]
+    fn the_tool_allowlist_is_read_from_settings_and_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let read = |text: Option<&str>| {
+            match text {
+                Some(text) => std::fs::write(&path, text).unwrap(),
+                None => drop(std::fs::remove_file(&path)),
+            }
+            read_mcp_tools(Some(&path))
+        };
+        assert_eq!(read_mcp_tools(None), None);
+        assert_eq!(read(None), None, "no file: every tool");
+        assert_eq!(read(Some("{}")), None);
+        assert_eq!(read(Some(r#"{"ai":{}}"#)), None);
+        assert_eq!(read(Some(r#"{"ai":{"mcp_tools":null}}"#)), None);
+        assert_eq!(
+            read(Some(r#"{"schema_version":4,"ai":{"mcp_tools":["list_tables","execute_query"],"agent_access":"read"}}"#)),
+            Some(vec!["list_tables".to_owned(), "execute_query".to_owned()])
+        );
+        assert_eq!(read(Some(r#"{"ai":{"mcp_tools":[]}}"#)), Some(Vec::new()), "an empty list allows none");
+        // What is there but unusable allows nothing.
+        for bad in [r#"{"ai":{"mcp_tools":"list_tables"}}"#, r#"{"ai":{"mcp_tools":["a", 1]}}"#, r#"{"ai":{"mcp_tools":{}}}"#, r#"{"ai":"x"}"#, "not json", "[]"] {
+            assert_eq!(read(Some(bad)), Some(Vec::new()), "{bad}");
+        }
+    }
+
+    #[test]
     fn overrides_apply_inside_their_limits_and_fall_back_outside() {
         let globals = Globals {
             query_timeout_secs: 10,
@@ -1721,7 +2009,7 @@ mod tests {
     }
 
     #[test]
-    fn the_mcp_writes_switch_is_on_only_for_a_true_boolean_and_fails_closed() {
+    fn the_mcp_writes_switch_counts_only_for_a_file_of_an_older_app_and_fails_closed() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         let read = |text: &str| {
@@ -1731,14 +2019,41 @@ mod tests {
         // No path, no file: off.
         assert!(!mcp_writes_enabled(None));
         assert!(!mcp_writes_enabled(Some(&path)));
-        assert!(matches!(read_mcp_writes(&path), Ok(false)));
+        assert_eq!(mcp_writes_state(Some(&path)), McpWrites::Unavailable);
+        assert_eq!(mcp_writes_state(None), McpWrites::Unavailable);
         assert!(read(
             r#"{"schema_version": 4, "ai": {"mcp_writes": true}, "future": [1]}"#
         ));
         assert!(read(r#"{"schema_version": 7, "ai": {"mcp_writes": true}}"#));
+        // A file written by an older app (below schema 7): `false` still blocks.
         assert!(!read(
             r#"{"schema_version": 4, "ai": {"mcp_writes": false}}"#
         ));
+        assert!(!read(
+            r#"{"schema_version": 6, "ai": {"mcp_writes": false}}"#
+        ));
+        assert_eq!(mcp_writes_state(Some(&path)), McpWrites::SwitchOff);
+        // Schema 7 and later: the switch is ignored (the app keeps it `true`, and no key at all
+        // changes nothing)...
+        for ignored in [
+            r#"{"schema_version": 7, "ai": {"mcp_writes": true}}"#,
+            r#"{"schema_version": 7, "ai": {}}"#,
+            r#"{"schema_version": 7}"#,
+            r#"{"schema_version": 8, "ai": {"agent_access": "read_write"}}"#,
+        ] {
+            assert!(read(ignored), "{ignored}");
+            assert_eq!(read_mcp_writes(&path).unwrap(), McpWrites::Allowed);
+        }
+        // ...but an explicit `false` is the user's old switch turned off (a downgrade and back):
+        // it blocks at any schema.
+        for off in [
+            r#"{"schema_version": 7, "ai": {"mcp_writes": false}}"#,
+            r#"{"schema_version": 8, "ai": {"mcp_writes": false, "agent_access": "read_write"}}"#,
+            r#"{"schema_version": 99, "ai": {"mcp_writes": false}}"#,
+        ] {
+            assert!(!read(off), "{off}");
+            assert_eq!(read_mcp_writes(&path).unwrap(), McpWrites::SwitchOff, "{off}");
+        }
         // A `true` the app did not write: an older schema, none, or a version that is no number.
         for stray in [
             r#"{"schema_version": 3, "ai": {"mcp_writes": true}}"#,
@@ -1750,7 +2065,7 @@ mod tests {
             r#"{"schema_version": null, "ai": {"mcp_writes": true}}"#,
         ] {
             assert!(!read(stray), "{stray}");
-            assert!(matches!(read_mcp_writes(&path), Ok(false)), "{stray}");
+            assert!(matches!(read_mcp_writes(&path), Ok(McpWrites::SwitchOff)), "{stray}");
         }
         // A missing section or key is off.
         for off in ["{}", r#"{"ai": {}}"#, r#"{"editor": {"soft_wrap": true}}"#] {
@@ -1916,11 +2231,59 @@ mod tests {
             with_global(&types, AgentLevel::Read, "custom-gone", None).0,
             AgentAccess::Off
         );
-        // Writes are never granted by the global.
-        assert_eq!(
-            with_global(&types, AgentLevel::ReadWrite, "", None).0,
-            AgentAccess::Read
-        );
+    }
+
+    #[test]
+    fn a_global_read_write_reaches_every_connection_that_is_not_production() {
+        let mut types = ConnectionType::builtins();
+        let rw = |types: &[ConnectionType], type_id: &str, level: Option<&str>| {
+            let mut profile = ConnectionProfile {
+                type_id: type_id.into(),
+                ..Default::default()
+            };
+            if let Some(level) = level {
+                profile.overrides.set(AGENT_ACCESS, text(level));
+            }
+            let globals = Globals {
+                agent_access: AgentLevel::ReadWrite,
+                ..Globals::default()
+            };
+            Effective::resolve(globals, types, &profile).agent_access
+        };
+        // No type, and the built-in and a custom non-production type, with nothing of their own.
+        types.push(ConnectionType {
+            id: "custom-1".into(),
+            name: "Staging".into(),
+            ..ConnectionType::default()
+        });
+        for type_id in ["", DEVELOPMENT, TEST, "custom-1"] {
+            assert_eq!(rw(&types, type_id, None), AgentAccess::ReadWrite, "{type_id:?}");
+        }
+        // Production is as before: no default, whatever the global says; its own level still works.
+        assert_eq!(rw(&types, PRODUCTION, None), AgentAccess::Off);
+        assert_eq!(rw(&types, PRODUCTION, Some("read")), AgentAccess::Read);
+        assert_eq!(rw(&types, PRODUCTION, Some("read_write")), AgentAccess::ReadWrite);
+        // A type id nobody defines stays restrictive: no default, and a read-only cap.
+        assert_eq!(rw(&types, "custom-gone", None), AgentAccess::Off);
+        assert_eq!(rw(&types, "custom-gone", Some("read_write")), AgentAccess::Read);
+        // The connection's own level still wins; a read-only type caps the default at read.
+        assert_eq!(rw(&types, DEVELOPMENT, Some("read")), AgentAccess::Read);
+        assert_eq!(rw(&types, DEVELOPMENT, Some("off")), AgentAccess::Off);
+        types[0].read_only = true;
+        assert_eq!(rw(&types, DEVELOPMENT, None), AgentAccess::Read);
+        // The agent's view (what the MCP server and the assistant use) agrees.
+        let info = ConnectionType::agent_info_in(&types, TEST, AgentLevel::ReadWrite);
+        assert_eq!(info.default_agent_access, Some(AgentAccess::ReadWrite));
+        let info = ConnectionType::agent_info_in(&types, "", AgentLevel::ReadWrite);
+        assert_eq!(info.default_agent_access, Some(AgentAccess::ReadWrite));
+        let info = ConnectionType::agent_info_in(&types, PRODUCTION, AgentLevel::ReadWrite);
+        assert_eq!(AgentAccess::effective(None, &info), AgentAccess::Off);
+        let info = ConnectionType::agent_info_in(&types, "custom-gone", AgentLevel::ReadWrite);
+        assert_eq!(AgentAccess::effective(None, &info), AgentAccess::Off);
+        // A type preset of its own may be Read and write too, with a lower global.
+        types[1].agent_access = AgentLevel::ReadWrite;
+        let info = ConnectionType::agent_info_in(&types, TEST, AgentLevel::Read);
+        assert_eq!(info.default_agent_access, Some(AgentAccess::ReadWrite));
     }
 
     #[test]
@@ -1934,7 +2297,7 @@ mod tests {
         assert_eq!(level("{}"), AgentLevel::Off);
         assert_eq!(level(r#"{"ai": {"agent_access": "schema"}}"#), AgentLevel::Schema);
         assert_eq!(level(r#"{"ai": {"agent_access": "read"}}"#), AgentLevel::Read);
-        assert_eq!(level(r#"{"ai": {"agent_access": "read_write"}}"#), AgentLevel::Read);
+        assert_eq!(level(r#"{"ai": {"agent_access": "read_write"}}"#), AgentLevel::ReadWrite);
         for bad in [
             r#"{"ai": {"agent_access": "everything"}}"#,
             r#"{"ai": {"agent_access": 3}}"#,
@@ -1962,7 +2325,7 @@ mod tests {
     }
 
     #[test]
-    fn the_agent_sees_a_connection_without_its_address_or_secrets() {
+    fn the_agent_sees_a_connection_with_its_endpoint_and_without_its_login_or_secrets() {
         let mut settings = ProfileSettings::default();
         settings
             .connection_types
@@ -1989,8 +2352,10 @@ mod tests {
         assert!(info.connection_type.production && info.connection_type.read_only);
         assert_eq!(info.statement_timeout_secs, Some(20));
         let shown = format!("{info:?}");
+        // Where it goes (host and database) is told; the login and the password never are.
+        assert_eq!(info.endpoint.as_deref(), Some("db.internal/app"));
         assert!(
-            !shown.contains("hunter2") && !shown.contains("db.internal"),
+            !shown.contains("hunter2") && !shown.contains("alice"),
             "{shown}"
         );
         record.db_type = "oracle".into();

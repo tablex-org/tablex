@@ -52,7 +52,7 @@ pub struct NewConnection {
     pub port: Option<i64>,
     pub database: Option<String>,
     pub user: Option<String>,
-    /// SQLite: the database file.
+    /// SQLite, DuckDB: the database file.
     pub path: Option<String>,
     pub tls: Option<Tls>,
     /// The id of a connection type that exists (the caller resolves it).
@@ -117,7 +117,7 @@ pub fn build_record(new: &NewConnection, id: &str, now: f64) -> Result<SavedConn
     let uri = match (&new.uri, fields) {
         (Some(_), true) => return Err("give either `uri` or the separate fields, not both".into()),
         (None, false) => {
-            return Err(if new.kind == ConnectionKind::Sqlite {
+            return Err(if new.kind.is_file_database() {
                 "give `path` (or a `uri`)".into()
             } else {
                 "give `uri`, or `host` and the other fields".into()
@@ -147,23 +147,32 @@ pub fn build_record(new: &NewConnection, id: &str, now: f64) -> Result<SavedConn
     })
 }
 
-fn sqlite_uri(path: &str) -> Result<String, String> {
+/// The URI of a file database: `sqlite://<path>` or `duckdb://<path>`.
+fn file_uri(kind: ConnectionKind, path: &str) -> Result<String, String> {
     let path = check_text("path", path, URI_MAX_CHARS)?;
     if !std::path::Path::new(&path).is_absolute() {
-        return Err("the SQLite `path` must be an absolute path".into());
+        return Err(format!("the {} `path` must be an absolute path", file_label(kind)));
     }
-    Ok(format!("sqlite://{path}"))
+    Ok(format!("{}://{path}", kind.expected_scheme()))
+}
+
+fn file_label(kind: ConnectionKind) -> &'static str {
+    if kind == ConnectionKind::Duckdb {
+        "DuckDB"
+    } else {
+        "SQLite"
+    }
 }
 
 fn from_fields(new: &NewConnection) -> Result<String, String> {
-    if new.kind == ConnectionKind::Sqlite {
+    if new.kind.is_file_database() {
         if new.host.is_some() || new.port.is_some() || new.database.is_some() || new.user.is_some() || new.tls.is_some() {
-            return Err("a SQLite connection takes only `path`".into());
+            return Err(format!("a {} connection takes only `path`", file_label(new.kind)));
         }
-        return sqlite_uri(new.path.as_deref().unwrap_or_default());
+        return file_uri(new.kind, new.path.as_deref().unwrap_or_default());
     }
     if new.path.is_some() {
-        return Err("`path` is for SQLite; give `host` for this kind".into());
+        return Err("`path` is for SQLite and DuckDB; give `host` for this kind".into());
     }
     let host = check_text("host", new.host.as_deref().unwrap_or_default(), HOST_MAX_CHARS)?;
     if !host
@@ -211,7 +220,15 @@ fn from_fields(new: &NewConnection) -> Result<String, String> {
             (ConnectionKind::Redis, _) => None,
             (ConnectionKind::Clickhouse, Tls::Disable) => None,
             (ConnectionKind::Clickhouse, _) => Some(("secure", "true")),
-            (ConnectionKind::Sqlite, _) => None,
+            (ConnectionKind::Mssql, Tls::Disable) => Some(("encrypt", "false")),
+            // `require` encrypts without checking the certificate (SQL Server's own default
+            // certificate is self-signed); `verify_full` checks it against the OS trust store.
+            (ConnectionKind::Mssql, Tls::Require) => {
+                url.query_pairs_mut().append_pair("encrypt", "true");
+                Some(("trustServerCertificate", "true"))
+            }
+            (ConnectionKind::Mssql, Tls::VerifyFull) => Some(("encrypt", "true")),
+            (ConnectionKind::Sqlite | ConnectionKind::Duckdb, _) => None,
         };
         if let Some((key, value)) = pair {
             url.query_pairs_mut().append_pair(key, value);
@@ -236,13 +253,14 @@ fn from_uri(kind: ConnectionKind, uri: &str) -> Result<String, String> {
     if uri.chars().any(char::is_whitespace) {
         return Err("`uri` has a blank in it".into());
     }
-    if kind == ConnectionKind::Sqlite {
+    if kind.is_file_database() {
+        let scheme = format!("{}://", kind.expected_scheme());
         let path = uri
-            .get(..9)
-            .filter(|scheme| scheme.eq_ignore_ascii_case("sqlite://"))
-            .map(|_| &uri[9..])
-            .ok_or("the SQLite `uri` must start with sqlite://")?;
-        return sqlite_uri(path);
+            .get(..scheme.len())
+            .filter(|prefix| prefix.eq_ignore_ascii_case(&scheme))
+            .map(|_| &uri[scheme.len()..])
+            .ok_or_else(|| format!("the {} `uri` must start with {scheme}", file_label(kind)))?;
+        return file_uri(kind, path);
     }
     if uri.contains('#') {
         return Err("`uri` has a fragment (#), which is not accepted".into());
@@ -317,6 +335,7 @@ mod tests {
             (ConnectionKind::Mongodb, "mongodb"),
             (ConnectionKind::Redis, "redis"),
             (ConnectionKind::Clickhouse, "clickhouse"),
+            (ConnectionKind::Mssql, "sqlserver"),
         ] {
             let record = build_record(&fields(kind), ID, 0.0).unwrap();
             assert!(record.uri.starts_with(&format!("{scheme}://app@db.local:5432/shop")), "{}", record.uri);
@@ -339,6 +358,9 @@ mod tests {
         assert!(with(ConnectionKind::Mongodb, Tls::Disable).unwrap().ends_with("?tls=false"));
         assert!(with(ConnectionKind::Redis, Tls::Require).unwrap().starts_with("rediss://"));
         assert!(with(ConnectionKind::Clickhouse, Tls::Require).unwrap().ends_with("?secure=true"));
+        assert!(with(ConnectionKind::Mssql, Tls::Disable).unwrap().ends_with("?encrypt=false"));
+        assert!(with(ConnectionKind::Mssql, Tls::Require).unwrap().ends_with("?encrypt=true&trustServerCertificate=true"));
+        assert!(with(ConnectionKind::Mssql, Tls::VerifyFull).unwrap().ends_with("?encrypt=true"));
         assert!(with(ConnectionKind::Mongodb, Tls::Require).unwrap_err().contains("any certificate"));
         let mut sqlite = new(ConnectionKind::Sqlite);
         sqlite.path = Some("/tmp/shop.db".into());
@@ -359,6 +381,25 @@ mod tests {
         by_uri.uri = Some(format!("SQLITE://{path}"));
         assert_eq!(build_record(&by_uri, ID, 0.0).unwrap().uri, format!("sqlite://{path}"));
         by_uri.uri = Some("postgresql://h/db".into());
+        assert!(build_record(&by_uri, ID, 0.0).is_err());
+    }
+
+    #[test]
+    fn duckdb_takes_an_absolute_path_like_sqlite() {
+        let path = std::env::temp_dir().join("shop.duckdb").to_string_lossy().into_owned();
+        let mut input = new(ConnectionKind::Duckdb);
+        input.path = Some(path.clone());
+        let record = build_record(&input, ID, 0.0).unwrap();
+        assert_eq!((record.uri.as_str(), record.db_type.as_str()), (format!("duckdb://{path}").as_str(), "duckdb"));
+        input.path = Some("shop.duckdb".into());
+        assert!(build_record(&input, ID, 0.0).unwrap_err().contains("DuckDB"));
+        input.path = None;
+        input.host = Some("db.local".into());
+        assert!(build_record(&input, ID, 0.0).unwrap_err().contains("only `path`"));
+        let mut by_uri = new(ConnectionKind::Duckdb);
+        by_uri.uri = Some(format!("DUCKDB://{path}"));
+        assert_eq!(build_record(&by_uri, ID, 0.0).unwrap().uri, format!("duckdb://{path}"));
+        by_uri.uri = Some(format!("sqlite://{path}"));
         assert!(build_record(&by_uri, ID, 0.0).is_err());
     }
 

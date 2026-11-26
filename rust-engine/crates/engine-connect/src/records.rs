@@ -16,6 +16,8 @@ pub const DB_TYPE_MYSQL: &str = "mysql";
 pub const DB_TYPE_MARIADB: &str = "mariadb";
 pub const DB_TYPE_REDIS: &str = "redis";
 pub const DB_TYPE_CLICKHOUSE: &str = "clickhouse";
+pub const DB_TYPE_DUCKDB: &str = "duckdb";
+pub const DB_TYPE_MSSQL: &str = "mssql";
 
 pub fn missing_password_error() -> String {
     format!(
@@ -51,6 +53,8 @@ pub enum ConnectionKind {
     Mariadb,
     Redis,
     Clickhouse,
+    Duckdb,
+    Mssql,
 }
 
 impl ConnectionKind {
@@ -63,6 +67,8 @@ impl ConnectionKind {
             DB_TYPE_MARIADB => Some(Self::Mariadb),
             DB_TYPE_REDIS => Some(Self::Redis),
             DB_TYPE_CLICKHOUSE => Some(Self::Clickhouse),
+            DB_TYPE_DUCKDB => Some(Self::Duckdb),
+            DB_TYPE_MSSQL => Some(Self::Mssql),
             _ => None,
         }
     }
@@ -77,6 +83,8 @@ impl ConnectionKind {
             Self::Mariadb => "mariadb",
             Self::Redis => "redis",
             Self::Clickhouse => "clickhouse",
+            Self::Duckdb => "duckdb",
+            Self::Mssql => "sqlserver",
         }
     }
 
@@ -92,6 +100,8 @@ impl ConnectionKind {
             Self::Mariadb => DB_TYPE_MARIADB,
             Self::Redis => DB_TYPE_REDIS,
             Self::Clickhouse => DB_TYPE_CLICKHOUSE,
+            Self::Duckdb => DB_TYPE_DUCKDB,
+            Self::Mssql => DB_TYPE_MSSQL,
         }
     }
 
@@ -105,7 +115,15 @@ impl ConnectionKind {
                 | Self::Mariadb
                 | Self::Redis
                 | Self::Clickhouse
+                | Self::Duckdb
+                | Self::Mssql
         )
+    }
+
+    /// A database that is a file on disk: no host, user or password, and the rest of its URI is a
+    /// path (spaces and `#` in it are part of the name).
+    pub fn is_file_database(&self) -> bool {
+        matches!(self, Self::Sqlite | Self::Duckdb)
     }
 
     /// `false` when a staged batch can be left half-applied after a failure
@@ -160,7 +178,7 @@ impl SavedConnection {
     /// The connection does not save its password and its URI names a user: the password has to
     /// be typed (a no-user connection, `redis://:@host`, a file database, needs none).
     pub fn expects_password(&self) -> bool {
-        if self.save_password || self.kind == ConnectionKind::Sqlite {
+        if self.save_password || self.kind.is_file_database() {
             return false;
         }
         let Some((_, rest)) = self.uri.split_once("://") else {
@@ -202,6 +220,14 @@ pub fn storage_connection_id(value: &str) -> String {
         .unwrap_or_else(|_| value.to_string())
 }
 
+/// The scheme (lowercase, with `://`) of a file database's URI, whatever its letter case.
+fn file_database_scheme(uri: &str) -> Option<&'static str> {
+    ["sqlite://", "duckdb://"].into_iter().find(|scheme| {
+        uri.get(..scheme.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(scheme))
+    })
+}
+
 pub fn normalize_uri_scheme(uri: &str) -> String {
     let Some((scheme, rest)) = uri.split_once("://") else {
         return uri.to_string();
@@ -218,11 +244,8 @@ pub fn normalize_uri_scheme(uri: &str) -> String {
 /// Swift `ConnectionCredentialResolver.sanitizedURIForStorage`.
 pub fn sanitized_uri(uri: &str) -> Result<String, String> {
     let uri = normalize_uri_scheme(uri);
-    if uri
-        .get(..9)
-        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("sqlite://"))
-    {
-        return Ok(format!("sqlite://{}", &uri[9..]));
+    if let Some(scheme) = file_database_scheme(&uri) {
+        return Ok(format!("{scheme}{}", &uri[scheme.len()..]));
     }
     if is_mongodb_uri(&uri) {
         let (authority_start, authority_end) = mongodb_authority_bounds(&uri)?;
@@ -249,7 +272,7 @@ pub fn sanitized_uri(uri: &str) -> Result<String, String> {
 
 /// The URI options (lowercase) that [`public_connection_uri`] keeps: routing and TLS choices, never
 /// a secret.
-pub const SHAREABLE_OPTIONS: [&str; 17] = [
+pub const SHAREABLE_OPTIONS: [&str; 20] = [
     "authsource",
     "authmechanism",
     "replicaset",
@@ -267,6 +290,10 @@ pub const SHAREABLE_OPTIONS: [&str; 17] = [
     "wtimeoutms",
     "secure",
     "ca_cert",
+    // SQL Server: how the connection is encrypted, never a credential.
+    "encrypt",
+    "trustservercertificate",
+    "hostnameincertificate",
 ];
 
 /// A shareable URI: no userinfo password, secret-valued query option, or fragment.
@@ -278,6 +305,12 @@ pub fn public_connection_uri(uri: &str) -> Result<String, String> {
             .split_once('?')
             .map_or(sanitized.as_str(), |(path, _)| path)
             .to_string());
+    }
+    if sanitized.starts_with("duckdb://") {
+        // The same, and the one option DuckDB reads, `mode=ro`, is a choice and not a secret.
+        let (path, query) = sanitized.split_once('?').unwrap_or((sanitized.as_str(), ""));
+        let read_only = query.split('&').any(|pair| pair.eq_ignore_ascii_case("mode=ro"));
+        return Ok(if read_only { format!("{path}?mode=ro") } else { path.to_string() });
     }
     let without_fragment = sanitized.split('#').next().unwrap_or_default();
     let Some((base, query)) = without_fragment.split_once('?') else {
@@ -657,11 +690,7 @@ pub fn runtime_uri(uri: &str, password: &str) -> Result<String, String> {
 
 /// Validates that a URI matches the persisted connection kind's scheme.
 pub fn validate_uri(kind: ConnectionKind, uri: &str) -> Result<(), String> {
-    if kind == ConnectionKind::Sqlite
-        && uri
-            .get(..9)
-            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("sqlite://"))
-    {
+    if kind.is_file_database() && file_database_scheme(uri) == Some(kind_file_scheme(kind)) {
         return Ok(());
     }
     if kind == ConnectionKind::Mongodb && is_mongodb_uri(uri) {
@@ -674,12 +703,14 @@ pub fn validate_uri(kind: ConnectionKind, uri: &str) -> Result<(), String> {
     let scheme_ok = match kind {
         ConnectionKind::Postgres => scheme == "postgres" || scheme == "postgresql",
         ConnectionKind::Sqlite => scheme == "sqlite",
+        ConnectionKind::Duckdb => scheme == "duckdb",
         ConnectionKind::Mongodb => scheme == "mongodb" || scheme == "mongodb+srv",
         ConnectionKind::Mysql => scheme == "mysql",
         ConnectionKind::Mariadb => scheme == "mariadb",
         ConnectionKind::Redis => matches!(scheme, "redis" | "rediss"),
         // The driver also accepts the plain HTTP(S) interface URLs.
         ConnectionKind::Clickhouse => matches!(scheme, "clickhouse" | "http" | "https"),
+        ConnectionKind::Mssql => matches!(scheme, "sqlserver" | "mssql"),
     };
     if !scheme_ok {
         return Err(format!(
@@ -687,6 +718,15 @@ pub fn validate_uri(kind: ConnectionKind, uri: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// The scheme of a file database kind's URIs.
+fn kind_file_scheme(kind: ConnectionKind) -> &'static str {
+    if kind == ConnectionKind::Duckdb {
+        "duckdb://"
+    } else {
+        "sqlite://"
+    }
 }
 
 fn is_mongodb_uri(uri: &str) -> bool {
@@ -901,6 +941,7 @@ pub fn redact_secrets(message: &str) -> String {
         "postgres://",
         "postgresql://",
         "sqlite://",
+        "duckdb://",
         "mongodb://",
         "mongodb+srv://",
         "mysql://",
@@ -908,6 +949,8 @@ pub fn redact_secrets(message: &str) -> String {
         "redis://",
         "rediss://",
         "clickhouse://",
+        "sqlserver://",
+        "mssql://",
         "http://",
         "https://",
     ] {
@@ -1036,6 +1079,8 @@ mod tests {
             "https://default:hunter2@ch.example.com:8443/db",
             "http://default:hunter2@ch.example.com/db",
             "rediss://default:hunter2@cache.example.com:6380/0",
+            "sqlserver://sa:hunter2@db.example.com:1433/app?encrypt=true",
+            "mssql://sa:hunter2@db.example.com/app",
             "redis://default:hunter2@cache.example.com/0",
         ] {
             let redacted = redact_secrets(&format!("connect failed for {uri} (refused)"));
@@ -1489,6 +1534,36 @@ mod tests {
         let imported = stage_connection_configs(&export, 3.0).unwrap();
         assert_eq!(imported[0].uri, expected);
         assert_eq!(runtime_uri(&imported[0].uri, "").unwrap(), expected);
+    }
+
+    #[test]
+    fn duckdb_is_a_file_database_whose_path_is_kept_and_read_only_choice_is_shared() {
+        assert_eq!(ConnectionKind::from_persisted(DB_TYPE_DUCKDB), Some(ConnectionKind::Duckdb));
+        assert_eq!(ConnectionKind::Duckdb.driver_id(), "duckdb");
+        assert_eq!(ConnectionKind::Duckdb.expected_scheme(), "duckdb");
+        assert!(ConnectionKind::Duckdb.is_supported() && ConnectionKind::Duckdb.is_file_database());
+        assert!(!ConnectionKind::Postgres.is_file_database());
+        assert!(validate_uri(ConnectionKind::Duckdb, "duckdb:///tmp/a b#c.duckdb").is_ok());
+        assert!(validate_uri(ConnectionKind::Duckdb, "DUCKDB://:memory:").is_ok());
+        assert!(validate_uri(ConnectionKind::Duckdb, "sqlite:///tmp/a.db").is_err());
+        assert!(validate_uri(ConnectionKind::Sqlite, "duckdb:///tmp/a.db").is_err());
+        assert_eq!(
+            sanitized_uri("DUCKDB:///tmp/my data#1.duckdb?mode=ro").unwrap(),
+            "duckdb:///tmp/my data#1.duckdb?mode=ro"
+        );
+        // Shared: the path and the read-only choice; any other option is dropped.
+        assert_eq!(
+            public_connection_uri("duckdb:///tmp/a#b.duckdb?mode=ro&token=secret").unwrap(),
+            "duckdb:///tmp/a#b.duckdb?mode=ro"
+        );
+        assert_eq!(
+            public_connection_uri("duckdb:///tmp/a.duckdb?token=secret").unwrap(),
+            "duckdb:///tmp/a.duckdb"
+        );
+        assert_eq!(redact_secrets("failed: duckdb:///tmp/a.duckdb done"), "failed: <redacted-uri> done");
+        let mut file = SavedConnection::from_record(&record("c", "n", DB_TYPE_DUCKDB, "duckdb:///tmp/a.duckdb"));
+        file.save_password = false;
+        assert!(!file.expects_password());
     }
 
     #[test]

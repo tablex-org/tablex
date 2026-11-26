@@ -8,6 +8,8 @@
 //!   socket goes to the tunnel while SNI and certificate verification use the real name.
 //! * **MySQL / MariaDB** connect to `127.0.0.1:<local>` and add `tls-server-name=<real host>`
 //!   whenever TLS may be used (`ssl-mode` is not `DISABLED`; `PREFERRED` is the default).
+//! * **SQL Server** connects to `127.0.0.1:<local>` and adds `hostNameInCertificate=<real host>`, so
+//!   the certificate is still checked against the real name.
 //! * **Redis / ClickHouse** have no server-name override yet: plain connections are rewritten,
 //!   TLS is refused.
 //! * **MongoDB** connects to the one forwarded member with `directConnection=true`; TLS,
@@ -79,6 +81,8 @@ fn kind_name(kind: ConnectionKind) -> &'static str {
         ConnectionKind::Mariadb => "MariaDB",
         ConnectionKind::Redis => "Redis",
         ConnectionKind::Clickhouse => "ClickHouse",
+        ConnectionKind::Duckdb => "DuckDB",
+        ConnectionKind::Mssql => "SQL Server",
     }
 }
 
@@ -176,11 +180,14 @@ impl TunnelPlan {
     ) -> Result<Self, PlanError> {
         let parts = Parts::parse(uri)?;
         let target = match kind {
-            ConnectionKind::Sqlite => return Err(PlanError::NoNetworkEndpoint(kind)),
+            ConnectionKind::Sqlite | ConnectionKind::Duckdb => {
+                return Err(PlanError::NoNetworkEndpoint(kind))
+            }
             ConnectionKind::Postgres => postgres_target(&parts)?,
             ConnectionKind::Mysql | ConnectionKind::Mariadb => mysql_target(&parts, kind)?,
             ConnectionKind::Redis => redis_target(&parts)?,
             ConnectionKind::Clickhouse => clickhouse_target(&parts)?,
+            ConnectionKind::Mssql => mssql_target(&parts)?,
             ConnectionKind::Mongodb => mongodb_target(&parts)?,
         };
         Ok(Self {
@@ -210,7 +217,10 @@ impl TunnelPlan {
                 .with_endpoint(&address.ip().to_string(), address.port())
                 .build(),
             ConnectionKind::Mongodb => rewrite_mongodb(&parts, *address),
-            ConnectionKind::Sqlite => return Err(PlanError::NoNetworkEndpoint(self.kind)),
+            ConnectionKind::Mssql => rewrite_mssql(&parts, *address),
+            ConnectionKind::Sqlite | ConnectionKind::Duckdb => {
+                return Err(PlanError::NoNetworkEndpoint(self.kind))
+            }
         };
         verify_forward(self.kind, &rewritten, *address)?;
         Ok(rewritten)
@@ -699,6 +709,45 @@ fn rewrite_mysql(parts: &Parts<'_>, local: SocketAddr) -> String {
 }
 
 // ---------------------------------------------------------------------------------------------
+// SQL Server
+// ---------------------------------------------------------------------------------------------
+
+const MSSQL_PORT: u16 = 1433;
+
+fn mssql_target(parts: &Parts<'_>) -> Result<Endpoint, PlanError> {
+    if !matches!(parts.scheme, "sqlserver" | "mssql") {
+        return Err(PlanError::InvalidUri("the scheme is not sqlserver:// or mssql://"));
+    }
+    let entry = network_host(parts.single_host(ConnectionKind::Mssql)?)?;
+    Ok(Endpoint::new(entry.name, entry.port.unwrap_or(MSSQL_PORT)))
+}
+
+fn rewrite_mssql(parts: &Parts<'_>, local: SocketAddr) -> String {
+    let rebuilt = parts.with_endpoint(&local.ip().to_string(), local.port());
+    let real_host = parts
+        .single_host(ConnectionKind::Mssql)
+        .ok()
+        .flatten()
+        .map(|entry| entry.name)
+        .unwrap_or_default();
+    let named = parts
+        .param("hostnameincertificate")
+        .is_some_and(|name| !name.is_empty());
+    if !named && !real_host.is_empty() {
+        // An empty `hostNameInCertificate=` is replaced, not left next to the real one.
+        rebuilt
+            .without(&["hostnameincertificate"])
+            .with(&format!(
+                "hostNameInCertificate={}",
+                utf8_percent_encode(&real_host, QUERY_VALUE)
+            ))
+            .build()
+    } else {
+        rebuilt.build()
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Redis
 // ---------------------------------------------------------------------------------------------
 
@@ -1095,6 +1144,37 @@ mod tests {
         );
     }
 
+    // --- SQL Server -------------------------------------------------------------------------
+
+    #[test]
+    fn mssql_connects_to_the_forward_and_keeps_checking_the_real_name() {
+        assert_eq!(
+            rewritten(
+                ConnectionKind::Mssql,
+                "sqlserver://sa:pw@db.example.com:14330/app?encrypt=true"
+            ),
+            "sqlserver://sa:pw@127.0.0.1:40001/app?encrypt=true&hostNameInCertificate=db.example.com"
+        );
+        assert_eq!(
+            target(ConnectionKind::Mssql, "mssql://sa@db.example.com"),
+            ("db.example.com".into(), 1433)
+        );
+        // A name the user chose is kept; an empty one is replaced.
+        assert_eq!(
+            rewritten(
+                ConnectionKind::Mssql,
+                "sqlserver://sa@db.example.com?hostNameInCertificate=sql.corp.example"
+            ),
+            "sqlserver://sa@127.0.0.1:40001?hostNameInCertificate=sql.corp.example"
+        );
+        assert!(rewritten(ConnectionKind::Mssql, "sqlserver://sa@h.example.com?hostNameInCertificate=")
+            .ends_with("hostNameInCertificate=h.example.com"));
+        assert!(matches!(
+            refusal(ConnectionKind::Mssql, "postgres://sa@h.example.com"),
+            PlanError::InvalidUri(_)
+        ));
+    }
+
     // --- ClickHouse -------------------------------------------------------------------------
 
     #[test]
@@ -1232,6 +1312,10 @@ mod tests {
         assert_eq!(
             refusal(ConnectionKind::Sqlite, "sqlite:///tmp/x.db"),
             PlanError::NoNetworkEndpoint(ConnectionKind::Sqlite)
+        );
+        assert_eq!(
+            refusal(ConnectionKind::Duckdb, "duckdb:///tmp/x.duckdb"),
+            PlanError::NoNetworkEndpoint(ConnectionKind::Duckdb)
         );
     }
 
@@ -1392,6 +1476,11 @@ mod tests {
     /// Every URI a connection of each kind can have: what the form writes, with TLS options, IPv6,
     /// encoded credentials, query-only hosts, no path.
     const CORPUS: &[(ConnectionKind, &str)] = &[
+        (
+            ConnectionKind::Mssql,
+            "sqlserver://sa:p%40ss@db.example.com:14330/app?encrypt=true",
+        ),
+        (ConnectionKind::Mssql, "mssql://sa@db.example.com"),
         (
             ConnectionKind::Postgres,
             "postgres://u:p%40ss@db.example.com:6543/app?sslmode=verify-full",
