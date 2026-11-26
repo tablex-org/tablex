@@ -21,7 +21,6 @@
 use bson::{Binary, Bson, DateTime, Decimal128, Document};
 use serde_json::{Map, Number, Value};
 use std::fmt::{self, Write};
-use std::sync::LazyLock;
 
 /// How a plain (unwrapped) number literal is typed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,32 +132,66 @@ pub fn parse_document(text: &str, typing: NumberTyping) -> Result<Document, Shel
     }
 }
 
+/// The parts of `YYYY-MM-DD[(T| )HH:MM[:SS[.fff]]][Z|(+|-)HH[:]MM]`: the date, the time, the seconds
+/// (with the colon and the fraction) and the zone. Plain byte matching: the MCP server takes this
+/// file without the regex engine, which would be most of what it adds to the binary.
+fn iso_parts(text: &str) -> Option<[Option<&str>; 4]> {
+    let bytes = text.as_bytes();
+    let digits = |from: usize, count: usize| {
+        bytes.len() >= from + count && bytes[from..from + count].iter().all(u8::is_ascii_digit)
+    };
+    if !(digits(0, 4) && bytes.get(4) == Some(&b'-') && digits(5, 2) && bytes.get(7) == Some(&b'-') && digits(8, 2)) {
+        return None;
+    }
+    let mut at = 10;
+    let (mut time, mut seconds) = (None, None);
+    if matches!(bytes.get(at), Some(b'T' | b' ')) && digits(at + 1, 2) && bytes.get(at + 3) == Some(&b':') && digits(at + 4, 2) {
+        time = Some(&text[at + 1..at + 6]);
+        at += 6;
+        if bytes.get(at) == Some(&b':') && digits(at + 1, 2) {
+            let mut end = at + 3;
+            if bytes.get(end) == Some(&b'.') && digits(end + 1, 1) {
+                end += 1;
+                while digits(end, 1) {
+                    end += 1;
+                }
+            }
+            seconds = Some(&text[at..end]);
+            at = end;
+        }
+    }
+    let zone = match &text[at..] {
+        "" => None,
+        "Z" => Some("Z"),
+        rest => {
+            let colon = usize::from(rest.as_bytes().get(3) == Some(&b':'));
+            let shaped = matches!(rest.as_bytes()[0], b'+' | b'-')
+                && digits(at + 1, 2)
+                && digits(at + 3 + colon, 2)
+                && rest.len() == 5 + colon;
+            if !shaped {
+                return None;
+            }
+            Some(rest)
+        }
+    };
+    Some([Some(&text[..10]), time, seconds, zone])
+}
+
 /// An ISO 8601 / RFC 3339 instant; a missing time is midnight and a missing
 /// zone is UTC (`2024-01-02`, `2024-01-02T03:04:05`, `2024-01-02 03:04:05.5+01:00`).
 pub fn parse_iso_date(text: &str) -> Option<DateTime> {
-    static SHAPE: LazyLock<regex::Regex> = LazyLock::new(|| {
-        regex::Regex::new(
-            r"^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2})(:\d{2}(?:\.\d+)?)?)?(Z|[+-]\d{2}:?\d{2})?$",
-        )
-        .expect("static date pattern")
-    });
     let text = text.trim();
     if let Ok(date) = DateTime::parse_rfc3339_str(text) {
         return Some(date);
     }
-    let captures = SHAPE.captures(text)?;
-    let zone = match captures.get(4).map(|zone| zone.as_str()) {
+    let [date, time, seconds, zone] = iso_parts(text)?;
+    let zone = match zone {
         None | Some("Z") => "Z".to_string(),
         Some(offset) if offset.contains(':') => offset.to_string(),
         Some(offset) => format!("{}:{}", &offset[..3], &offset[3..]),
     };
-    let normalized = format!(
-        "{}T{}{}{}",
-        &captures[1],
-        captures.get(2).map_or("00:00", |time| time.as_str()),
-        captures.get(3).map_or(":00", |seconds| seconds.as_str()),
-        zone
-    );
+    let normalized = format!("{}T{}{}{}", date?, time.unwrap_or("00:00"), seconds.unwrap_or(":00"), zone);
     DateTime::parse_rfc3339_str(normalized).ok()
 }
 
@@ -1392,5 +1425,13 @@ mod tests {
         assert_eq!(millis("2024-09-01 01:00:00+0100"), Some(1_725_148_800_000));
         assert_eq!(millis("2024-09-01T00:00:00.5Z"), Some(1_725_148_800_500));
         assert_eq!(millis("yesterday"), None);
+        // Every shape the plain-byte matcher takes, and the near misses it refuses.
+        assert_eq!(millis("2024-09-01Z"), Some(1_725_148_800_000));
+        assert_eq!(millis("2024-09-01 00:00"), Some(1_725_148_800_000));
+        assert_eq!(millis("2024-09-01T02:30-02:30"), Some(1_725_148_800_000 + 5 * 3_600_000));
+        assert_eq!(millis(" 2024-09-01T00:00:00 "), Some(1_725_148_800_000));
+        for bad in ["2024-9-01", "2024-09-01T", "2024-09-01T00", "2024-09-01T00:00:", "2024-09-01T00:00:00.", "2024-09-01T00:00:00.Z", "2024-09-01+01", "2024-09-01+01:0", "2024-09-01+0100x", "2024-09-01 00:00 Z", "24-09-01", "2024-09-011"] {
+            assert_eq!(millis(bad), None, "{bad}");
+        }
     }
 }
