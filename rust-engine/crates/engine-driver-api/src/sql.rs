@@ -16,6 +16,14 @@
 //!   [`SqlObjectRef`], response a [`TableProperties`]. A request that carries a
 //!   `kind` is a [`SchemaObjectRef`] instead and the response a
 //!   [`SchemaObjectSource`] (see below).
+//! * Schema columns (capability `metadata.schema_columns`): a navigator request on a schema (a
+//!   database for drivers without schemas) whose `payload` has `"columns": true` (and no `object`)
+//!   lists the columns of every table, view and materialized view of the schema as `column` nodes,
+//!   each with a [`SqlColumnNode`] payload (its `object` names the table), ordered by table name
+//!   (binary order) then column position, the columns of a table in the order and with the
+//!   details the per-table request gives. A table-like object the per-table request would list
+//!   but the driver leaves out is simply absent: a host asks for it on its own. Paged by the
+//!   keyset `cursor` of [`schema_columns_cursor`], never by offset.
 //! * Schema objects: a navigator request on a schema (a database for drivers
 //!   without schemas) with `payload.kind` set to a [`SchemaObjectKind`] lists only
 //!   the objects of that kind. `materialized_view` answers table-like nodes
@@ -73,7 +81,9 @@
 //!   `engine_driver_kit::sql::Classification::read_only_refusal`. Not covered
 //!   (blind spots): side effects hidden in a function the single statement calls
 //!   (`nextval`, a user function: the scope stops its data writes, not the rest).
-//!   The connect reply may carry `server_version` (MySQL numeric form: MySQL 8.4.6 =
+//!   The connect reply may carry `file_access_locked: true` (DuckDB opened with `?external_access=off`: file and
+//!   network access off, configuration locked), which a host that must not let SQL reach files trusts instead
+//!   of asking the database. It may carry `server_version` (MySQL numeric form: MySQL 8.4.6 =
 //!   `80406`, MariaDB 11.8.9 = `110809`) for hosts that classify too, and a
 //!   `sql_dialect` ([`SqlDialectInfo`](crate::SqlDialectInfo)) with the session's own
 //!   `string_backslash_escapes`, `double_quote_identifiers` and `bracket_identifiers`
@@ -254,6 +264,18 @@ pub struct SchemaObjectRef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SchemaObjectSource {
     pub source: String,
+}
+
+/// Cursor of a schema-columns page: the last column sent (its table and its position), so the
+/// next page continues after it. Opaque to the host.
+pub fn schema_columns_cursor(table: &str, ordinal: i64) -> String {
+    format!("{ordinal}:{table}")
+}
+
+/// The `(table, ordinal)` a [`schema_columns_cursor`] holds; `None` when it is not one.
+pub fn parse_schema_columns_cursor(cursor: &str) -> Option<(&str, i64)> {
+    let (ordinal, table) = cursor.split_once(':')?;
+    Some((table, ordinal.parse().ok()?))
 }
 
 /// Payload of a navigator `column` node.
@@ -443,6 +465,14 @@ pub struct TableTrigger {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn schema_columns_cursor_round_trips_a_table_with_colons() {
+        let cursor = schema_columns_cursor("a:b", 7);
+        assert_eq!(parse_schema_columns_cursor(&cursor), Some(("a:b", 7)));
+        assert_eq!(parse_schema_columns_cursor("orders"), None);
+        assert_eq!(parse_schema_columns_cursor("x:orders"), None);
+    }
 
     #[test]
     fn object_ref_omits_absent_levels() {

@@ -91,6 +91,10 @@ struct Connected {
     /// [`DriverBackend::connection_server_version`]); absent when unknown.
     #[serde(skip_serializing_if = "Option::is_none")]
     server_version: Option<u32>,
+    /// The instance has file access off and a locked configuration (see
+    /// [`DriverBackend::connection_file_access_locked`]); absent when not.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    file_access_locked: bool,
 }
 
 #[derive(Serialize)]
@@ -219,11 +223,13 @@ impl<B: DriverBackend> Driver<B> {
             let entry = Arc::new(entry);
             let sql_dialect = B::connection_dialect(&entry.connection);
             let server_version = B::connection_server_version(&entry.connection);
+            let file_access_locked = B::connection_file_access_locked(&entry.connection);
             let connection_id = self.lock().insert_connection(entry);
             Ok(Connected {
                 connection_id,
                 sql_dialect,
                 server_version,
+                file_access_locked,
             })
         })
     }

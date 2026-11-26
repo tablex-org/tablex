@@ -257,6 +257,16 @@ pub trait DriverBackend: Sized + 'static {
         None
     }
 
+    /// Whether this connection's instance has file and network access switched off with its
+    /// configuration locked (DuckDB `enable_external_access = false` and `lock_configuration`),
+    /// sent as `file_access_locked` in the `dbengine_connect` reply. A host that must not let SQL
+    /// reach files (the agent tools) trusts this answer of the driver and not a query of its
+    /// own: a query can be answered by something the database file defines. `false` (the
+    /// default): not locked, not reported.
+    fn connection_file_access_locked(_connection: &Self::Connection) -> bool {
+        false
+    }
+
     /// Called when the host disconnects (or at shutdown), before the kit drops
     /// its reference. In-flight calls may still hold the connection, so the
     /// real close should also happen in `Drop`.

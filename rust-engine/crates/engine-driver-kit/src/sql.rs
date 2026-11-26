@@ -100,6 +100,13 @@ pub struct SqlLexOptions {
     /// comment below it. `None` (unknown): any versioned comment makes the text
     /// [`Classification::version_ambiguous`].
     pub server_version: Option<u32>,
+    /// DuckDB's tokenizer where it differs from the other presets: control bytes (`\x01`)
+    /// are word bytes (so `\x01e'..'` is a word and a plain string, not an `E` string), and a
+    /// number ends where DuckDB backs off (`1e'..'` is the number `1` and an `E` string). A vertical
+    /// tab (`\x0b`) is white space, as it is to DuckDB. DuckDB also rewrites some Unicode spaces
+    /// to ASCII ones before it tokenizes: [`normalize_duckdb_spaces`] does the same, and a caller
+    /// that lexes DuckDB text applies it first.
+    pub duckdb_tokenizer: bool,
 }
 
 impl SqlLexOptions {
@@ -120,7 +127,19 @@ impl SqlLexOptions {
             backslash_in_identifiers: false,
             line_comment_ends_at_cr: true,
             server_version: None,
+            duckdb_tokenizer: false,
         }
+    }
+
+    /// DuckDB (its PEG parser's tokenizer, `src/parser/peg/tokenizer`): PostgreSQL's strings,
+    /// dollar quotes and nested block comments, plus `` `…` `` identifiers (`` ` `` ends a word
+    /// and opens a name wherever a token starts) and the word and number rules of
+    /// [`duckdb_tokenizer`](Self::duckdb_tokenizer). No `[name]`, no `#` comments.
+    pub const fn duckdb() -> Self {
+        let mut options = Self::postgres();
+        options.backtick_identifiers = true;
+        options.duckdb_tokenizer = true;
+        options
     }
 
     /// MySQL with the default `sql_mode` (backslash escapes, `"` is a string).
@@ -140,6 +159,7 @@ impl SqlLexOptions {
             backslash_in_identifiers: false,
             line_comment_ends_at_cr: false,
             server_version: None,
+            duckdb_tokenizer: false,
         }
     }
 
@@ -181,6 +201,33 @@ impl SqlLexOptions {
             backslash_in_identifiers: true,
             line_comment_ends_at_cr: false,
             server_version: None,
+            duckdb_tokenizer: false,
+        }
+    }
+
+    /// SQL Server (T-SQL): `'…'` strings (`''` escapes), `"…"` and `[…]` quoted identifiers
+    /// (`QUOTED_IDENTIFIER ON`, the default of every client library), `--` and nested `/* */`
+    /// comments. T-SQL does not need `;` between statements, so the classifier's statement
+    /// split is only a lower bound there: drivers also scan the words of the whole text.
+    pub const fn mssql() -> Self {
+        Self {
+            backslash_escapes: false,
+            double_quote_is_identifier: true,
+            backtick_identifiers: false,
+            dollar_quotes: false,
+            e_strings: false,
+            nested_block_comments: true,
+            bracket_identifiers: true,
+            hash_comments: false,
+            dash_comment_needs_space: false,
+            executable_comments: false,
+            mariadb_comments: false,
+            backslash_in_identifiers: false,
+            // Read a lone CR as a line end: the text then shows at least as much code as the
+            // server runs, never less.
+            line_comment_ends_at_cr: true,
+            server_version: None,
+            duckdb_tokenizer: false,
         }
     }
 
@@ -436,6 +483,147 @@ impl Classification {
             _ => None,
         }
     }
+}
+
+/// The Unicode space characters DuckDB rewrites to ASCII spaces before it tokenizes (U+00A0,
+/// U+2000 to U+200B, U+202F, U+205F, U+2060, U+3000, U+FEFF), and nothing else: the text with
+/// each of them replaced by as many ASCII spaces as it has bytes, so every byte offset stays
+/// valid. `None` when the text has none (no allocation).
+///
+/// DuckDB looks for them with a scan of its own that skips `'…'` and `"…"` (a doubled quote
+/// escapes), `$tag$ … $tag$` and a `--` comment to the end of its line, and does not know `/* */`
+/// comments or `` ` `` names; its bounds are kept here, so a space in the last two bytes of the
+/// text is left alone, as there. A replaced character was in code (or in a block comment) by
+/// DuckDB's own reckoning, so a caller that refuses what a statement does not need can refuse any
+/// text this changes. The lexer reads bytes of `0x80` and above as word bytes, so text it judges
+/// must be passed through this first: `SELECT\u{a0}e'\'` is `SELECT e'\'` to DuckDB (an escape
+/// string), and a plain string and a word to the lexer.
+#[must_use]
+pub fn normalize_duckdb_spaces(sql: &str) -> Option<String> {
+    #[derive(Clone, Copy)]
+    enum State {
+        Regular,
+        Quotes(u8),
+        Dollar(usize, usize),
+        Comment,
+    }
+    let tag_first = |byte: u8| byte.is_ascii_alphabetic() || byte == b'_' || byte >= 0x80;
+    let tag_next = |byte: u8| tag_first(byte) || byte.is_ascii_digit();
+    let query = sql.as_bytes();
+    let size = query.len();
+    let mut spaces: Vec<(usize, usize)> = Vec::new();
+    let mut pos = 0;
+    let mut state = State::Regular;
+    'scan: loop {
+        match state {
+            State::Regular => {
+                while pos + 2 < size {
+                    let byte = query[pos];
+                    let (second, third) = (query[pos + 1], query[pos + 2]);
+                    if byte == 0xC2 && second == 0xA0 {
+                        spaces.push((pos, 2));
+                    }
+                    // A byte that starts one of these is no quote, `$` or `-`: the order of the
+                    // branches does not matter.
+                    if (byte == 0xE2
+                        && matches!((second, third), (0x80, 0x80..=0x8B | 0xAF) | (0x81, 0x9F | 0xA0)))
+                        || (byte == 0xE3 && (second, third) == (0x80, 0x80))
+                        || (byte == 0xEF && (second, third) == (0xBB, 0xBF))
+                    {
+                        spaces.push((pos, 3));
+                    } else if byte == b'"' || byte == b'\'' {
+                        pos += 1;
+                        state = State::Quotes(byte);
+                        continue 'scan;
+                    } else if byte == b'$' && (second == b'$' || tag_first(second)) {
+                        pos += 1;
+                        let start = pos;
+                        // The tag of a `$tag$`: a run of tag bytes up to the next `$`.
+                        let mut closed = None;
+                        let mut invalid = false;
+                        while pos + 2 < size {
+                            if query[pos] == b'$' {
+                                closed = Some(pos);
+                                break;
+                            }
+                            if !tag_next(query[pos]) {
+                                invalid = true;
+                                break;
+                            }
+                            pos += 1;
+                        }
+                        match (closed, invalid) {
+                            (Some(end), _) => {
+                                state = State::Dollar(start, end);
+                                continue 'scan;
+                            }
+                            // Not a dollar quote: the byte that ended the tag is read again.
+                            (None, true) => continue,
+                            (None, false) => break 'scan,
+                        }
+                    } else if byte == b'-' && second == b'-' {
+                        state = State::Comment;
+                        continue 'scan;
+                    }
+                    pos += 1;
+                }
+                break 'scan;
+            }
+            State::Quotes(quote) => {
+                while pos + 1 < size {
+                    if query[pos] == quote {
+                        if query[pos + 1] == quote {
+                            pos += 2;
+                            continue;
+                        }
+                        pos += 1;
+                        state = State::Regular;
+                        continue 'scan;
+                    }
+                    pos += 1;
+                }
+                break 'scan;
+            }
+            State::Dollar(start, end) => {
+                let tag = &query[start..end];
+                while pos + 2 < size {
+                    if query[pos] == b'$'
+                        && size - (pos + 1) > tag.len()
+                        && query[pos + tag.len() + 1] == b'$'
+                        && query[pos + 1..pos + 1 + tag.len()] == *tag
+                    {
+                        pos += tag.len() + 1;
+                        state = State::Regular;
+                        continue 'scan;
+                    }
+                    pos += 1;
+                }
+                break 'scan;
+            }
+            State::Comment => {
+                while pos < size {
+                    if query[pos] == b'\n' || query[pos] == b'\r' {
+                        state = State::Regular;
+                        continue 'scan;
+                    }
+                    pos += 1;
+                }
+                break 'scan;
+            }
+        }
+    }
+    if spaces.is_empty() {
+        return None;
+    }
+    let mut out = String::with_capacity(size);
+    let mut done = 0;
+    for (at, len) in spaces {
+        out.push_str(&sql[done..at]);
+        out.push_str(&"   "[..len]);
+        done = at + len;
+    }
+    out.push_str(&sql[done..]);
+    Some(out)
 }
 
 /// Classifies `sql` for the dialect described by `options`.
@@ -770,7 +958,9 @@ impl<'a> Lexer<'a> {
             };
             let start = self.pos;
             match byte {
-                b if b.is_ascii_whitespace() => self.pos += 1,
+                b if b.is_ascii_whitespace() || (b == 0x0b && self.options.duckdb_tokenizer) => {
+                    self.pos += 1;
+                }
                 b'-' if self.peek(1) == Some(b'-') && self.dash_comment_starts() => {
                     self.skip_line();
                 }
@@ -828,9 +1018,9 @@ impl<'a> Lexer<'a> {
                     self.pos += 1;
                     return self.token(TokenKind::Comma, start);
                 }
-                b if is_word_start(b) => {
+                b if self.is_word_start(b) => {
                     self.pos += 1;
-                    while self.peek(0).is_some_and(is_word_continue) {
+                    while self.peek(0).is_some_and(|b| self.is_word_continue(b)) {
                         self.pos += 1;
                     }
                     // `E'…'`: a PostgreSQL escape string. The `E` is its prefix.
@@ -844,6 +1034,10 @@ impl<'a> Lexer<'a> {
                         return self.token(TokenKind::Quoted, start);
                     }
                     return self.token(TokenKind::Word, start);
+                }
+                b if b.is_ascii_digit() && self.options.duckdb_tokenizer => {
+                    self.skip_duckdb_number();
+                    return self.token(TokenKind::Number, start);
                 }
                 b if b.is_ascii_digit() => {
                     self.pos += 1;
@@ -861,6 +1055,44 @@ impl<'a> Lexer<'a> {
                 }
             }
         }
+    }
+
+    fn is_word_start(&self, byte: u8) -> bool {
+        is_word_start(byte) || (self.options.duckdb_tokenizer && is_control_byte(byte))
+    }
+
+    fn is_word_continue(&self, byte: u8) -> bool {
+        is_word_continue(byte) || (self.options.duckdb_tokenizer && is_control_byte(byte))
+    }
+
+    /// At the first digit of a number, the way DuckDB's tokenizer reads one: digits and dots,
+    /// `_` between two digits, `e`/`E` after a digit (or in a number that starts with one) and a
+    /// sign after an `e`. Whatever it took that does not end in a digit or a dot is given back
+    /// (`1e'..'` is `1` and then an `E` string; `1e-` is `1`, `e`, `-`).
+    fn skip_duckdb_number(&mut self) {
+        let start = self.pos;
+        let is_exponent = |byte: u8| matches!(byte, b'e' | b'E');
+        let mut at = start + 1;
+        while let Some(byte) = self.byte_at(at) {
+            let previous = self.bytes[at - 1];
+            let part = byte.is_ascii_digit()
+                || byte == b'.'
+                || (byte == b'_'
+                    && previous.is_ascii_digit()
+                    && self.byte_at(at + 1).is_some_and(|next| next.is_ascii_digit()))
+                || (is_exponent(byte)
+                    && !is_exponent(previous)
+                    && (self.bytes[start].is_ascii_digit() || previous.is_ascii_digit()))
+                || (matches!(byte, b'+' | b'-') && is_exponent(previous));
+            if !part {
+                break;
+            }
+            at += 1;
+        }
+        while !(self.bytes[at - 1].is_ascii_digit() || self.bytes[at - 1] == b'.') {
+            at -= 1;
+        }
+        self.pos = at;
     }
 
     fn dash_comment_starts(&self) -> bool {
@@ -1022,6 +1254,12 @@ fn is_word_start(byte: u8) -> bool {
 
 fn is_word_continue(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$' || byte >= 0x80
+}
+
+/// A control byte that is not white space (DuckDB's `\v` and `\f` are; the lexer skips both in
+/// DuckDB mode).
+fn is_control_byte(byte: u8) -> bool {
+    matches!(byte, 0x00..=0x08 | 0x0e..=0x1f | 0x7f)
 }
 
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -2817,6 +3055,23 @@ mod tests {
     }
 
     #[test]
+    fn mssql_reads_brackets_double_quotes_and_nested_comments() {
+        let mssql = SqlLexOptions::mssql();
+        // `;` inside `[..]`, `".."` and a nested comment does not split; `''` escapes a quote; `\` is a plain character.
+        let text = "SELECT [a;b], \"c;d\", 'it''s\\;' /* a /* ; */ ; */ FROM t";
+        let c = classify(text, &mssql);
+        assert_eq!(c.statements.len(), 1, "{c:?}");
+        assert!(c.pageable);
+        // `]]` is an escaped bracket.
+        assert_eq!(classify("SELECT [a]];b]; SELECT 2", &mssql).statements.len(), 2);
+        // `#` is a temp-table prefix, not a comment; `--` ends at a line end, also a lone CR.
+        assert_eq!(classify("SELECT * FROM #t; SELECT 2", &mssql).statements.len(), 2);
+        assert_eq!(classify("SELECT 1 --x\r; SELECT 2", &mssql).statements.len(), 2);
+        assert!(classify("DELETE FROM t", &mssql).danger.is_some());
+        assert!(classify("USE other", &mssql).changes_database);
+    }
+
+    #[test]
     fn sqlite_bracket_identifiers_are_inert_and_do_not_split_statements() {
         // The apostrophes live inside bracket identifiers: they are not strings.
         let c = lite("SELECT [x'] ; DELETE FROM t; SELECT ['] ; SELECT 1");
@@ -2995,6 +3250,129 @@ mod tests {
     }
 
     #[test]
+    fn duckdb_splits_text_where_its_tokenizer_does() {
+        let duck = SqlLexOptions::duckdb();
+        let pg = SqlLexOptions::postgres();
+        let count = |sql: &str, options: &SqlLexOptions| classify(sql, options).statements.len();
+        // A backtick name hides a `'` from PostgreSQL's lexer, not from DuckDB's.
+        let sql = "SELECT 1 AS `'`; COMMIT; DELETE FROM orders; SELECT 1 AS `'`";
+        assert_eq!((count(sql, &duck), count(sql, &pg)), (4, 1));
+        // Also in the middle of a word: a backtick ends it and opens a name.
+        let sql = "SELECT 1 AS a`;`; COMMIT; SELECT 1 AS `b";
+        assert_eq!(count(sql, &duck), 3);
+        // A control byte is a word byte: `\x01e` is one word, `'\'` a plain string.
+        let sql = "SELECT \x01e'\\'; COMMIT; SELECT '";
+        assert_eq!((count(sql, &duck), count(sql, &pg)), (3, 1));
+        // A number gives back its trailing `e`: `1e'..'` is `1` and an `E` string.
+        let sql = "SELECT 1e'\\'; COMMIT; SELECT '";
+        assert_eq!((count(sql, &duck), count(sql, &pg)), (1, 3));
+        for sql in ["SELECT 1.e'\\'; x; '", "SELECT 1_0e'\\'; x; '", "SELECT .5e'\\'; x; '"] {
+            assert_eq!(count(sql, &duck), 1, "{sql}");
+        }
+        // `1e-5` stays one number.
+        use SqlTokenKind::{Number, Word};
+        assert_eq!(scan("1e-5 1e+ 2", &duck)[..3], [(Number, "1e-5"), (Number, "1"), (Word, "e")]);
+    }
+
+    /// A vertical tab is white space to DuckDB: `read_text\x0b(` is a call, not a word and a symbol.
+    #[test]
+    fn duckdb_reads_a_vertical_tab_as_white_space() {
+        use SqlTokenKind::{Close, Open, Quoted, Word};
+        let duck = SqlLexOptions::duckdb();
+        assert_eq!(
+            scan("read_text\x0b('/etc/passwd')", &duck),
+            [(Word, "read_text"), (Open, "("), (Quoted, "'/etc/passwd'"), (Close, ")")]
+        );
+        assert_eq!(scan("a\x0bb\x0c c", &duck).len(), 3);
+        // Other dialects keep reading it as they did.
+        assert_eq!(scan("a\x0bb", &SqlLexOptions::postgres()).len(), 3);
+    }
+
+    #[test]
+    fn duckdb_unicode_spaces_are_rewritten_like_duckdb_does() {
+        let duck = SqlLexOptions::duckdb();
+        // Every code point DuckDB rewrites, each as many ASCII spaces as it has bytes.
+        for (space, bytes) in [
+            ("\u{a0}", 2),
+            ("\u{2000}", 3),
+            ("\u{2005}", 3),
+            ("\u{200b}", 3),
+            ("\u{202f}", 3),
+            ("\u{205f}", 3),
+            ("\u{2060}", 3),
+            ("\u{3000}", 3),
+            ("\u{feff}", 3),
+        ] {
+            let sql = format!("SELECT{space}1 FROM t");
+            let normalized = normalize_duckdb_spaces(&sql).expect(&sql);
+            assert_eq!(normalized, format!("SELECT{}1 FROM t", " ".repeat(bytes)));
+            assert_eq!(normalized.len(), sql.len());
+        }
+        // Not in the list: U+200C, U+2028, U+2029, U+00A1, U+3001.
+        for space in ["\u{200c}", "\u{2028}", "\u{2029}", "\u{a1}", "\u{3001}", "\u{1680}"] {
+            assert_eq!(normalize_duckdb_spaces(&format!("SELECT{space}1 FROM t")), None, "{space:?}");
+        }
+        // Where its own scan does not look: strings, names, dollar quotes, a `--` comment.
+        for sql in [
+            "SELECT 'a\u{a0}b' FROM t",
+            "SELECT \"a\u{a0}b\" FROM t",
+            "SELECT 'it''s\u{a0}' FROM t",
+            "SELECT $$a\u{a0}b$$ FROM t",
+            "SELECT $q$a\u{a0}$$b$q$ FROM t",
+            "SELECT 1 -- a\u{a0}b\nFROM t",
+            "SELECT 1 FROM t",
+        ] {
+            assert_eq!(normalize_duckdb_spaces(sql), None, "{sql}");
+        }
+        // After them it looks again, and it does not know `/* */` or backticks.
+        assert!(normalize_duckdb_spaces("SELECT 'a' \u{a0}FROM t").is_some());
+        assert!(normalize_duckdb_spaces("SELECT $$a$$ \u{a0}FROM t").is_some());
+        // DuckDB's scan resumes on the last `$` of a closing tag, where a `$` before a Unicode space
+        // starts a tag: the space right after a dollar quote is not rewritten (and the tokenizer does
+        // not read it as a space either, so the lexer and DuckDB agree).
+        assert_eq!(normalize_duckdb_spaces("SELECT $$a$$\u{a0}FROM t"), None);
+        assert!(normalize_duckdb_spaces("SELECT 1 -- x\n\u{a0}FROM t").is_some());
+        assert!(normalize_duckdb_spaces("SELECT 1 /* \u{a0} */").is_some());
+        assert_eq!(normalize_duckdb_spaces("SELECT 1 AS `'\u{a0}`, 'x'\u{a0}"), None);
+        // A `$` followed by a Unicode space starts a tag, as in DuckDB: nothing is rewritten there.
+        assert_eq!(normalize_duckdb_spaces("SELECT $\u{a0}1 FROM t"), None);
+        // The last two bytes are never looked at, as in DuckDB.
+        assert_eq!(normalize_duckdb_spaces("SELECT 1\u{a0}"), None);
+        assert!(normalize_duckdb_spaces("SELECT 1\u{a0} ").is_some());
+        // What the lexer reads is the text DuckDB reads: this is the attack. The lexer takes the
+        // `\u{a0}e` for a word and `'\'` for a string, and sees one read; DuckDB sees an `E` string, and
+        // a `DELETE` after the CTE.
+        let sql = "WITH c AS (SELECT \u{a0}e'\\' AS a, x ') DELETE FROM t --') SELECT * FROM c";
+        assert!(classify(sql, &duck).pageable);
+        let normalized = normalize_duckdb_spaces(sql).expect("it has a Unicode space");
+        let judged = classify(&normalized, &duck);
+        assert!(!judged.pageable);
+        assert_eq!(judged.statements.len(), 1);
+        // The pass is idempotent (DuckDB runs it again on the text the driver hands it).
+        assert_eq!(normalize_duckdb_spaces(&normalized), None);
+    }
+
+    /// The rewrite must leave nothing for DuckDB's own pass to find: tried on many small texts
+    /// built from the characters that steer the scan.
+    #[test]
+    fn duckdb_unicode_space_rewrite_is_idempotent_and_keeps_offsets() {
+        let pieces = ["'", "\"", "$", "$a$", "--", "\n", "\r", "\u{a0}", "\u{2003}", "\u{feff}", "a", "e", " ", "`", "/*", "*/"];
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+        for _ in 0..20_000 {
+            let mut sql = String::new();
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            for _ in 0..(seed >> 60) + 2 {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                sql.push_str(pieces[(seed >> 33) as usize % pieces.len()]);
+            }
+            if let Some(normalized) = normalize_duckdb_spaces(&sql) {
+                assert_eq!(normalized.len(), sql.len(), "{sql:?}");
+                assert_eq!(normalize_duckdb_spaces(&normalized), None, "{sql:?}");
+            }
+        }
+    }
+
+    #[test]
     fn tokens_flag_unterminated_text() {
         let pg = SqlLexOptions::postgres();
         assert!(!tokens("SELECT 'a' /* b */ \"c\"", &pg).unterminated);
@@ -3057,5 +3435,33 @@ mod tests {
         assert_eq!(scan(sql, &SqlLexOptions::postgres()).len(), 2);
         assert_eq!(scan(sql, &SqlLexOptions::sqlite()).len(), 1);
         assert_eq!(scan("a # x\rb", &SqlLexOptions::mysql()).len(), 1);
+    }
+
+    /// The tokens a caller that judges a `SET` reads: the words after a `--` that is no comment, and
+    /// the end of a `"` string that holds a backslash, are where the MySQL server finds them.
+    #[test]
+    fn mysql_tokens_follow_the_server_for_dashes_and_backslashes_in_double_quotes() {
+        let words = |sql: &str, options: &SqlLexOptions| -> Vec<String> {
+            let scan = tokens(sql, options);
+            scan.tokens
+                .iter()
+                .filter(|token| token.kind == SqlTokenKind::Word)
+                .map(|token| sql[token.range.clone()].to_ascii_lowercase())
+                .collect()
+        };
+        let my = SqlLexOptions::mysql();
+        // `1--1` is arithmetic: the `GLOBAL` after it is code. With a blank it is a comment.
+        assert!(words("SET @a = 1--1, GLOBAL max_connections = 1", &my).contains(&"global".to_owned()));
+        assert!(!words("SET @a = 1 -- , GLOBAL max_connections = 1", &my).contains(&"global".to_owned()));
+        // A backslash escapes the quote inside `"` too: the first string ends at the second `"`, and
+        // `foreign_key_checks` is code.
+        let quoted = r#"SET @x = "\" , @y = ", foreign_key_checks = 0, @z = "x""#;
+        assert!(words(quoted, &my).contains(&"foreign_key_checks".to_owned()));
+        // NO_BACKSLASH_ESCAPES: the first string ends at the backslash, and the second one hides it.
+        assert!(!words(quoted, &my.without_backslash_escapes()).contains(&"foreign_key_checks".to_owned()));
+        // PostgreSQL nests block comments: this is `SET ROLE admin`.
+        let nested = "SET /* /* */ search_path TO x /* */ */ ROLE admin";
+        assert_eq!(words(nested, &SqlLexOptions::postgres()), ["set", "role", "admin"]);
+        assert!(words(nested, &SqlLexOptions::sqlite()).contains(&"search_path".to_owned()));
     }
 }

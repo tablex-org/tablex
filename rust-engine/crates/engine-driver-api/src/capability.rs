@@ -67,6 +67,9 @@ capabilities! {
     AdminIndexes => "admin.indexes",
     AdminDatabase => "admin.database",
     MetadataTableProperties => "metadata.table_properties",
+    // SQL drivers: one navigator request lists the columns of every table-like object of a
+    // schema (`payload.columns == true`, see `sql::schema_columns_cursor`).
+    MetadataSchemaColumns => "metadata.schema_columns",
     // Redis (non-SQL): query kinds `redis.key` / `redis.command` and the key
     // mutation kinds, where the `MutationRequest.kind` equals the token suffix.
     QueryRedisKey => "query.redis_key",
@@ -231,7 +234,7 @@ mod tests {
             assert_eq!(token.parse::<Capability>(), Ok(capability));
             assert_eq!(capability.to_string(), token);
         }
-        assert_eq!(Capability::ALL.len(), 49);
+        assert_eq!(Capability::ALL.len(), 50);
     }
 
     #[test]
