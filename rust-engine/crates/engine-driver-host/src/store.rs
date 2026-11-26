@@ -16,6 +16,18 @@ const PENDING_DELETE: &str = ".pending-delete";
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(5);
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
+/// Why an install was accepted, recorded with it: the Driver Manager marks a developer build by
+/// this, not by the Team ID (an official release driver has none either).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InstallSource {
+    /// Installed under the strict trust policy: the manifest was signed, every artifact pinned.
+    Catalog,
+    /// Installed under the developer policy (an unsigned or local manifest, an ad-hoc signed
+    /// library, an imported file).
+    Developer,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InstalledDriverRecord {
@@ -39,6 +51,13 @@ pub struct InstalledDriverRecord {
     pub previous_path: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_sha256: Option<String>,
+    /// How the current version came to be installed. Absent in records written before it was kept
+    /// (and by an older build that rewrote the store).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<InstallSource>,
+    /// [`Self::source`] of the previous version, so a rollback restores it with the version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_source: Option<InstallSource>,
 }
 
 /// A flat install that [`InstalledDriverStore::migrate_flat_installs`] moved
@@ -144,10 +163,12 @@ impl InstalledDriverStore {
                 record.previous_version = existing.previous_version;
                 record.previous_path = existing.previous_path;
                 record.previous_sha256 = existing.previous_sha256;
+                record.previous_source = existing.previous_source;
             } else {
                 record.previous_version = Some(existing.version);
                 record.previous_path = Some(existing.path);
                 record.previous_sha256 = Some(existing.sha256);
+                record.previous_source = existing.source;
             }
         }
         records.insert(record.id.clone(), record);
@@ -176,6 +197,7 @@ impl InstalledDriverStore {
         record.version = version;
         record.path = path;
         record.sha256 = sha256;
+        record.source = record.previous_source.take();
         let rolled_back = record.clone();
         self.write_unlocked(records.into_values().collect())?;
         Ok(rolled_back)

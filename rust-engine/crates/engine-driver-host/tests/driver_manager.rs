@@ -4,7 +4,7 @@ use common::{mock_dylib, mock_entry, sha256_of};
 use engine_driver_host::{
     classify_download_url, stream_to_file, DownloadError, DownloadTransport, DriverInstaller,
     DriverTarget, InstallError, InstallProgress, InstallStep, InstalledDriverStore, LoaderError,
-    NoProgress, StoreError, TrustPolicy, UninstallOutcome,
+    InstallSource, NoProgress, StoreError, TrustPolicy, UninstallOutcome,
 };
 use std::fs;
 use std::io::{Cursor, Read};
@@ -266,6 +266,51 @@ fn versioned_install_rollback_and_gc_keep_generations_with_owners() {
         vec![v3.path.parent().expect("dir").to_path_buf()]
     );
     assert!(rolled_back.path.exists());
+}
+
+#[test]
+fn an_install_records_how_it_was_accepted_and_a_rollback_restores_that_of_the_version_it_returns_to() {
+    let temp = TempDir::new().expect("temp");
+    let store = InstalledDriverStore::new(temp.path());
+    let strict = installer(&store);
+    let developer = installer(&store).with_trust_policy(TrustPolicy::Developer);
+    let dylib = mock_dylib();
+
+    // The catalog's drivers pin no Team ID: the policy they were installed under is what tells.
+    let v1 = strict.install_from_file(&mock_entry("1.0.0", ""), dylib).expect("v1");
+    assert_eq!(v1.source, Some(InstallSource::Catalog));
+    assert_eq!(v1.previous_source, None);
+    let v2 = developer.install_from_file(&mock_entry("2.0.0", ""), dylib).expect("v2");
+    assert_eq!(v2.source, Some(InstallSource::Developer));
+    assert_eq!(v2.previous_version.as_deref(), Some("1.0.0"));
+    assert_eq!(v2.previous_source, Some(InstallSource::Catalog), "kept with the version it belongs to");
+    let v3 = strict.install_from_file(&mock_entry("3.0.0", ""), dylib).expect("v3");
+    assert_eq!((v3.source, v3.previous_source), (Some(InstallSource::Catalog), Some(InstallSource::Developer)));
+    assert_eq!(store.record("mock").unwrap().unwrap(), v3, "what the store holds is what was returned");
+
+    // Installing the same files again over themselves keeps what the previous version was.
+    let again = strict.install_from_file(&mock_entry("3.0.0", ""), dylib).expect("v3 again");
+    assert_eq!((again.source, again.previous_source), (Some(InstallSource::Catalog), Some(InstallSource::Developer)));
+
+    let back = strict.rollback("mock").expect("rollback");
+    assert_eq!((back.version.as_str(), back.source, back.previous_source), ("2.0.0", Some(InstallSource::Developer), None));
+    assert_eq!(store.record("mock").unwrap().unwrap().source, Some(InstallSource::Developer));
+}
+
+#[test]
+fn a_rollback_to_a_version_installed_before_the_source_was_kept_leaves_it_unknown() {
+    let temp = TempDir::new().expect("temp");
+    let store = InstalledDriverStore::new(temp.path());
+    let installer = installer(&store);
+    let dylib = mock_dylib();
+    installer.install_from_file(&mock_entry("1.0.0", ""), dylib).expect("v1");
+    // A record as an earlier build wrote it: no source.
+    let mut old = store.record("mock").unwrap().unwrap();
+    old.source = None;
+    store.save(old).unwrap();
+    installer.install_from_file(&mock_entry("2.0.0", ""), dylib).expect("v2");
+    let back = installer.rollback("mock").expect("rollback");
+    assert_eq!((back.version.as_str(), back.source), ("1.0.0", None));
 }
 
 #[test]

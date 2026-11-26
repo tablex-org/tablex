@@ -4,7 +4,7 @@
 //! own writes, and the one-version-back rollback still works on them. The store is only touched
 //! through its public API, in temporary copies.
 
-use engine_driver_host::{InstalledDriverRecord, InstalledDriverStore, LegacyMigration};
+use engine_driver_host::{InstallSource, InstalledDriverRecord, InstalledDriverStore, LegacyMigration};
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -158,5 +158,51 @@ fn a_store_of_every_release_at_the_legacy_location_moves_and_keeps_its_records()
         }
         assert!(!legacy_base.join("Drivers").exists(), "{version}");
         drop(temp);
+    }
+}
+
+/// How an install was accepted is a field the records of the earlier releases do not have: they read
+/// as unknown, are written back without it (nothing is added to a record that never had it), and a
+/// record that has it is written in the same camelCase as the rest, with the previous version's kept
+/// for the rollback. A reader that does not know the field (an older `tablex-mcp` sharing the store)
+/// ignores it: the record has no `deny_unknown_fields`.
+#[test]
+fn the_install_source_is_new_to_old_records_and_written_in_the_stores_own_style() {
+    for version in VERSIONS {
+        let (_temp, base, old) = rig(version, |temp| temp.join("tablex"));
+        let store = InstalledDriverStore::new(&base);
+        let records = store.load_all().unwrap();
+        assert!(records.values().all(|record| record.source.is_none() && record.previous_source.is_none()), "{version}");
+        // An untouched round trip does not invent the field.
+        store.save(records["sqlite"].clone()).unwrap();
+        for record in written(&store).as_array().unwrap() {
+            assert!(record.get("source").is_none() && record.get("previousSource").is_none(), "{version}: {record}");
+        }
+
+        // A new install over the old one records its source and the old record's (none): the old
+        // record's other fields are still all there.
+        let mut next = records["sqlite"].clone();
+        next.version = "0.4.0".into();
+        next.path = base.join("Drivers/v2/sqlite/0.4.0/libdbengine_sqlite.dylib");
+        next.source = Some(InstallSource::Catalog);
+        store.save_installed(next).unwrap();
+        let sqlite = written(&store).as_array().unwrap().iter().find(|record| record["id"] == "sqlite").cloned().unwrap();
+        assert_eq!(sqlite["source"], "catalog", "{version}");
+        assert!(sqlite.get("previousSource").is_none(), "{version}: the previous version had none");
+        assert_eq!(sqlite["previousVersion"], "0.3.0", "{version}");
+        let store_again = InstalledDriverStore::new(&base);
+        assert_eq!(store_again.record("sqlite").unwrap().unwrap().source, Some(InstallSource::Catalog), "{version}");
+        // Every other record is exactly what the release wrote.
+        let others: Vec<Value> = old.as_array().unwrap().iter().filter(|record| record["id"] != "sqlite").cloned().collect();
+        let now: Vec<Value> = written(&store).as_array().unwrap().iter().filter(|record| record["id"] != "sqlite").cloned().collect();
+        assert_survives(&format!("{version}: the other records"), "", &old_with_base(&Value::Array(others), &base), &Value::Array(now));
+
+        // The other way: a record with both fields reads back, and the rollback gives the previous one.
+        let mut mongo = store.record("mongodb").unwrap().unwrap();
+        (mongo.source, mongo.previous_source) = (Some(InstallSource::Catalog), Some(InstallSource::Developer));
+        store.save(mongo).unwrap();
+        let text = fs::read_to_string(store.store_path()).unwrap();
+        assert!(text.contains("\"source\": \"catalog\"") && text.contains("\"previousSource\": \"developer\""), "{version}: {text}");
+        assert_eq!(store.rollback("mongodb").unwrap().source, Some(InstallSource::Developer), "{version}");
     }
 }

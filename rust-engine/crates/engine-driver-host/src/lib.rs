@@ -50,7 +50,7 @@ pub use shared_session::SharedDriverSession;
 pub use signer::SignerConfig;
 pub use sql_format::{kill_process_tree, run_filter, FormatCancel, FormatHostError, SqlFormatTool};
 pub use store::{
-    InstalledDriverRecord, InstalledDriverStore, LegacyMigration, MigratedInstall, StoreError,
+    InstallSource, InstalledDriverRecord, InstalledDriverStore, LegacyMigration, MigratedInstall, StoreError,
 };
 pub use target::{DriverTarget, TargetArch, TargetOs};
 pub use tools::{

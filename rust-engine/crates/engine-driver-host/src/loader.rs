@@ -542,6 +542,10 @@ impl DriverHandle {
             connection_id,
             dialect: connection_dialect(&value),
             server_version: connection_server_version(&value),
+            file_access_locked: value
+                .get("file_access_locked")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
             pages: HashSet::new(),
             connected: Arc::new(AtomicBool::new(true)),
         })
@@ -941,6 +945,9 @@ pub struct DriverSession {
     /// The server's version in MySQL's numeric form (MySQL 8.4.6 = `80406`, MariaDB
     /// 11.8.9 = `110809`), when the driver reported `server_version` in its connect reply.
     server_version: Option<u32>,
+    /// The driver reported `file_access_locked` in its connect reply: the instance has file
+    /// access off with a locked configuration. Absent, or not a boolean: `false`.
+    file_access_locked: bool,
     pages: HashSet<u64>,
     /// Shared with [`SessionAnchor`] so lock-free callers (see
     /// `SharedDriverSession`) observe a disconnect without the session lock.
@@ -1193,6 +1200,12 @@ impl DriverSession {
     /// `SqlLexOptions::with_server_version` takes. `None` when the driver did not report it.
     pub fn server_version(&self) -> Option<u32> {
         self.server_version
+    }
+
+    /// Whether the driver said, in its connect reply, that this connection's instance has file
+    /// access off with a locked configuration (DuckDB). `false` for every driver that does not.
+    pub fn file_access_locked(&self) -> bool {
+        self.file_access_locked
     }
 
     /// The per-connection SQL dialect from the connect reply; `None` when the

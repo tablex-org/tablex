@@ -1,8 +1,8 @@
 use crate::progress::{InstallStep, ProgressSink, ThrottledProgress};
 use crate::{
     DownloadedArtifact, DriverArtifact, DriverHandle, DriverLoader, DriverManifestEntry,
-    DriverOwners, DriverTarget, DriverVerificationError, DriverVerifier, InstalledDriverRecord,
-    InstalledDriverStore, LoaderError, NoProgress, SignerConfig, TargetOs, TrustPolicy,
+    DriverOwners, DriverTarget, DriverVerificationError, DriverVerifier, InstallSource,
+    InstalledDriverRecord, InstalledDriverStore, LoaderError, NoProgress, SignerConfig, TargetOs, TrustPolicy,
 };
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -404,6 +404,10 @@ impl<'a> DriverInstaller<'a> {
             uri_schemes: entry.uri_schemes.clone(),
             license: entry.license.clone(),
             source_repo: entry.source_repo.clone(),
+            source: Some(match self.policy {
+                TrustPolicy::Strict => InstallSource::Catalog,
+                TrustPolicy::Developer => InstallSource::Developer,
+            }),
             ..Default::default()
         };
         self.store.save_installed(record.clone())?;
