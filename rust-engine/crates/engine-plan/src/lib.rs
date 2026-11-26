@@ -50,6 +50,7 @@ pub enum ExplainDialect {
     MariaDb,
     Sqlite,
     ClickHouse,
+    DuckDb,
 }
 
 impl ExplainDialect {
@@ -61,6 +62,7 @@ impl ExplainDialect {
             Self::MariaDb => "MariaDB",
             Self::Sqlite => "SQLite",
             Self::ClickHouse => "ClickHouse",
+            Self::DuckDb => "DuckDB",
         }
     }
 
@@ -74,12 +76,14 @@ impl ExplainDialect {
             Self::MariaDb => SqlLexOptions::mariadb(),
             Self::Sqlite => SqlLexOptions::sqlite(),
             Self::ClickHouse => SqlLexOptions::clickhouse(),
+            // DuckDB's own PEG tokenizer (this build has no PostgreSQL parser).
+            Self::DuckDb => SqlLexOptions::duckdb(),
         }
     }
 
     /// Whether `ExplainMode::Analyze` (execute and measure) exists for this dialect.
     pub fn supports_analyze(self) -> bool {
-        matches!(self, Self::Postgres | Self::MySql | Self::MariaDb)
+        matches!(self, Self::Postgres | Self::MySql | Self::MariaDb | Self::DuckDb)
     }
 }
 

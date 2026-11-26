@@ -53,6 +53,24 @@ fn sqlite_and_clickhouse_statements() {
 }
 
 #[test]
+fn duckdb_statements() {
+    let estimate = explain_sql(D::DuckDb, M::Estimate, "select 1", false).unwrap();
+    assert_eq!(estimate.sql, "EXPLAIN (FORMAT JSON) select 1");
+    assert_eq!(estimate.format, PlanFormat::Json);
+    let analyze = explain_sql(D::DuckDb, M::Analyze, "select 1;", true).unwrap();
+    assert_eq!(analyze.sql, "EXPLAIN ANALYZE (FORMAT JSON) select 1");
+    assert_eq!(err(D::DuckDb, M::Analyze, "select 1", false), E::AnalyzeRequiresReadOnly);
+    // DuckDB's own tokenizer: dollar quotes, nested comments and backtick names (a `'` or `;` in one
+    // is part of the name, not a string or a statement end).
+    single(D::DuckDb, "select $$a;b$$");
+    single(D::DuckDb, "select /* a /* b; */ c; */ 1");
+    single(D::DuckDb, "select `a; select 2`");
+    single(D::DuckDb, "select 1 as `'`");
+    assert_eq!(err(D::DuckDb, M::Estimate, "select 1 as `'`; commit; select 1 as `'`", true), E::MultipleStatements);
+    assert_eq!(err(D::DuckDb, M::Estimate, "select 1; select 2", true), E::MultipleStatements);
+}
+
+#[test]
 fn estimate_does_not_need_read_only() {
     let s = explain_sql(D::Postgres, M::Estimate, "delete from t", false).unwrap();
     assert_eq!(s.sql, "EXPLAIN (FORMAT JSON) delete from t");
@@ -147,11 +165,11 @@ fn single(d: D, s: &str) {
 
 #[test]
 fn semicolon_in_string_literals() {
-    for d in [D::Postgres, D::MySql, D::MariaDb, D::Sqlite, D::ClickHouse] {
+    for d in [D::Postgres, D::MySql, D::MariaDb, D::Sqlite, D::ClickHouse, D::DuckDb] {
         single(d, "select 'a;b'");
         single(d, "select 'it''s; fine'");
         single(d, "select \"a;b\" from t");
-        if d != D::Postgres {
+        if !matches!(d, D::Postgres | D::DuckDb) {
             single(d, "select `a;b` from t;");
         }
     }
@@ -159,7 +177,7 @@ fn semicolon_in_string_literals() {
 
 #[test]
 fn semicolon_in_comments() {
-    for d in [D::Postgres, D::MySql, D::MariaDb, D::Sqlite, D::ClickHouse] {
+    for d in [D::Postgres, D::MySql, D::MariaDb, D::Sqlite, D::ClickHouse, D::DuckDb] {
         single(d, "select 1 -- a; b\n, 2");
         single(d, "select 1 /* a; b */, 2");
     }
@@ -230,7 +248,7 @@ fn non_ascii_text_is_kept_intact() {
 #[test]
 fn unterminated_constructs_do_not_panic() {
     for s in ["select 'abc", "select \"abc", "select `abc", "select /* abc", "select 1 -- abc", "select $a$ abc", "select 'abc\\"] {
-        for d in [D::Postgres, D::MySql, D::MariaDb, D::Sqlite, D::ClickHouse] {
+        for d in [D::Postgres, D::MySql, D::MariaDb, D::Sqlite, D::ClickHouse, D::DuckDb] {
             let _ = explain_sql(d, M::Estimate, s, true);
         }
     }

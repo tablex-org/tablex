@@ -21,6 +21,7 @@ use crate::{ExplainDialect, ExplainError, ExplainMode, ExplainStatement, PlanFor
 /// | MariaDB | `EXPLAIN FORMAT=JSON s` | `ANALYZE FORMAT=JSON s` |
 /// | SQLite | `EXPLAIN QUERY PLAN s` | refused |
 /// | ClickHouse | `EXPLAIN json = 1, actions = 1, indexes = 1 s` | refused |
+/// | DuckDB | `EXPLAIN (FORMAT JSON) s` | `EXPLAIN ANALYZE (FORMAT JSON) s` |
 pub fn explain_sql(
     dialect: ExplainDialect,
     mode: ExplainMode,
@@ -59,6 +60,8 @@ pub fn explain_sql(
         (ExplainDialect::MariaDb, ExplainMode::Analyze) => ("ANALYZE FORMAT=JSON", PlanFormat::Json),
         (ExplainDialect::Sqlite, _) => ("EXPLAIN QUERY PLAN", PlanFormat::Rows),
         (ExplainDialect::ClickHouse, _) => ("EXPLAIN json = 1, actions = 1, indexes = 1", PlanFormat::Json),
+        (ExplainDialect::DuckDb, ExplainMode::Estimate) => ("EXPLAIN (FORMAT JSON)", PlanFormat::Json),
+        (ExplainDialect::DuckDb, ExplainMode::Analyze) => ("EXPLAIN ANALYZE (FORMAT JSON)", PlanFormat::Json),
     };
     Ok(ExplainStatement { sql: format!("{prefix} {body}"), format })
 }

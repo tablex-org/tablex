@@ -1,6 +1,7 @@
 //! One module per output family.
 
 pub(crate) mod clickhouse;
+pub(crate) mod duckdb;
 pub(crate) mod mysql;
 pub(crate) mod mysql_tree;
 pub(crate) mod postgres;

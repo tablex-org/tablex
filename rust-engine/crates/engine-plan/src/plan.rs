@@ -137,6 +137,12 @@ impl PlanRows {
         let cells: Vec<&str> = self.rows.iter().filter_map(|r| r.first()?.as_deref()).collect();
         cells.join("\n")
     }
+
+    /// Last column of every row joined by `\n` (DuckDB: `explain_key`, `explain_value`).
+    fn last_column_text(&self) -> String {
+        let cells: Vec<&str> = self.rows.iter().filter_map(|r| r.last()?.as_deref()).collect();
+        cells.join("\n")
+    }
 }
 
 impl Plan {
@@ -157,7 +163,7 @@ impl Plan {
         let (raw, parsed) = if dialect == ExplainDialect::Sqlite {
             parse::sqlite::parse(rows)?
         } else {
-            let raw = rows.first_column_text();
+            let raw = if dialect == ExplainDialect::DuckDb { rows.last_column_text() } else { rows.first_column_text() };
             if raw.trim().is_empty() {
                 return Err(ExplainError::EmptyOutput);
             }
@@ -166,6 +172,7 @@ impl Plan {
                 ExplainDialect::MySql => parse::mysql::parse(&raw, true)?,
                 ExplainDialect::MariaDb => parse::mysql::parse(&raw, false)?,
                 ExplainDialect::ClickHouse => parse::clickhouse::parse(&raw)?,
+                ExplainDialect::DuckDb => parse::duckdb::parse(&raw)?,
                 ExplainDialect::Sqlite => unreachable!("handled above"),
             };
             (raw, parsed)

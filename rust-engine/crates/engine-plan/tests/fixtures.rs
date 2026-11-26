@@ -2,7 +2,7 @@
 
 mod common;
 use common::*;
-use engine_plan::{ExplainDialect as D, ExplainMode as M, Plan};
+use engine_plan::{ExplainDialect as D, ExplainMode as M, Plan, PlanRows};
 
 fn approx(a: Option<f64>, b: f64) {
     let a = a.expect("value present");
@@ -25,6 +25,7 @@ fn all_fixtures() -> Vec<(D, M, String)> {
         (D::MariaDb, "mariadb"),
         (D::Sqlite, "sqlite"),
         (D::ClickHouse, "clickhouse"),
+        (D::DuckDb, "duckdb"),
     ] {
         let path = format!("{}/tests/fixtures/{dir}", env!("CARGO_MANIFEST_DIR"));
         for entry in std::fs::read_dir(path).unwrap() {
@@ -40,7 +41,7 @@ fn all_fixtures() -> Vec<(D, M, String)> {
 #[test]
 fn every_fixture_has_a_header_and_parses() {
     let fixtures = all_fixtures();
-    assert_eq!(fixtures.len(), 38);
+    assert_eq!(fixtures.len(), 40);
     for (d, m, path) in fixtures {
         let full = format!("{}/tests/fixtures/{path}", env!("CARGO_MANIFEST_DIR"));
         let text = std::fs::read_to_string(full).unwrap();
@@ -94,12 +95,44 @@ fn node_counts_and_roots() {
         ("clickhouse/join_estimate.json", M::Estimate, D::ClickHouse, 13, "Expression"),
         ("clickhouse/union_estimate.json", M::Estimate, D::ClickHouse, 8, "Distinct"),
         ("clickhouse/index_estimate.json", M::Estimate, D::ClickHouse, 3, "Expression"),
+        ("duckdb/join_estimate.json", M::Estimate, D::DuckDb, 11, "Top N"),
+        ("duckdb/join_analyze.json", M::Analyze, D::DuckDb, 14, "Result Collector"),
     ];
     for (path, mode, dialect, count, root) in expected {
         let plan = parse_fixture(dialect, mode, path);
         assert_eq!(plan.nodes.len(), count, "{path}");
         assert_eq!(plan.nodes[0].operation, root, "{path}");
     }
+}
+
+#[test]
+fn duckdb_values() {
+    let estimate = parse_fixture(D::DuckDb, M::Estimate, "duckdb/join_estimate.json");
+    let scan = find(&estimate, "Seq Scan", Some("memory.main.plan_t2"));
+    assert_eq!(scan.actual_rows, None);
+    approx(scan.est_rows, 5000.0);
+    assert!(find(&estimate, "Hash Join", None).detail.as_deref().is_some_and(|detail| detail.contains("t1_id = id")));
+    assert_eq!(estimate.total_cost, None);
+    assert!(estimate.warnings.is_empty(), "{:?}", estimate.warnings);
+
+    let analyze = parse_fixture(D::DuckDb, M::Analyze, "duckdb/join_analyze.json");
+    let top = find(&analyze, "Top N", None);
+    approx(top.actual_rows, 5.0);
+    approx(top.est_rows, 5.0);
+    // `timing` is seconds; the plan keeps milliseconds.
+    assert!(top.actual_time_ms.is_some_and(|ms| ms > 0.0 && ms < 1000.0));
+    let scan = find(&analyze, "Seq Scan", Some("memory.main.plan_t2"));
+    approx(scan.actual_rows, 2500.0);
+    assert!(scan.props.iter().any(|(key, value)| key == "rows_scanned" && value == "5000"));
+    // The planner's and the optimizer's own sections are not operators.
+    assert!(analyze.nodes.iter().all(|node| node.operation != "Planner" && node.operation != "Optimizer"));
+    // A driver's result set has the key beside the value: the plan is the last column.
+    let rows = PlanRows {
+        columns: vec!["explain_key".into(), "explain_value".into()],
+        rows: vec![vec![Some("physical_plan".into()), Some(fixture_payload("duckdb/join_estimate.json"))]],
+    };
+    assert_eq!(Plan::parse(D::DuckDb, M::Estimate, &rows).unwrap().nodes.len(), estimate.nodes.len());
+    assert!(matches!(Plan::parse(D::DuckDb, M::Estimate, &cell("{}")), Err(engine_plan::ExplainError::UnexpectedShape(_))));
 }
 
 #[test]

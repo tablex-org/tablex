@@ -1,0 +1,300 @@
+-- server: DuckDB v2.0.1
+-- statement: EXPLAIN ANALYZE (FORMAT JSON) SELECT t1.grp, count(*) AS n, sum(t2.amount) AS total FROM plan_t1 t1 JOIN plan_t2 t2 ON t2.t1_id = t1.id WHERE t1.val < 500 GROUP BY t1.grp ORDER BY total DESC LIMIT 5
+{
+    "io": {
+        "total_bytes_read": 0,
+        "total_bytes_written": 0,
+        "total_read_operations": 0,
+        "total_read_time": 0.0,
+        "total_write_operations": 0,
+        "total_write_time": 0.0
+    },
+    "operator": [
+        {
+            "extra_info": {},
+            "intermediate_rows": 0,
+            "intermediate_size_bytes": 0,
+            "name": "RESULT_COLLECTOR",
+            "timing": 0.0,
+            "type": "RESULT_COLLECTOR",
+            "children": [
+                {
+                    "extra_info": {},
+                    "intermediate_rows": 0,
+                    "intermediate_size_bytes": 0,
+                    "name": "EXECUTE",
+                    "timing": 0.0,
+                    "type": "EXECUTE",
+                    "children": [
+                        {
+                            "extra_info": {},
+                            "intermediate_rows": 0,
+                            "intermediate_size_bytes": 0,
+                            "name": "EXPLAIN_ANALYZE",
+                            "timing": 2.6e-7,
+                            "type": "EXPLAIN_ANALYZE",
+                            "children": [
+                                {
+                                    "extra_info": {
+                                        "Top": "5",
+                                        "Order By": "total DESC",
+                                        "Estimated Cardinality": "5"
+                                    },
+                                    "intermediate_rows": 5,
+                                    "intermediate_size_bytes": 140,
+                                    "name": "TOP_N",
+                                    "timing": 0.000034166,
+                                    "type": "TOP_N",
+                                    "children": [
+                                        {
+                                            "extra_info": {
+                                                "Projections": [
+                                                    "CAST(#0 AS INTEGER)",
+                                                    "#1",
+                                                    "#2"
+                                                ],
+                                                "Estimated Cardinality": "11"
+                                            },
+                                            "intermediate_rows": 10,
+                                            "intermediate_size_bytes": 280,
+                                            "name": "PROJECTION",
+                                            "timing": 0.000006422,
+                                            "type": "PROJECTION",
+                                            "children": [
+                                                {
+                                                    "extra_info": {
+                                                        "Groups": "#0",
+                                                        "Aggregates": [
+                                                            "count_star()",
+                                                            "sum(#1)"
+                                                        ],
+                                                        "Estimated Cardinality": "11"
+                                                    },
+                                                    "intermediate_rows": 10,
+                                                    "intermediate_size_bytes": 250,
+                                                    "name": "PERFECT_HASH_GROUP_BY",
+                                                    "timing": 0.000072819,
+                                                    "type": "PERFECT_HASH_GROUP_BY",
+                                                    "children": [
+                                                        {
+                                                            "extra_info": {
+                                                                "Projections": [
+                                                                    "grp",
+                                                                    "amount"
+                                                                ],
+                                                                "Estimated Cardinality": "484"
+                                                            },
+                                                            "intermediate_rows": 2500,
+                                                            "intermediate_size_bytes": 12500,
+                                                            "name": "PROJECTION",
+                                                            "timing": 0.000001986,
+                                                            "type": "PROJECTION",
+                                                            "children": [
+                                                                {
+                                                                    "extra_info": {
+                                                                        "Projections": [
+                                                                            "#0",
+                                                                            "CAST(#1 AS TINYINT)"
+                                                                        ],
+                                                                        "Estimated Cardinality": "484"
+                                                                    },
+                                                                    "intermediate_rows": 2500,
+                                                                    "intermediate_size_bytes": 12500,
+                                                                    "name": "PROJECTION",
+                                                                    "timing": 0.000047321,
+                                                                    "type": "PROJECTION",
+                                                                    "children": [
+                                                                        {
+                                                                            "extra_info": {
+                                                                                "Join Type": "INNER",
+                                                                                "Conditions": "t1_id = id",
+                                                                                "Estimated Cardinality": "484"
+                                                                            },
+                                                                            "intermediate_rows": 2500,
+                                                                            "intermediate_size_bytes": 20384,
+                                                                            "name": "HASH_JOIN",
+                                                                            "timing": 0.000444802,
+                                                                            "type": "HASH_JOIN",
+                                                                            "children": [
+                                                                                {
+                                                                                    "extra_info": {
+                                                                                        "Projections": [
+                                                                                            "CAST(#0 AS SMALLINT)",
+                                                                                            "#1"
+                                                                                        ],
+                                                                                        "Estimated Cardinality": "5000"
+                                                                                    },
+                                                                                    "intermediate_rows": 2500,
+                                                                                    "intermediate_size_bytes": 15000,
+                                                                                    "name": "PROJECTION",
+                                                                                    "timing": 0.000029065,
+                                                                                    "type": "PROJECTION",
+                                                                                    "children": [
+                                                                                        {
+                                                                                            "extra_info": {
+                                                                                                "Table": "memory.main.plan_t2",
+                                                                                                "Type": "Sequential Scan",
+                                                                                                "Projections": [
+                                                                                                    "t1_id",
+                                                                                                    "amount"
+                                                                                                ],
+                                                                                                "Dynamic Filters": "optional: t1_id IN PRF(id)",
+                                                                                                "Estimated Cardinality": "5000"
+                                                                                            },
+                                                                                            "intermediate_rows": 2500,
+                                                                                            "intermediate_size_bytes": 20000,
+                                                                                            "name": "SEQ_SCAN",
+                                                                                            "row_groups_scanned": 1,
+                                                                                            "rows_scanned": 5000,
+                                                                                            "timing": 0.000360048,
+                                                                                            "total_row_groups_to_scan": 1,
+                                                                                            "type": "TABLE_SCAN"
+                                                                                        }
+                                                                                    ]
+                                                                                },
+                                                                                {
+                                                                                    "extra_info": {
+                                                                                        "Projections": [
+                                                                                            "#0",
+                                                                                            "#1",
+                                                                                            "CAST(#1 AS INTEGER)"
+                                                                                        ],
+                                                                                        "Estimated Cardinality": "200"
+                                                                                    },
+                                                                                    "intermediate_rows": 500,
+                                                                                    "intermediate_size_bytes": 3500,
+                                                                                    "name": "PROJECTION",
+                                                                                    "timing": 0.000005991,
+                                                                                    "type": "PROJECTION",
+                                                                                    "children": [
+                                                                                        {
+                                                                                            "extra_info": {
+                                                                                                "Projections": [
+                                                                                                    "CAST(#0 AS SMALLINT)",
+                                                                                                    "CAST(#1 AS TINYINT)"
+                                                                                                ],
+                                                                                                "Estimated Cardinality": "200"
+                                                                                            },
+                                                                                            "intermediate_rows": 500,
+                                                                                            "intermediate_size_bytes": 1500,
+                                                                                            "name": "PROJECTION",
+                                                                                            "timing": 0.000018205,
+                                                                                            "type": "PROJECTION",
+                                                                                            "children": [
+                                                                                                {
+                                                                                                    "extra_info": {
+                                                                                                        "Table": "memory.main.plan_t1",
+                                                                                                        "Type": "Sequential Scan",
+                                                                                                        "Projections": [
+                                                                                                            "id",
+                                                                                                            "grp"
+                                                                                                        ],
+                                                                                                        "Filters": "(val < 500)",
+                                                                                                        "Estimated Cardinality": "200"
+                                                                                                    },
+                                                                                                    "intermediate_rows": 500,
+                                                                                                    "intermediate_size_bytes": 4000,
+                                                                                                    "name": "SEQ_SCAN",
+                                                                                                    "row_groups_scanned": 1,
+                                                                                                    "rows_scanned": 1000,
+                                                                                                    "timing": 0.00009997,
+                                                                                                    "total_row_groups_to_scan": 1,
+                                                                                                    "type": "TABLE_SCAN"
+                                                                                                }
+                                                                                            ]
+                                                                                        }
+                                                                                    ]
+                                                                                }
+                                                                            ]
+                                                                        }
+                                                                    ]
+                                                                }
+                                                            ]
+                                                        }
+                                                    ]
+                                                }
+                                            ]
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+    ],
+    "optimizer": {
+        "aggregate_function_rewriter": 0.000022553,
+        "aggregate_reuse": 0.000016371,
+        "build_side_probe_side": 0.000032653,
+        "column_lifetime": 0.000021731,
+        "common_aggregate": 0.000005822,
+        "common_subexpressions": 0.000004699,
+        "common_subplan": 0.000141521,
+        "cte_filter_pusher": 0.000001573,
+        "cte_inlining": 0.000001443,
+        "deliminator": 0.000001714,
+        "duplicate_groups": 0.000012504,
+        "empty_result_pullup": 0.000002054,
+        "expression_rewriter": 0.000123947,
+        "filter_pullup": 0.000006633,
+        "filter_pushdown": 0.000233987,
+        "grouping_sets": 0.00000497,
+        "in_clause": 0.000002956,
+        "join_elimination": 0.00002074,
+        "join_filter_pushdown": 0.000096765,
+        "join_order": 0.00027686,
+        "late_materialization": 0.00001048,
+        "limit_pushdown": 0.000001283,
+        "outer_join_simplification": 0.000012063,
+        "partial_aggregate_pushdown": 0.000011061,
+        "partitioned_execution": 0.000001453,
+        "projection_placement": 0.000089361,
+        "projection_pullup": 0.000009598,
+        "redundant_order_keys": 0.00000999,
+        "regex_range": 0.000001483,
+        "reorder_filter": 0.00000516,
+        "row_group_pruner": 0.000002505,
+        "row_number_rewriter": 0.000002164,
+        "sampling_pushdown": 0.000001082,
+        "scalar_fn_pushdown": 0.000001203,
+        "self_join_aggregate": 0.000003236,
+        "statistics_propagation": 0.000617972,
+        "top_n": 0.00001044,
+        "top_n_window_elimination": 0.000005952,
+        "total_time": 0.002113822,
+        "type_pushdown": 0.000002375,
+        "unnest_rewriter": 0.000002515,
+        "unused_columns": 0.00005235,
+        "window_self_join": 0.000001983
+    },
+    "physical_planner": {
+        "column_binding": 0.000022673,
+        "create_plan": 0.000092918,
+        "resolve_types": 0.000011712,
+        "total_time": 0.000143725
+    },
+    "planner": {
+        "binding_time": 0.00122334,
+        "total_time": 0.000958022
+    },
+    "query": {
+        "cpu_time": 0.001121055,
+        "sql": "EXPLAIN ANALYZE (FORMAT JSON) SELECT t1.grp, count(*) AS n, sum(t2.amount) AS total FROM plan_t1 t1 JOIN plan_t2 t2 ON t2.t1_id = t1.id WHERE t1.val < 500 GROUP BY t1.grp ORDER BY total DESC LIMIT 5",
+        "total_intermediate_rows": 14025,
+        "total_intermediate_size_bytes": 90054,
+        "total_row_groups_scanned": 2,
+        "total_row_groups_to_scan": 2,
+        "total_rows_scanned": 6000,
+        "total_time": 0.016350674
+    },
+    "system": {
+        "blocked_thread_time": 0.0,
+        "peak_buffer_memory": 5810080,
+        "peak_streaming_buffer_size": 0,
+        "peak_temp_dir_size": 0,
+        "total_bytes_spilled": 0,
+        "total_memory_allocated": 4194304
+    }
+}

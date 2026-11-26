@@ -1,0 +1,138 @@
+-- server: DuckDB v2.0.1
+-- statement: EXPLAIN (FORMAT JSON) SELECT t1.grp, count(*) AS n, sum(t2.amount) AS total FROM plan_t1 t1 JOIN plan_t2 t2 ON t2.t1_id = t1.id WHERE t1.val < 500 GROUP BY t1.grp ORDER BY total DESC LIMIT 5
+[
+    {
+        "name": "TOP_N",
+        "children": [
+            {
+                "name": "PROJECTION",
+                "children": [
+                    {
+                        "name": "PERFECT_HASH_GROUP_BY",
+                        "children": [
+                            {
+                                "name": "PROJECTION",
+                                "children": [
+                                    {
+                                        "name": "PROJECTION",
+                                        "children": [
+                                            {
+                                                "name": "HASH_JOIN",
+                                                "children": [
+                                                    {
+                                                        "name": "PROJECTION",
+                                                        "children": [
+                                                            {
+                                                                "name": "SEQ_SCAN",
+                                                                "children": [],
+                                                                "extra_info": {
+                                                                    "Table": "memory.main.plan_t2",
+                                                                    "Type": "Sequential Scan",
+                                                                    "Projections": [
+                                                                        "t1_id",
+                                                                        "amount"
+                                                                    ],
+                                                                    "Estimated Cardinality": "5000"
+                                                                }
+                                                            }
+                                                        ],
+                                                        "extra_info": {
+                                                            "Projections": [
+                                                                "CAST(#0 AS SMALLINT)",
+                                                                "#1"
+                                                            ],
+                                                            "Estimated Cardinality": "5000"
+                                                        }
+                                                    },
+                                                    {
+                                                        "name": "PROJECTION",
+                                                        "children": [
+                                                            {
+                                                                "name": "PROJECTION",
+                                                                "children": [
+                                                                    {
+                                                                        "name": "SEQ_SCAN",
+                                                                        "children": [],
+                                                                        "extra_info": {
+                                                                            "Table": "memory.main.plan_t1",
+                                                                            "Type": "Sequential Scan",
+                                                                            "Projections": [
+                                                                                "id",
+                                                                                "grp"
+                                                                            ],
+                                                                            "Filters": "(val < 500)",
+                                                                            "Estimated Cardinality": "200"
+                                                                        }
+                                                                    }
+                                                                ],
+                                                                "extra_info": {
+                                                                    "Projections": [
+                                                                        "CAST(#0 AS SMALLINT)",
+                                                                        "CAST(#1 AS TINYINT)"
+                                                                    ],
+                                                                    "Estimated Cardinality": "200"
+                                                                }
+                                                            }
+                                                        ],
+                                                        "extra_info": {
+                                                            "Projections": [
+                                                                "#0",
+                                                                "#1",
+                                                                "CAST(#1 AS INTEGER)"
+                                                            ],
+                                                            "Estimated Cardinality": "200"
+                                                        }
+                                                    }
+                                                ],
+                                                "extra_info": {
+                                                    "Join Type": "INNER",
+                                                    "Conditions": "t1_id = id",
+                                                    "Estimated Cardinality": "484"
+                                                }
+                                            }
+                                        ],
+                                        "extra_info": {
+                                            "Projections": [
+                                                "#0",
+                                                "CAST(#1 AS TINYINT)"
+                                            ],
+                                            "Estimated Cardinality": "484"
+                                        }
+                                    }
+                                ],
+                                "extra_info": {
+                                    "Projections": [
+                                        "grp",
+                                        "amount"
+                                    ],
+                                    "Estimated Cardinality": "484"
+                                }
+                            }
+                        ],
+                        "extra_info": {
+                            "Groups": "#0",
+                            "Aggregates": [
+                                "count_star()",
+                                "sum(#1)"
+                            ],
+                            "Estimated Cardinality": "11"
+                        }
+                    }
+                ],
+                "extra_info": {
+                    "Projections": [
+                        "CAST(#0 AS INTEGER)",
+                        "#1",
+                        "#2"
+                    ],
+                    "Estimated Cardinality": "11"
+                }
+            }
+        ],
+        "extra_info": {
+            "Top": "5",
+            "Order By": "total DESC",
+            "Estimated Cardinality": "5"
+        }
+    }
+]
