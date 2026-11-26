@@ -8,9 +8,11 @@
 //! `Button::dropdown_caret`, `Select`); the editor, its Save button (saved
 //! script library, Cmd-S) and the run pipeline are the existing ones.
 use super::*;
-use gpui_component::select::{Select, SelectEvent, SelectState};
+use gpui_component::select::{Select, SelectEvent, SelectState, SearchableVec};
 
-type TextSelect = SelectState<Vec<String>>;
+// A searchable Select needs `SearchableVec`: the plain `Vec` delegate shows the
+// search box but never filters.
+type TextSelect = SelectState<SearchableVec<String>>;
 
 struct ToolbarSelects {
     connection: gpui::Entity<TextSelect>,
@@ -105,7 +107,7 @@ impl AppRoot {
     fn mongo_connections_key(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        for saved in &self.saved_connections {
+        for saved in self.saved_connections.iter() {
             if saved.kind == ConnectionKind::Mongodb && !saved.disabled {
                 saved.id.hash(&mut hasher);
                 saved.name.hash(&mut hasher);
@@ -256,15 +258,15 @@ impl AppRoot {
         }
         self.refresh_connection_choices();
         if let std::collections::hash_map::Entry::Vacant(slot) = self.script_toolbar.tabs.entry(tab_id) {
-            let conn_select = cx.new(|cx| TextSelect::new(Vec::new(), None, window, cx).searchable(true));
-            let db_select = cx.new(|cx| TextSelect::new(Vec::new(), None, window, cx).searchable(true));
+            let conn_select = cx.new(|cx| TextSelect::new(SearchableVec::new(Vec::new()), None, window, cx).searchable(true));
+            let db_select = cx.new(|cx| TextSelect::new(SearchableVec::new(Vec::new()), None, window, cx).searchable(true));
             let mut subscriptions = Vec::new();
             subscriptions.push(cx.subscribe_in(
                 &conn_select,
                 window,
                 move |this: &mut Self,
                       _,
-                      event: &SelectEvent<Vec<String>>,
+                      event: &SelectEvent<SearchableVec<String>>,
                       _: &mut Window,
                       cx: &mut Context<Self>| {
                     if let SelectEvent::Confirm(Some(label)) = event {
@@ -277,7 +279,7 @@ impl AppRoot {
                 window,
                 move |this: &mut Self,
                       _,
-                      event: &SelectEvent<Vec<String>>,
+                      event: &SelectEvent<SearchableVec<String>>,
                       _: &mut Window,
                       cx: &mut Context<Self>| {
                     if let SelectEvent::Confirm(Some(name)) = event {
@@ -316,13 +318,13 @@ impl AppRoot {
             let items = self.script_toolbar.choices.labels.clone();
             selects
                 .connection
-                .update(cx, |state, cx| state.set_items(items, window, cx));
+                .update(cx, |state, cx| state.set_items(items.into(), window, cx));
             selects.connections_key = choices_key;
         }
         if let Some(databases) = databases {
             selects
                 .database
-                .update(cx, |state, cx| state.set_items(databases, window, cx));
+                .update(cx, |state, cx| state.set_items(databases.into(), window, cx));
             selects.databases_key = Some(databases_key);
         }
         // Selection follows the tab.

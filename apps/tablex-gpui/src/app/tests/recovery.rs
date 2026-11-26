@@ -79,7 +79,7 @@ impl SqlRig<'_> {
 
     fn set_keep_alive(&mut self, seconds: u32) {
         self.app.update(self.visual, |this, cx| {
-            let mut next = (*this.settings).clone();
+            let mut next = (**this.settings).clone();
             next.query.keep_alive_secs = seconds;
             this.apply_settings(next, None, cx);
         });

@@ -25,6 +25,9 @@ pub(super) struct RecordedHistory {
     pub(super) collection: String,
     pub(super) sql: String,
     pub(super) rows: i64,
+    pub(super) error: Option<String>,
+    pub(super) duration_ms: Option<i64>,
+    pub(super) kind: String,
 }
 
 /// Restores Swift workspace SQL tabs whose connections this shell can drive.
@@ -173,46 +176,47 @@ impl AppRoot {
             .unwrap_or_default(),
             _ => Vec::new(),
         };
-        self.view_mut(tab_id).history.entries = entries;
+        let history = &mut self.view_mut(tab_id).history;
+        history.entries = entries;
+        history.selected = None;
+        history.focus.get_or_insert_with(|| cx.focus_handle());
         cx.notify();
     }
 
-    pub(super) fn run_history_entry(
-        &mut self,
-        tab_id: u64,
-        entry_id: i64,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(entry) = self
-            .view(tab_id)
-            .history
-            .entries
-            .iter()
-            .find(|entry| entry.id == entry_id)
-            .cloned()
-        else {
-            return;
-        };
-        if let Some(tab) = self.workspace.tab_mut(tab_id) {
-            tab.sql = entry.filter.clone();
+    /// The keys of the strip: the arrows move the selection, Enter runs the selected entry.
+    fn history_strip_key(&mut self, tab_id: u64, event: &gpui::KeyDownEvent, cx: &mut Context<Self>) {
+        let history = &mut self.view_mut(tab_id).history;
+        let at = history.selected.and_then(|id| history.entries.iter().position(|entry| entry.id == id));
+        match event.keystroke.key.as_str() {
+            "down" => {
+                let next = at.map_or(0, |at| (at + 1).min(history.entries.len().saturating_sub(1)));
+                history.selected = history.entries.get(next).map(|entry| entry.id);
+                cx.notify();
+            }
+            "up" => {
+                let next = at.map_or(0, |at| at.saturating_sub(1));
+                history.selected = history.entries.get(next).map(|entry| entry.id);
+                cx.notify();
+            }
+            "enter" => {
+                if let Some(id) = history.selected {
+                    self.history_strip_run(tab_id, id, cx);
+                }
+            }
+            _ => {}
         }
-        if let Some(editor) = self.query_editors.by_tab.get(&tab_id).cloned() {
-            editor.update(cx, |state, cx| {
-                state.set_value(entry.filter.clone(), window, cx);
-            });
-        }
-        self.view_mut(tab_id).history.visible = false;
-        self.run_tab_query_explicit(tab_id, cx);
     }
 
+    /// The strip under a table's results: the last runs of the table. A click puts an entry's
+    /// statement in the editor; a double click, or Enter on the selected entry, runs it.
     pub(super) fn render_history_panel(&self, tab_id: u64, cx: &mut Context<Self>) -> AnyElement {
         let history = &self.view(tab_id).history;
         if !history.visible {
             return div().into_any_element();
         }
-        let entries = history.entries.clone();
-        let list = entries.into_iter().fold(
+        let selected = history.selected;
+        let connection = self.workspace.tab(tab_id).map(|tab| tab.connection_id.clone()).unwrap_or_default();
+        let list = history.entries.iter().fold(
             div()
                 .id("history-list")
                 .flex()
@@ -221,31 +225,42 @@ impl AppRoot {
                 .overflow_y_scroll(),
             |container, entry| {
                 let entry_id = entry.id;
+                let focus = history.focus.clone();
                 container.child(
                     div()
                         .id(("history-entry", entry_id as u64))
+                        .debug_selector(move || format!("history-entry-{entry_id}"))
                         .p(px(8.0))
-                        .bg(theme::surface())
+                        .bg(if selected == Some(entry_id) { theme::selected() } else { theme::surface() })
                         .hover(|style| style.bg(theme::hover()))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.run_history_entry(tab_id, entry_id, window, cx);
+                        .on_click(cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                            if let Some(focus) = &focus {
+                                window.focus(focus, cx);
+                            }
+                            if event.click_count() >= 2 {
+                                this.history_strip_run(tab_id, entry_id, cx);
+                            } else {
+                                this.history_strip_insert(tab_id, entry_id, window, cx);
+                            }
                         }))
                         .child(
                             div()
                                 .text_size(px(11.0))
                                 .text_color(theme::text())
-                                .child(entry.filter),
+                                .child(model_first_line(&entry.filter)),
                         )
                         .child(
                             div()
                                 .text_size(px(10.0))
                                 .text_color(theme::text_muted())
-                                .child(format!("{} rows", entry.result_count)),
+                                .child(t!("history.rows_n", count = entry.result_count).into_owned()),
                         ),
                 )
             },
         );
-        div()
+        let mut panel = div()
+            .id(("history-strip", tab_id))
+            .debug_selector(|| "history-strip".into())
             .h(px(180.0))
             .px(px(12.0))
             .py(px(8.0))
@@ -255,17 +270,35 @@ impl AppRoot {
             .border_t_1()
             .border_color(theme::border())
             .bg(theme::chrome())
+            .key_context("HistoryStrip")
+            .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| this.history_strip_key(tab_id, event, cx)));
+        if let Some(focus) = &history.focus {
+            panel = panel.track_focus(focus);
+        }
+        panel
             .child(
                 div()
-                    .text_size(px(11.0))
-                    .text_color(theme::text_muted())
-                    .child("Query History"),
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(div().text_size(px(11.0)).text_color(theme::text_muted()).child(t!("history.title").into_owned()))
+                    .child(
+                        Button::new(("history-show-all", tab_id))
+                            .debug_selector(|| "history-show-all".into())
+                            .label(t!("history.show_all").into_owned())
+                            .compact()
+                            .ghost()
+                            .small()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_query_history(Some(connection.clone()).filter(|id| !id.is_empty()), window, cx);
+                            })),
+                    ),
             )
             .child(if history.entries.is_empty() {
                 div()
                     .text_size(px(11.0))
                     .text_color(theme::text_muted())
-                    .child("No saved queries for this table")
+                    .child(t!("history.strip_empty").into_owned())
                     .into_any_element()
             } else {
                 list.into_any_element()
@@ -725,6 +758,7 @@ impl AppRoot {
         // A Results tab gives the results back; a query tab takes its Results tab or window along.
         self.results_tab_closing(tab_id, cx);
         self.error_log_tab_closing(tab_id, cx);
+        self.history_tab_closing(tab_id);
         self.auto_refresh.tasks.remove(&tab_id);
         self.query_tasks.started_at.remove(&tab_id);
         if self
@@ -881,43 +915,49 @@ impl AppRoot {
         }
     }
 
-    /// Records a successful SQL run in the shared query history. The SQL text
-    /// lands in the legacy `filter` column, matching how Swift history entries
-    /// are keyed per connection context. The write happens off the UI thread;
-    /// tests keep the entries in memory instead of touching the user's history
-    /// database.
-    pub(super) fn record_query_history(&mut self, run: &SqlRun, rows: i64, cx: &mut Context<Self>) {
-        #[cfg(test)]
-        {
-            let _ = &cx;
-            self.recorded_history.push(RecordedHistory {
+    /// How long the run `run` of `tab_id` has been going, in ms (read before the result is applied,
+    /// which ends the timing).
+    pub(super) fn query_elapsed_ms(&self, tab_id: u64, run: crate::query::QueryRunId) -> Option<i64> {
+        self.query_tasks
+            .started_at
+            .get(&tab_id)
+            .filter(|(started, _)| *started == run)
+            .map(|(_, at)| at.elapsed().as_millis().min(i64::MAX as u128) as i64)
+    }
+
+    /// Records a SQL run that worked in the shared query history: the SQL text lands in the legacy
+    /// `filter` column, matching how Swift history entries are keyed per connection context. The
+    /// write happens off the UI thread; tests keep the entries in memory instead of touching the
+    /// user's history database.
+    pub(super) fn record_query_history(&mut self, run: &SqlRun, rows: i64, duration_ms: Option<i64>, cx: &mut Context<Self>) {
+        self.record_sql_run(run, rows, duration_ms, None, cx);
+    }
+
+    /// Records a SQL run that failed, with its error (masked of secrets, clipped).
+    pub(super) fn record_query_failure(&mut self, run: &SqlRun, error: &str, duration_ms: Option<i64>, cx: &mut Context<Self>) {
+        self.record_sql_run(run, 0, duration_ms, Some(super::history::clip_error(error)), cx);
+    }
+
+    fn record_sql_run(&mut self, run: &SqlRun, rows: i64, duration_ms: Option<i64>, error: Option<String>, cx: &mut Context<Self>) {
+        let kind = if matches!(run.kind, RunKind::RedisCommand) {
+            engine_storage::history::KIND_REDIS_COMMAND
+        } else {
+            engine_storage::history::classify_sql(&run.sql)
+        };
+        self.record_history(
+            super::history::Recorded {
                 connection: run.connection.clone(),
                 database: run.database.clone(),
                 collection: run.collection.clone(),
-                sql: run.sql.clone(),
+                statement: run.sql.clone(),
+                limit: run.limit,
                 rows,
-            });
-        }
-        #[cfg(not(test))]
-        {
-            let run = run.clone();
-            cx.background_executor()
-                .spawn(async move {
-                    let _ = engine_storage::history::save_entry(
-                        &run.connection,
-                        &run.database,
-                        &run.collection,
-                        &run.sql,
-                        "",
-                        "",
-                        0,
-                        run.limit,
-                        0,
-                        rows,
-                    );
-                })
-                .detach();
-        }
+                duration_ms,
+                error,
+                kind,
+            },
+            cx,
+        );
     }
 
     pub(super) fn cancel_tab_query(&mut self, tab_id: u64, cx: &mut Context<Self>) {
@@ -1334,6 +1374,8 @@ impl AppRoot {
     /// the connection type: refused on a read-only connection, confirmed first on a production
     /// one.
     pub(super) fn run_typed_sql(&mut self, tab_id: u64, sql: String, typed_in_editor: bool, cx: &mut Context<Self>) {
+        // Another run: nothing the last confirmation read is handed on.
+        self.drop_preview_handoff();
         if typed_in_editor && self.gate_editor_statement(tab_id, &sql, cx) {
             return;
         }
@@ -1454,6 +1496,7 @@ impl AppRoot {
         cx: &mut Context<Self>,
     ) {
         let Some(tab) = self.workspace.tab(tab_id) else {
+            self.drop_preview_handoff();
             return;
         };
         let tab_connection = tab.connection_id.clone();
@@ -1470,6 +1513,7 @@ impl AppRoot {
         if self.scenario_ui.service.is_some() && tab.query_mode.is_redis() {
             let tab = tab.clone();
             self.run_scenario_redis(tab, false, cx);
+            self.drop_preview_handoff();
             return;
         }
         // A dropped session keeps its dead handle until released; do it before
@@ -1483,12 +1527,15 @@ impl AppRoot {
         }
         let (run, offset) = {
             let Some(runtime) = self.workspace.runtime_mut(tab_id) else {
+                self.driver_runtime.preview_handoff = None;
                 return;
             };
             if runtime.mongo.has_pending_mutations() {
+                self.driver_runtime.preview_handoff = None;
                 return;
             }
             let Some(run) = runtime.query.begin() else {
+                self.driver_runtime.preview_handoff = None;
                 return;
             };
             // A different statement starts from its first page: a driver
@@ -1529,6 +1576,7 @@ impl AppRoot {
         };
         if let Some(reason) = reason {
             self.fail_pending_sql(tab_id, run, reason, cx);
+            self.drop_preview_handoff();
             return;
         }
         // A read-only connection also has the driver refuse writes (its server-side read-only run),
@@ -1778,4 +1826,9 @@ impl AppRoot {
 /// "1 pending structure change", "3 pending structure changes".
 fn structure_changes(count: usize) -> String {
     format!("{count} pending structure change{}", if count == 1 { "" } else { "s" })
+}
+
+/// The first line of a statement, for the strip.
+fn model_first_line(statement: &str) -> String {
+    statement.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or_default().to_owned()
 }

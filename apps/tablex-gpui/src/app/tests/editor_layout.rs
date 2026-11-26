@@ -360,9 +360,9 @@ fn the_results_menu_puts_the_results_right_of_the_editor_and_back_below(cx: &mut
 fn the_setting_puts_the_results_of_every_tab_right_of_the_editor(cx: &mut TestAppContext) {
     let (app, visual) = layout_app(cx);
     app.update(visual, |this, cx| {
-        let mut settings = (*this.settings).clone();
+        let mut settings = (**this.settings).clone();
         settings.editor.results_position = crate::settings::ResultsPosition::Right;
-        this.settings = std::sync::Arc::new(settings);
+        *this.settings = std::sync::Arc::new(settings);
         cx.notify();
     });
     click_debug_button(visual, "global-new-query");

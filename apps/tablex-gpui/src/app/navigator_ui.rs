@@ -18,6 +18,54 @@ pub(super) static LIST_PASSES: std::sync::atomic::AtomicU64 = std::sync::atomic:
 #[cfg(test)]
 pub(super) static ROWS_BUILT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+#[cfg(test)]
+thread_local! {
+    /// How many times the sidebar view was rendered on this thread (tests only).
+    static SIDEBAR_RENDERS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Renders of the sidebar view so far on this thread (tests and the sidebar benchmark).
+#[cfg(test)]
+pub(super) fn sidebar_renders() -> u64 {
+    SIDEBAR_RENDERS.with(std::cell::Cell::get)
+}
+
+/// The left pane as a cached view of its own, embedded by the shell like a tab's results (`TabResults`):
+/// GPUI replays its previous frame unless the entity was notified, so a window draw that is about the editor,
+/// the grid, a hover over them or an animation elsewhere does not rebuild the tree rows.
+///
+/// It owns nothing: `render` calls [`AppRoot::render_navigator`], so every handler still runs against
+/// `AppRoot`. What invalidates it:
+///
+/// * A notification of `AppRoot` ([`AppRoot::on_root_notified`], its own observer) or of the chrome
+///   ([`AppRoot::notify_chrome`]) when what the pane draws moved (`sync_sidebar`: not for the fps counter or a
+///   change that is not about the pane).
+/// * The pane's own entities (a row's hover, the list's scroll, the search field) as GPUI notifies them.
+/// * A window refresh (theme, language), which GPUI applies to every cached view.
+/// * A change of the pane's bounds (the sidebar's width, the window's height).
+/// * [`AppRoot::sync_sidebar`], which every tab notification runs: the state the pane draws is held in `Watched`
+///   fields of `AppRoot` (see `sidebar_watch`, which lists all of it) and any `&mut` borrow of one notifies the
+///   pane there. So a change to what the tree shows needs no notification of its own to reach the pane, whichever
+///   view the code notifies.
+/// * The root's render ([`AppRoot::sidebar_behind`]): a change nothing notified about, or one made during the
+///   draw itself (GPUI drops a notification sent from inside a draw), is found there and the pane is embedded
+///   uncached for that frame, so it renders in that very draw.
+pub(in crate::app) struct SidebarView {
+    pub(in crate::app) root: gpui::WeakEntity<AppRoot>,
+}
+
+impl Render for SidebarView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(test)]
+        SIDEBAR_RENDERS.with(|renders| renders.set(renders.get() + 1));
+        // The root is not being updated while its children render (its own `render` has returned), so this is
+        // not a re-entrant update.
+        self.root
+            .update(cx, |root, root_cx| root.render_navigator(window, root_cx))
+            .unwrap_or_else(|_| div().into_any_element())
+    }
+}
+
 /// Lucide glyphs vendored under `assets/icons` for the sidebar.
 /// Implemented against the pinned `gpui-component` icon contract
 /// (`IconNamed -> Icon::new -> app AssetSource`) with no new dependency:
@@ -104,11 +152,12 @@ fn sidebar_bounds_probe(
     element: impl IntoElement,
     target: &'static str,
     key: String,
-    label: String,
-    node: String,
+    label: impl FnOnce() -> String,
+    node: impl FnOnce() -> String,
     root: gpui::WeakEntity<AppRoot>,
 ) -> Stateful<Div> {
     let id = key.clone();
+    let (label, node) = (label(), node());
     div()
         .on_children_prepainted(move |children, window, app| {
             let [bounds] = &children[..] else {
@@ -144,8 +193,8 @@ fn sidebar_bounds_probe(
     element: impl IntoElement,
     _target: &'static str,
     key: String,
-    _label: String,
-    _node: String,
+    _label: impl FnOnce() -> String,
+    _node: impl FnOnce() -> String,
     _root: gpui::WeakEntity<AppRoot>,
 ) -> Stateful<Div> {
     div().child(element).id(key)
@@ -232,10 +281,12 @@ pub(super) fn connection_brand_asset(
         crate::connections::ConnectionKind::Sqlite => Some("icons/sqlite.svg"),
         crate::connections::ConnectionKind::Mongodb => Some("icons/mongodb.svg"),
         crate::connections::ConnectionKind::Clickhouse => Some("icons/clickhouse.svg"),
+        crate::connections::ConnectionKind::Duckdb => Some("icons/duckdb.svg"),
         crate::connections::ConnectionKind::Redis => Some("icons/redis.svg"),
         // The dolphin alone: the full MySQL logo's wordmark is a smudge at icon size.
         crate::connections::ConnectionKind::Mysql => Some("icons/mysql-mark.svg"),
         crate::connections::ConnectionKind::Mariadb => Some("icons/mariadb.svg"),
+        crate::connections::ConnectionKind::Mssql => Some("icons/sql-server.svg"),
     }
 }
 
@@ -536,6 +587,16 @@ impl AppRoot {
             ConnectionStatus::Connecting => theme::warning(),
             ConnectionStatus::Connected => theme::success(),
             ConnectionStatus::Failed(_) => theme::danger(),
+        }
+    }
+
+    /// The drag is over `row` (`inside`: the pointer is within the row's bounds). GPUI sends a drag's move to every row
+    /// that listens, wherever the pointer is, so only the row under it becomes the drop target, and the pane is
+    /// notified when that changes, not on every mouse move.
+    pub(super) fn drag_over_row(&mut self, row: &NavigatorNodeId, inside: bool, cx: &mut Context<Self>) {
+        if inside && self.navigator_ui.drop_target.as_ref() != Some(row) {
+            self.navigator_ui.drop_target = Some(row.clone());
+            self.notify_chrome(cx);
         }
     }
 
@@ -1109,6 +1170,7 @@ impl AppRoot {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let root = cx.entity().downgrade();
+        self.mark_sidebar_drawn();
         let search_input = self.sidebar_search_input(window, cx);
         let search = self.navigator.search_options().clone();
         let sort = self.navigator.preferences().sort;
@@ -1147,8 +1209,8 @@ impl AppRoot {
                 button,
                 "sidebar-button",
                 key.into(),
-                String::new(),
-                String::new(),
+                String::new,
+                String::new,
                 probe_toolbar_root.clone(),
             )
         };
@@ -1326,8 +1388,8 @@ impl AppRoot {
                     button,
                     "sidebar-multi",
                     key.into(),
-                    format!("{count} selected"),
-                    String::new(),
+                    || format!("{count} selected"),
+                    String::new,
                     probe_root.clone(),
                 )
             };
@@ -1808,8 +1870,8 @@ impl AppRoot {
                         .into_any_element(),
                     "sidebar-button",
                     "settings".into(),
-                    String::new(),
-                    String::new(),
+                    String::new,
+                    String::new,
                     root.clone(),
                 )
             })
@@ -2043,20 +2105,20 @@ impl AppRoot {
                         // A table, view or materialized view: the estimate of its rows and size at the right edge (when the
                         // setting is on), and the estimates and comment in its tooltip. Read lazily, one statement per namespace.
                         let stats_row = matches!(row.id, NavigatorNodeId::Object { .. }) && this.table_stats_supported(&row.id);
-                        let mut stats_tip = None;
                         if stats_row {
-                            let show = this.settings.navigation.show_table_stats;
-                            // Read after this frame (the read changes the app; drawing only looks at it).
-                            if show && this.table_stats_missing(&row.id) {
-                                let (root, id) = (cx.entity(), row.id.clone());
-                                cx.defer(move |app| {
-                                    root.update(app, |this, cx| this.ensure_table_stats(&id, cx));
-                                });
-                            }
-                            if let Some(stats) = this.table_stats_of(&row.id) {
+                            // Only with the setting on is anything read here; the tooltip reads what the hover loaded
+                            // when it opens (below), so a row costs nothing more with the setting off.
+                            if this.settings.navigation.show_table_stats {
+                                // Read after this frame (the read changes the app; drawing only looks at it).
+                                if this.table_stats_missing(&row.id) {
+                                    let (root, id) = (cx.entity(), row.id.clone());
+                                    cx.defer(move |app| {
+                                        root.update(app, |this, cx| this.ensure_table_stats(&id, cx));
+                                    });
+                                }
                                 // The name has priority (as for a table item's detail): the estimate gives up its width
                                 // first and draws the rows alone, or nothing, in what is left.
-                                if let Some(label) = StatsLabel::new(&stats).filter(|_| show) {
+                                if let Some(label) = this.table_stats_of(&row.id).and_then(|stats| StatsLabel::new(&stats)) {
                                     let mut stats_box = div()
                                         .debug_selector(move || format!("sidebar-stats-{index}"))
                                         .flex()
@@ -2065,9 +2127,6 @@ impl AppRoot {
                                         .child(label);
                                     stats_box.style().flex_shrink = Some(DETAIL_SHRINK);
                                     element = element.child(stats_box);
-                                }
-                                if !stats.is_empty() {
-                                    stats_tip = Some(stats);
                                 }
                             }
                         }
@@ -2102,8 +2161,15 @@ impl AppRoot {
                             // It opens with the whole name (the row truncates it), then what the catalog says.
                             if let NavigatorNodeId::Object { schema, object, .. } = &row.id {
                                 let name = gpui::SharedString::from(if schema.is_empty() { object.clone() } else { format!("{schema}.{object}") });
+                                let (stats_root, stats_id) = (menu_root.clone(), row.id.clone());
                                 element = element.tooltip(move |window, cx| {
-                                    let lines = stats_tip.as_ref().map(|stats| stats.tooltip_lines()).unwrap_or_default();
+                                    // What the catalog says is read as the tooltip opens: the hover that opens it loaded it.
+                                    let lines = stats_root
+                                        .read_with(&*cx, |this, _| this.table_stats_of(&stats_id))
+                                        .ok()
+                                        .flatten()
+                                        .map(|stats| stats.tooltip_lines())
+                                        .unwrap_or_default();
                                     let name = name.clone();
                                     Tooltip::element(move |_, _| {
                                         div()
@@ -2237,8 +2303,8 @@ impl AppRoot {
                             base,
                             "sidebar-row",
                             format!("row-{index}"),
-                            row.label.clone(),
-                            format!("{:?}", row.id),
+                            || row.label.clone(),
+                            || format!("{:?}", row.id),
                             menu_root.clone(),
                         );
                         let connected = match &row_id {
@@ -2282,9 +2348,8 @@ impl AppRoot {
                             let hover_target = drop_target.clone();
                             base = base
                                 .on_drag_move(cx.listener(
-                                    move |this, _: &gpui::DragMoveEvent<SidebarDrag>, _, cx| {
-                                        this.navigator_ui.drop_target = Some(hover_target.clone());
-                                        this.notify_chrome(cx);
+                                    move |this, event: &gpui::DragMoveEvent<SidebarDrag>, _, cx| {
+                                        this.drag_over_row(&hover_target, event.bounds.contains(&event.event.position), cx);
                                     },
                                 ))
                                 .on_drop(move |drag: &SidebarDrag, _, app| {
@@ -3237,6 +3302,7 @@ impl AppRoot {
                     )
                     .map(|(text, color)| {
                         div()
+                            .debug_selector(|| format!("sidebar-line-{text}"))
                             .px(px(10.0))
                             .py(px(4.0))
                             .text_size(px(11.0))
@@ -3398,6 +3464,15 @@ impl AppRoot {
                 }
             }
             return;
+        }
+        if matches!(request, LoadRequest::Columns { .. }) {
+            if self.serve_columns_from_schema(&request, generation, cx) {
+                return;
+            }
+            #[cfg(test)]
+            {
+                self.schema_columns.per_table_calls += 1;
+            }
         }
         let Some(session) = self.driver_runtime.sessions.get(&connection).cloned() else {
             self.apply_navigator_load(

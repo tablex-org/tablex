@@ -78,7 +78,7 @@ pub fn connection_info(saved: &SavedConnection) -> Vec<InfoRow> {
         ..saved.clone()
     });
     let (mut user, mut database) = (form.username.clone(), form.database.clone());
-    if saved.kind == ConnectionKind::Sqlite {
+    if saved.kind.is_file_database() {
         if !form.file_path.is_empty() {
             rows.push(InfoRow::new("File", form.file_path));
         }

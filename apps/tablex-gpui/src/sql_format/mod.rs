@@ -161,6 +161,8 @@ pub fn wire_dialect(dialect: ExplainDialect) -> Dialect {
         ExplainDialect::MariaDb => Dialect::Mariadb,
         ExplainDialect::Sqlite => Dialect::Sqlite,
         ExplainDialect::ClickHouse => Dialect::Clickhouse,
+        // The formatter has no DuckDB grammar; DuckDB's SQL is PostgreSQL's.
+        ExplainDialect::DuckDb => Dialect::Postgres,
     }
 }
 

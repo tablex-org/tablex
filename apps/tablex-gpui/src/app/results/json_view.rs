@@ -138,6 +138,31 @@ impl AppRoot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The panel's viewers are made in the window that shows the panel: not this one when the
+        // panel has a window of its own.
+        let detail = !self.cell_detail_in_window(tab_id);
+        self.sync_viewers(tab_id, detail, true, window, cx);
+    }
+
+    /// The viewers of the cell detail panel in its own window (the window renders them).
+    pub(in crate::app) fn sync_cell_detail_viewers(
+        &mut self,
+        tab_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.sync_viewers(tab_id, true, false, window, cx);
+    }
+
+    /// The cell detail panel's viewers (`detail`) and the tab's own ones (`results`).
+    fn sync_viewers(
+        &mut self,
+        tab_id: u64,
+        detail: bool,
+        results: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(tab) = self.workspace.tab(tab_id) else {
             return;
         };
@@ -149,11 +174,12 @@ impl AppRoot {
         let view = self.tab_views.entry(tab_id).or_default();
         // A document editor belongs to the document it was opened on; a new
         // page or selection (a re-run, a commit's refresh) leaves it behind.
-        if view
-            .mongo
-            .document_edit
-            .as_ref()
-            .is_some_and(|edit| runtime.mongo.inspector.selected != Some(edit.key))
+        if results
+            && view
+                .mongo
+                .document_edit
+                .as_ref()
+                .is_some_and(|edit| runtime.mongo.inspector.selected != Some(edit.key))
         {
             view.mongo.document_edit = None;
         }
@@ -161,8 +187,10 @@ impl AppRoot {
         let mut rebuilt = 0u64;
 
         // Row tab JSON view (whole row).
+        let show_detail = detail;
         let detail = &runtime.cell_detail;
-        if detail.open
+        if show_detail
+            && detail.open
             && detail.tab == CellDetailTab::Row
             && detail.row_view == crate::cell_detail::RowView::Json
         {
@@ -187,7 +215,7 @@ impl AppRoot {
         // Details tab value box (JSON-like values only, while not editing).
         let editing = view.detail_ui.edit.is_some();
         let mode = view.detail_ui.value_mode;
-        if detail.open && detail.tab == CellDetailTab::Details && !editing {
+        if show_detail && detail.open && detail.tab == CellDetailTab::Details && !editing {
             if let Some((cell, canonical)) = detail
                 .detail
                 .as_ref()
@@ -217,7 +245,8 @@ impl AppRoot {
         }
 
         // Mongo document view (JSON mode), staged updates applied.
-        if is_mongo
+        if results
+            && is_mongo
             && runtime.mongo.view == crate::mongo_result::MongoResultView::Document
             && runtime.mongo.document_view == crate::mongo_result::MongoDocumentView::Json
         {

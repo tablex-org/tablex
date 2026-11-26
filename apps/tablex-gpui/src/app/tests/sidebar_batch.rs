@@ -57,9 +57,11 @@ fn moving_expanded_connections_to_ungrouped_preserves_cached_tree_and_load_state
         let database = NavigatorNodeId::Database { connection: crate::ui_fixture::MONGO_ID.into(), database: "fixture_db".into() };
         let schema = NavigatorNodeId::Schema { connection: crate::ui_fixture::MONGO_ID.into(), database: "fixture_db".into(), schema: "public".into() };
         let outcome = this.navigator.toggle_expansion(&connection);
-        this.navigator.apply_load(&outcome.request.unwrap(), this.navigator.generation(), Ok(vec![crate::navigator::database_child(crate::ui_fixture::MONGO_ID, "fixture_db")]));
+        let generation = this.navigator.generation();
+        this.navigator.apply_load(&outcome.request.unwrap(), generation, Ok(vec![crate::navigator::database_child(crate::ui_fixture::MONGO_ID, "fixture_db")]));
         let outcome = this.navigator.toggle_expansion(&database);
-        this.navigator.apply_load(&outcome.request.unwrap(), this.navigator.generation(), Ok(vec![crate::navigator::schema_child(crate::ui_fixture::MONGO_ID, "fixture_db", "public")]));
+        let generation = this.navigator.generation();
+        this.navigator.apply_load(&outcome.request.unwrap(), generation, Ok(vec![crate::navigator::schema_child(crate::ui_fixture::MONGO_ID, "fixture_db", "public")]));
         this.navigator.toggle_expansion(&schema);
 
         let before: Vec<_> = this.navigator.visible_rows().into_iter().filter(|row| matches!(&row.id,

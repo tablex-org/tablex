@@ -95,9 +95,17 @@ pub struct ConnectionSessions {
     /// Live sessions the computer slept under: nothing says they died, nothing vouches that they
     /// did not. The next use reconnects them first (see `app::recovery`).
     stale: HashSet<String>,
+    /// Counts the changes of what a connection shows (its status, and being dropped): a view that draws
+    /// them knows it is out of date when this moved.
+    revision: u64,
 }
 
 impl ConnectionSessions {
+    /// See the field: changes whenever a connection's status changes.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
     pub fn status(&self, connection: &str) -> ConnectionStatus {
         self.statuses
             .get(connection)
@@ -119,6 +127,7 @@ impl ConnectionSessions {
                 self.generations.insert(connection.to_string(), generation);
                 self.statuses
                     .insert(connection.to_string(), ConnectionStatus::Connecting);
+                self.revision += 1;
                 Some(generation)
             }
             _ => None,
@@ -140,6 +149,7 @@ impl ConnectionSessions {
                     Ok(()) => ConnectionStatus::Connected,
                     Err(error) => ConnectionStatus::Failed(redact_secrets(&error)),
                 };
+                self.revision += 1;
                 true
             }
             _ => false,
@@ -164,6 +174,7 @@ impl ConnectionSessions {
         self.stale.remove(connection);
         self.statuses
             .insert(connection.to_string(), ConnectionStatus::Failed(reason));
+        self.revision += 1;
         true
     }
 
@@ -194,7 +205,11 @@ impl ConnectionSessions {
     pub fn disconnect(&mut self, connection: &str) -> bool {
         self.generations.remove(connection);
         self.stale.remove(connection);
-        let was_connected = self.statuses.remove(connection) == Some(ConnectionStatus::Connected);
+        let removed = self.statuses.remove(connection);
+        if removed.is_some() {
+            self.revision += 1;
+        }
+        let was_connected = removed == Some(ConnectionStatus::Connected);
         if was_connected {
             self.dropped.insert(connection.to_string());
         }

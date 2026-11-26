@@ -14,6 +14,8 @@ pub(super) struct JdbcTarget {
     pub password: Option<Secret>,
     /// The URL asks for TLS (`sslmode=require`, `useSSL=true`, an `https` ClickHouse URL...).
     pub tls: bool,
+    /// `trustServerCertificate=true` (SQL Server).
+    pub trust_certificate: bool,
 }
 
 /// `jdbc:<subprotocol>://[user[:password]@]host[:port][,more-hosts][/database][?options]`,
@@ -61,10 +63,15 @@ pub(super) fn parse(jdbc_url: &str) -> JdbcTarget {
     // `user` / `password` may be parameters instead of userinfo (PostgreSQL, MySQL).
     let mut tls = scheme.to_ascii_lowercase().ends_with(":https");
     let (mut param_user, mut param_password) = (String::new(), String::new());
+    let (mut param_database, mut trust_certificate) = (String::new(), false);
     for (key, value) in query.split(['&', ';']).filter_map(|pair| pair.split_once('=')) {
         let value = decode(value);
         match key.to_ascii_lowercase().as_str() {
             "user" => param_user = value,
+            // SQL Server: `jdbc:sqlserver://host:1433;databaseName=x;encrypt=true;trustServerCertificate=true`.
+            "databasename" | "database" => param_database = value,
+            "encrypt" => tls |= matches!(value.to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "strict" | "mandatory"),
+            "trustservercertificate" => trust_certificate = matches!(value.to_ascii_lowercase().as_str(), "true" | "1" | "yes"),
             "password" => param_password = value,
             "ssl" | "usessl" | "tls" | "secure" => {
                 tls |= matches!(value.to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "on")
@@ -82,10 +89,11 @@ pub(super) fn parse(jdbc_url: &str) -> JdbcTarget {
     JdbcTarget {
         host,
         port,
-        database: decode(database.split('/').next().unwrap_or_default()),
+        database: Some(decode(database.split('/').next().unwrap_or_default())).filter(|name| !name.is_empty()).unwrap_or(param_database),
         user: if user.is_empty() { param_user } else { user },
         password: Secret::new(if password.is_empty() { param_password } else { password }),
         tls,
+        trust_certificate,
     }
 }
 
@@ -169,6 +177,9 @@ mod tests {
         assert_eq!((multi.host.as_str(), multi.port), ("a", Some(1)));
         let mssql = parse("jdbc:sqlserver://srv:1433;databaseName=x");
         assert_eq!((mssql.host.as_str(), mssql.port), ("srv", Some(1433)));
+        let tails = parse("jdbc:sqlserver://srv:1433;databaseName=sales;user=app;password=pw;encrypt=true;trustServerCertificate=true");
+        assert_eq!((tails.database.as_str(), tails.user.as_str(), tails.tls, tails.trust_certificate), ("sales", "app", true, true));
+        assert!(!parse("jdbc:sqlserver://srv;encrypt=false").tls);
     }
 
     #[test]

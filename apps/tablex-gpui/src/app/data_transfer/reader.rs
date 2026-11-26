@@ -96,6 +96,12 @@ pub(in crate::app) fn key_type_allowed(kind: ConnectionKind, data_type: &str) ->
         }
         // The affinity rules: a declared type with INT in it is an integer column, one with CHAR, CLOB or TEXT a text one.
         ConnectionKind::Sqlite => head.contains("int") || head.contains("char") || head.contains("clob") || head.contains("text"),
+        ConnectionKind::Duckdb => {
+            matches!(head, "tinyint" | "smallint" | "integer" | "int" | "bigint" | "hugeint" | "utinyint" | "usmallint" | "uinteger" | "ubigint" | "uhugeint" | "decimal" | "numeric" | "varchar" | "text" | "string" | "uuid" | "date" | "timestamp")
+        }
+        // Exact numbers, text, dates and GUIDs compare through a literal as the server orders them; a float, `bit`, bytes, `xml` and
+        // `rowversion` do not. A GUID is ordered by its last bytes first, so it is left out.
+        ConnectionKind::Mssql => matches!(head, "tinyint" | "smallint" | "int" | "bigint" | "decimal" | "numeric" | "char" | "varchar" | "nchar" | "nvarchar" | "date" | "datetime" | "datetime2" | "smalldatetime"),
         // A ClickHouse key is a sorting key: several rows can share it.
         ConnectionKind::Clickhouse | ConnectionKind::Mongodb | ConnectionKind::Redis => false,
     }
@@ -531,7 +537,10 @@ impl PageReader {
                 Some(mode) if mode.eq_ignore_ascii_case("wal") => begun(self, "BEGIN"),
                 _ => SnapshotState::Unavailable("the database is not in WAL mode: a read transaction would block its writers"),
             },
+            // Every DuckDB transaction reads one snapshot; a read-only one writes nothing.
+            ConnectionKind::Duckdb => begun(self, "BEGIN TRANSACTION READ ONLY"),
             ConnectionKind::Clickhouse => SnapshotState::Unavailable("ClickHouse has no snapshot across statements"),
+            ConnectionKind::Mssql => SnapshotState::Unavailable("SQL Server needs ALLOW_SNAPSHOT_ISOLATION on the database for a snapshot across statements"),
             ConnectionKind::Mongodb | ConnectionKind::Redis => SnapshotState::Unavailable("not a SQL connection"),
         }
     }

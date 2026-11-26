@@ -2058,6 +2058,55 @@ fn a_blank_filter_keeps_execute_enabled(cx: &mut TestAppContext) {
     assert_eq!(first_name(&app, visual, tab_id).as_deref(), Some(natural.as_str()), "a blank filter selects everything");
 }
 
+/// An empty inline FILTER / SORT box shows a faint hint over it; any text (a space too) takes it away, and
+/// a click on the hint reaches the editor under it.
+#[gpui::test]
+fn an_empty_inline_filter_and_sort_box_shows_a_hint_until_it_has_text(cx: &mut TestAppContext) {
+    let (app, visual) = context_test_app(cx, "mongo-grid", "populated");
+    visual.simulate_resize(gpui::size(gpui::px(1400.0), gpui::px(850.0)));
+    settle(visual);
+    let tab_id = app.read_with(visual, |this, _| this.workspace.active_tab().unwrap().id);
+    let filter = app.update_in(visual, |this, window, cx| this.mongo_filter_editor(tab_id, window, cx));
+    let sort = app.update_in(visual, |this, window, cx| this.mongo_sort_editor(tab_id, window, cx));
+    let set = |visual: &mut gpui::VisualTestContext, editor: &gpui::Entity<EditorState>, text: &'static str| {
+        app.update_in(visual, |_, window, cx| editor.update(cx, |state, cx| state.set_value(text, window, cx)));
+        settle(visual);
+    };
+
+    // Text in the boxes: no hint.
+    set(visual, &filter, "{}");
+    set(visual, &sort, r#"{"name":1}"#);
+    assert!(visual.debug_bounds("mongo-filter-hint").is_none());
+    assert!(visual.debug_bounds("mongo-sort-hint").is_none());
+
+    // Empty: a hint over each box, inside it and at the left where the text starts.
+    set(visual, &filter, "");
+    set(visual, &sort, "");
+    for (hint, field) in [("mongo-filter-hint", "mongo-filter-field"), ("mongo-sort-hint", "mongo-sort-field")] {
+        let hint = visual.debug_bounds(hint).unwrap_or_else(|| panic!("{hint} is shown"));
+        let field = visual.debug_bounds(field).unwrap();
+        assert!(field.contains(&hint.center()), "{hint:?} lies in {field:?}");
+    }
+
+    // A click on the hint reaches the editor under it.
+    let hint = visual.debug_bounds("mongo-sort-hint").unwrap();
+    visual.simulate_click(hint.center(), Default::default());
+    settle(visual);
+    assert!(app.update_in(visual, |_, window, cx| sort.read(cx).focus_handle(cx).is_focused(window)), "the click focused the box");
+
+    // Any text takes it away, only whitespace too; clearing the box brings it back.
+    visual.simulate_input(" ");
+    settle(visual);
+    assert!(visual.debug_bounds("mongo-sort-hint").is_none(), "a space is text");
+    assert!(visual.debug_bounds("mongo-filter-hint").is_some(), "the other box is still empty");
+    visual.simulate_keystrokes("backspace");
+    settle(visual);
+    assert!(visual.debug_bounds("mongo-sort-hint").is_some(), "empty again");
+    visual.simulate_input("{");
+    settle(visual);
+    assert!(visual.debug_bounds("mongo-sort-hint").is_none());
+}
+
 #[test]
 fn blank_filter_sort_and_projection_mean_none_in_the_request() {
     for blank in ["", "  ", "\n"] {

@@ -16,7 +16,7 @@
 
 use super::*;
 use crate::navigator::NodeLoadState;
-use gpui::{Animation, AnimationExt as _, ClipboardItem, Rgba, SharedString, WeakEntity};
+use gpui::{ClipboardItem, Easing, Rgba, SharedString, TimedTransformation, Transformation, WeakEntity};
 use gpui_component::text::TextView;
 use gpui_component::tooltip::Tooltip;
 use std::rc::Rc;
@@ -27,7 +27,7 @@ pub(super) const ROW_GROUP: &str = "nav-row";
 const SUMMARY_MAX_CHARS: usize = 120;
 const DOT_SIZE: f32 = 6.0;
 const RING_WIDTH: f32 = 1.5;
-/// Cap of the connecting pulse, so a connecting row costs 12 redraws a second.
+/// Cap of the connecting pulse: the window presents at most 12 frames a second for it (without rebuilding any view).
 const PULSE_FPS: f32 = 12.0;
 
 /// What a row's failure marker acts on.
@@ -130,21 +130,25 @@ pub(super) fn icon_with_status_sized(
         ConnectionStatus::Connecting => (theme::warning(), true),
         ConnectionStatus::Disconnected | ConnectionStatus::Failed(_) => return icon,
     };
-    let dot = div().size(px(dot_size)).rounded_full().bg(color);
+    // The connecting dot fades through the window's own animation clock: the circle is painted once and the
+    // window moves it in the scene it has, so the pulse does not re-render the view it is in (the sidebar).
     let dot = if connecting {
-        dot.with_animation(
-            ("nav-connecting", index),
-            Animation::new(Duration::from_millis(1400))
-                .repeat_synced()
-                .with_max_fps(PULSE_FPS)
-                // Full strength at both ends, so reduced motion (which draws the last
-                // frame) shows the dot at full strength.
-                .with_easing(|t| 0.675 + 0.325 * (t * std::f32::consts::TAU).cos()),
-            |dot, alpha| dot.opacity(alpha),
-        )
-        .into_any_element()
+        gpui::svg()
+            .path("icons/status-dot.svg")
+            .size(px(dot_size))
+            .text_color(color)
+            .with_timed_transformation(
+                // Full strength at both ends, so reduced motion (which draws the start) shows the dot at full strength.
+                TimedTransformation::new(Duration::from_millis(1400))
+                    .from(Transformation::alpha(1.0))
+                    .to(Transformation::alpha(0.35))
+                    .with_easing(Easing::EaseInOut)
+                    .alternate()
+                    .with_max_fps(PULSE_FPS),
+            )
+            .into_any_element()
     } else {
-        dot.into_any_element()
+        div().size(px(dot_size)).rounded_full().bg(color).into_any_element()
     };
     let overhang = ring_width * 2.0;
     div()

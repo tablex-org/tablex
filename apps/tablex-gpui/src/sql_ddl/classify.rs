@@ -21,6 +21,8 @@ pub enum Flavor {
     MySql,
     Sqlite,
     ClickHouse,
+    /// SQL Server: `tinyint` is unsigned, a bare `float` is a double, `datetime2` has 7 digits.
+    SqlServer,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +84,7 @@ fn parse(flavor: Flavor, original: &str) -> Ty {
     // ClickHouse spells widths with a capital: `Int8` is one byte, PostgreSQL's `int8` eight.
     let clickhouse = original.trim().starts_with("Int") || original.trim().starts_with("UInt") || original.trim().starts_with("Nullable(Int") || original.trim().starts_with("Nullable(UInt");
     match base {
+        "tinyint" if flavor == Flavor::SqlServer => Ty::Integer { bits: 8, unsigned: true },
         "tinyint" | "int1" => signed(8),
         "smallint" | "int2" | "smallserial" | "int16" => signed(16),
         "mediumint" => signed(24),
@@ -102,6 +105,7 @@ fn parse(flavor: Flavor, original: &str) -> Ty {
         },
         "real" | "float4" | "float32" => Ty::Float(1),
         "double" | "float8" | "float64" => Ty::Float(2),
+        "float" if flavor == Flavor::SqlServer && args.is_empty() => Ty::Float(2),
         "float" => match args.first() {
             Some(precision) if *precision > 24 => Ty::Float(2),
             _ => Ty::Float(1),
@@ -116,7 +120,7 @@ fn parse(flavor: Flavor, original: &str) -> Ty {
         },
         "tinytext" => Ty::Variable(255),
         // PostgreSQL's `text` is unbounded, MySQL's holds 65 535 bytes; the other servers: the smaller bound is the safe one.
-        "text" if flavor == Flavor::Postgres => Ty::Variable(u64::MAX),
+        "text" | "ntext" if matches!(flavor, Flavor::Postgres | Flavor::SqlServer) => Ty::Variable(u64::MAX),
         "text" => Ty::Variable(65_535),
         "mediumtext" => Ty::Variable(16_777_215),
         "longtext" | "string" | "citext" => Ty::Variable(u64::MAX),
@@ -126,10 +130,10 @@ fn parse(flavor: Flavor, original: &str) -> Ty {
             digits: args.first().copied(),
             zone: base == "timetz" || words.windows(2).any(|w| w == ["with", "time"]),
         },
-        "timestamp" | "timestamptz" | "datetime" | "datetime64" => Ty::Moment {
+        "timestamp" | "timestamptz" | "datetime" | "datetime64" | "datetime2" | "datetimeoffset" | "smalldatetime" => Ty::Moment {
             kind: if base == "datetime" && flavor == Flavor::MySql { MomentKind::Datetime } else { MomentKind::Timestamp },
             digits: args.first().copied(),
-            zone: base == "timestamptz" || words.windows(2).any(|w| w == ["with", "time"]),
+            zone: base == "timestamptz" || base == "datetimeoffset" || words.windows(2).any(|w| w == ["with", "time"]),
         },
         _ => Ty::Other,
     }
@@ -153,6 +157,8 @@ fn digits(flavor: Flavor, written: Option<u32>) -> Option<u32> {
     written.or(match flavor {
         Flavor::MySql => Some(0),
         Flavor::Postgres => Some(6),
+        // `datetime2` and `time` keep 7 digits when none are written.
+        Flavor::SqlServer => Some(7),
         Flavor::Sqlite | Flavor::ClickHouse => None,
     })
 }
@@ -160,7 +166,7 @@ fn digits(flavor: Flavor, written: Option<u32>) -> Option<u32> {
 /// Whether a `date` fits the time type `to` without losing a day.
 fn date_fits(flavor: Flavor, kind: MomentKind, zone: bool) -> bool {
     match flavor {
-        Flavor::Postgres | Flavor::Sqlite => kind == MomentKind::Timestamp && !zone,
+        Flavor::Postgres | Flavor::Sqlite | Flavor::SqlServer => kind == MomentKind::Timestamp && !zone,
         // `timestamp` only covers 1970 to 2038.
         Flavor::MySql => kind == MomentKind::Datetime,
         Flavor::ClickHouse => false,

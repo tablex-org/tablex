@@ -397,7 +397,7 @@ fn save_and_connect_reconnects_an_existing_session_for_uri_override(cx: &mut Tes
             ssh_tunnel: false,
         };
         let connection = saved.id.to_string();
-        this.saved_connections = vec![saved];
+        *this.saved_connections = vec![saved];
         let attempt = this
             .sessions
             .begin_connect(&connection)
@@ -450,7 +450,7 @@ fn save_and_connect_replaces_a_connecting_session_for_uri_override(cx: &mut Test
             ssh_tunnel: false,
         };
         let connection = saved.id.to_string();
-        this.saved_connections = vec![saved];
+        *this.saved_connections = vec![saved];
         assert!(this.sessions.begin_connect(&connection).is_some());
         this.navigator_ui
             .pending_loads

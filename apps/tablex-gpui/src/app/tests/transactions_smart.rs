@@ -282,12 +282,12 @@ fn smart_commit_switches_the_kinds_with_transactions_and_not_clickhouse(cx: &mut
         let tab = rig.tab(kind, update);
         let key = rig.app.read_with(rig.visual, |this, _| this.workspace.tab(tab).unwrap().connection_id.clone());
         rig.app.update(rig.visual, |this, cx| {
-            let mut settings = (*this.settings).clone();
+            let mut settings = (**this.settings).clone();
             settings.connection_types.retain(|existing| existing.id != "smart-type");
             let mut ty = crate::settings::connection::ConnectionType { id: "smart-type".into(), name: "smart".into(), ..Default::default() };
             smart_type(true)(&mut ty);
             settings.connection_types.push(ty);
-            this.settings = std::sync::Arc::new(settings);
+            *this.settings = std::sync::Arc::new(settings);
             let profile = crate::settings::connection::ConnectionProfile { type_id: "smart-type".into(), ..Default::default() };
             this.connection_policy.set_profile(&key, profile);
             cx.notify();
@@ -388,9 +388,9 @@ fn a_continue_on_error_script_keeps_the_later_writes_in_the_transaction_after_it
     let mut rig = SqlRig::sqlite(cx, &db);
     let a = rig.tab;
     rig.app.update(rig.visual, |this, _| {
-        let mut settings = (*this.settings).clone();
+        let mut settings = (**this.settings).clone();
         settings.editor.on_script_error = crate::settings::OnScriptError::Continue;
-        this.settings = std::sync::Arc::new(settings);
+        *this.settings = std::sync::Arc::new(settings);
     });
     rig.set_connection_type(smart_type(true));
     rig.run_on(a, "UPDATE nope SET a = 1 WHERE id = 1; UPDATE items SET name = 'later' WHERE id = 1; UPDATE items SET name = 'last' WHERE id = 2");
@@ -511,7 +511,7 @@ impl SqlRig<'_> {
     /// follows a settings change runs).
     fn apply_type(&mut self, change: impl FnOnce(&mut crate::settings::connection::ConnectionType)) {
         self.app.update(self.visual, |this, cx| {
-            let mut settings = (*this.settings).clone();
+            let mut settings = (**this.settings).clone();
             let ty = settings.connection_types.iter_mut().find(|ty| ty.id == "test-type").expect("set_connection_type made it");
             change(ty);
             this.apply_settings(settings, None, cx);
@@ -589,9 +589,9 @@ fn a_connection_moved_to_a_read_only_type_releases_its_idle_own_sessions_too(cx:
     // The connection is edited to another type, as the connection dialog does.
     let key = rig.key.clone();
     rig.app.update(rig.visual, |this, cx| {
-        let mut settings = (*this.settings).clone();
+        let mut settings = (**this.settings).clone();
         settings.connection_types.push(crate::settings::connection::ConnectionType { id: "ro-type".into(), name: "ro".into(), read_only: true, ..Default::default() });
-        this.settings = std::sync::Arc::new(settings);
+        *this.settings = std::sync::Arc::new(settings);
         let profile = crate::settings::connection::ConnectionProfile { type_id: "ro-type".into(), ..Default::default() };
         this.connection_policy.set_profile(&key, profile);
         let saved = this.saved_connections.clone();

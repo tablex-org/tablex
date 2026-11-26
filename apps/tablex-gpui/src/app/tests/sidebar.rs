@@ -735,7 +735,7 @@ fn connection_clipboard_copy_never_rehydrates_or_includes_saved_password(cx: &mu
         .read(|cx| root.read(cx).view().clone().downcast::<AppRoot>().unwrap());
     app.update(visual, |this, cx| {
         let id = uuid::Uuid::new_v4();
-        this.saved_connections = vec![SavedConnection {
+        *this.saved_connections = vec![SavedConnection {
             id,
             name: "Sensitive".into(),
             uri: "postgresql://alice:secret@localhost/app".into(),
@@ -1640,7 +1640,7 @@ fn unsupported_connection_enter_cannot_connect_but_stays_editable(cx: &mut TestA
                 disabled: true,
                 ssh_tunnel: false,
             };
-            this.saved_connections = vec![saved.clone()];
+            *this.saved_connections = vec![saved.clone()];
             this.navigator.set_connections(vec![saved]);
             let row_id = NavigatorNodeId::Connection {
                 connection: id.clone(),

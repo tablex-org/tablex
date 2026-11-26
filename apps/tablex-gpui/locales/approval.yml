@@ -1,0 +1,47 @@
+_version: 2
+approval:
+  title:
+    en: Approve a change from an MCP client
+    vi: Duyệt thay đổi từ client MCP
+  intro:
+    en: The MCP client cannot ask you itself, so tablex asks. Nothing runs unless you approve.
+    vi: Client MCP không thể tự hỏi bạn nên tablex hỏi thay. Sẽ không có gì chạy nếu bạn không duyệt.
+  client:
+    en: "Requested by: %{name}"
+    vi: "Yêu cầu bởi: %{name}"
+  connection:
+    en: "Connection: %{name}"
+    vi: "Kết nối: %{name}"
+  connection_type:
+    en: "Type: %{name}"
+    vi: "Loại: %{name}"
+  database:
+    en: "Database: %{name}"
+    vi: "Cơ sở dữ liệu: %{name}"
+  collection:
+    en: "Collection: %{name}"
+    vi: "Collection: %{name}"
+  danger:
+    en: "Dangerous: %{reason}"
+    vi: "Nguy hiểm: %{reason}"
+  decline:
+    en: Decline
+    vi: Từ chối
+  approve:
+    en: Approve
+    vi: Duyệt
+  size:
+    en: "Lines: %{lines} · Characters: %{characters}"
+    vi: "Số dòng: %{lines} · Số ký tự: %{characters}"
+  change:
+    en: "Change %{k} of %{n}"
+    vi: "Thay đổi %{k} trên %{n}"
+  withdrawn:
+    en: The MCP client withdrew this question. Nothing ran.
+    vi: Client MCP đã rút lại câu hỏi này. Không có gì được chạy.
+  close:
+    en: Close
+    vi: Đóng
+  click_hint:
+    en: Click Approve to run it
+    vi: Nhấn chuột vào Duyệt để chạy

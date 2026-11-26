@@ -121,7 +121,7 @@ impl std::fmt::Display for GateError {
             Self::NotSql => f.write_str("SQL files run on SQL connections."),
             Self::ClickHouse => f.write_str("Running a SQL file is not available for ClickHouse yet."),
             Self::ReadOnly(message) => f.write_str(message),
-            Self::InMemorySqlite => f.write_str("Running a SQL file is off for an in-memory SQLite database: the run would use a second connection that sees a different, empty database."),
+            Self::InMemorySqlite => f.write_str("Running a SQL file is off for an in-memory database: the run would use a second connection that sees a different, empty database."),
             Self::NotOpen => f.write_str("The connection is not open."),
         }
     }
@@ -142,7 +142,7 @@ impl AppRoot {
         if let Some(message) = self.read_only_connection_message(connection, "Running a SQL file is") {
             return Err(GateError::ReadOnly(message));
         }
-        if saved.kind == ConnectionKind::Sqlite && super::super::structure_edit::apply::sqlite_is_in_memory(&saved.uri) {
+        if saved.kind.is_file_database() && super::super::structure_edit::apply::sqlite_is_in_memory(&saved.uri) {
             return Err(GateError::InMemorySqlite);
         }
         if self.scenario_ui.service.is_none() && self.driver_capabilities(connection, saved.kind.driver_id()).is_none() {
@@ -214,7 +214,7 @@ impl AppRoot {
     /// The namespace an action on "the current connection" works on: that of the tab `tab_id` when it has a connection, else of the
     /// row selected in the navigator. `None` when there is neither.
     pub(in crate::app) fn namespace_from_context(&self, tab_id: Option<u64>) -> Option<Namespace> {
-        let tab = tab_id.and_then(|id| self.workspace.tab(id)).filter(|tab| !tab.connection_id.is_empty()).cloned();
+        let tab = tab_id.and_then(|id| self.workspace.tab(id)).filter(|tab| !tab.connection_id.is_empty());
         match tab {
             Some(tab) => {
                 let known = Namespace { connection: tab.connection_id.clone(), database: tab.database.clone(), schema: tab.schema.clone().unwrap_or_default() };

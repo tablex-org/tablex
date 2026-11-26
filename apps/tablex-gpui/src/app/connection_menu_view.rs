@@ -5,7 +5,7 @@ use crate::navigator::NavigatorNodeId;
 use crate::sessions::ConnectionStatus;
 use gpui_component::menu::PopupMenu;
 use gpui_component::scroll::ScrollableMask;
-use gpui_component::select::{Select, SelectEvent, SelectState};
+use gpui_component::select::{SearchableVec, Select, SelectEvent, SelectState};
 
 /// Display name of the menu's connection, for confirmations.
 #[allow(dead_code)]
@@ -29,6 +29,17 @@ fn history_menu_contents(
     entries: Vec<crate::saved_sql::SavedSqlEntry>,
     error: Option<String>,
 ) -> PopupMenu {
+    // The manager first: every run of every connection, searched and filtered.
+    let show_all_root = root.clone();
+    let submenu = submenu
+        .item(
+            PopupMenuItem::new(t!("history.show_all_history"))
+                .icon(menu_icon(navigator_ui::SidebarGlyph::History))
+                .on_click(move |_, window, app| {
+                    let _ = show_all_root.update(app, |this, cx| this.open_query_history(None, window, cx));
+                }),
+        )
+        .separator();
     if loading {
         return submenu.item(PopupMenuItem::new(t!("menu.loading")).disabled(true));
     }
@@ -625,7 +636,7 @@ impl AppRoot {
                             .unwrap_or(&[])
                             .to_vec();
                         let _ = cx.update_window(handle, move |_, window, app| {
-                            select.update(app, |select, cx| select.set_items(names, window, cx));
+                            select.update(app, |select, cx| select.set_items(SearchableVec::new(names), window, cx));
                         });
                     }
                 }
@@ -693,14 +704,16 @@ impl AppRoot {
             });
         let draft = cx.new(|_| VisibleFilterDialogState::init(current.clone()));
         let schema_select = (saved_kind == ConnectionKind::Postgres).then(|| {
-            cx.new(|cx| SelectState::new(Vec::<String>::new(), None, window, cx).searchable(true))
+            cx.new(|cx| {
+                SelectState::new(SearchableVec::new(Vec::<String>::new()), None, window, cx).searchable(true)
+            })
         });
         if let Some(select) = &schema_select {
             let draft_for_event = draft.clone();
             let connection_for_event = connection_id.to_string();
             let subscription = cx.subscribe(
                 select,
-                move |this, _, event: &SelectEvent<Vec<String>>, cx| {
+                move |this, _, event: &SelectEvent<SearchableVec<String>>, cx| {
                     let SelectEvent::Confirm(Some(database)) = event else {
                         return;
                     };

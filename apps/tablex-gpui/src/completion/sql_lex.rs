@@ -170,7 +170,12 @@ impl<'a> Scanner<'a> {
                 terminated = self.quoted('`', false);
                 Tok::Quoted
             }
-            '$' if self.flavor == SqlFlavor::Postgres && self.dollar_quoted_ahead() => {
+            // `[name]`: `]]` is a `]`, which `quoted` reads as a doubled close.
+            '[' if self.flavor == SqlFlavor::Mssql => {
+                terminated = self.quoted(']', false);
+                Tok::Quoted
+            }
+            '$' if matches!(self.flavor, SqlFlavor::Postgres | SqlFlavor::Duckdb) && self.dollar_quoted_ahead() => {
                 terminated = self.dollar_quoted();
                 Tok::Str
             }

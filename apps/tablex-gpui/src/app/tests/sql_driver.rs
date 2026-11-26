@@ -206,9 +206,9 @@ impl<'a> SqlRig<'a> {
         let (tab, key, session, handle) = app.update(visual, |this, cx| {
             this.scenario_ui.service = None;
             // These tests run whole scripts with Run (the default runs the statement at the cursor).
-            let mut settings = (*this.settings).clone();
+            let mut settings = (**this.settings).clone();
             settings.editor.run_scope = crate::settings::RunScope::All;
-            this.settings = std::sync::Arc::new(settings);
+            *this.settings = std::sync::Arc::new(settings);
             let id = uuid::Uuid::new_v4();
             this.saved_connections.push(SavedConnection {
                 id,
@@ -546,14 +546,18 @@ fn run_select_fills_the_grid_and_records_history(cx: &mut TestAppContext) {
                 collection: String::new(),
                 sql: sql.into(),
                 rows: 5,
+                error: None,
+                duration_ms: this.recorded_history[0].duration_ms,
+                kind: "query".into(),
             }],
             "a successful driver run lands in the query history like a native one"
         );
+        assert!(this.recorded_history[0].duration_ms.is_some(), "with how long it took");
     });
 }
 
 #[gpui::test]
-fn failed_statement_is_an_error_with_its_driver_code_and_is_not_recorded(cx: &mut TestAppContext) {
+fn failed_statement_is_an_error_with_its_driver_code_and_is_recorded_with_its_error(cx: &mut TestAppContext) {
     let db = SqliteDb::new(ITEMS_SEED);
     let mut rig = SqlRig::sqlite(cx, &db);
     rig.run("SELECT * FROM no_such_table");
@@ -565,7 +569,14 @@ fn failed_statement_is_an_error_with_its_driver_code_and_is_not_recorded(cx: &mu
     assert_eq!(rig.log().len(), 1, "{:?}", rig.log());
     let (_, severity, retryable) = rig.log().remove(0);
     assert_eq!((severity, retryable), (crate::error_log::Severity::Error, false));
-    rig.app.read_with(rig.visual, |this, _| assert!(this.recorded_history.is_empty()));
+    rig.app.read_with(rig.visual, |this, _| {
+        assert_eq!(this.recorded_history.len(), 1, "a failed run is in the history too");
+        let failed = &this.recorded_history[0];
+        assert_eq!(failed.sql, "SELECT * FROM no_such_table");
+        assert!(failed.error.as_deref().is_some_and(|error| error.contains("no_such_table")), "{:?}", failed.error);
+        assert!(failed.duration_ms.is_some());
+        assert_eq!(failed.kind, "query");
+    });
 }
 
 #[gpui::test]

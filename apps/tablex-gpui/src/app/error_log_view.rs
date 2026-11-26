@@ -310,6 +310,13 @@ impl LogStore {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// What a test's root render reports as storage warnings (the real ones are process-wide, and the tests of
+    /// other threads would take them).
+    pub(super) static RENDER_WARNINGS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 impl AppRoot {
     // --- reporting ---------------------------------------------------------
 
@@ -321,11 +328,17 @@ impl AppRoot {
         if !engine_storage::legacy::warnings_pending() {
             return;
         }
-        for message in engine_storage::legacy::take_warnings() {
+        self.show_storage_warnings(engine_storage::legacy::take_warnings());
+        cx.notify();
+    }
+
+    /// Runs inside the root's render, where a notification is dropped by GPUI: the notice reaches the pane through
+    /// the epoch (the root's render embeds the pane uncached when the state it draws moved, see `sidebar_behind`).
+    pub(super) fn show_storage_warnings(&mut self, messages: impl IntoIterator<Item = String>) {
+        for message in messages {
             self.report_warning(Area::App, None, &message);
             self.sidebar.notice = Some(message);
         }
-        cx.notify();
     }
 
     /// `connection` is the saved-connection key (UUID string) when known.
@@ -370,6 +383,14 @@ impl AppRoot {
             .workspace
             .tab(tab_id)
             .map(|tab| tab.connection_id.clone());
+        if crate::error_log::is_server_out_of_memory(error) {
+            // The plain line leads; the driver's own text stays in the entry's details.
+            let mut report = Report::from_text(Severity::Error, Area::Query, error);
+            report.message = t!("grid.server_out_of_memory").into_owned();
+            report.details = Some(error.to_owned());
+            self.report_event(connection.as_deref(), report);
+            return;
+        }
         self.report_error(Area::Query, connection.as_deref(), error);
     }
 
@@ -587,7 +608,7 @@ impl AppRoot {
     /// The position button's pick: the same change as the Settings page's (applied at once, saved
     /// after the debounce); `sync_error_log_place` follows from it.
     fn set_error_log_place(&mut self, place: ErrorLogPlace, cx: &mut Context<Self>) {
-        let mut next = (*self.settings).clone();
+        let mut next = (**self.settings).clone();
         next.appearance.error_log_place = place;
         self.apply_settings(next, None, cx);
     }

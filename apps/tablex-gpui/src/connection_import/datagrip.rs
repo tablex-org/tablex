@@ -488,6 +488,7 @@ pub fn parse(
             };
             connection.password = target.password;
             connection.tls = target.tls;
+            connection.trust_certificate = target.trust_certificate;
             if connection.kind.supported() == Some(ConnectionKind::Mongodb) {
                 connection.uri = jdbc::mongo_multi_host_uri(&fragment.jdbc_url);
             }
@@ -636,7 +637,7 @@ mod tests {
     #[test]
     fn unsupported_products_are_listed() {
         let all = parse(SHARED, Some(LOCAL), &[]).unwrap();
-        assert_eq!(by_name(&all, "warehouse-mssql").kind, ImportKind::Unsupported("SQL Server".into()));
+        assert_eq!(by_name(&all, "warehouse-mssql").kind, ImportKind::Supported(ConnectionKind::Mssql));
         assert_eq!(by_name(&all, "ledger-oracle").kind, ImportKind::Unsupported("Oracle".into()));
         assert_eq!(all.len(), 8);
     }

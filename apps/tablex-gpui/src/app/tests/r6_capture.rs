@@ -80,10 +80,10 @@ fn capture_backup_screens() {
         cx.update_window(handle, |_, _, app_cx| {
             app.update(app_cx, |this, cx| {
                 this.seed_connection_tree_scenario();
-                let mut settings = (*this.settings).clone();
+                let mut settings = (**this.settings).clone();
                 settings.query.pg_dump_path = dump_path.clone();
                 settings.query.pg_restore_path = restore_path.clone();
-                this.settings = Arc::new(settings);
+                *this.settings = Arc::new(settings);
                 this.driver_runtime.server_versions.insert(postgres.into(), 170_400);
                 cx.notify();
             })

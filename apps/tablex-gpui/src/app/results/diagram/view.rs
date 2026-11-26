@@ -2406,6 +2406,8 @@ impl AppRoot {
                             | ConnectionKind::Mysql
                             | ConnectionKind::Mariadb
                             | ConnectionKind::Clickhouse
+                            | ConnectionKind::Duckdb
+                            | ConnectionKind::Mssql
                     )
                 })
     }
@@ -2456,6 +2458,8 @@ impl AppRoot {
                         | ConnectionKind::Mysql
                         | ConnectionKind::Mariadb
                         | ConnectionKind::Clickhouse
+                        | ConnectionKind::Duckdb
+                        | ConnectionKind::Mssql
                 )
             })
     }
@@ -2496,17 +2500,20 @@ impl AppRoot {
             })
             .collect();
         loaded.sort_unstable();
-        let postgres = self
-            .saved_connections
-            .iter()
-            .find(|saved| saved.matches_id(connection))
-            .is_some_and(|saved| saved.kind == ConnectionKind::Postgres);
-        match loaded.as_slice() {
-            [] if postgres => "public",
-            [] => database,
-            [only] => only,
-            several if several.contains(&"public") => "public",
-            [first, ..] => first,
+        let kind = self.saved_connections.iter().find(|saved| saved.matches_id(connection)).map(|saved| saved.kind);
+        // The schema a connection starts in: PostgreSQL's `public`, DuckDB's `main`.
+        let default = match kind {
+            Some(ConnectionKind::Postgres) => Some("public"),
+            Some(ConnectionKind::Duckdb) => Some("main"),
+            _ => None,
+        };
+        match (loaded.as_slice(), default) {
+            ([], Some(default)) => default,
+            ([], None) => database,
+            ([only], _) => only,
+            (several, Some(default)) if several.contains(&default) => default,
+            (several, None) if several.contains(&"public") => "public",
+            ([first, ..], _) => first,
         }
         .to_string()
     }

@@ -157,9 +157,9 @@ impl<'a> ShellRig<'a> {
         let (tab_id, connection) = app.update(visual, |this, cx| {
             this.scenario_ui.service = None;
             // These tests run whole scripts with Run (the default runs the statement at the cursor).
-            let mut settings = (*this.settings).clone();
+            let mut settings = (**this.settings).clone();
             settings.editor.run_scope = crate::settings::RunScope::All;
-            this.settings = std::sync::Arc::new(settings);
+            *this.settings = std::sync::Arc::new(settings);
             this.driver_ui.tools.store = Some(std::sync::Arc::new(engine_driver_host::ToolStore::new(&tools_dir)));
             this.driver_ui.store = std::sync::Arc::new(engine_driver_host::InstalledDriverStore::new(&store_dir));
             this.driver_ui.policy = TrustPolicy::Developer;
@@ -506,9 +506,9 @@ fn an_installed_plugin_runs_at_once_with_the_connections_write_policy(cx: &mut T
     let mut rig = ShellRig::new(cx, Some("0.3.0"));
     rig.install_plugin();
     rig.update(|this, _| {
-        let mut settings = (*this.settings).clone();
+        let mut settings = (**this.settings).clone();
         settings.query.query_timeout_secs = 60;
-        this.settings = std::sync::Arc::new(settings);
+        *this.settings = std::sync::Arc::new(settings);
     });
     rig.engine.push(Scripted::Reply(Box::new(reply(&[], documents(&[r#"{"a":1}"#]), "app"))));
     rig.run_script("db.c.deleteMany({})");
@@ -518,18 +518,18 @@ fn an_installed_plugin_runs_at_once_with_the_connections_write_policy(cx: &mut T
     assert_eq!(rig.engine.requests()[0].timeout_ms, Some(60_000), "the app's query timeout is the run's limit");
     // "No limit" (0) sends no limit.
     rig.update(|this, _| {
-        let mut settings = (*this.settings).clone();
+        let mut settings = (**this.settings).clone();
         settings.query.query_timeout_secs = 0;
-        this.settings = std::sync::Arc::new(settings);
+        *this.settings = std::sync::Arc::new(settings);
     });
     rig.engine.push(Scripted::Reply(Box::new(reply(&[], ShellResult::None, "app"))));
     rig.click("run-query");
     rig.wait_ready();
     assert_eq!(rig.engine.requests()[1].timeout_ms, None);
     rig.update(|this, _| {
-        let mut settings = (*this.settings).clone();
+        let mut settings = (**this.settings).clone();
         settings.query.query_timeout_secs = 60;
-        this.settings = std::sync::Arc::new(settings);
+        *this.settings = std::sync::Arc::new(settings);
     });
 
     // A read-only connection runs the script with writes off; the plugin's refusal is the message.
@@ -599,13 +599,16 @@ fn use_moves_the_tabs_database_and_the_run_is_recorded_in_the_history(cx: &mut T
     rig.wait_ready();
     assert_eq!(rig.engine.requests()[1].database, "other");
 
-    // A failed run is not history.
+    // A failed run is history too, with its error.
     let mut broken = reply(&[], ShellResult::None, "other");
     broken.error = Some(failure(FailureKind::Syntax, "unexpected token", Some((1, 9))));
     rig.engine.push(Scripted::Reply(Box::new(broken)));
     rig.click("run-query");
     rig.wait_ready();
-    assert_eq!(rig.read(|this| this.recorded_history.len()), 2);
+    assert_eq!(rig.read(|this| this.recorded_history.len()), 3);
+    let failed = rig.read(|this| this.recorded_history[2].clone());
+    assert!(failed.error.as_deref().is_some_and(|error| error.contains("unexpected token")), "{:?}", failed.error);
+    assert_eq!(rig.read(|this| this.recorded_history[1].error.clone()), None, "the runs that worked have none");
 }
 
 #[gpui::test]
@@ -655,9 +658,9 @@ fn run_follows_run_executes_and_an_error_names_the_editor_line(cx: &mut TestAppC
     let mut rig = ShellRig::new(cx, Some("0.3.0"));
     rig.install_plugin();
     rig.update(|this, _| {
-        let mut next = (*this.settings).clone();
+        let mut next = (**this.settings).clone();
         next.editor.run_scope = crate::settings::RunScope::Current;
-        this.settings = std::sync::Arc::new(next);
+        *this.settings = std::sync::Arc::new(next);
     });
     let mut broken = reply(&[], ShellResult::None, "app");
     broken.error = Some(failure(FailureKind::Syntax, "expecting ';'", Some((2, 8))));

@@ -1934,3 +1934,229 @@ fn mongo_document_header_controls_stay_visible_in_a_narrow_pane(cx: &mut TestApp
         }
     }
 }
+
+/// The panel of `tab_id` in a window of its own: its handle and a context that draws it.
+fn cell_detail_window_context(
+    app: &gpui::Entity<AppRoot>,
+    visual: &mut gpui::VisualTestContext,
+    tab_id: u64,
+) -> gpui::VisualTestContext {
+    let handle = app
+        .read_with(visual, |this, _| this.cell_detail_window(tab_id))
+        .expect("the panel's window is open");
+    let mut other = gpui::VisualTestContext::from_window(handle, &visual.cx);
+    settle(&mut other);
+    other
+}
+
+fn window_count(visual: &mut gpui::VisualTestContext) -> usize {
+    visual.cx.update(|cx| cx.windows().len())
+}
+
+fn detail_window_title(
+    app: &gpui::Entity<AppRoot>,
+    visual: &mut gpui::VisualTestContext,
+    tab_id: u64,
+) -> Option<String> {
+    app.read_with(visual, |this, cx| this.cell_detail_window_title_shown(tab_id, cx))
+}
+
+#[gpui::test]
+fn the_cell_detail_panel_in_a_window_follows_the_selection_and_goes_back_when_it_closes(
+    cx: &mut TestAppContext,
+) {
+    let (app, visual) = context_test_app(cx, "result-grid", "populated");
+    visual.simulate_resize(gpui::size(gpui::px(1100.0), gpui::px(850.0)));
+    let tab_id = app.update(visual, |this, cx| {
+        let tab_id = this.active_id();
+        this.select_grid_cell(tab_id, CellPosition { row: 1, column: 1 });
+        this.open_cell_detail_tab(tab_id, CellDetailTab::Details, cx);
+        this.set_cell_detail_placement(tab_id, CellDetailPlacement::Bottom, cx);
+        tab_id
+    });
+    settle(visual);
+    assert_eq!(window_count(visual), 1);
+    assert!(visual.debug_bounds("cell-detail-panel").is_some(), "docked at the bottom first");
+    let docked_grid = visual.debug_bounds("grid-scroll-area").unwrap().size.height;
+    let tab_title = app.read_with(visual, |this, _| this.workspace.tab(tab_id).unwrap().title.clone());
+
+    // Window: an OS window of its own; the app's window gives the whole area to the grid.
+    app.update(visual, |this, cx| this.set_cell_detail_placement(tab_id, CellDetailPlacement::Window, cx));
+    settle(visual);
+    assert_eq!(window_count(visual), 2, "a window of its own");
+    assert!(visual.debug_bounds("cell-detail-panel").is_none(), "no longer in the app's window");
+    assert!(visual.debug_bounds("cell-detail-rail").is_some(), "the rail stays");
+    assert!(visual.debug_bounds("grid-scroll-area").unwrap().size.height > docked_grid);
+    let mut other = cell_detail_window_context(&app, visual, tab_id);
+    assert!(other.debug_bounds("cell-detail-window").is_some());
+    assert!(other.debug_bounds("cell-detail-panel").is_some(), "the panel renders in its window");
+    assert!(other.debug_bounds("cell-detail-row-value").is_some());
+    assert_eq!(detail_window_title(&app, visual, tab_id), Some(format!("Row 2 · {tab_title}")));
+
+    // Only one window: picking Window again brings that one to the front.
+    app.update(visual, |this, cx| this.set_cell_detail_placement(tab_id, CellDetailPlacement::Window, cx));
+    settle(visual);
+    settle(&mut other);
+    assert_eq!(window_count(visual), 2);
+
+    // It follows the selection of its tab, and the title with it.
+    app.update(visual, |this, _| this.select_grid_cell(tab_id, CellPosition { row: 3, column: 1 }));
+    settle(visual);
+    settle(&mut other);
+    assert_eq!(detail_window_title(&app, visual, tab_id), Some(format!("Row 4 · {tab_title}")));
+    assert!(other.debug_bounds("cell-detail-row-value").is_some());
+
+    // The close box: the panel is back at the bottom, in the app's window.
+    assert!(other.simulate_close(), "the window may close");
+    other.update(|window, _| window.remove_window());
+    settle(visual);
+    assert_eq!(window_count(visual), 1);
+    app.read_with(visual, |this, _| {
+        let state = this.tab_cell_detail(tab_id).unwrap();
+        assert!(state.open);
+        assert_eq!(state.placement, CellDetailPlacement::Bottom);
+        assert!(this.cell_detail_window(tab_id).is_none());
+    });
+    assert!(visual.debug_bounds("cell-detail-panel").is_some(), "docked again");
+
+    // A panel that was never docked elsewhere goes back to the right.
+    app.update(visual, |this, cx| {
+        this.set_cell_detail_placement(tab_id, CellDetailPlacement::Right, cx);
+        this.set_cell_detail_placement(tab_id, CellDetailPlacement::Window, cx);
+    });
+    settle(visual);
+    assert_eq!(window_count(visual), 2);
+    let mut other = cell_detail_window_context(&app, visual, tab_id);
+    // Leaving through the window's own menu closes it and docks the panel where it was.
+    click_debug_button(&mut other, "cell-detail-placement");
+    settle(&mut other);
+    click_debug_button(&mut other, "cell-detail-placement-bottom");
+    settle(visual);
+    assert_eq!(window_count(visual), 1, "the window closed");
+    app.read_with(visual, |this, _| {
+        assert_eq!(this.tab_cell_detail(tab_id).unwrap().placement, CellDetailPlacement::Bottom);
+    });
+    assert!(visual.debug_bounds("cell-detail-panel").is_some());
+}
+
+#[gpui::test]
+fn the_cell_detail_window_is_picked_from_the_placement_menu_and_closes_with_the_panel_or_the_tab(
+    cx: &mut TestAppContext,
+) {
+    let (app, visual) = context_test_app(cx, "result-grid", "populated");
+    visual.simulate_resize(gpui::size(gpui::px(1100.0), gpui::px(850.0)));
+    let tab_id = app.update(visual, |this, cx| {
+        let tab_id = this.active_id();
+        this.select_grid_cell(tab_id, CellPosition { row: 1, column: 1 });
+        this.open_cell_detail_tab(tab_id, CellDetailTab::Details, cx);
+        tab_id
+    });
+    settle(visual);
+
+    // The menu of the panel lists the four places, Window with the icon of the Results place menu.
+    click_debug_button(visual, "cell-detail-placement");
+    settle(visual);
+    for item in [
+        "cell-detail-placement-right",
+        "cell-detail-placement-bottom",
+        "cell-detail-placement-popup",
+        "cell-detail-placement-window",
+    ] {
+        assert!(visual.debug_bounds(item).is_some(), "{item} is in the menu");
+    }
+    click_debug_button(visual, "cell-detail-placement-window");
+    settle(visual);
+    assert_eq!(window_count(visual), 2);
+    let mut other = cell_detail_window_context(&app, visual, tab_id);
+
+    // Closing the panel in its window closes the window; the panel is docked again when it reopens.
+    click_debug_button(&mut other, "cell-detail-close");
+    settle(visual);
+    assert_eq!(window_count(visual), 1, "the window went with the panel");
+    app.read_with(visual, |this, _| {
+        let state = this.tab_cell_detail(tab_id).unwrap();
+        assert!(!state.open);
+        assert_eq!(state.placement, CellDetailPlacement::Right);
+    });
+    app.update(visual, |this, cx| this.open_cell_detail_tab(tab_id, CellDetailTab::Details, cx));
+    settle(visual);
+    assert_eq!(window_count(visual), 1);
+    assert!(visual.debug_bounds("cell-detail-panel").is_some());
+
+    // A closed panel opens no window.
+    app.update(visual, |this, cx| {
+        this.close_cell_detail_panel(tab_id, cx);
+        this.set_cell_detail_placement(tab_id, CellDetailPlacement::Window, cx);
+    });
+    settle(visual);
+    assert_eq!(window_count(visual), 1);
+
+    // Closing the rail's last tab closes the window; closing the query tab does too.
+    app.update(visual, |this, cx| {
+        this.open_cell_detail_tab(tab_id, CellDetailTab::Details, cx);
+        this.set_cell_detail_placement(tab_id, CellDetailPlacement::Window, cx);
+    });
+    settle(visual);
+    assert_eq!(window_count(visual), 2);
+    app.update(visual, |this, cx| this.close_cell_detail_tab(tab_id, CellDetailTab::Details, cx));
+    settle(visual);
+    assert_eq!(window_count(visual), 1, "the last tab closed the panel and its window");
+
+    app.update(visual, |this, cx| {
+        this.open_cell_detail_tab(tab_id, CellDetailTab::Details, cx);
+        this.set_cell_detail_placement(tab_id, CellDetailPlacement::Window, cx);
+    });
+    settle(visual);
+    assert_eq!(window_count(visual), 2);
+    app.update(visual, |this, cx| this.close_tab(tab_id, cx));
+    settle(visual);
+    assert_eq!(window_count(visual), 1, "the window went with its tab");
+    app.read_with(visual, |this, _| assert!(this.cell_detail_window(tab_id).is_none()));
+}
+
+#[gpui::test]
+fn the_row_tab_in_the_cell_detail_window_builds_its_viewer_in_that_window_and_keeps_following(
+    cx: &mut TestAppContext,
+) {
+    let (app, visual) = context_test_app(cx, "result-grid", "populated");
+    visual.simulate_resize(gpui::size(gpui::px(1100.0), gpui::px(850.0)));
+    let tab_id = app.update(visual, |this, cx| {
+        let tab_id = this.active_id();
+        this.select_grid_cell(tab_id, CellPosition { row: 1, column: 1 });
+        this.open_cell_detail_tab(tab_id, CellDetailTab::Row, cx);
+        this.set_cell_detail_row_view(tab_id, crate::cell_detail::RowView::Json, cx);
+        tab_id
+    });
+    settle(visual);
+    let viewer_text = |app: &gpui::Entity<AppRoot>, visual: &mut gpui::VisualTestContext| {
+        app.read_with(visual, |this, cx| {
+            this.view(tab_id).json_views.cell_json.as_ref().map(|viewer| viewer.state.read(cx).value().to_string())
+        })
+    };
+    let docked = viewer_text(&app, visual).expect("the Row JSON viewer exists while docked");
+
+    app.update(visual, |this, cx| this.set_cell_detail_placement(tab_id, CellDetailPlacement::Window, cx));
+    settle(visual);
+    let mut other = cell_detail_window_context(&app, visual, tab_id);
+    settle(visual);
+    assert!(other.debug_bounds("cell-detail-panel").is_some());
+    // The app's window does not build it any more: only the window that shows the panel does.
+    let in_window = viewer_text(&app, visual).expect("the window made the viewer");
+    assert_eq!(in_window, docked, "the same row");
+
+    // Another row: the viewer in the window shows it.
+    app.update(visual, |this, _| this.select_grid_cell(tab_id, CellPosition { row: 3, column: 1 }));
+    settle(visual);
+    settle(&mut other);
+    let followed = viewer_text(&app, visual).expect("the viewer follows");
+    assert_ne!(followed, docked, "another row's JSON");
+
+    // The Tree view in the window works too.
+    app.update(visual, |this, cx| this.set_cell_detail_row_view(tab_id, crate::cell_detail::RowView::Tree, cx));
+    settle(visual);
+    settle(&mut other);
+    assert!(other.debug_bounds("cell-detail-panel").is_some());
+    app.read_with(visual, |this, _| {
+        assert!(!this.tab_cell_detail(tab_id).unwrap().row_tree.is_empty(), "the tree is built");
+    });
+}

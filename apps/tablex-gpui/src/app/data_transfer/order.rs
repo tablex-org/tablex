@@ -84,6 +84,9 @@ pub(in crate::app) fn lex_options(kind: ConnectionKind) -> SqlLexOptions {
         ConnectionKind::Mariadb => SqlLexOptions::mariadb(),
         ConnectionKind::Sqlite => SqlLexOptions::sqlite(),
         ConnectionKind::Clickhouse => SqlLexOptions::clickhouse(),
+        ConnectionKind::Mssql => SqlLexOptions::mssql(),
+        // DuckDB's tokenizer is not PostgreSQL's: `` ` `` names, control bytes in words, numbers.
+        ConnectionKind::Duckdb => SqlLexOptions::duckdb(),
         _ => SqlLexOptions::postgres(),
     }
 }
@@ -338,7 +341,7 @@ fn map_term(sql: &str, term: &[&SqlToken], columns: &[OrderColumn]) -> Option<(u
 /// Whether `name` is a word or a quoted name of the statement (case does not matter): a query that reads a table has its name.
 pub(in crate::app) fn query_mentions(sql: &str, name: &str) -> bool {
     // Read the ways every dialect reads it: either way the name is in it.
-    [SqlLexOptions::postgres(), SqlLexOptions::mysql(), SqlLexOptions::sqlite(), SqlLexOptions::clickhouse()].iter().any(|options| {
+    [SqlLexOptions::postgres(), SqlLexOptions::mysql(), SqlLexOptions::sqlite(), SqlLexOptions::clickhouse(), SqlLexOptions::duckdb()].iter().any(|options| {
         tokens(sql, options).tokens.iter().any(|token| {
             let text = &sql[token.range.clone()];
             match token.kind {

@@ -210,7 +210,7 @@ pub(super) fn format_bytes(bytes: u64) -> String {
 /// carries are string literals of the dialect.
 pub(super) fn stats_sql(kind: ConnectionKind, database: &str, schema: &str) -> Option<String> {
     let dialect = dialect_for(kind)?;
-    // The namespace of MySQL, MariaDB and ClickHouse is the database; of PostgreSQL the schema.
+    // The namespace of MySQL, MariaDB and ClickHouse is the database; of PostgreSQL and SQL Server the schema.
     let place = Some(schema).filter(|schema| !schema.is_empty()).unwrap_or(database);
     Some(match kind {
         ConnectionKind::Postgres => format!(
@@ -228,7 +228,18 @@ pub(super) fn stats_sql(kind: ConnectionKind, database: &str, schema: &str) -> O
             "SELECT name, engine, total_rows, total_bytes, comment FROM system.tables WHERE database = {}",
             literal(dialect, place)
         ),
-        ConnectionKind::Sqlite | ConnectionKind::Mongodb | ConnectionKind::Redis => return None,
+        // Rows and size from the partition statistics of the heap or clustered index (`index_id` 0 or 1), the description
+        // from the table's `MS_Description` extended property. The catalog of the database in use answers.
+        ConnectionKind::Mssql => format!(
+            "SELECT o.name, o.type, SUM(CASE WHEN p.index_id IN (0, 1) THEN p.row_count ELSE 0 END), SUM(p.used_page_count) * 8192, \
+             CAST(MAX(CASE WHEN o.type = 'U' THEN ep.value END) AS nvarchar(4000)) \
+             FROM sys.objects o JOIN sys.schemas s ON s.schema_id = o.schema_id \
+             LEFT JOIN sys.dm_db_partition_stats p ON p.object_id = o.object_id \
+             LEFT JOIN sys.extended_properties ep ON ep.class = 1 AND ep.major_id = o.object_id AND ep.minor_id = 0 AND ep.name = N'MS_Description' \
+             WHERE s.name = {} AND o.type IN ('U', 'V') AND o.is_ms_shipped = 0 GROUP BY o.name, o.type",
+            literal(dialect, place)
+        ),
+        ConnectionKind::Sqlite | ConnectionKind::Duckdb | ConnectionKind::Mongodb | ConnectionKind::Redis => return None,
     })
 }
 
@@ -247,6 +258,8 @@ pub(super) fn parse_stats(kind: ConnectionKind, rows: &TextRows) -> HashMap<Stri
             let view = match kind {
                 ConnectionKind::Postgres => kind_of == "v",
                 ConnectionKind::Clickhouse => kind_of.ends_with("View"),
+                // `sys.objects.type` is a `char(2)`: `V ` is a view, `U ` a table.
+                ConnectionKind::Mssql => kind_of.trim() == "V",
                 _ => kind_of.contains("VIEW"),
             };
             let comment = row.get(4).cloned().flatten();
@@ -369,6 +382,8 @@ impl AppRoot {
                 })
                 .collect();
             self.table_stats.entries.insert(key, StatsEntry { stamp, state: StatsState::Ready(fixture_stats(&names)) });
+            // The rows show them now (the sidebar replays its last frame unless it is told).
+            cx.notify();
             return;
         }
         let database = (kind == ConnectionKind::Postgres).then(|| key.database.clone());
@@ -456,6 +471,19 @@ mod tests {
         assert_eq!(TableStats::new(Some(1_200_000), Some(47_185_920), None).label.as_deref(), Some("1.2M rows \u{00B7} 45 MB"));
         assert_eq!(TableStats::new(None, Some(8192), None).label.as_deref(), Some("8.0 KB"));
         assert_eq!(TableStats::new(None, None, Some("a note".into())).label, None);
+    }
+
+    #[test]
+    fn sql_server_reads_partition_statistics_of_the_schema() {
+        let sql = stats_sql(ConnectionKind::Mssql, "sales", "dbo").unwrap();
+        assert!(sql.contains("sys.dm_db_partition_stats") && sql.contains("MS_Description") && sql.contains("s.name = 'dbo'"), "{sql}");
+        let rows: TextRows = vec![
+            vec![Some("orders".into()), Some("U ".into()), Some("1200".into()), Some("81920".into()), Some("Customer orders".into())],
+            vec![Some("recent".into()), Some("V ".into()), Some("0".into()), Some("0".into()), None],
+        ];
+        let found = parse_stats(ConnectionKind::Mssql, &rows);
+        assert_eq!(found["orders"].label.as_deref(), Some("1.2K rows \u{00B7} 80 KB"));
+        assert_eq!(found["recent"].label, None, "a view has no rows or size of its own");
     }
 
     #[test]

@@ -124,6 +124,11 @@ struct OpenMenu {
 }
 
 fn open_menu(visual: &mut gpui::VisualTestContext, trigger: &'static str, menu_width: f32, searchable: bool) -> Option<OpenMenu> {
+    open_menu_pitch(visual, trigger, menu_width, searchable, SELECT_ITEM_PITCH)
+}
+
+/// [`open_menu`] for a Select whose rows are `pitch` tall (the default size's is `SELECT_ITEM_PITCH`).
+fn open_menu_pitch(visual: &mut gpui::VisualTestContext, trigger: &'static str, menu_width: f32, searchable: bool, pitch: f32) -> Option<OpenMenu> {
     let trigger = visual.debug_bounds(trigger)?;
     let scale = 2.0f32;
     let quads = wait_for_menu(visual, trigger, menu_width, false);
@@ -136,8 +141,8 @@ fn open_menu(visual: &mut gpui::VisualTestContext, trigger: &'static str, menu_w
     })?;
     let top = panel.bounds.origin.y.0 / scale;
     let height = panel.bounds.size.height.0 / scale;
-    let rows = ((height - 7.0) / SELECT_ITEM_PITCH).round() as usize - usize::from(searchable);
-    let first = top + 4.0 + if searchable { SELECT_ITEM_PITCH } else { 0.0 };
+    let rows = ((height - 7.0) / pitch).round() as usize - usize::from(searchable);
+    let first = top + 4.0 + if searchable { pitch } else { 0.0 };
     let cursor = quads
         .iter()
         .rfind(|q| {
@@ -148,7 +153,7 @@ fn open_menu(visual: &mut gpui::VisualTestContext, trigger: &'static str, menu_w
                 && x >= panel.bounds.origin.x.0 / scale
                 && q.background.as_solid().is_some_and(|c| c.a > 0.9)
         })
-        .map(|q| ((q.bounds.origin.y.0 / scale - first) / SELECT_ITEM_PITCH).round() as usize);
+        .map(|q| ((q.bounds.origin.y.0 / scale - first) / pitch).round() as usize);
     Some(OpenMenu { rows, cursor })
 }
 

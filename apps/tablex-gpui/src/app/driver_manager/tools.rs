@@ -13,7 +13,7 @@ use engine_driver_host::{
 use std::fmt;
 
 /// One line under the tool: what the server may do. The label is the switch in Settings → AI.
-pub(in crate::app) const MCP_CAPABILITY_NOTE: &str = "It reads according to each connection's assistant access (the names of your connections are listed to the client even where access is off), and changes data only when \"Let MCP clients run changes\" is on in Settings \u{2192} AI, the connection has \"Read and write\" access and it is not of a production type.";
+pub(in crate::app) const MCP_CAPABILITY_NOTE: &str = "It reads according to each connection's assistant access (the names of your connections are listed to the client even where access is off), and changes data only when the connection has \"Read and write\" access (Settings \u{2192} AI, or the connection's own setting) and is not of a production type; each change is put to you first.";
 
 /// Under the "Allow Keychain access" button (macOS).
 pub(in crate::app) const KEYCHAIN_NOTE: &str =

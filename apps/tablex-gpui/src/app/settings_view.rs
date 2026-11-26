@@ -12,7 +12,7 @@ use crate::settings::registry::{self, Kind, Section, SettingDescriptor, Value};
 use crate::settings::Settings;
 use gpui::{Entity, SharedString, Subscription};
 use gpui_component::input::{InputEvent, NumberInput};
-use gpui_component::select::{Select, SelectEvent, SelectState};
+use gpui_component::select::{SearchableVec, Select, SelectEvent, SelectState};
 use gpui_component::IndexPath;
 
 const NAV_WIDTH: f32 = 208.0;
@@ -70,7 +70,8 @@ impl Page {
     }
 }
 
-type ChoiceSelect = Entity<SelectState<Vec<SharedString>>>;
+// `SearchableVec`, not `Vec`: a plain `Vec` delegate never filters the search box.
+type ChoiceSelect = Entity<SelectState<SearchableVec<SharedString>>>;
 
 /// The name and color inputs of the connection type being edited. They are
 /// rebuilt when another type is picked, which drops their subscriptions.
@@ -376,7 +377,7 @@ impl AppRoot {
     /// `--ui-scenario settings`: the Editor page with unapplied edits.
     pub(super) fn seed_settings_scenario(&mut self) {
         self.workspace.open_settings_tab();
-        let mut draft = (*self.settings).clone();
+        let mut draft = (**self.settings).clone();
         draft.editor.soft_wrap = true;
         draft.editor.tab_size = 4;
         draft.editor.run_scope = crate::settings::RunScope::Current;
@@ -391,7 +392,7 @@ impl AppRoot {
     #[cfg(any(test, feature = "ui-scenarios"))]
     pub(super) fn seed_settings_ai_scenario(&mut self) {
         self.workspace.open_settings_tab();
-        let mut draft = (*self.settings).clone();
+        let mut draft = (**self.settings).clone();
         draft.ai.selected_mut().model = "claude-sonnet-5-5".into();
         draft.ai.effort = engine_ai::Effort::High;
         // The in-memory key store of a scenario; the page then shows "Saved".
@@ -414,7 +415,7 @@ impl AppRoot {
     #[cfg(any(test, feature = "ui-scenarios"))]
     pub(super) fn seed_settings_ai_ollama_scenario(&mut self) {
         self.workspace.open_settings_tab();
-        let mut draft = (*self.settings).clone();
+        let mut draft = (**self.settings).clone();
         draft.ai.provider = crate::settings::AiProvider::Ollama;
         draft.ai.selected_mut().model = "qwen3:8b".into();
         // The in-memory key store of a scenario holds nothing for Ollama: "Not set (optional)".
@@ -434,7 +435,7 @@ impl AppRoot {
     /// edits and a refused recording.
     pub(super) fn seed_settings_shortcuts_scenario(&mut self) {
         self.workspace.open_settings_tab();
-        let mut draft = (*self.settings).clone();
+        let mut draft = (**self.settings).clone();
         draft
             .shortcuts
             .insert("workspace.toggle_error_log".into(), Vec::new());
@@ -922,7 +923,7 @@ impl AppRoot {
                     if reload {
                         if let Some(select) = page.selects.get(id) {
                             select.update(cx, |state, cx| {
-                                state.set_items(labels, window, cx);
+                                state.set_items(labels.into(), window, cx);
                                 match &current {
                                     Some(current) => state.set_selected_value(current, window, cx),
                                     None => state.set_selected_index(None, window, cx),
@@ -1107,6 +1108,7 @@ impl AppRoot {
                     .child(
                         div()
                             .flex()
+                            .flex_wrap()
                             .items_center()
                             .gap(px(6.0))
                             .child(
@@ -1701,9 +1703,7 @@ impl AppRoot {
                 },
             )
         };
-        // A hand-edited `read_write` preset is shown as the Read it is capped to.
-        let shown = agent_level.type_preset();
-        let agent = agent_select(&AgentLevel::TYPE_PRESETS, Some(shown), window, cx);
+        let agent = agent_select(&AgentLevel::ALL, Some(agent_level), window, cx);
         let agent_subscription = {
             let type_id = id.clone();
             cx.subscribe_in(
@@ -2071,7 +2071,7 @@ impl AppRoot {
                                     .debug_selector(|| "connection-type-agent-explanation".into())
                                     .text_size(px(12.0))
                                     .text_color(theme::text_faint())
-                                    .child(ty.agent_access.type_preset().description()),
+                                    .child(ty.agent_access.description()),
                             ),
                     )
                     .child(
@@ -2154,7 +2154,7 @@ fn ensure_select(
         None => {
             let select = cx.new(|cx| {
                 SelectState::new(
-                    labels,
+                    SearchableVec::new(labels),
                     position.map(|row| IndexPath::default().row(row)),
                     window,
                     cx,
@@ -2165,8 +2165,8 @@ fn ensure_select(
                 &select,
                 window,
                 move |this: &mut AppRoot,
-                      _: &Entity<SelectState<Vec<SharedString>>>,
-                      event: &SelectEvent<Vec<SharedString>>,
+                      _: &ChoiceSelect,
+                      event: &SelectEvent<SearchableVec<SharedString>>,
                       _,
                       cx| {
                     let SelectEvent::Confirm(Some(label)) = event else {

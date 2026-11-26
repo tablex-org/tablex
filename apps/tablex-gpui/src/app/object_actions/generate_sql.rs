@@ -70,9 +70,14 @@ impl GenerateKind {
 /// SQL). Every supported dialect takes `LIMIT n`; a dialect with `TOP` or `FETCH FIRST` adds its arm.
 fn row_limit(kind: ConnectionKind) -> Option<String> {
     match kind {
-        ConnectionKind::Postgres | ConnectionKind::Mysql | ConnectionKind::Mariadb | ConnectionKind::Sqlite | ConnectionKind::Clickhouse => {
-            Some(format!("LIMIT {SELECT_ROWS}"))
-        }
+        ConnectionKind::Postgres
+        | ConnectionKind::Mysql
+        | ConnectionKind::Mariadb
+        | ConnectionKind::Sqlite
+        | ConnectionKind::Clickhouse
+        | ConnectionKind::Duckdb => Some(format!("LIMIT {SELECT_ROWS}")),
+        // `SELECT TOP n`: the clause goes after SELECT, not at the end (see `generate`).
+        ConnectionKind::Mssql => Some(format!("TOP {SELECT_ROWS}")),
         ConnectionKind::Mongodb | ConnectionKind::Redis => None,
     }
 }
@@ -107,12 +112,17 @@ pub(super) fn generate(
     Ok(match kind {
         GenerateKind::Select => {
             let listed: Vec<String> = all.iter().map(|(quoted, ..)| quoted.clone()).collect();
-            let head = match listed.len() {
-                0 => "SELECT *".to_owned(),
-                n if n > INLINE_COLUMNS => format!("SELECT\n  {}", listed.join(",\n  ")),
-                _ => format!("SELECT {}", listed.join(", ")),
+            // T-SQL limits rows with `TOP n` right after SELECT; the others end with `LIMIT n`.
+            let (top, tail) = match limit.strip_prefix("TOP ") {
+                Some(rows) => (format!(" TOP {rows}"), String::new()),
+                None => (String::new(), format!("\n{limit}")),
             };
-            format!("{head}\nFROM {target}\n{limit};")
+            let head = match listed.len() {
+                0 => format!("SELECT{top} *"),
+                n if n > INLINE_COLUMNS => format!("SELECT{top}\n  {}", listed.join(",\n  ")),
+                _ => format!("SELECT{top} {}", listed.join(", ")),
+            };
+            format!("{head}\nFROM {target}{tail};")
         }
         GenerateKind::Insert => {
             let fillable: Vec<_> = all.iter().filter(|(.., column)| fillable(column)).collect();
@@ -303,6 +313,17 @@ mod tests {
     }
 
     #[test]
+    fn sql_server_limits_rows_with_top_right_after_select() {
+        let columns: Vec<_> = ["a", "b", "c", "d"].into_iter().map(|name| column(name, false)).collect();
+        let sql = |columns: &[TableColumn]| generate(GenerateKind::Select, SqlDialect::MSSQL, "TOP 100", Some("dbo"), "t", columns).unwrap();
+        assert_eq!(sql(&[]), "SELECT TOP 100 *\nFROM \"dbo\".\"t\";");
+        assert_eq!(sql(&columns[..2]), "SELECT TOP 100 \"a\", \"b\"\nFROM \"dbo\".\"t\";");
+        assert_eq!(sql(&columns), "SELECT TOP 100\n  \"a\",\n  \"b\",\n  \"c\",\n  \"d\"\nFROM \"dbo\".\"t\";");
+        assert_eq!(row_limit(ConnectionKind::Mssql).as_deref(), Some("TOP 100"));
+        assert!(has_row_identifying_key(ConnectionKind::Mssql));
+    }
+
+    #[test]
     fn every_parameter_is_found_by_the_editor_and_no_two_columns_share_one() {
         let columns = [column("id", true), column("a b", false), column("a_b", false), column("a-b", false), column("9", false), column("", false)];
         let sql = make(GenerateKind::Update, SqlDialect::POSTGRES, None, &columns);
@@ -315,6 +336,21 @@ mod tests {
     fn a_name_the_dialect_cannot_quote_unambiguously_is_refused() {
         let columns = [column("back\\slash", false)];
         assert!(generate(GenerateKind::Select, SqlDialect::CLICKHOUSE, "LIMIT 100", None, "t", &columns).is_err());
+    }
+
+    #[test]
+    fn duckdb_quotes_with_double_quotes_limits_with_limit_and_has_a_row_identifying_key() {
+        let columns = [column("id", true), column("we\"ird", false)];
+        assert_eq!(row_limit(ConnectionKind::Duckdb).as_deref(), Some("LIMIT 100"));
+        assert_eq!(
+            make(GenerateKind::Select, SqlDialect::for_kind(ConnectionKind::Duckdb), Some("main"), &columns),
+            "SELECT \"id\", \"we\"\"ird\"\nFROM \"main\".\"t\"\nLIMIT 100;"
+        );
+        assert_eq!(
+            make(GenerateKind::Delete, SqlDialect::for_kind(ConnectionKind::Duckdb), Some("main"), &columns),
+            "DELETE FROM \"main\".\"t\"\nWHERE \"id\" = :id;"
+        );
+        assert!(has_row_identifying_key(ConnectionKind::Duckdb));
     }
 
     #[test]

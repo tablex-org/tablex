@@ -58,6 +58,16 @@ impl<'a> DriverRejection<'a> {
     }
 }
 
+/// Whether a failed run's text says the database server itself ran out of memory: PostgreSQL's
+/// SQLSTATE 53200 or its `out of memory` with the `memory context` it failed in, MySQL and
+/// MariaDB's ER_OUT_OF_RESOURCES (1041, "Out of memory; check if mysqld ..."). Not a fault of
+/// tablex or of the query's text, so the result area and the log say that first.
+pub fn is_server_out_of_memory(text: &str) -> bool {
+    // ASCII case-insensitive, with no lowercased copy of the (possibly long) error.
+    let has = |needle: &str| text.as_bytes().windows(needle.len()).any(|window| window.eq_ignore_ascii_case(needle.as_bytes()));
+    (has("sqlstate") && has("53200")) || (has("out of memory") && has("memory context")) || has("out of memory; check if mysqld")
+}
+
 #[derive(
     Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
 )]
@@ -1080,6 +1090,25 @@ mod tests {
         assert!(text.contains("[ERROR] Driver (driver.rejected) retryable"));
         assert!(text.contains("  second"));
         assert!(text.contains("[WARNING] Query"));
+    }
+
+    #[test]
+    fn a_server_out_of_memory_is_told_from_other_failures() {
+        for text in [
+            "driver rejected the request: query.failed: ERROR: out of memory DETAIL: Failed on request of size 8192 in memory context \"MessageContext\".",
+            "db error: SQLSTATE 53200 out of memory",
+            "DB ERROR: sqlState 53200",
+            "ERROR 1041 (HY000): Out of memory; check if mysqld or some other process uses all available memory",
+        ] {
+            assert!(is_server_out_of_memory(text), "{text}");
+        }
+        for text in [
+            "driver rejected the request: query.failed: syntax error at or near \"selec\"",
+            "Key (id)=(53200) already exists",
+            "out of memory while loading the grid",
+        ] {
+            assert!(!is_server_out_of_memory(text), "{text}");
+        }
     }
 
     #[test]

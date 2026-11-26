@@ -83,7 +83,7 @@ impl ConfigTab {
 
     /// Tabs shown for `kind`; file databases have no network layers.
     pub fn for_kind(kind: ConnectionKind) -> Vec<Self> {
-        if kind == ConnectionKind::Sqlite {
+        if kind.is_file_database() {
             vec![Self::Connection, Self::Advanced, Self::Overrides]
         } else if matches!(kind, ConnectionKind::Clickhouse | ConnectionKind::Redis) {
             // TLS lives on the Connection tab (Secure toggle, ClickHouse: + CA certificate): neither
@@ -142,6 +142,8 @@ pub struct ConnectionDialogInputs {
     pub ca_cert: Entity<InputState>,
     /// ClickHouse HTTPS toggle (`secure=true`).
     pub secure: Rc<Cell<bool>>,
+    /// DuckDB: open the file read-only (`?mode=ro`).
+    pub read_only: Rc<Cell<bool>>,
     /// The TLS/SSL tab (PostgreSQL, MySQL / MariaDB, MongoDB).
     pub tls: TlsInputs,
     /// The Tunnel / Proxy tab.
@@ -341,6 +343,7 @@ impl ConnectionDialogInputs {
             connect_timeout: input(window, cx, &form.connect_timeout, false),
             ca_cert: input(window, cx, &form.ca_cert, false),
             secure: Rc::new(Cell::new(form.secure)),
+            read_only: Rc::new(Cell::new(form.read_only)),
             tls: TlsInputs::new(window, cx, kind.clone(), &form.tls),
             ssh: SshTabInputs::new(window, cx, &form.ssh.clone().unwrap_or_default()),
             custom_color,
@@ -600,6 +603,7 @@ impl ConnectionDialogInputs {
         form.connect_timeout = self.connect_timeout.read(cx).value().trim().to_string();
         form.ca_cert = self.ca_cert.read(cx).value().to_string();
         form.secure = self.secure.get();
+        form.read_only = self.read_only.get();
         form.tls = self.tls.read(cx);
         form.color_hex = self.color.borrow().clone();
         form.save_password = self.save_password.get();
@@ -609,7 +613,7 @@ impl ConnectionDialogInputs {
         form.profile = Some(self.read_profile(cx));
         let mut ssh = self.ssh.read(cx);
         // Files have no network layer; a stale switch must not survive a change of kind.
-        let networked = form.kind != ConnectionKind::Sqlite;
+        let networked = !form.kind.is_file_database();
         ssh.enabled &= networked;
         ssh.proxy.enabled &= networked;
         form.ssh = Some(ssh);
@@ -699,6 +703,12 @@ impl ConnectionDialogInputs {
                 "clickhouse://user:password@host:8123/database",
                 t!("connection_dialog.optional_defaults_to_default"),
                 "8123",
+                "localhost",
+            ),
+            ConnectionKind::Mssql => (
+                "sqlserver://user:password@host:1433/database",
+                t!("connection_dialog.optional"),
+                "1433",
                 "localhost",
             ),
             ConnectionKind::Redis => (
@@ -820,7 +830,7 @@ impl ConnectionDialogInputs {
 
     fn connection_tab(&self, kind: ConnectionKind) -> AnyElement {
         let mut body = div().flex().flex_col().gap(px(14.0));
-        if kind != ConnectionKind::Sqlite {
+        if !kind.is_file_database() {
             let inputs_for_url = self.clone();
             let url_control = div()
                 .flex()
@@ -895,8 +905,11 @@ impl ConnectionDialogInputs {
             "connection-config-color",
             self.color_swatches(),
         ));
-        if kind == ConnectionKind::Sqlite {
+        if kind.is_file_database() {
             body = body.child(self.sqlite_file_row());
+            if kind == ConnectionKind::Duckdb {
+                body = body.child(self.duckdb_file_options_row());
+            }
         } else if self.use_uri.get() {
             body = body.child(
                 div()
@@ -1101,6 +1114,38 @@ impl ConnectionDialogInputs {
                     ),
             )
             .into_any_element()
+    }
+
+    /// DuckDB: open the file read-only, or work in memory (the file path `:memory:`).
+    fn duckdb_file_options_row(&self) -> AnyElement {
+        let read_only = Checkbox::new("duckdb-read-only")
+            .label(ts!("connection_dialog.open_read_only"))
+            .checked(self.read_only.get())
+            .on_click({
+                let inputs = self.clone();
+                move |checked, _, cx| {
+                    inputs.read_only.set(*checked);
+                    cx.refresh_windows();
+                }
+            });
+        let in_memory = Button::new("duckdb-in-memory")
+            .debug_selector(|| "duckdb-in-memory".into())
+            .label(t!("connection_dialog.in_memory"))
+            .outline()
+            .tooltip(t!("connection_dialog.in_memory_hint"))
+            .on_click({
+                let inputs = self.clone();
+                move |_, window, cx| {
+                    replace_input(&inputs.file_path, ":memory:", window, cx);
+                    inputs.read_only.set(false);
+                    cx.refresh_windows();
+                }
+            });
+        config_row(
+            t!("connection_dialog.options"),
+            "connection-config-duckdb-options",
+            div().flex().items_center().gap(px(12.0)).child(read_only).child(in_memory),
+        )
     }
 
     fn sqlite_file_row(&self) -> AnyElement {
@@ -1543,6 +1588,7 @@ impl ConnectionDialogInputs {
         replace_input(&self.connect_timeout, &form.connect_timeout, window, cx);
         replace_input(&self.ca_cert, &form.ca_cert, window, cx);
         self.secure.set(form.secure);
+        self.read_only.set(form.read_only);
         self.tls.fill(&form.tls, window, cx);
         replace_input(&self.file_path, &form.file_path, window, cx);
         replace_input(
@@ -2169,11 +2215,13 @@ fn database_asset(kind: ConnectionKind) -> Option<&'static str> {
     match kind {
         ConnectionKind::Postgres => Some("icons/postgres.svg"),
         ConnectionKind::Sqlite => Some("icons/sqlite.svg"),
+        ConnectionKind::Duckdb => Some("icons/duckdb.svg"),
         ConnectionKind::Mongodb => Some("icons/mongodb.svg"),
         ConnectionKind::Clickhouse => Some("icons/clickhouse.svg"),
         ConnectionKind::Redis => Some("icons/redis.svg"),
         ConnectionKind::Mysql => Some("icons/mysql-mark.svg"),
         ConnectionKind::Mariadb => Some("icons/mariadb.svg"),
+        ConnectionKind::Mssql => Some("icons/sql-server.svg"),
     }
 }
 
@@ -2239,10 +2287,10 @@ fn is_mongodb_cluster_uri(uri: &str) -> bool {
 
 fn category_for_kind(kind: ConnectionKind) -> PickerCategory {
     match kind {
-        ConnectionKind::Postgres | ConnectionKind::Mysql | ConnectionKind::Mariadb => {
+        ConnectionKind::Postgres | ConnectionKind::Mysql | ConnectionKind::Mariadb | ConnectionKind::Mssql => {
             PickerCategory::Relational
         }
-        ConnectionKind::Clickhouse => PickerCategory::Analytics,
+        ConnectionKind::Clickhouse | ConnectionKind::Duckdb => PickerCategory::Analytics,
         ConnectionKind::Sqlite => PickerCategory::Lightweight,
         ConnectionKind::Mongodb | ConnectionKind::Redis => PickerCategory::DocsCacheSearch,
     }
@@ -2278,6 +2326,8 @@ pub(crate) fn kind_label(kind: ConnectionKind) -> &'static str {
         ConnectionKind::Mariadb => "MariaDB",
         ConnectionKind::Redis => "Redis",
         ConnectionKind::Clickhouse => "ClickHouse",
+        ConnectionKind::Duckdb => "DuckDB",
+        ConnectionKind::Mssql => "SQL Server",
     }
 }
 
@@ -2527,11 +2577,11 @@ mod tests {
             "connection-picker-postgres",
             "connection-picker-mysql",
             "connection-picker-mariadb",
+            "connection-picker-sql-server",
         ] {
             assert!(cx.debug_bounds(selector).is_some(), "missing entry: {selector}");
         }
         for selector in [
-            "connection-picker-sql-server",
             "connection-picker-oracle",
             "connection-picker-firebird",
             "connection-picker-cockroachdb",
@@ -2995,6 +3045,38 @@ mod tests {
         let form = cx.read(|app| inputs.read_form(app, ConnectionFormState::new(ConnectionKind::Postgres)));
         assert_eq!(form.connect_timeout, "15");
         assert!(form.generated_uri().unwrap().contains("connect_timeout=15"));
+    }
+
+    #[gpui::test]
+    fn duckdb_config_is_a_file_with_read_only_and_a_memory_shortcut(cx: &mut TestAppContext) {
+        cx.dispatcher.allow_parking();
+        let (cx, inputs) = open_config(cx, ConnectionKind::Duckdb);
+        // A file database: its path and options, no host, user, password or network tab.
+        for selector in ["connection-config-file", "connection-config-duckdb-options", "duckdb-in-memory"] {
+            assert!(cx.debug_bounds(selector).is_some(), "missing selector: {selector}");
+        }
+        for selector in ["connection-config-host", "connection-config-password", "connection-config-username", "connection-config-tab-tls", "connection-config-tab-tunnel"] {
+            assert!(cx.debug_bounds(selector).is_none(), "unexpected selector: {selector}");
+        }
+        cx.update(|window, app| {
+            replace_input(&inputs.name, "analytics", window, app);
+            replace_input(&inputs.file_path, "/data/sales.duckdb", window, app);
+        });
+        inputs.read_only.set(true);
+        let form = cx.read(|app| inputs.read_form(app, ConnectionFormState::new(ConnectionKind::Duckdb)));
+        assert_eq!(form.persisted_uri().unwrap(), "duckdb:///data/sales.duckdb?mode=ro");
+        // "In memory" fills the path with `:memory:` and drops the read-only choice, with the real button.
+        for _ in 0..2 {
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+        }
+        let button = cx.debug_bounds("duckdb-in-memory").unwrap();
+        cx.simulate_click(button.center(), Default::default());
+        cx.run_until_parked();
+        assert!(!inputs.read_only.get());
+        let form = cx.read(|app| inputs.read_form(app, ConnectionFormState::new(ConnectionKind::Duckdb)));
+        assert_eq!(form.file_path, ":memory:");
+        assert_eq!(form.persisted_uri().unwrap(), "duckdb://:memory:");
     }
 
     #[gpui::test]

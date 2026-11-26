@@ -125,11 +125,11 @@ fn br_pg(cx: &mut TestAppContext) -> (gpui::Entity<AppRoot>, &mut gpui::VisualTe
 
 fn br_configure(app: &gpui::Entity<AppRoot>, visual: &mut gpui::VisualTestContext, tools: &BrTools) {
     app.update(visual, |this, cx| {
-        let mut settings = (*this.settings).clone();
+        let mut settings = (**this.settings).clone();
         settings.query.pg_dump_path = tools.path("pg_dump").display().to_string();
         settings.query.pg_restore_path = tools.path("pg_restore").display().to_string();
         settings.query.mysqldump_path = tools.path("mysqldump").display().to_string();
-        this.settings = std::sync::Arc::new(settings);
+        *this.settings = std::sync::Arc::new(settings);
         this.driver_runtime.session_uris.insert(OA_PG.into(), engine_connect::records::RuntimeUri::new(format!("postgres://ann:{BR_PASSWORD}@127.0.0.1:5999/warehouse?sslmode=require")));
         this.driver_runtime.server_versions.insert(OA_PG.into(), 170_400);
         cx.notify();
@@ -406,9 +406,9 @@ fn a_pg_dump_older_than_the_server_or_missing_is_told_before_anything_runs(cx: &
 
     // A path in Settings that leads nowhere is told, not skipped.
     app.update(visual, |this, cx| {
-        let mut settings = (*this.settings).clone();
+        let mut settings = (**this.settings).clone();
         settings.query.pg_dump_path = "/nonexistent/pg_dump".into();
-        this.settings = std::sync::Arc::new(settings);
+        *this.settings = std::sync::Arc::new(settings);
         cx.notify();
     });
     br_click(visual, "backup-back");
@@ -478,10 +478,10 @@ fn br_add_mysql(app: &gpui::Entity<AppRoot>, visual: &mut gpui::VisualTestContex
     app.update(visual, |this, cx| {
         this.saved_connections.push(SavedConnection { id, name: name.into(), uri: format!("{scheme}://root@127.0.0.1:3306/shop"), kind, save_password: false, is_pinned: false, disabled: false, ssh_tunnel: false });
         this.driver_runtime.session_uris.insert(key_for_app, engine_connect::records::RuntimeUri::new(format!("{scheme}://root:{BR_PASSWORD}@127.0.0.1:3306/shop?ssl-mode=REQUIRED&ssl-ca=/etc/ca.pem")));
-        let mut settings = (*this.settings).clone();
+        let mut settings = (**this.settings).clone();
         settings.query.mysqldump_path = tools.path("mysqldump").display().to_string();
         settings.query.mariadb_dump_path = tools.path("mariadb-dump").display().to_string();
-        this.settings = std::sync::Arc::new(settings);
+        *this.settings = std::sync::Arc::new(settings);
         cx.notify();
     });
     settle(visual);
@@ -1012,10 +1012,10 @@ fn br_live_app<'a>(cx: &'a mut TestAppContext, pg: &BrLivePg) -> (gpui::Entity<A
     let (app, visual, _, _) = oa_pg(cx);
     let uri = pg.uri.clone();
     app.update(visual, |this, cx| {
-        let mut settings = (*this.settings).clone();
+        let mut settings = (**this.settings).clone();
         settings.query.pg_dump_path = format!("{BR_PG_BIN}/pg_dump");
         settings.query.pg_restore_path = format!("{BR_PG_BIN}/pg_restore");
-        this.settings = std::sync::Arc::new(settings);
+        *this.settings = std::sync::Arc::new(settings);
         this.driver_runtime.session_uris.insert(OA_PG.into(), engine_connect::records::RuntimeUri::new(uri));
         this.driver_runtime.server_versions.insert(OA_PG.into(), 171_000);
         cx.notify();
@@ -1386,9 +1386,9 @@ fn br_my_register(app: &gpui::Entity<AppRoot>, visual: &mut gpui::VisualTestCont
     app.update(visual, |this, cx| {
         this.saved_connections.push(SavedConnection { id, name: "live".into(), uri: uri.clone(), kind, save_password: false, is_pinned: false, disabled: false, ssh_tunnel: false });
         this.driver_runtime.session_uris.insert(key_for_app, engine_connect::records::RuntimeUri::new(uri));
-        let mut settings = (*this.settings).clone();
+        let mut settings = (**this.settings).clone();
         settings.query.mysqldump_path = dump;
-        this.settings = std::sync::Arc::new(settings);
+        *this.settings = std::sync::Arc::new(settings);
         cx.notify();
     });
     settle(visual);
@@ -1670,9 +1670,9 @@ fn live_r6_postgresql_restore_brings_the_navigator_up_to_date(cx: &mut TestAppCo
     let mut rig = nav_rig(cx, ConnectionKind::Postgres, ("dbengine-postgres", "abi-v2"), &pg.uri);
     let key = rig.key.clone();
     rig.app.update(rig.visual, |this, cx| {
-        let mut settings = (*this.settings).clone();
+        let mut settings = (**this.settings).clone();
         settings.query.pg_restore_path = format!("{BR_PG_BIN}/pg_restore");
-        this.settings = std::sync::Arc::new(settings);
+        *this.settings = std::sync::Arc::new(settings);
         cx.notify();
     });
     rig.expand(&connection_node(&key));

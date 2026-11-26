@@ -111,6 +111,7 @@ pub(super) fn query_preview_body(
 /// `AppRoot`, not in a `TabView`.
 pub(super) struct GridPrefs {
     pub(super) copy_default: copy::CopyFormat,
+    /// The old `grid-copy-default.json`, read once at start (see `carry_over_old_copy_default`).
     pub(super) copy_default_path: Option<std::path::PathBuf>,
     pub(super) snowflake_dir: Option<std::path::PathBuf>,
     pub(super) snowflake_request: u64,
@@ -120,11 +121,10 @@ impl GridPrefs {
     pub(super) fn new(scenario_root: Option<&std::path::Path>) -> Self {
         let copy_default_path = scenario_root
             .map(|root| root.join("grid-copy-default.json"))
-            .or_else(copy::copy_default_path);
+            // Unit tests never reach the user's real config dir.
+            .or_else(|| if cfg!(test) { None } else { copy::copy_default_path() });
         Self {
-            copy_default: copy_default_path
-                .as_deref()
-                .map_or(copy::CopyFormat::Smart, copy::read_copy_default),
+            copy_default: copy::CopyFormat::Smart,
             copy_default_path,
             snowflake_dir: scenario_root.map(|root| root.join("snowflake")),
             snowflake_request: 0,
@@ -189,6 +189,10 @@ impl Default for GridUiState {
 pub(super) struct HistoryPanel {
     pub(super) visible: bool,
     pub(super) entries: Vec<engine_storage::history::HistoryEntry>,
+    /// The entry Enter runs: the last one clicked, or moved to with the arrow keys.
+    pub(super) selected: Option<i64>,
+    /// The strip takes the keyboard (arrows, Enter) when an entry is clicked.
+    pub(super) focus: Option<gpui::FocusHandle>,
 }
 
 /// Everything one tab's result area owns besides its data (`TabRuntime`):
@@ -291,8 +295,7 @@ impl TabView {
         grid.sort_menu = None;
         self.detail_ui.edit = None;
         self.chart.forget_controls();
-        self.json_views.cell_value = None;
-        self.json_views.cell_json = None;
+        self.forget_detail_viewers();
         self.json_views.mongo_doc = None;
         self.mongo.filter_focus = None;
         self.plan_raw = None;
@@ -301,6 +304,13 @@ impl TabView {
         self.columns_focus = None;
         self.script_stats = None;
         self.surface = None;
+    }
+
+    /// Drops the viewers of the cell detail panel (value box, row JSON): the next render makes them in
+    /// the window that shows the panel.
+    pub(super) fn forget_detail_viewers(&mut self) {
+        self.json_views.cell_value = None;
+        self.json_views.cell_json = None;
     }
 
     /// Focus target of the grid (created on first use: a handle needs `App`).

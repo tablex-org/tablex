@@ -80,7 +80,7 @@ impl AppRoot {
         if crate::sql_ddl::dialect_for(saved.kind).is_none() {
             return Err(Problem::NotSql);
         }
-        if saved.kind == ConnectionKind::Sqlite && super::super::structure_edit::apply::sqlite_is_in_memory(&saved.uri) {
+        if saved.kind.is_file_database() && super::super::structure_edit::apply::sqlite_is_in_memory(&saved.uri) {
             return Err(Problem::InMemorySqlite);
         }
         if self.scenario_ui.service.is_none() {

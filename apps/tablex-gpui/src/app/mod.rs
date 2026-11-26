@@ -50,8 +50,10 @@ use std::time::Duration;
 use std::time::Instant;
 
 mod actions;
+mod affected_preview;
 mod aggregate;
 mod app_channel;
+mod approval_dialog;
 mod assistant;
 mod command_palette;
 mod completion;
@@ -61,8 +63,10 @@ mod connection_overview;
 mod another_user;
 mod connection_policy;
 mod connection_ui;
+mod data_files;
 mod data_import;
 mod ddl_compare;
+mod access_notice;
 mod accounts;
 mod backup;
 mod bookmarks;
@@ -82,6 +86,7 @@ mod navigator_status;
 mod navigator_tools;
 mod navigator_ui;
 mod folder_filter;
+mod history;
 mod key_home_ui;
 mod object_actions;
 mod panes_ui;
@@ -93,6 +98,7 @@ mod remote_search;
 mod reset_passwords;
 mod results;
 mod scenario;
+mod schema_columns;
 mod script_highlight;
 mod script_run;
 mod script_toolbar;
@@ -110,6 +116,7 @@ mod sidebar_config;
 mod sidebar_import;
 mod sidebar_names;
 mod sidebar_pins;
+mod sidebar_watch;
 mod smart_commit;
 mod source_tab;
 mod sql_editor;
@@ -176,7 +183,7 @@ pub(in crate::app) fn frame_count() -> u64 {
 /// select and its window.
 type VisibleFilterSchemaSelect = (
     String,
-    gpui::Entity<gpui_component::select::SelectState<Vec<String>>>,
+    gpui::Entity<gpui_component::select::SelectState<gpui_component::select::SearchableVec<String>>>,
     gpui::AnyWindowHandle,
 );
 
@@ -226,7 +233,7 @@ pub struct AppRoot {
     #[cfg(test)]
     accounts_injected: Option<Arc<accounts::InjectedCatalog>>,
     /// The row counts, sizes and comments read for the tables of the tree (see `table_stats`).
-    table_stats: table_stats::StatsCache,
+    table_stats: sidebar_watch::Watched<table_stats::StatsCache>,
     /// Test double: where the table estimates are read from.
     #[cfg(test)]
     table_stats_injected: Option<Arc<accounts::InjectedCatalog>>,
@@ -252,7 +259,7 @@ pub struct AppRoot {
     transfer_create: std::collections::HashMap<u64, data_transfer::TransferCreate>,
     /// The review of the table an import creates, until it is answered.
     import_create: Option<data_import::ImportCreate>,
-    navigator: NavigatorState,
+    navigator: sidebar_watch::Watched<NavigatorState>,
     sessions: ConnectionSessions,
     connection_ui: connection_ui::ConnectionUiState,
     filter_enumeration: connection_menu::FilterEnumerationState,
@@ -273,18 +280,35 @@ pub struct AppRoot {
         gpui::Entity<connection_menu_view::VisibleFilterDialogState>,
     )>,
     visible_filter_schema_select: Option<VisibleFilterSchemaSelect>,
-    navigator_ui: navigator_ui::NavigatorUiState,
-    sidebar: sidebar::SidebarState,
-    saved_connections: Vec<SavedConnection>,
+    navigator_ui: sidebar_watch::Watched<navigator_ui::NavigatorUiState>,
+    /// The left pane's cached view (renders through [`AppRoot::render_navigator`]).
+    sidebar_view: gpui::Entity<navigator_ui::SidebarView>,
+    /// Moves with every `&mut` borrow of the state the left pane draws (see `sidebar_watch`).
+    sidebar_epoch: sidebar_watch::SidebarEpoch,
+    /// The epoch and `sessions.revision()` as of the last time the left pane was notified (see
+    /// [`AppRoot::notify_sidebar`]).
+    sidebar_seen: (u64, u64),
+    /// The same, as of the last time the pane rendered (see [`AppRoot::sidebar_behind`]): a notification sent
+    /// while a window draws is dropped by GPUI, so "notified" does not mean "drawn".
+    sidebar_drawn: (u64, u64),
+    sidebar: sidebar_watch::Watched<sidebar::SidebarState>,
+    /// The pane's search field, built by the pane's first render. Not `Watched`: that render must not mark the
+    /// pane as changed since it drew, and the field is a GPUI entity whose changes reach the pane through GPUI.
+    search_field: Option<gpui::Entity<InputState>>,
+    saved_connections: sidebar_watch::Watched<Vec<SavedConnection>>,
+    /// The data files opened as tables this run (see `data_files`).
+    data_files: data_files::DataFiles,
     /// What the Welcome tab lists as recent.
     welcome: welcome::WelcomeState,
     /// Connection type and setting overrides of the saved connections.
-    connection_policy: connection_policy::ConnectionPolicy,
+    connection_policy: sidebar_watch::Watched<connection_policy::ConnectionPolicy>,
     query_editors: workspace::WorkspaceEditors,
     /// Foreign keys of the tables the SQL completion asked about (join suggestions).
     completion_foreign_keys: completion::ForeignKeyCache,
     /// One `describe_object` answer per table for its navigator folders.
     table_folder_describes: navigator_ui::FolderDescribes,
+    /// The columns of whole schemas, from one catalog request each (Columns folders, completion).
+    schema_columns: schema_columns::SchemaColumnsCache,
     completion_loads: completion::CompletionLoads,
     format_ui: sql_editor::FormatUi,
     mongo_ui: results::mongo::MongoUiState,
@@ -318,7 +342,7 @@ pub struct AppRoot {
     transactions: transaction::TransactionUi,
     /// SSH tunnels of the live connections, the secrets they were opened with and the dialogs
     /// that ask for host-key trust, passwords and one-time codes.
-    tunnel_ui: tunnel_ui::TunnelUi,
+    tunnel_ui: sidebar_watch::Watched<tunnel_ui::TunnelUi>,
     /// Loaded driver handles keyed by driver id ("mongodb"), shared across
     /// sessions that use the same driver kind.
     driver_ui: drivers::DriverManagerUi,
@@ -327,11 +351,12 @@ pub struct AppRoot {
     shell: shell::ShellState,
     /// Error Log model, persistence queue and pane state.
     error_log: error_log_view::ErrorLogUi,
+    history: history::HistoryUi,
     /// Command palette (Cmd+K / Cmd+P): list entity, recents, catalog cache.
     palette: command_palette::PaletteState,
     /// The applied settings: a cheap snapshot, replaced whole by
     /// `apply_settings` (see `settings`).
-    settings: Arc<crate::settings::Settings>,
+    settings: sidebar_watch::Watched<Arc<crate::settings::Settings>>,
     /// Values the grid renderer reads, derived from `settings`.
     grid_display: settings_state::GridDisplay,
     settings_ui: settings_state::SettingsUi,
@@ -342,6 +367,9 @@ pub struct AppRoot {
     /// The local socket `tablex-mcp` shows things through (see `app_channel`).
     #[cfg_attr(all(test, not(unix)), allow(dead_code))]
     app_channel: app_channel::ChannelUi,
+    /// The questions of MCP clients that cannot ask through MCP, put to the user in a dialog
+    /// (see `approval_dialog`).
+    approvals: approval_dialog::ApprovalQueue,
 }
 
 struct ColumnResizeGhost;
@@ -418,10 +446,15 @@ impl AppRoot {
         } else {
             // "Don't save passwords" makes every connection ask: known before the records are read.
             key_home_ui::apply_saved_choice();
-            let records = crate::connections::try_load_saved_records().unwrap_or_else(|error| {
+            #[cfg_attr(test, allow(unused_mut))]
+            let mut records = crate::connections::try_load_saved_records().unwrap_or_else(|error| {
                 connection_load_error = Some(format!("Could not read the saved connections: {error}"));
                 Vec::new()
             });
+            // The Files connection of the last run lost its views with it. Tests share one store
+            // between apps that run side by side: they never remove another's.
+            #[cfg(not(test))]
+            data_files::forget_stale_record(&mut records);
             (
                 records.iter().map(SavedConnection::from_record).collect(),
                 connection_policy::ConnectionPolicy::from_records(&records),
@@ -432,6 +465,7 @@ impl AppRoot {
         navigator.set_database_scopes(connection_policy.database_scopes(&saved_connections));
         let mut sidebar = sidebar::SidebarState::new(scenario_enabled, &mut navigator, cx);
         // An empty list that is an error says so (it is reported at start, with the other problems).
+        let connections_unreadable = connection_load_error.is_some();
         if let Some(error) = connection_load_error {
             sidebar.error.get_or_insert(error);
         }
@@ -475,6 +509,7 @@ impl AppRoot {
             tunnel_ui.agent.clone(),
             scenario_enabled || cfg!(test),
         );
+        let sidebar_epoch = sidebar_watch::SidebarEpoch::default();
         let mut app = Self {
             tab_views: HashMap::new(),
             pane_views: HashMap::new(),
@@ -501,7 +536,7 @@ impl AppRoot {
             #[cfg(test)]
             accounts_injected: None,
             compare_tabs: HashMap::new(),
-            table_stats: Default::default(),
+            table_stats: sidebar_epoch.watch(Default::default()),
             #[cfg(test)]
             table_stats_injected: None,
             process_lists: HashMap::new(),
@@ -515,7 +550,7 @@ impl AppRoot {
             import_create: None,
             transfers: Default::default(),
             transfer_create: Default::default(),
-            navigator,
+            navigator: sidebar_epoch.watch(navigator),
             sessions: ConnectionSessions::default(),
             connection_ui,
             filter_enumeration: connection_menu::FilterEnumerationState::default(),
@@ -537,14 +572,24 @@ impl AppRoot {
             import_selection: None,
             visible_filter_dialog: None,
             visible_filter_schema_select: None,
-            navigator_ui: navigator_ui::NavigatorUiState::default(),
-            sidebar,
-            saved_connections,
+            navigator_ui: sidebar_epoch.watch(navigator_ui::NavigatorUiState::default()),
+            sidebar_epoch: sidebar_epoch.clone(),
+            sidebar_view: {
+                let root = cx.weak_entity();
+                cx.new(|_| navigator_ui::SidebarView { root })
+            },
+            sidebar_seen: (0, 0),
+            sidebar_drawn: (0, 0),
+            sidebar: sidebar_epoch.watch(sidebar),
+            search_field: None,
+            saved_connections: sidebar_epoch.watch(saved_connections),
+            data_files: Default::default(),
             welcome,
-            connection_policy,
+            connection_policy: sidebar_epoch.watch(connection_policy),
             query_editors: workspace::WorkspaceEditors::default(),
             completion_foreign_keys: completion::ForeignKeyCache::default(),
             table_folder_describes: navigator_ui::FolderDescribes::default(),
+            schema_columns: schema_columns::SchemaColumnsCache::default(),
             completion_loads: completion::CompletionLoads::default(),
             format_ui: sql_editor::FormatUi::default(),
             mongo_ui: results::mongo::MongoUiState::default(),
@@ -566,21 +611,23 @@ impl AppRoot {
             driver_runtime: drivers::DriverRuntime::default(),
             recovery: recovery::Recovery::default(),
             transactions: transaction::TransactionUi::default(),
-            tunnel_ui,
+            tunnel_ui: sidebar_epoch.watch(tunnel_ui),
             // The installed set is read off the UI thread (`start_driver_startup`).
             driver_ui: drivers::DriverManagerUi::new(driver_store),
             scenario_ui: scenario::ScenarioUiState::new(ui_scenario),
             shell: shell::ShellState::default(),
             error_log: error_log_view::ErrorLogUi::new(cx),
+            history: history::HistoryUi::default(),
             palette: Default::default(),
-            settings: Arc::new(crate::settings::Settings::default()),
+            settings: sidebar_epoch.watch(Arc::new(crate::settings::Settings::default())),
             grid_display: settings_state::GridDisplay::from_settings(
                 &crate::settings::Settings::default(),
             ),
-            settings_ui: settings_state::SettingsUi::new(settings_path),
+            settings_ui: settings_state::SettingsUi::new(settings_path, connections_unreadable),
             assistant,
             update_ui: updates::UpdateUi::new(scenario_enabled || cfg!(test)),
             app_channel: Default::default(),
+            approvals: Default::default(),
         };
         // Every tab's cached results view is stale after a plain notification
         // of the root unless it was announced as chrome-only.
@@ -718,6 +765,22 @@ impl AppRoot {
             }
             _ => {}
         }
+        // Capture-only `TABLEX_SEED_ACCESS_NOTICE=1`: what the schema 7 migration leaves (the default
+        // is Read and write, the notice flag is set), with the Postgres fixture a Production type.
+        #[cfg(feature = "ui-scenarios")]
+        if scenario_enabled && std::env::var("TABLEX_SEED_ACCESS_NOTICE").as_deref() == Ok("1") {
+            let mut settings = (**app.settings).clone();
+            settings.ai.agent_access = engine_connect::profile::AgentLevel::ReadWrite;
+            settings.ai.access_notice_pending = true;
+            *app.settings = Arc::new(settings);
+            app.connection_policy.set_profile(
+                crate::ui_fixture::POSTGRES_ID,
+                engine_connect::profile::ConnectionProfile {
+                    type_id: engine_connect::profile::PRODUCTION.into(),
+                    ..Default::default()
+                },
+            );
+        }
         if matches!(
             scenario.as_ref().map(|scenario| scenario.kind),
             Some(crate::ui_scenario::ScenarioKind::ConnectionTree)
@@ -786,6 +849,7 @@ mod tests {
     include!("tests/grid_find.rs");
     include!("tests/tab_views.rs");
     include!("tests/script_toolbar.rs");
+    include!("tests/searchable_select.rs");
     include!("tests/vim.rs");
     include!("tests/editor_status.rs");
     include!("tests/mongo_shell.rs");
@@ -794,6 +858,7 @@ mod tests {
     include!("tests/connection_overview.rs");
     include!("tests/navigator.rs");
     include!("tests/sidebar.rs");
+    include!("tests/sidebar_view.rs");
     include!("tests/sidebar_pins.rs");
     include!("tests/sidebar_names.rs");
     include!("tests/navigator_status.rs");
@@ -802,6 +867,7 @@ mod tests {
     include!("tests/sidebar_import.rs");
     include!("tests/editing.rs");
     include!("tests/cell_detail.rs");
+    include!("tests/affected_preview.rs");
     include!("tests/binary_view.rs");
     include!("tests/pinned_columns.rs");
     include!("tests/header_sort.rs");
@@ -850,10 +916,14 @@ mod tests {
     include!("tests/sql_driver_edit.rs");
     include!("tests/sql_review_fixes.rs");
     include!("tests/sql_navigator.rs");
+    include!("tests/schema_columns.rs");
     include!("tests/schema_objects.rs");
     include!("tests/clickhouse.rs");
+    include!("tests/duckdb.rs");
+    include!("tests/data_files.rs");
     include!("tests/redis.rs");
     include!("tests/error_log.rs");
+    include!("tests/query_history.rs");
     include!("tests/showcase.rs");
     include!("tests/command_palette.rs");
     include!("tests/settings.rs");
@@ -864,6 +934,7 @@ mod tests {
     include!("tests/updates.rs");
     include!("tests/connection_types.rs");
     include!("tests/app_channel.rs");
+    include!("tests/approval_dialog.rs");
     include!("tests/connection_tls.rs");
     include!("tests/ssh_tunnel.rs");
     include!("tests/session_password.rs");
@@ -904,6 +975,10 @@ mod tests {
         include!("tests/r7_capture.rs");
         include!("tests/r8_capture.rs");
         include!("tests/mongo_document_edit_capture.rs");
+        include!("tests/cell_detail_capture.rs");
+        include!("tests/query_history_capture.rs");
+        include!("tests/affected_preview_capture.rs");
+        include!("tests/approval_dialog_capture.rs");
         include!("tests/agent_access_capture.rs");
         include!("tests/transaction_capture.rs");
     }

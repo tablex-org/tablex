@@ -10,8 +10,9 @@
 //! The server owns the transaction state; the app does not infer it from the SQL. MySQL and
 //! MariaDB sessions of a Manual tab run with `autocommit = 0` ([`session_setup`]), so every
 //! statement is inside a transaction (a DDL statement that commits by itself just starts the next
-//! one). PostgreSQL and SQLite get a `BEGIN` before each statement ([`begin_statement`]) whose
-//! result is ignored: the server says "already in progress" when one is open. All the app keeps
+//! one). PostgreSQL, SQLite and DuckDB get a `BEGIN` before each statement ([`begin_statement`])
+//! whose result is ignored: the server says "already in progress" when one is open (DuckDB's
+//! driver does not run a `BEGIN` inside a transaction, as DuckDB would abort it). All the app keeps
 //! is how many statements were sent since the last Commit /
 //! Rollback and how many of them modify ([`TabTx`]): the toolbar shows them, and only modifying
 //! ones are asked about before a session is closed.
@@ -34,12 +35,21 @@ pub enum CommitMode {
 /// What is sent before each statement of a Manual tab, result ignored. `None`: MySQL and
 /// MariaDB, whose session runs with autocommit off, and the kinds without a manual mode.
 pub fn begin_statement(kind: ConnectionKind) -> Option<&'static str> {
-    matches!(kind, ConnectionKind::Postgres | ConnectionKind::Sqlite).then_some("BEGIN")
+    matches!(kind, ConnectionKind::Postgres | ConnectionKind::Sqlite | ConnectionKind::Duckdb).then_some("BEGIN")
 }
 
 /// What a tab's own session runs once when it opens (MySQL / MariaDB: no autocommit).
 pub fn session_setup(kind: ConnectionKind) -> Option<&'static str> {
     matches!(kind, ConnectionKind::Mysql | ConnectionKind::Mariadb).then_some("SET autocommit = 0")
+}
+
+/// The statement that opens a transaction on `kind`: T-SQL's bare `BEGIN` starts a block.
+pub fn start_transaction_statement(kind: ConnectionKind) -> &'static str {
+    match kind {
+        ConnectionKind::Mysql | ConnectionKind::Mariadb => "START TRANSACTION",
+        ConnectionKind::Mssql => "BEGIN TRANSACTION",
+        _ => "BEGIN",
+    }
 }
 
 /// Why a tab on a `kind` connection cannot be in manual mode; `None` when it can.
@@ -50,14 +60,15 @@ pub fn session_setup(kind: ConnectionKind) -> Option<&'static str> {
 pub fn manual_unavailable(kind: ConnectionKind, read_only: bool, in_memory: bool) -> Option<&'static str> {
     match kind {
         ConnectionKind::Clickhouse => Some("ClickHouse has no transactions."),
+        ConnectionKind::Mssql => Some("SQL Server tabs run each statement on its own; open a transaction in the script with BEGIN TRANSACTION and end it with COMMIT or ROLLBACK."),
         ConnectionKind::Redis => Some("Redis commands run one at a time; there is no commit mode."),
         ConnectionKind::Mongodb => Some("MongoDB tabs do not use SQL transactions."),
         _ if read_only => Some(
             "This connection is read-only: the server refuses BEGIN in a read-only run. \
              Turn read-only off for its connection type to use manual commit.",
         ),
-        ConnectionKind::Sqlite if in_memory => Some(
-            "An in-memory SQLite database exists for one session only, so a tab cannot have a \
+        ConnectionKind::Sqlite | ConnectionKind::Duckdb if in_memory => Some(
+            "An in-memory database exists for one session only, so a tab cannot have a \
              session of its own.",
         ),
         _ => None,
@@ -77,6 +88,15 @@ pub fn database_name(kind: ConnectionKind, uri: &str, name: &str) -> String {
     }
     match kind {
         ConnectionKind::Sqlite => "main".to_owned(),
+        // DuckDB names an attached file after it, without the extension; a database in memory is `memory`.
+        ConnectionKind::Duckdb => {
+            let path = uri.split_once("://").map_or("", |(_, rest)| rest.split('?').next().unwrap_or_default());
+            if path == ":memory:" {
+                "memory".to_owned()
+            } else {
+                std::path::Path::new(path).file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_default()
+            }
+        }
         _ => uri
             .split_once("://")
             .and_then(|(_, rest)| rest.split_once('/'))
@@ -731,6 +751,7 @@ mod tests {
     fn only_postgres_and_sqlite_get_a_begin_and_only_the_mysql_family_turns_autocommit_off() {
         assert_eq!(begin_statement(ConnectionKind::Postgres), Some("BEGIN"));
         assert_eq!(begin_statement(ConnectionKind::Sqlite), Some("BEGIN"));
+        assert_eq!(begin_statement(ConnectionKind::Duckdb), Some("BEGIN"), "DuckDB has manual transactions, and no savepoints");
         for kind in [ConnectionKind::Mysql, ConnectionKind::Mariadb, ConnectionKind::Clickhouse, ConnectionKind::Redis, ConnectionKind::Mongodb] {
             assert_eq!(begin_statement(kind), None, "{kind:?}");
         }
@@ -752,6 +773,9 @@ mod tests {
             assert!(manual_unavailable(kind, true, false).is_some_and(|reason| reason.contains("read-only")), "{kind:?}");
         }
         assert!(manual_unavailable(ConnectionKind::Sqlite, false, true).is_some_and(|reason| reason.contains("in-memory")));
+        assert!(manual_unavailable(ConnectionKind::Duckdb, false, true).is_some_and(|reason| reason.contains("in-memory")));
+        assert_eq!(manual_unavailable(ConnectionKind::Duckdb, false, false), None);
+        assert!(manual_unavailable(ConnectionKind::Duckdb, true, false).is_some_and(|reason| reason.contains("read-only")));
         assert_eq!(manual_unavailable(ConnectionKind::Postgres, false, true), None, "only SQLite is in memory");
     }
 
@@ -807,6 +831,12 @@ mod tests {
         assert!(same_database(pg, uri, "", "shop") && same_database(pg, uri, "shop", ""));
         assert!(!same_database(pg, uri, "", "other"));
         assert!(same_database(pg, "postgres://host", "", ""));
+        // DuckDB names an attached file after it (no extension); a memory database is `memory`.
+        let duck = ConnectionKind::Duckdb;
+        assert!(same_database(duck, "duckdb:///data/shop.duckdb", "", "shop"));
+        assert!(same_database(duck, "duckdb:///data/shop.duckdb?mode=ro", "shop", ""));
+        assert!(!same_database(duck, "duckdb:///data/shop.duckdb", "", "other"));
+        assert!(same_database(duck, "duckdb://:memory:", "", "memory"));
         assert!(same_database(ConnectionKind::Sqlite, "sqlite:///a.db", "", "main"));
         assert!(!same_database(ConnectionKind::Sqlite, "sqlite:///a.db", "", "temp"));
         assert!(mentions_autocommit("set @@AutoCommit = 0") && !mentions_autocommit("SELECT 1"));

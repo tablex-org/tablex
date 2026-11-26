@@ -34,8 +34,10 @@ use std::path::{Path, PathBuf};
 const VERSIONS: &[&str] = &["v0.1.10", "v0.1.11"];
 
 /// `(version, json path)` of values a later migration rewrites on purpose (a settings migration, say):
-/// the survival checks skip them. Nothing is listed while no migration touches a released value.
-const MIGRATED: &[(&str, &str)] = &[];
+/// the survival checks skip them. Settings migration 7 moves `schema_version` of every release that wrote
+/// 6; `ai.mcp_writes` (also rewritten by migration 7, false to true) is `true` in all of these fixtures, so
+/// it needs no entry here.
+const MIGRATED: &[(&str, &str)] = &[("v0.1.9", "schema_version"), ("v0.1.10", "schema_version"), ("v0.1.11", "schema_version")];
 
 /// The connections of the fixtures as the app names them (lowercase); the same ones as in
 /// `engine-connect/tests/upgrade_compat.rs`, which holds their records.
@@ -154,6 +156,8 @@ fn populated_settings() -> Settings {
     settings.ai.keep_conversations = false;
     settings.ai.mcp_writes = true;
     settings.ai.agent_access = engine_connect::profile::AgentLevel::Read;
+    settings.ai.mcp_tools = Some(json!(["list_connections", "list_tables", "execute_query"]));
+    settings.ai.mcp_databases = Some(json!({"Orders DB": ["shop", "reports"], SHOP: ["analytics"]}));
     settings.connection_types.push(engine_connect::profile::ConnectionType {
         id: "staging".into(),
         name: "Staging".into(),
@@ -394,7 +398,7 @@ fn generate_fixture_set() {
 
     // `<config dir>/TableX`; its own folder here (on macOS it is the data dir under another case).
     let config = out.join("config").join("TableX");
-    super::results::copy::write_copy_default(&config.join("grid-copy-default.json"), super::results::copy::CopyFormat::SqlInsert).unwrap();
+    super::results::copy::write_old_copy_default(&config.join("grid-copy-default.json"), super::results::copy::CopyFormat::SqlInsert).unwrap();
     super::results::snowflake::SnowflakeStore::configure_worker(&config.join("snowflake"), 17).unwrap();
 
     // One file: fold the write-ahead log in so no `-wal` / `-shm` is left beside it.
@@ -501,7 +505,9 @@ fn settings_of_every_release_load_with_every_value_and_survive_a_save() {
         // `tablex-mcp` reads the same file through `engine-connect`.
         let profile = engine_connect::profile::ProfileSettings::load(&path).unwrap();
         assert_eq!(profile.connection_types, loaded.settings.connection_types, "{version}");
-        assert_eq!(engine_connect::profile::read_mcp_writes(&path).unwrap(), loaded.settings.ai.mcp_writes, "{version}");
+        // Old files (schema below 7) carry the switch, and these fixtures have it on.
+        assert_eq!(engine_connect::profile::read_mcp_writes(&path).unwrap(), engine_connect::profile::McpWrites::Allowed, "{version}");
+        assert!(loaded.settings.ai.mcp_writes && !loaded.settings.ai.access_notice_pending, "{version}");
     }
 }
 
@@ -733,6 +739,27 @@ fn the_pinned_rows_of_every_release_find_their_rows_again() {
     }
 }
 
+/// The query history of every release is read by the manager: each old row is a run that worked, shown
+/// with what it has (no duration, no error made up), and the kind comes from its statement.
+#[test]
+fn the_query_history_of_every_release_reads_as_rows_of_the_manager() {
+    for version in VERSIONS {
+        let dir = copy_of(version);
+        let db = dir.path().join("tablex").join(engine_storage::app_db::FILE_NAME);
+        let conn = engine_storage::app_db::open(&db).unwrap();
+        let rows = engine_storage::history::search_in(&conn, &engine_storage::history::HistoryFilter::default(), None, 1000).unwrap();
+        assert!(!rows.is_empty(), "{version}");
+        let names = HashMap::new();
+        for entry in rows {
+            let view = super::history::row_view_for_test(entry.clone(), &names);
+            assert!(!view.line.is_empty() && !view.time.is_empty(), "{version}: {entry:?}");
+            assert!(!view.failed, "{version}: an old row is a run that worked");
+            assert_eq!(view.duration, "", "{version}: no duration is made up");
+            assert_eq!(view.result.is_empty(), entry.result_count == 0 && entry.status.is_none(), "{version}");
+        }
+    }
+}
+
 // ---- files beside the database ------------------------------------------------------------------------------
 
 #[test]
@@ -765,7 +792,7 @@ fn saved_scripts_the_error_log_and_the_small_files_of_every_release_are_read() {
         assert_eq!(log.load_recent(100).len(), expected.len() + 1);
 
         let config = dir.path().join("config").join("TableX");
-        assert_eq!(super::results::copy::read_copy_default(&config.join("grid-copy-default.json")), super::results::copy::CopyFormat::SqlInsert, "{version}");
+        assert_eq!(super::results::copy::read_old_copy_default(&config.join("grid-copy-default.json")), Some(super::results::copy::CopyFormat::SqlInsert), "{version}");
         let worker = config.join("snowflake");
         // The worker file is private to its owner; git keeps no modes.
         #[cfg(unix)]
@@ -817,4 +844,148 @@ fn the_persisted_forms_of_the_features_of_this_release_are_pinned() {
     assert_eq!(crate::settings::store::FILE_NAME, "settings.json");
     assert_eq!(engine_storage::app_db::FILE_NAME, "tablex.db");
     assert_eq!(gpui_session::SESSION_VERSION, 1);
+}
+
+/// `ai.mcp_tools` and `ai.mcp_databases` are written by hand and read by `tablex-mcp` from the same
+/// file the app saves: the app keeps them as they are (a value it does not understand included, which
+/// the MCP server reads as "nothing allowed"), writes nothing for a file that has none, and the MCP
+/// server reads them the same after a save.
+#[test]
+fn the_mcp_tool_and_database_limits_survive_the_app_saving_the_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    let legacy = store::Legacy::default();
+    let cases = [
+        json!({"mcp_tools": ["list_tables", "execute_query"], "mcp_databases": {"Orders DB": ["shop", "reports"]}}),
+        json!({"mcp_tools": [], "mcp_databases": {}}),
+        // Not what the docs say: kept, and the MCP server fails closed on it.
+        json!({"mcp_tools": "list_tables", "mcp_databases": ["shop"]}),
+    ];
+    for ai in cases {
+        let file = json!({"schema_version": crate::settings::SCHEMA_VERSION, "ai": ai});
+        std::fs::write(&path, serde_json::to_string_pretty(&file).unwrap()).unwrap();
+        let loaded = store::load(&path, &legacy);
+        assert_eq!(loaded.settings.ai.mcp_tools.as_ref(), Some(&ai["mcp_tools"]), "{ai}");
+        assert_eq!(loaded.settings.ai.mcp_databases.as_ref(), Some(&ai["mcp_databases"]), "{ai}");
+        let before = engine_connect::profile::read_mcp_tools(Some(&path));
+        store::save(&path, &loaded.settings).unwrap();
+        let written = read_json(&path);
+        assert_eq!(written["ai"]["mcp_tools"], ai["mcp_tools"], "{ai}");
+        assert_eq!(written["ai"]["mcp_databases"], ai["mcp_databases"], "{ai}");
+        assert_eq!(engine_connect::profile::read_mcp_tools(Some(&path)), before, "{ai}");
+        let again = store::load(&path, &legacy);
+        assert_eq!((again.notice, again.needs_save), (None, false), "{ai}");
+        assert_eq!(again.settings, loaded.settings, "{ai}");
+    }
+    // A file with neither: none is written, so the MCP server keeps offering every tool.
+    std::fs::write(&path, json!({"schema_version": crate::settings::SCHEMA_VERSION, "ai": {}}).to_string()).unwrap();
+    let loaded = store::load(&path, &legacy);
+    assert_eq!((loaded.settings.ai.mcp_tools.as_ref(), loaded.settings.ai.mcp_databases.as_ref()), (None, None));
+    store::save(&path, &loaded.settings).unwrap();
+    let written = read_json(&path);
+    assert!(written["ai"].get("mcp_tools").is_none() && written["ai"].get("mcp_databases").is_none(), "{written}");
+    assert_eq!(engine_connect::profile::read_mcp_tools(Some(&path)), None);
+}
+
+// ---- v0.1.9: the files of the release before the rename to tablex --------------------------------------------
+
+/// The fixture set of v0.1.9 holds what that release's own binary wrote: `settings.json` (every value
+/// of it away from its default, read and written back by the v0.1.9 build), the sidebar preferences
+/// and the app database with the session of a user who had two tabs. It has no connections, so it is
+/// not in `VERSIONS` (the other test files expect rows in the database). A user who "lost some
+/// settings on update" can be checked against this one: every value must come out as it went in, and
+/// everything the later releases added must read as its default.
+#[test]
+fn the_files_of_v0_1_9_load_with_every_value_and_the_settings_added_since_read_as_defaults() {
+    let version = "v0.1.9";
+    let dir = copy_of(version);
+    let tablex = dir.path().join("tablex");
+
+    // settings.json
+    let path = tablex.join("settings.json");
+    let original = std::fs::read(&path).unwrap();
+    let old = read_json(&path);
+    assert_eq!(old["schema_version"], 6, "the fixture is a file of v0.1.9");
+    assert!(lookup(&old, "appearance.error_log_place").is_none(), "added in 0.1.10, not in the file");
+    let legacy = store::Legacy::read(Some(&tablex.join("sidebar-preferences.json")));
+    let loaded = store::load(&path, &legacy);
+    assert_eq!(loaded.notice, None, "no notice: the file is read as it is");
+    assert_eq!(loaded.needs_save, old["schema_version"].as_u64().unwrap() < u64::from(crate::settings::SCHEMA_VERSION));
+    assert_eq!(std::fs::read(&path).unwrap(), original, "loading does not write");
+    assert!(!tablex.join("settings.json.corrupt").exists());
+
+    // Every value of the file is read, and still in the file after a save.
+    let new: Value = serde_json::from_slice(&store::encode(&loaded.settings).unwrap()).unwrap();
+    assert_survives(version, "settings.json", &old, &new);
+    let default_json = serde_json::to_value(Settings::default()).unwrap();
+    let mut added_since = Vec::new();
+    for descriptor in registry::registry().iter().filter(|descriptor| descriptor.section != registry::Section::Ai) {
+        let mut changed = Settings::default();
+        descriptor.set(&mut changed, other_value(descriptor)).unwrap();
+        let mut places = Vec::new();
+        changed_places("", &default_json, &serde_json::to_value(&changed).unwrap(), &mut places);
+        let value = descriptor.get(&loaded.settings);
+        if places.iter().all(|place| lookup(&old, place).is_none()) {
+            assert_eq!(value, descriptor.default, "{}: not in the file of {version}: its default", descriptor.id);
+            added_since.push(descriptor.id);
+        } else if descriptor.id != "appearance.show_fps" {
+            // (`show_fps` defaults to on in a debug build, which runs these tests.)
+            assert_ne!(value, descriptor.default, "{}: the value of the file was read as the default", descriptor.id);
+        }
+    }
+    // Exactly what 0.1.10 and 0.1.11 added is absent from the file: a setting that is in the file and
+    // listed here, or one that is added later and not listed, is a change to look at.
+    assert_eq!(
+        added_since,
+        [
+            "appearance.error_log_place",
+            "editor.preview_affected_rows",
+            "editor.vim_default_mode",
+            "editor.vim_clipboard",
+            "editor.vim_escape_sequence",
+            "editor.vim_escape_timeout",
+            "editor.vim_highlight_yank",
+            "editor.vim_ctrl_keys",
+            "editor.vim_ignore_case",
+            "editor.vim_smart_case",
+            "query.history_record",
+            "query.history_keep_days",
+            "navigation.connection_double_click",
+            "navigation.expand_on_connect",
+            "navigation.group_by_driver",
+            "navigation.restore_tree_state",
+            "navigation.show_table_stats",
+        ]
+    );
+    let settings = &loaded.settings;
+    assert_eq!(settings.ai.provider, AiProvider::OpenAiCompatible);
+    assert_eq!(settings.ai.providers.openai_compatible, ProviderEntry { model: "llm-example".into(), base_url: "https://llm.example.com/v1".into() });
+    assert!(settings.ai.mcp_writes, "the hidden MCP key stays true (migration 7 only runs on a file older than 7)");
+    assert_eq!(settings.ai.agent_access, engine_connect::profile::AgentLevel::Read);
+    assert_eq!(settings.editor.run_scope, crate::settings::RunScope::All, "migration 6 only runs on a file older than 6");
+    assert_eq!(settings.connection_types.last().map(|ty| ty.id.as_str()), Some("staging"));
+    assert_eq!(settings.shortcuts["workspace.close_tab"], ["secondary-shift-w"]);
+    store::save(&path, settings).unwrap();
+    let again = store::load(&path, &legacy);
+    assert_eq!((again.notice, again.needs_save), (None, false));
+    assert_eq!(&again.settings, settings, "save then load");
+
+    // sidebar-preferences.json
+    let path = tablex.join("sidebar-preferences.json");
+    let old = read_json(&path);
+    let prefs = SidebarPreferences::load(&path).unwrap();
+    assert_ne!(prefs, SidebarPreferences::default());
+    assert_survives(version, "sidebar-preferences.json", &old, &serde_json::to_value(&prefs).unwrap());
+    assert_eq!((prefs.sort, prefs.sidebar_width, prefs.assistant_open, prefs.assistant_width), (ConnectionSort::Descending, Some(312.5), true, Some(404.0)));
+    assert!(prefs.folder_filters.is_empty() && prefs.bookmarks.is_empty(), "added in 0.1.11");
+
+    // The session in the app database (0.1.9 moved gpui-workspace-session.json in).
+    let db = tablex.join(engine_storage::app_db::FILE_NAME);
+    let stored = documents::get(&db, documents::SESSION, documents::SESSION_NAME).unwrap().expect("a session");
+    let LoadOutcome::Loaded(session) = gpui_session::load(&db) else { panic!("the session did not load") };
+    assert_survives(version, "session", &serde_json::from_str(&stored).unwrap(), &serde_json::to_value(&session).unwrap());
+    assert_eq!(session.tabs.iter().map(|tab| tab.title.as_str()).collect::<Vec<_>>(), ["scratch notes", "second"]);
+    assert!(session.tabs[0].is_pinned && session.tabs[0].sql == "select 1 as keepme;" && session.tabs[0].output_limit == 77);
+    assert_eq!(session.active, Some(1));
+    assert!(session.tree.is_empty(), "added in 0.1.11");
 }

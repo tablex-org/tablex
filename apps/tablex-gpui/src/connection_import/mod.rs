@@ -162,6 +162,8 @@ pub fn kind_label(kind: ConnectionKind) -> &'static str {
         ConnectionKind::Mariadb => "MariaDB",
         ConnectionKind::Redis => "Redis",
         ConnectionKind::Clickhouse => "ClickHouse",
+        ConnectionKind::Duckdb => "DuckDB",
+        ConnectionKind::Mssql => "SQL Server",
     }
 }
 
@@ -303,6 +305,8 @@ pub struct ImportedConnection {
     pub password: Option<Secret>,
     /// The connection asks for TLS/SSL.
     pub tls: bool,
+    /// The source says to accept the server certificate without checking it (JDBC `trustServerCertificate=true`).
+    pub trust_certificate: bool,
     /// A multi-host / SRV MongoDB URI (no password) that the host/port
     /// fields cannot express.
     pub uri: Option<String>,
@@ -324,6 +328,7 @@ impl ImportedConnection {
             username: String::new(),
             password: None,
             tls: false,
+            trust_certificate: false,
             uri: None,
             ssh: None,
             proxy: None,
@@ -476,7 +481,7 @@ impl ImportedConnection {
             .map(|secret| secret.expose().to_string())
             .unwrap_or_default();
         match (&self.uri, kind) {
-            (_, ConnectionKind::Sqlite) => form.file_path = self.host.clone(),
+            (_, ConnectionKind::Sqlite | ConnectionKind::Duckdb) => form.file_path = self.host.clone(),
             (Some(uri), _) => {
                 form.use_uri = true;
                 form.uri = uri.clone();
@@ -499,7 +504,10 @@ impl ImportedConnection {
                             form.uri_options = "ssl-mode=REQUIRED".into()
                         }
                         ConnectionKind::Clickhouse | ConnectionKind::Redis => form.secure = true,
-                        ConnectionKind::Sqlite => {}
+                        ConnectionKind::Mssql => {
+                            form.uri_options = if self.trust_certificate { "encrypt=true&trustServerCertificate=true" } else { "encrypt=true" }.into()
+                        }
+                        ConnectionKind::Sqlite | ConnectionKind::Duckdb => {}
                     }
                 }
             }
@@ -811,9 +819,9 @@ const PRODUCTS: &[Product] = &[
     product("mongodb", "MongoDB", Some(ConnectionKind::Mongodb)),
     exact("mongo", "MongoDB", Some(ConnectionKind::Mongodb)),
     product("redis", "Redis", Some(ConnectionKind::Redis)),
-    product("sqlserver", "SQL Server", None),
-    product("mssql", "SQL Server", None),
-    product("jtds", "SQL Server", None),
+    product("sqlserver", "SQL Server", Some(ConnectionKind::Mssql)),
+    product("mssql", "SQL Server", Some(ConnectionKind::Mssql)),
+    product("jtds", "SQL Server", Some(ConnectionKind::Mssql)),
     product("oracle", "Oracle", None),
     product("duckdb", "DuckDB", None),
     product("snowflake", "Snowflake", None),

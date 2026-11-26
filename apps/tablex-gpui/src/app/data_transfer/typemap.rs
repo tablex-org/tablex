@@ -83,6 +83,38 @@ pub(in crate::app) fn family_of(kind: ConnectionKind, data_type: &str) -> Family
             _ => {}
         }
     }
+    if kind == ConnectionKind::Duckdb {
+        // DuckDB's unsigned integers have a leading `u`, its 128-bit ones are `hugeint`, its `float` has
+        // four bytes, and its timestamps of a coarser or finer unit have a suffix.
+        match first {
+            "utinyint" => return integer(8, true),
+            "usmallint" => return integer(16, true),
+            "uinteger" => return integer(32, true),
+            "ubigint" => return integer(64, true),
+            "hugeint" => return integer(128, false),
+            "uhugeint" => return integer(128, true),
+            "float" => return Family::Float { double: false },
+            "timestamp_s" | "timestamp_ms" | "timestamp_ns" => return Family::Timestamp { zoned: false },
+            _ => {}
+        }
+    }
+    if kind == ConnectionKind::Mssql {
+        // SQL Server: `tinyint` is unsigned, `bit` a flag, money a decimal of scale 4, `datetimeoffset` carries a zone, `timestamp` is
+        // a row version (bytes), and `(max)` has no number in it.
+        match first {
+            "tinyint" => return integer(8, true),
+            "bit" => return Family::Boolean,
+            "money" => return Family::Decimal { precision: Some(19), scale: Some(4) },
+            "smallmoney" => return Family::Decimal { precision: Some(10), scale: Some(4) },
+            "datetimeoffset" => return Family::Timestamp { zoned: true },
+            "uniqueidentifier" => return Family::Uuid,
+            "timestamp" | "rowversion" | "image" | "varbinary" | "binary" => return Family::Binary,
+            "ntext" | "xml" | "sql_variant" => return Family::Text { length: None, fixed: false },
+            "float" if numbers.is_empty() || precision.is_some_and(|bits| bits > 24) => return Family::Float { double: true },
+            "float" => return Family::Float { double: false },
+            _ => {}
+        }
+    }
     match first {
         "tinyint" if numbers == [1] && matches!(kind, ConnectionKind::Mysql | ConnectionKind::Mariadb) => Family::Boolean,
         "bool" | "boolean" => Family::Boolean,
@@ -158,7 +190,7 @@ fn read(kind: ConnectionKind, data_type: &str) -> Family {
 
 /// `family` in the words of the server `kind`.
 pub(in crate::app) fn render(family: Family, kind: ConnectionKind) -> String {
-    use ConnectionKind::{Clickhouse, Mariadb, Mysql, Postgres, Sqlite};
+    use ConnectionKind::{Clickhouse, Duckdb, Mariadb, Mssql, Mysql, Postgres, Sqlite};
     match (kind, family) {
         // An integer past 64 bits and a decimal past 15 digits would be rounded by SQLite's NUMERIC (a double): text keeps them.
         (Sqlite, Family::Integer { bits, unsigned: true }) if bits >= 64 => "TEXT".into(),
@@ -246,6 +278,52 @@ pub(in crate::app) fn render(family: Family, kind: ConnectionKind) -> String {
         (Clickhouse, Family::Uuid) => "UUID".into(),
         (Clickhouse, _) => "String".into(),
 
+        // DuckDB takes no length on text, and a type past its own widths (a decimal of more than 38 digits, an integer past
+        // 128 bits) is kept as text. JSON is an extension there: text travels.
+        (Duckdb, Family::Integer { bits: 8, unsigned }) => if unsigned { "UTINYINT" } else { "TINYINT" }.into(),
+        (Duckdb, Family::Integer { bits: 16, unsigned }) => if unsigned { "USMALLINT" } else { "SMALLINT" }.into(),
+        (Duckdb, Family::Integer { bits: 24 | 32, unsigned }) => if unsigned { "UINTEGER" } else { "INTEGER" }.into(),
+        (Duckdb, Family::Integer { bits: 64, unsigned }) => if unsigned { "UBIGINT" } else { "BIGINT" }.into(),
+        (Duckdb, Family::Integer { bits: 128, unsigned }) => if unsigned { "UHUGEINT" } else { "HUGEINT" }.into(),
+        (Duckdb, Family::Integer { .. }) => "VARCHAR".into(),
+        (Duckdb, Family::Decimal { precision: Some(precision), scale }) if precision <= 38 => format!("DECIMAL({precision},{})", scale.unwrap_or(0).min(precision)),
+        (Duckdb, Family::Decimal { precision: None, .. }) => "DECIMAL(38,10)".into(),
+        (Duckdb, Family::Decimal { .. }) => "VARCHAR".into(),
+        (Duckdb, Family::Float { double: false }) => "FLOAT".into(),
+        (Duckdb, Family::Float { double: true }) => "DOUBLE".into(),
+        (Duckdb, Family::Boolean) => "BOOLEAN".into(),
+        (Duckdb, Family::Date) => "DATE".into(),
+        (Duckdb, Family::Time) => "TIME".into(),
+        (Duckdb, Family::Timestamp { zoned: true }) => "TIMESTAMPTZ".into(),
+        (Duckdb, Family::Timestamp { zoned: false }) => "TIMESTAMP".into(),
+        (Duckdb, Family::Binary) => "BLOB".into(),
+        (Duckdb, Family::Uuid) => "UUID".into(),
+        (Duckdb, _) => "VARCHAR".into(),
+        (Mssql, Family::Integer { bits: 8, unsigned: true }) => "tinyint".into(),
+        (Mssql, Family::Integer { bits: 8 | 16, .. }) | (Mssql, Family::Integer { bits: 24, unsigned: true }) => "smallint".into(),
+        (Mssql, Family::Integer { bits: 24, .. }) | (Mssql, Family::Integer { bits: 32, unsigned: false }) => "int".into(),
+        (Mssql, Family::Integer { bits: 32, unsigned: true }) | (Mssql, Family::Integer { bits: 64, unsigned: false }) => "bigint".into(),
+        (Mssql, Family::Integer { bits: 64, unsigned: true }) => "decimal(20,0)".into(),
+        (Mssql, Family::Integer { .. }) => "decimal(38,0)".into(),
+        // At most 38 digits; a decimal without precision gets the widest that keeps 18 decimals.
+        (Mssql, Family::Decimal { precision: Some(precision), scale }) => {
+            let (precision, scale) = (precision.clamp(1, 38), scale.unwrap_or(0));
+            format!("decimal({precision},{})", scale.min(precision))
+        }
+        (Mssql, Family::Decimal { .. }) => "decimal(38,18)".into(),
+        (Mssql, Family::Float { double: false }) => "real".into(),
+        (Mssql, Family::Float { double: true }) => "float".into(),
+        (Mssql, Family::Boolean) => "bit".into(),
+        (Mssql, Family::Date) => "date".into(),
+        (Mssql, Family::Time) => "time(7)".into(),
+        (Mssql, Family::Timestamp { zoned: true }) => "datetimeoffset(6)".into(),
+        (Mssql, Family::Timestamp { zoned: false }) => "datetime2(6)".into(),
+        (Mssql, Family::Text { length: Some(length), fixed: true }) if length <= 4_000 => format!("nchar({length})"),
+        (Mssql, Family::Text { length: Some(length), .. }) if length <= 4_000 => format!("nvarchar({length})"),
+        (Mssql, Family::Text { .. } | Family::Json | Family::Other) => "nvarchar(max)".into(),
+        (Mssql, Family::Binary) => "varbinary(max)".into(),
+        (Mssql, Family::Uuid) => "uniqueidentifier".into(),
+
         // Not SQL kinds: no table is created there.
         (_, _) => "text".into(),
     }
@@ -275,7 +353,7 @@ pub(in crate::app) fn map_type(from: ConnectionKind, data_type: &str, to: Connec
 
 /// [`map_type`], with a note where the new type cannot hold everything the old one could.
 pub(in crate::app) fn map_type_noted(from: ConnectionKind, data_type: &str, to: ConnectionKind, labels: Labels) -> Mapped {
-    use ConnectionKind::{Clickhouse, Mariadb, Mysql, Postgres};
+    use ConnectionKind::{Clickhouse, Duckdb, Mariadb, Mysql, Postgres};
     // A result column of a query is labelled by the driver with a bare type (`varchar`, `char`, `decimal`, `enum`, `datetime`): as
     // written it would make another column (CHAR(1), DECIMAL(10,0), a DATETIME with no fraction, an ENUM with no values, or an
     // error). What the label cannot say is taken from the family, which holds every value. A catalog says the size where it has
@@ -303,6 +381,8 @@ pub(in crate::app) fn map_type_noted(from: ConnectionKind, data_type: &str, to: 
         (_, Clickhouse, Family::Date | Family::Timestamp { .. }) => Some("A date or time before 1900 cannot be held (ClickHouse Date32 and DateTime64)."),
         (_, Mysql | Mariadb, Family::Timestamp { zoned: true }) => Some("The instant is stored as its UTC time of day."),
         (_, Mysql | Mariadb, Family::Text { length: Some(length), .. }) if length > 1_000 => Some("Long text is a TEXT column: the row limit of MySQL is 65,535 bytes."),
+        (_, Duckdb, Family::Decimal { precision: None, .. }) => Some("No precision: DECIMAL(38,10) keeps 10 decimals, the rest is rounded. Use VARCHAR to keep every digit."),
+        (_, Duckdb, Family::Decimal { precision: Some(precision), .. }) if precision > 38 => Some("DuckDB holds 38 digits: a larger decimal is kept as text."),
         _ => None,
     };
     Mapped { data_type: render(family, to), note }
@@ -311,7 +391,62 @@ pub(in crate::app) fn map_type_noted(from: ConnectionKind, data_type: &str, to: 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ConnectionKind::{Clickhouse, Mariadb, Mysql, Postgres, Sqlite};
+    use ConnectionKind::{Clickhouse, Duckdb, Mariadb, Mysql, Postgres, Sqlite};
+
+    #[test]
+    fn duckdb_types_map_through_the_families_both_ways() {
+        // Into DuckDB: its own widths, and text where it has no type.
+        for (from, data_type, expected) in [
+            (Postgres, "bigint", "BIGINT"),
+            (Postgres, "smallint", "SMALLINT"),
+            (Postgres, "numeric(12,2)", "DECIMAL(12,2)"),
+            (Postgres, "numeric(50,2)", "VARCHAR"),
+            (Postgres, "numeric", "DECIMAL(38,10)"),
+            (Postgres, "double precision", "DOUBLE"),
+            (Postgres, "real", "FLOAT"),
+            (Postgres, "timestamptz", "TIMESTAMPTZ"),
+            (Postgres, "timestamp without time zone", "TIMESTAMP"),
+            (Postgres, "varchar(40)", "VARCHAR"),
+            (Postgres, "bytea", "BLOB"),
+            (Postgres, "jsonb", "VARCHAR"),
+            (Postgres, "uuid", "UUID"),
+            (Postgres, "integer[]", "VARCHAR"),
+            (Mysql, "bigint unsigned", "UBIGINT"),
+            (Mysql, "tinyint(1)", "BOOLEAN"),
+            (Mysql, "datetime(6)", "TIMESTAMP"),
+            (Mysql, "longtext", "VARCHAR"),
+            (Clickhouse, "UInt128", "UHUGEINT"),
+            (Clickhouse, "Int256", "VARCHAR"),
+            (Sqlite, "INTEGER", "BIGINT"),
+            (Sqlite, "DATETIME", "TIMESTAMP"),
+            (Duckdb, "HUGEINT", "HUGEINT"),
+            (Duckdb, "INTEGER[]", "INTEGER[]"),
+        ] {
+            assert_eq!(mapped(from, data_type, Duckdb), expected, "{from:?} {data_type}");
+        }
+        // Out of DuckDB: its names read as what they are.
+        for (data_type, to, expected) in [
+            ("HUGEINT", Postgres, "numeric(39,0)"),
+            ("UBIGINT", Postgres, "numeric(20,0)"),
+            ("UTINYINT", Postgres, "smallint"),
+            ("FLOAT", Postgres, "real"),
+            ("DOUBLE", Postgres, "double precision"),
+            ("DECIMAL(18,3)", Mysql, "decimal(18,3)"),
+            ("TIMESTAMP WITH TIME ZONE", Postgres, "timestamptz"),
+            ("TIMESTAMP_MS", Postgres, "timestamp"),
+            ("TIMESTAMP", Sqlite, "DATETIME"),
+            ("BLOB", Mysql, "longblob"),
+            ("VARCHAR", Mysql, "longtext"),
+            ("STRUCT(a INTEGER)", Postgres, "text"),
+            ("MAP(VARCHAR, INTEGER)", Mysql, "longtext"),
+            ("INTERVAL", Postgres, "text"),
+            ("BOOLEAN", Sqlite, "BOOLEAN"),
+        ] {
+            assert_eq!(mapped(Duckdb, data_type, to), expected, "{data_type} -> {to:?}");
+        }
+        assert!(map_type_noted(Postgres, "numeric", Duckdb, Labels::Catalog).note.is_some());
+        assert!(map_type_noted(Postgres, "numeric(50,2)", Duckdb, Labels::Catalog).note.is_some());
+    }
 
     fn mapped(from: ConnectionKind, data_type: &str, to: ConnectionKind) -> String {
         map_type(from, data_type, to)
@@ -402,6 +537,53 @@ mod tests {
         assert_eq!(mapped(Postgres, "numeric(5)", Mysql), "decimal(5,0)");
         assert_eq!(mapped(Clickhouse, "Decimal(18, 4)", Postgres), "numeric(18,4)");
         assert_eq!(mapped(Clickhouse, "Decimal64(4)", Postgres), "numeric(18,4)");
+    }
+
+    #[test]
+    fn sql_server_types_map_both_ways() {
+        let mssql = ConnectionKind::Mssql;
+        for (from, to) in [
+            ("tinyint", "smallint"),
+            ("int", "integer"),
+            ("bit", "boolean"),
+            ("money", "numeric(19,4)"),
+            ("smallmoney", "numeric(10,4)"),
+            ("decimal(12,3)", "numeric(12,3)"),
+            ("datetime2(7)", "timestamp"),
+            ("datetimeoffset", "timestamptz"),
+            ("uniqueidentifier", "uuid"),
+            ("nvarchar(50)", "varchar(50)"),
+            ("nvarchar(max)", "text"),
+            ("ntext", "text"),
+            ("varbinary(max)", "bytea"),
+            ("timestamp", "bytea"),
+            ("float", "double precision"),
+            ("real", "real"),
+        ] {
+            assert_eq!(mapped(mssql, from, Postgres), to, "{from}");
+        }
+        for (from, to) in [
+            ("integer", "int"),
+            ("bigint", "bigint"),
+            ("boolean", "bit"),
+            ("numeric(10,2)", "decimal(10,2)"),
+            ("double precision", "float"),
+            ("timestamp", "datetime2(6)"),
+            ("timestamptz", "datetimeoffset(6)"),
+            ("uuid", "uniqueidentifier"),
+            ("varchar(40)", "nvarchar(40)"),
+            ("char(3)", "nchar(3)"),
+            ("text", "nvarchar(max)"),
+            ("bytea", "varbinary(max)"),
+            ("jsonb", "nvarchar(max)"),
+        ] {
+            assert_eq!(mapped(Postgres, from, mssql), to, "{from}");
+        }
+        assert_eq!(mapped(Mysql, "tinyint unsigned", mssql), "tinyint");
+        assert_eq!(mapped(Mysql, "bigint unsigned", mssql), "decimal(20,0)");
+        assert_eq!(mapped(Mysql, "tinyint(1)", mssql), "bit");
+        // The same server keeps what it reports.
+        assert_eq!(mapped(mssql, "nvarchar(50)", mssql), "nvarchar(50)");
     }
 
     #[test]

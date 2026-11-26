@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 
 /// Schema version written by this build. Bump it together with a new
 /// migration in [`store`].
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 
 /// A closed set of named values a setting can take (`Select` options).
 pub trait Choice: Copy + PartialEq + 'static {
@@ -192,18 +192,20 @@ impl_choice!(Effort {
     Max => ("max", "Max"),
 });
 
-/// The levels a global default can take (`AgentLevel::TYPE_PRESETS`; never `read_write`).
+/// The levels a global default can take: all of them, up to Read and write (which applies to every
+/// connection that is not of a production type and sets no level itself).
 impl Choice for AgentLevel {
     const OPTIONS: &'static [(&'static str, &'static str)] = &[
         (AgentLevel::Off.id(), AgentLevel::Off.label()),
         (AgentLevel::Schema.id(), AgentLevel::Schema.label()),
         (AgentLevel::Read.id(), AgentLevel::Read.label()),
+        (AgentLevel::ReadWrite.id(), AgentLevel::ReadWrite.label()),
     ];
     fn id(self) -> &'static str {
-        AgentLevel::id(self.type_preset())
+        AgentLevel::id(self)
     }
     fn from_id(id: &str) -> Option<Self> {
-        Self::TYPE_PRESETS.into_iter().find(|level| level.id() == id)
+        AgentLevel::from_id(id)
     }
 }
 
@@ -412,6 +414,9 @@ pub struct EditorSettings {
     /// Global switch on top of the driver's own confirmation of dangerous
     /// statements: off runs them without asking.
     pub confirm_dangerous: bool,
+    /// A confirmation of an `UPDATE` / `DELETE` also reads how many rows it will change (and the
+    /// first few of them) before the user answers.
+    pub preview_affected_rows: bool,
     pub confirm_unsaved_close: bool,
     /// Format SQL: the case of keywords.
     pub format_keyword_case: KeywordCase,
@@ -492,6 +497,7 @@ impl Default for EditorSettings {
             parameters: true,
             max_result_tabs: 20,
             confirm_dangerous: true,
+            preview_affected_rows: true,
             confirm_unsaved_close: false,
             format_keyword_case: KeywordCase::Upper,
             format_indent: 0,
@@ -585,6 +591,10 @@ pub struct QuerySettings {
     pub pg_restore_path: String,
     pub mysqldump_path: String,
     pub mariadb_dump_path: String,
+    /// Every run is put in the Query History (off: nothing new is recorded; what is there stays).
+    pub history_record: bool,
+    /// Days a run stays in the Query History; older ones are deleted at start. 0 = forever.
+    pub history_keep_days: u32,
 }
 
 impl Default for QuerySettings {
@@ -597,6 +607,8 @@ impl Default for QuerySettings {
             pg_restore_path: String::new(),
             mysqldump_path: String::new(),
             mariadb_dump_path: String::new(),
+            history_record: true,
+            history_keep_days: 90,
         }
     }
 }
@@ -745,16 +757,36 @@ pub struct AiSettings {
     /// Keep finished conversations as files on this computer (History). They can hold query
     /// results. Off stops writing; it deletes nothing.
     pub keep_conversations: bool,
-    /// "Let MCP clients run changes": `tablex-mcp` may ask the MCP client to approve statements that
-    /// change data on connections whose assistant access is "Read and write" (never on production
-    /// connections). Off by default; the MCP server reads this file at the time of each write and
-    /// treats anything but `true` as off.
+    /// **Deprecated**, no control in the app. It was the switch "Let MCP clients run changes"; from
+    /// schema 7 the access level alone decides and every change is asked about one by one. The app
+    /// keeps writing `true` so that an older `tablex-mcp` paired with this app still allows writes
+    /// on a connection set to Read and write; a new `tablex-mcp` ignores it in a file of schema 7
+    /// or later. A file without the key reads `false` (what the switch's default was), so the
+    /// 6 -> 7 migration can tell "was off" from "was on".
+    #[serde(default = "switch_was_off")]
     pub mcp_writes: bool,
     /// "Default agent access": the level of every connection that sets none itself and is not of a
-    /// production type (never `read_write`). Off by default; `tablex-mcp` reads it from this file.
+    /// production type, up to `read_write`. Off by default; `tablex-mcp` reads it from this file.
     pub agent_access: AgentLevel,
+    /// Set by the 6 -> 7 migration when the old switch was off: the next start tells the user, once,
+    /// which connections MCP clients may now ask to change (`app/access_notice`), and clears it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub access_notice_pending: bool,
+    /// `ai.mcp_tools`: the tools `tablex-mcp` offers (a list of names; absent offers every tool).
+    /// No control in the app: the user edits the file, and the app keeps what it finds there, as it
+    /// is (a value that is not a list is kept too: the MCP server reads it as "no tool").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp_tools: Option<serde_json::Value>,
+    /// `ai.mcp_databases`: connection id or name to the databases agents may use on it. Kept like
+    /// [`mcp_tools`](Self::mcp_tools).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp_databases: Option<serde_json::Value>,
     #[serde(flatten)]
     legacy: LegacyAi,
+}
+
+fn switch_was_off() -> bool {
+    false
 }
 
 impl Default for AiSettings {
@@ -765,8 +797,11 @@ impl Default for AiSettings {
             effort: Effort::Medium,
             fallback: true,
             keep_conversations: true,
-            mcp_writes: false,
+            mcp_writes: true,
             agent_access: AgentLevel::Off,
+            access_notice_pending: false,
+            mcp_tools: None,
+            mcp_databases: None,
             legacy: LegacyAi::default(),
         }
     }
@@ -801,8 +836,6 @@ impl AiSettings {
     /// Puts back what a hand-edited file made unusable, for each provider: an empty Anthropic
     /// model, an address the API key must not be sent to.
     pub fn normalize(&mut self) {
-        // A hand-edited `read_write` is not offered globally; it acts as `read`.
-        self.agent_access = self.agent_access.type_preset();
         for provider in AiProvider::ALL {
             let entry = self.providers.entry_mut(provider);
             if provider == AiProvider::Anthropic && entry.model.trim().is_empty() {

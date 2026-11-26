@@ -159,11 +159,13 @@ impl Render for AppRoot {
         }
         self.guard_window_close(window, cx);
         self.check_key_home(window, cx);
+        self.show_access_notice(window, cx);
         self.schedule_session_save(cx);
         // Tests share one process, and with it the storage layer's warnings: they ask for them.
-        if !cfg!(test) {
-            self.report_storage_warnings(cx);
-        }
+        #[cfg(not(test))]
+        self.report_storage_warnings(cx);
+        #[cfg(test)]
+        self.show_storage_warnings(super::error_log_view::RENDER_WARNINGS.take());
         self.flush_error_log(cx);
         let active_tab_id = self.workspace.active_tab().map(|tab| tab.id);
         #[cfg(feature = "ui-scenarios")]
@@ -233,7 +235,17 @@ impl Render for AppRoot {
                     ),
             );
 
-        let navigator = self.render_navigator(window, cx);
+        // The left pane replays its last frame unless it was notified (see `SidebarView`). A change that is
+        // only found here (state written during this render or since the pane last drew) cannot be notified
+        // from inside a draw, so the pane is embedded uncached for this frame and renders now.
+        let navigator = if self.sidebar_behind() {
+            self.sidebar_view.clone().into_any_element()
+        } else {
+            self.sidebar_view
+                .clone()
+                .cached(gpui::StyleRefinement::default().size_full())
+                .into_any_element()
+        };
         let sidebar_width = self.shell.sidebar_width;
 
         // The New Connection / New Query / Data Transfer
@@ -665,6 +677,9 @@ impl Render for AppRoot {
             }))
             .on_action(cx.listener(|this, _: &FocusPaneDown, _, cx| {
                 this.focus_pane_direction(crate::panes::Edge::Bottom, cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenQueryHistory, window, cx| {
+                this.open_query_history(None, window, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleErrorLog, window, cx| {
                 this.toggle_error_log(window, cx);

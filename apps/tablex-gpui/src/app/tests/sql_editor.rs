@@ -48,9 +48,9 @@ fn sql_notes(rig: &mut ExplainRig<'_>) -> usize {
 
 fn sql_set_settings(rig: &mut ExplainRig<'_>, edit: impl FnOnce(&mut crate::settings::Settings)) {
     rig.app.update(rig.visual, |this, _| {
-        let mut next = (*this.settings).clone();
+        let mut next = (**this.settings).clone();
         edit(&mut next);
-        this.settings = std::sync::Arc::new(next);
+        *this.settings = std::sync::Arc::new(next);
     });
 }
 

@@ -27,7 +27,7 @@ fn showcase_app(cx: &mut TestAppContext) -> (gpui::Entity<AppRoot>, &mut gpui::V
 fn showcase_texts(app: &gpui::Entity<AppRoot>, visual: &mut gpui::VisualTestContext) -> Vec<String> {
     app.update(visual, |this, _| {
         let mut texts: Vec<String> = Vec::new();
-        for saved in &this.saved_connections {
+        for saved in this.saved_connections.iter() {
             texts.push(saved.name.clone());
             texts.push(saved.uri.clone());
         }

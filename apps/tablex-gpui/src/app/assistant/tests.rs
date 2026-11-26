@@ -802,9 +802,9 @@ fn a_rejected_key_through_the_app_is_filed_in_the_error_log_without_the_key(
     let rig = rig();
     let address = serve_rejection();
     app.update(cx, |app, cx| {
-        let mut settings = (*app.settings).clone();
+        let mut settings = (**app.settings).clone();
         settings.ai.selected_mut().base_url = format!("http://{address}");
-        app.settings = Arc::new(settings);
+        *app.settings = Arc::new(settings);
         app.assistant.set_layer_for_test(Arc::clone(&rig.layer));
         app.connection_policy.set_profile(CONN, read_profile());
         let chat = app.assistant_chat(cx);
@@ -3432,10 +3432,10 @@ mod providers {
     /// The Settings the app runs with: `provider` selected, `model` chosen for it.
     fn choose(app: &Entity<AppRoot>, cx: &mut TestAppContext, provider: AiProvider, model: &str) {
         app.update(cx, |app, cx| {
-            let mut settings = (*app.settings).clone();
+            let mut settings = (**app.settings).clone();
             settings.ai.provider = provider;
             settings.ai.selected_mut().model = model.into();
-            app.settings = Arc::new(settings);
+            *app.settings = Arc::new(settings);
             app.assistant_sync(cx);
         });
     }

@@ -73,6 +73,17 @@ impl SqlDialect {
         double_quote_identifiers: false,
         bracket_identifiers: false,
     };
+    /// What the SQL Server driver advertises: `"…"` and `[…]` both name things (the session sets
+    /// `QUOTED_IDENTIFIER ON`), a backslash is an ordinary character. Statements the app writes for it
+    /// quote with `[…]` where they can (see `DdlDialect::quote` of `sql_ddl`).
+    pub const MSSQL: Self = Self {
+        identifier_quote: '"',
+        string_quote: '\'',
+        backslash_escapes: false,
+        like_requires_text_cast: false,
+        double_quote_identifiers: true,
+        bracket_identifiers: true,
+    };
     /// What the ClickHouse driver advertises: backticks, `"…"` a name too, a backslash an escape.
     pub const CLICKHOUSE: Self = Self { double_quote_identifiers: true, ..Self::MYSQL };
 
@@ -82,6 +93,7 @@ impl SqlDialect {
             ConnectionKind::Sqlite => Self::SQLITE,
             ConnectionKind::Mysql | ConnectionKind::Mariadb => Self::MYSQL,
             ConnectionKind::Clickhouse => Self::CLICKHOUSE,
+            ConnectionKind::Mssql => Self::MSSQL,
             _ => Self::POSTGRES,
         }
     }
@@ -172,8 +184,10 @@ pub enum BinaryLiteral {
     Postgres,
     /// `X'DEADBEEF'`: MySQL, MariaDB, SQLite.
     HexString,
-    /// `unhex('DEADBEEF')`.
+    /// `unhex('DEADBEEF')`: ClickHouse and DuckDB.
     ClickHouse,
+    /// `0xDEADBEEF`: SQL Server.
+    Hex0x,
 }
 
 impl BinaryLiteral {
@@ -182,7 +196,9 @@ impl BinaryLiteral {
             ConnectionKind::Sqlite | ConnectionKind::Mysql | ConnectionKind::Mariadb => {
                 Self::HexString
             }
-            ConnectionKind::Clickhouse => Self::ClickHouse,
+            // `unhex('DEADBEEF')`: the same spelling as ClickHouse's.
+            ConnectionKind::Clickhouse | ConnectionKind::Duckdb => Self::ClickHouse,
+            ConnectionKind::Mssql => Self::Hex0x,
             _ => Self::Postgres,
         }
     }
@@ -193,6 +209,7 @@ impl BinaryLiteral {
             Self::Postgres => format!("decode('{hex}', 'hex')"),
             Self::HexString => format!("X'{hex}'"),
             Self::ClickHouse => format!("unhex('{hex}')"),
+            Self::Hex0x => format!("0x{hex}"),
         }
     }
 }

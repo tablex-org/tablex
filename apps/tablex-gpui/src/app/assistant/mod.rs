@@ -629,7 +629,7 @@ impl AppRoot {
 
     /// The chat's readiness and the connection's access, from the key state, the saved
     /// connections and the connection types of Settings.
-    fn assistant_status(&self, scope: Option<&Scope>) -> ChatStatus {
+    pub(in crate::app) fn assistant_status(&self, scope: Option<&Scope>) -> ChatStatus {
         let access = scope.map_or(engine_agent::AgentAccess::Off, |scope| {
             self.effective_for(&scope.connection_id).agent_access
         });

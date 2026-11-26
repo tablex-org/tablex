@@ -237,7 +237,7 @@ impl NewColumn {
 
 /// The type a new table gives a column of the file, in the words of `kind`'s dialect.
 pub(in crate::app) fn proposed_type(kind: ConnectionKind, inferred: Inferred) -> &'static str {
-    use ConnectionKind::{Clickhouse, Mariadb, Mysql, Postgres, Sqlite};
+    use ConnectionKind::{Clickhouse, Duckdb, Mariadb, Mssql, Mysql, Postgres, Sqlite};
     match (kind, inferred) {
         (Sqlite, Inferred::Integer) => "INTEGER",
         (Sqlite, Inferred::Decimal | Inferred::Float) => "REAL",
@@ -265,6 +265,20 @@ pub(in crate::app) fn proposed_type(kind: ConnectionKind, inferred: Inferred) ->
         (Clickhouse, Inferred::Date) => "Date",
         (Clickhouse, Inferred::Timestamp) => "DateTime",
         (Clickhouse, Inferred::Text) => "String",
+        (Duckdb, Inferred::Integer) => "BIGINT",
+        (Duckdb, Inferred::Decimal) => "DECIMAL(38,10)",
+        (Duckdb, Inferred::Float) => "DOUBLE",
+        (Duckdb, Inferred::Boolean) => "BOOLEAN",
+        (Duckdb, Inferred::Date) => "DATE",
+        (Duckdb, Inferred::Timestamp) => "TIMESTAMP",
+        (Duckdb, Inferred::Text) => "VARCHAR",
+        (Mssql, Inferred::Integer) => "bigint",
+        (Mssql, Inferred::Decimal) => "decimal(38,10)",
+        (Mssql, Inferred::Float) => "float",
+        (Mssql, Inferred::Boolean) => "bit",
+        (Mssql, Inferred::Date) => "date",
+        (Mssql, Inferred::Timestamp) => "datetime2(6)",
+        (Mssql, Inferred::Text) => "nvarchar(max)",
         // Not SQL kinds: no table is created there.
         (_, Inferred::Text) => "text",
         (_, _) => "text",

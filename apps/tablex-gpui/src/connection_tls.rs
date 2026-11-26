@@ -12,6 +12,8 @@
 //! No driver supports a key passphrase (PostgreSQL and MySQL refuse an encrypted key, the MongoDB
 //! build has no `cert-key-password` feature), so there is no secret to keep in the credential
 //! store, and a passphrase typed into the free-text URL options is refused instead of stored.
+//! | SQL Server | `encrypt`, `trustServerCertificate` | `ca_cert` | none | `hostNameInCertificate` |
+//!
 //! ClickHouse (`secure`, `ca_cert`) and Redis (`rediss://`) are configured on the Connection tab.
 
 use crate::connections::ConnectionKind;
@@ -37,6 +39,8 @@ pub enum TlsFamily {
     /// MySQL and MariaDB share one driver family.
     MySql,
     Mongo,
+    /// SQL Server: `encrypt`, `trustServerCertificate`, `ca_cert`, `hostNameInCertificate`.
+    SqlServer,
 }
 
 /// The connection mode. `Default` writes nothing and leaves the choice to the driver.
@@ -58,7 +62,8 @@ impl TlsFamily {
             ConnectionKind::Postgres => Some(Self::Postgres),
             ConnectionKind::Mysql | ConnectionKind::Mariadb => Some(Self::MySql),
             ConnectionKind::Mongodb => Some(Self::Mongo),
-            ConnectionKind::Sqlite | ConnectionKind::Redis | ConnectionKind::Clickhouse => None,
+            ConnectionKind::Mssql => Some(Self::SqlServer),
+            ConnectionKind::Sqlite | ConnectionKind::Duckdb | ConnectionKind::Redis | ConnectionKind::Clickhouse => None,
         }
     }
 
@@ -70,6 +75,7 @@ impl TlsFamily {
                 &[Default, Disable, Allow, Prefer, Require, VerifyCa, VerifyFull]
             }
             Self::Mongo => &[Default, Disable, VerifyFull, Require],
+            Self::SqlServer => &[Default, Disable, VerifyFull, Require],
         }
     }
 
@@ -94,8 +100,12 @@ impl TlsFamily {
             (Self::Mongo, TlsMode::Disable) => "Off",
             (Self::Mongo, TlsMode::VerifyFull) => "On (verify certificate)",
             (Self::Mongo, TlsMode::Require) => "On (skip verification)",
-            // Not offered by MongoDB; never selected.
-            (Self::Mongo, _) => "",
+            (Self::SqlServer, TlsMode::Default) => "Default (on, verified)",
+            (Self::SqlServer, TlsMode::Disable) => "Off (login only)",
+            (Self::SqlServer, TlsMode::VerifyFull) => "On (verify certificate)",
+            (Self::SqlServer, TlsMode::Require) => "On (skip verification)",
+            // Not offered by MongoDB or SQL Server; never selected.
+            (Self::Mongo | Self::SqlServer, _) => "",
         }
     }
 
@@ -107,6 +117,15 @@ impl TlsFamily {
             }
             (Self::MySql, TlsMode::Default) | (Self::MySql, TlsMode::Prefer) => {
                 "Encrypts when the server offers TLS, otherwise connects in clear text. Protects against passive eavesdropping only."
+            }
+            (Self::SqlServer, TlsMode::Default | TlsMode::VerifyFull) => {
+                "Encrypts everything; the server certificate is checked against the system trust store (or the CA file) and the host name."
+            }
+            (Self::SqlServer, TlsMode::Disable) => {
+                "Encrypts the login only; queries and results travel in clear text (a server that forces encryption still gets it)."
+            }
+            (Self::SqlServer, TlsMode::Require) => {
+                "Encrypts everything but accepts any server certificate (a self-signed one): no protection against an active attacker."
             }
             (_, TlsMode::Disable) => "Never uses TLS.",
             (Self::Mongo, TlsMode::Default) => {
@@ -122,7 +141,7 @@ impl TlsFamily {
             (_, TlsMode::VerifyCa) => {
                 "TLS with the certificate chain verified against the CA file (required); the host name is not checked."
             }
-            (Self::Mongo, TlsMode::Prefer) => "",
+            (Self::Mongo | Self::SqlServer, TlsMode::Prefer) => "",
             (_, TlsMode::VerifyFull) => {
                 "TLS with the certificate chain and host name verified (the CA file or the system trust store)."
             }
@@ -131,11 +150,11 @@ impl TlsFamily {
 
     /// MongoDB reads certificate and key from one PEM file.
     pub fn has_key_file(self) -> bool {
-        self != Self::Mongo
+        !matches!(self, Self::Mongo | Self::SqlServer)
     }
 
     pub fn has_server_name(self) -> bool {
-        self == Self::MySql
+        matches!(self, Self::MySql | Self::SqlServer)
     }
 
     /// The mode in the URI; `None` for the driver default.
@@ -147,7 +166,7 @@ impl TlsFamily {
     fn parse_mode(self, value: &str) -> Option<TlsMode> {
         let value = value.to_ascii_lowercase().replace('-', "_");
         Some(match (self, value.as_str()) {
-            (Self::Mongo, _) => return None,
+            (Self::Mongo | Self::SqlServer, _) => return None,
             (_, "disable" | "disabled") => TlsMode::Disable,
             (_, "allow") => TlsMode::Allow,
             (_, "prefer" | "preferred") => TlsMode::Prefer,
@@ -186,6 +205,8 @@ pub enum TlsError {
         path: String,
         problem: FileProblem,
     },
+    /// SQL Server: the driver refuses `trustServerCertificate` together with a CA file.
+    TrustWithCa,
     /// A key passphrase in the free-text options.
     PassphraseOption(String),
 }
@@ -226,6 +247,9 @@ impl fmt::Display for TlsError {
                     write!(f, "Cannot read the {what} file '{path}' ({kind})")
                 }
             },
+            Self::TrustWithCa => f.write_str(
+                "On (skip verification) accepts any certificate, so a CA file has no use: clear the CA file or choose On (verify certificate)",
+            ),
             Self::PassphraseOption(name) => write!(
                 f,
                 "'{name}' would store a key passphrase in the connection URI, and no driver supports encrypted keys; decrypt the key (for example `openssl pkcs8 -in key.pem -out key-plain.pem`) and keep the file private"
@@ -244,6 +268,7 @@ impl TlsSettings {
         let mut tls = Self::default();
         let mut kept = Vec::new();
         let (mut mongo_tls, mut mongo_invalid) = (None, None);
+        let (mut mssql_encrypt, mut mssql_trust) = (None, None);
         for part in options.split('&').filter(|part| !part.is_empty()) {
             let (name, value) = part.split_once('=').unwrap_or((part, ""));
             let value = percent_decode_str(value).decode_utf8_lossy().into_owned();
@@ -277,6 +302,20 @@ impl TlsSettings {
                 (TlsFamily::Mongo, "tlsallowinvalidcertificates", _) => parse_bool(&value)
                     .map(|on| mongo_invalid = Some(on))
                     .is_some(),
+                (TlsFamily::SqlServer, "ca_cert", _) => {
+                    tls.ca_file = value;
+                    true
+                }
+                (TlsFamily::SqlServer, "hostnameincertificate", _) => {
+                    tls.server_name = value;
+                    true
+                }
+                (TlsFamily::SqlServer, "encrypt", _) => parse_bool(&value.to_ascii_lowercase())
+                    .map(|on| mssql_encrypt = Some(on))
+                    .is_some(),
+                (TlsFamily::SqlServer, "trustservercertificate", _) => parse_bool(&value.to_ascii_lowercase())
+                    .map(|on| mssql_trust = Some(on))
+                    .is_some(),
                 _ => false,
             };
             if !taken {
@@ -290,6 +329,15 @@ impl TlsSettings {
                 (_, Some(true)) => TlsMode::Require,
                 (Some(true), _) | (None, Some(false)) => TlsMode::VerifyFull,
                 (None, None) if files => TlsMode::VerifyFull,
+                (None, None) => TlsMode::Default,
+            };
+        }
+        if family == TlsFamily::SqlServer {
+            tls.mode = match (mssql_encrypt, mssql_trust) {
+                (Some(false), _) => TlsMode::Disable,
+                (_, Some(true)) => TlsMode::Require,
+                (Some(true), _) | (None, Some(false)) => TlsMode::VerifyFull,
+                (None, None) if !tls.ca_file.is_empty() => TlsMode::VerifyFull,
                 (None, None) => TlsMode::Default,
             };
         }
@@ -356,6 +404,19 @@ impl TlsSettings {
                 push("tlsCAFile", &self.ca_file);
                 push("tlsCertificateKeyFile", &self.client_cert);
             }
+            TlsFamily::SqlServer => {
+                match self.mode {
+                    TlsMode::Disable => push("encrypt", "false"),
+                    TlsMode::VerifyFull => push("encrypt", "true"),
+                    TlsMode::Require => {
+                        push("encrypt", "true");
+                        push("trustServerCertificate", "true");
+                    }
+                    _ => {}
+                }
+                push("ca_cert", &self.ca_file);
+                push("hostNameInCertificate", &self.server_name);
+            }
         }
     }
 
@@ -365,6 +426,15 @@ impl TlsSettings {
         if family == TlsFamily::Mongo {
             return if self.mode == TlsMode::Disable && !(ca.is_empty() && cert.is_empty()) {
                 Err(TlsError::FilesWithTlsOff)
+            } else {
+                Ok(())
+            };
+        }
+        if family == TlsFamily::SqlServer {
+            return if self.mode == TlsMode::Disable && !(ca.is_empty() && self.server_name.trim().is_empty()) {
+                Err(TlsError::FilesWithTlsOff)
+            } else if self.mode == TlsMode::Require && !ca.is_empty() {
+                Err(TlsError::TrustWithCa)
             } else {
                 Ok(())
             };
@@ -503,6 +573,34 @@ mod tests {
             written(TlsFamily::Mongo, &TlsSettings { mode: TlsMode::Require, ..tls }),
             "tls=true&tlsAllowInvalidCertificates=true&tlsCAFile=/ca.pem&tlsCertificateKeyFile=/k.pem"
         );
+    }
+
+    #[test]
+    fn sql_server_modes_map_to_encrypt_and_trust_server_certificate() {
+        for (options, mode) in [
+            ("", TlsMode::Default),
+            ("encrypt=false", TlsMode::Disable),
+            ("encrypt=true", TlsMode::VerifyFull),
+            ("Encrypt=TRUE&trustServerCertificate=true", TlsMode::Require),
+            ("trustServerCertificate=true", TlsMode::Require),
+            ("ca_cert=/ca.pem", TlsMode::VerifyFull),
+        ] {
+            let (tls, _) = extract(TlsFamily::SqlServer, options);
+            assert_eq!(tls.mode, mode, "{options}");
+        }
+        let (tls, rest) = extract(TlsFamily::SqlServer, "applicationName=x&encrypt=true&ca_cert=/ca.pem&hostNameInCertificate=db.example.com");
+        assert_eq!(rest, "applicationName=x");
+        assert_eq!((tls.ca_file.as_str(), tls.server_name.as_str()), ("/ca.pem", "db.example.com"));
+        assert_eq!(written(TlsFamily::SqlServer, &tls), "encrypt=true&ca_cert=/ca.pem&hostNameInCertificate=db.example.com");
+        let skip = TlsSettings { mode: TlsMode::Require, ..Default::default() };
+        assert_eq!(written(TlsFamily::SqlServer, &skip), "encrypt=true&trustServerCertificate=true");
+        assert_eq!(written(TlsFamily::SqlServer, &TlsSettings { mode: TlsMode::Disable, ..Default::default() }), "encrypt=false");
+        assert_eq!(skip.check(TlsFamily::SqlServer), Ok(()));
+        let both = TlsSettings { mode: TlsMode::Require, ca_file: "/ca.pem".into(), ..Default::default() };
+        assert_eq!(both.check(TlsFamily::SqlServer), Err(TlsError::TrustWithCa));
+        let off = TlsSettings { mode: TlsMode::Disable, ca_file: "/ca.pem".into(), ..Default::default() };
+        assert_eq!(off.check(TlsFamily::SqlServer), Err(TlsError::FilesWithTlsOff));
+        assert_eq!(TlsFamily::of(crate::connections::ConnectionKind::Mssql), Some(TlsFamily::SqlServer));
     }
 
     #[test]

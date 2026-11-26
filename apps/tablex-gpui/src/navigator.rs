@@ -10,6 +10,7 @@ pub use engine_driver_api::sql::{SchemaObjectKind, SchemaObjectRef};
 mod pins;
 mod sidebar_view;
 pub mod redis_tree;
+pub mod schema_columns;
 pub mod sql_driver;
 pub use sidebar_view::{folder_key, NavigatorAction, SearchOptions, SearchScope};
 
@@ -194,6 +195,7 @@ impl ObjectGroup {
                 &[Tables, Views, Functions, Procedures, Sequences, Triggers, Events]
             }
             Some(ConnectionKind::Sqlite) => &[Tables, Views, Triggers],
+            // DuckDB's navigator lists tables and views; it has no triggers or routines to browse.
             _ => &[Tables, Views],
         }
     }
@@ -230,8 +232,14 @@ impl TableFolder {
         use TableFolder::*;
         match kind {
             Some(
-                ConnectionKind::Postgres | ConnectionKind::Mysql | ConnectionKind::Mariadb | ConnectionKind::Sqlite,
+                ConnectionKind::Postgres
+                | ConnectionKind::Mysql
+                | ConnectionKind::Mariadb
+                | ConnectionKind::Sqlite
+                | ConnectionKind::Mssql,
             ) if !view => &[Columns, Indexes, Constraints, ForeignKeys, Triggers],
+            // Primary key, unique and check constraints and foreign keys; DuckDB has no triggers.
+            Some(ConnectionKind::Duckdb) if !view => &[Columns, Indexes, Constraints, ForeignKeys],
             // Data-skipping indexes; no foreign keys, constraints or triggers to list.
             Some(ConnectionKind::Clickhouse) if !view => &[Columns, Indexes],
             Some(
@@ -239,7 +247,9 @@ impl TableFolder {
                 | ConnectionKind::Mysql
                 | ConnectionKind::Mariadb
                 | ConnectionKind::Sqlite
-                | ConnectionKind::Clickhouse,
+                | ConnectionKind::Clickhouse
+                | ConnectionKind::Duckdb
+                | ConnectionKind::Mssql,
             ) => &[Columns],
             _ => &[],
         }
@@ -1426,6 +1436,20 @@ impl NavigatorState {
         self.children.get(id)?.as_deref()
     }
 
+    /// The object groups of `connection` that are loaded (or loading) and that `wanted` accepts: what a
+    /// soft refresh may reload without loading anything that was not listed yet. Only those are cloned.
+    pub fn loaded_object_groups(&self, connection: &str, mut wanted: impl FnMut(&NavigatorNodeId) -> bool) -> Vec<NavigatorNodeId> {
+        self.load_states
+            .iter()
+            .filter(|(id, state)| {
+                matches!(id, NavigatorNodeId::ObjectGroup { connection: owner, .. } if owner == connection)
+                    && matches!(state, NodeLoadState::Loaded | NodeLoadState::Loading)
+                    && wanted(id)
+            })
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
     /// Where the lazy load of `id` stands (`None`: never requested).
     pub fn load_state(&self, id: &NavigatorNodeId) -> Option<&NodeLoadState> {
         self.load_states.get(id)
@@ -1452,6 +1476,21 @@ impl NavigatorState {
     /// (and collapsing) it. A node whose children were never loaded returns `None`: its first
     /// expansion loads them.
     pub fn reload_children(&mut self, id: &NavigatorNodeId) -> Option<LoadRequest> {
+        let request = self.begin_reload(id)?;
+        self.rebuild_visible();
+        Some(request)
+    }
+
+    /// [`Self::reload_children`] for several nodes: the sidebar is rebuilt once, not once per node.
+    pub fn reload_children_of(&mut self, ids: &[NavigatorNodeId]) -> Vec<LoadRequest> {
+        let requests: Vec<LoadRequest> = ids.iter().filter_map(|id| self.begin_reload(id)).collect();
+        if !requests.is_empty() {
+            self.rebuild_visible();
+        }
+        requests
+    }
+
+    fn begin_reload(&mut self, id: &NavigatorNodeId) -> Option<LoadRequest> {
         if !matches!(self.load_states.get(id), Some(NodeLoadState::Loaded | NodeLoadState::Loading)) {
             return None;
         }
@@ -1467,7 +1506,6 @@ impl NavigatorState {
             .cloned();
         self.begin_group_load(id, filter.as_deref());
         self.reloading.insert(id.clone(), self.generation);
-        self.rebuild_visible();
         Some(request)
     }
 
@@ -2140,11 +2178,12 @@ impl NavigatorState {
                 }
                 _ => &quote_identifier,
             };
-            Some(format!(
-                "SELECT *\nFROM {}.{}\nLIMIT 200;",
-                quote(schema),
-                quote(object)
-            ))
+            let mssql = self.connection(connection).map(|c| c.kind) == Some(ConnectionKind::Mssql);
+            Some(if mssql {
+                format!("SELECT TOP 200 *\nFROM {}.{};", quote(schema), quote(object))
+            } else {
+                format!("SELECT *\nFROM {}.{}\nLIMIT 200;", quote(schema), quote(object))
+            })
         } else {
             None
         }
@@ -2555,15 +2594,19 @@ pub fn driver_title(kind: ConnectionKind) -> &'static str {
         ConnectionKind::Mariadb => "MariaDB",
         ConnectionKind::Redis => "Redis",
         ConnectionKind::Clickhouse => "ClickHouse",
+        ConnectionKind::Duckdb => "DuckDB",
+        ConnectionKind::Mssql => "SQL Server",
     }
 }
 
 /// The order of the database-type sections.
-const DRIVER_SECTIONS: [ConnectionKind; 7] = [
+const DRIVER_SECTIONS: [ConnectionKind; 9] = [
     ConnectionKind::Postgres,
     ConnectionKind::Mysql,
     ConnectionKind::Mariadb,
+    ConnectionKind::Mssql,
     ConnectionKind::Sqlite,
+    ConnectionKind::Duckdb,
     ConnectionKind::Clickhouse,
     ConnectionKind::Mongodb,
     ConnectionKind::Redis,
@@ -4073,6 +4116,15 @@ mod tests {
             ["Tables", "Views", "Functions", "Procedures", "Sequences", "Triggers", "Events"]
         );
         assert_eq!(titles(ConnectionKind::Sqlite), ["Tables", "Views", "Triggers"]);
+        assert_eq!(titles(ConnectionKind::Duckdb), ["Tables", "Views"]);
+        assert_eq!(
+            crate::navigator::TableFolder::for_kind(Some(ConnectionKind::Duckdb), false),
+            [TableFolder::Columns, TableFolder::Indexes, TableFolder::Constraints, TableFolder::ForeignKeys],
+            "no triggers"
+        );
+        assert_eq!(crate::navigator::TableFolder::for_kind(Some(ConnectionKind::Duckdb), true), [TableFolder::Columns]);
+        assert_eq!(driver_title(ConnectionKind::Duckdb), "DuckDB");
+        assert!(crate::navigator::sql_driver::is_sql_kind(ConnectionKind::Duckdb));
         assert_eq!(titles(ConnectionKind::Clickhouse), ["Tables", "Views"]);
         assert_eq!(ObjectGroup::for_kind(None), [Tables, Views]);
         // Only the table-like groups have columns; every other group asks for its own kind.

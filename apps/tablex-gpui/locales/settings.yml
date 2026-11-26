@@ -197,8 +197,8 @@ settings:
       en: Agent access
       vi: Quyền của agent
     agent_access_help:
-      en: "What an AI agent (the in-app assistant, MCP clients) may do on connections of this type that set nothing themselves. Never more than Read; a Production type always needs the connection's own setting, and a read-only type caps every connection at Read."
-      vi: "Việc mà một agent AI (trợ lý trong ứng dụng, client MCP) được làm trên các kết nối thuộc loại này mà không tự đặt gì. Không bao giờ hơn Đọc; loại Production luôn cần cài đặt riêng của kết nối, và loại chỉ đọc giới hạn mọi kết nối ở mức Đọc."
+      en: "What an AI agent (the in-app assistant, MCP clients) may do on connections of this type that set nothing themselves. Read and write is allowed on types that are not Production, and each change is still put to you for approval. A Production type always needs the connection's own setting, and a read-only type caps every connection at Read."
+      vi: "Việc mà một agent AI (trợ lý trong ứng dụng, client MCP) được làm trên các kết nối thuộc loại này mà không tự đặt gì. Đọc và ghi được phép trên các loại không phải Production, và mỗi thay đổi vẫn được hỏi bạn duyệt. Loại Production luôn cần cài đặt riêng của kết nối, và loại chỉ đọc giới hạn mọi kết nối ở mức Đọc."
     delete:
       en: Delete type
       vi: Xoá loại
@@ -526,6 +526,13 @@ settings:
         description:
           en: "Ask before running statements a driver flags as dangerous (DROP, DELETE without WHERE, ...). Off runs them without asking."
           vi: "Hỏi trước khi chạy câu lệnh mà driver đánh dấu là nguy hiểm (DROP, DELETE không có WHERE, ...). Tắt thì chạy mà không hỏi."
+      preview_affected_rows:
+        title:
+          en: Preview affected rows before UPDATE/DELETE
+          vi: Xem trước các dòng bị ảnh hưởng trước UPDATE/DELETE
+        description:
+          en: "When a confirmation asks before an UPDATE or DELETE, also count the rows it will change and show the first few, read-only. A statement without WHERE is called out. Statements it cannot read beforehand (joins, CTEs) run as before."
+          vi: "Khi hộp xác nhận hỏi trước UPDATE hoặc DELETE, đếm luôn số dòng sẽ bị thay đổi và hiện vài dòng đầu, ở chế độ chỉ đọc. Câu lệnh không có WHERE sẽ được cảnh báo. Câu lệnh không thể đọc trước (join, CTE) vẫn chạy như cũ."
       confirm_unsaved_close:
         title:
           en: Confirm closing unsaved scripts
@@ -856,6 +863,20 @@ settings:
         description:
           en: "Seconds an open connection may sit idle before tablex checks it is still alive, so one that died (a server restart, a night asleep) is noticed and reopened on its next use. 0 means never check."
           vi: "Số giây một kết nối đang mở được nằm yên trước khi tablex kiểm tra nó còn sống không, để kết nối đã chết (máy chủ khởi động lại, máy ngủ qua đêm) được phát hiện và mở lại ở lần dùng kế tiếp. 0 là không kiểm tra."
+      history_record:
+        title:
+          en: Record query history
+          vi: Ghi lại lịch sử truy vấn
+        description:
+          en: "Put every run in the Query History: when, how long, how many rows or the error, and the statement. Off records nothing new; what is already there stays until you delete it."
+          vi: "Ghi mọi lần chạy vào Lịch sử truy vấn: thời điểm, thời gian chạy, số dòng hoặc lỗi, và câu lệnh. Tắt thì không ghi thêm; những gì đã có vẫn còn cho đến khi bạn xoá."
+      history_keep_days:
+        title:
+          en: Keep query history for (days)
+          vi: Giữ lịch sử truy vấn trong (ngày)
+        description:
+          en: "Runs older than this are deleted from the Query History when tablex starts. 0 keeps them for ever."
+          vi: "Những lần chạy cũ hơn số ngày này bị xoá khỏi Lịch sử truy vấn khi tablex khởi động. 0 là giữ mãi."
       pg_dump_path:
         title:
           en: pg_dump
@@ -1086,8 +1107,8 @@ settings:
           en: Default agent access
           vi: Quyền truy cập mặc định của agent
         description:
-          en: How far the assistant and MCP clients may go on a connection that sets no level itself. Production connections stay off; writes always need Read and write on the connection.
-          vi: Mức mà trợ lý và các client MCP được phép làm trên một kết nối không tự đặt mức. Kết nối production luôn tắt; thao tác ghi luôn cần Đọc và ghi trên kết nối.
+          en: "How far the assistant and MCP clients may go on a connection that sets no level itself. Production connections stay off: they need a level of their own. Read and write applies to connections that are not Production; each change is still put to you for approval. A client set to auto-approve can run changes without you seeing them, so only use clients you trust."
+          vi: "Mức mà trợ lý và các client MCP được phép làm trên một kết nối không tự đặt mức. Kết nối Production luôn tắt: chúng cần mức riêng. Đọc và ghi áp dụng cho các kết nối không phải Production; mỗi thay đổi vẫn được hỏi bạn duyệt. Client được đặt để tự duyệt có thể chạy thay đổi mà bạn không thấy, nên chỉ dùng client bạn tin cậy."
         options:
           "off":
             en: "Off"
@@ -1098,13 +1119,9 @@ settings:
           read:
             en: Read
             vi: Đọc
-      mcp_writes:
-        title:
-          en: Let MCP clients run changes
-          vi: Cho phép client MCP chạy thay đổi
-        description:
-          en: "An MCP client (the program you connected tablex's MCP server to) may then ask to run statements that change data on connections whose assistant access is \"Read and write\". tablex asks that client to put each one to you; a client set to answer by itself can run them without you seeing them, so turn this on only for a client you trust. Never on a connection of a production type (only the built-in Production type counts; a custom type is not production). Off by default."
-          vi: "Khi bật, một client MCP (chương trình bạn đã nối với máy chủ MCP của tablex) có thể yêu cầu chạy các câu lệnh làm thay đổi dữ liệu trên những kết nối có quyền trợ lý là \"Đọc và ghi\". tablex yêu cầu client đó hỏi bạn từng câu lệnh; client được đặt để tự trả lời có thể chạy chúng mà bạn không thấy, nên chỉ bật cho client bạn tin cậy. Không bao giờ áp dụng cho kết nối loại production (chỉ loại Production có sẵn được tính; loại tuỳ chỉnh không phải production). Mặc định tắt."
+          read_write:
+            en: Read and write
+            vi: Đọc và ghi
       base_url:
         title:
           en: Base URL
@@ -1170,6 +1187,9 @@ settings:
     timeouts:
       en: Timeouts
       vi: Thời gian chờ
+    history:
+      en: History
+      vi: Lịch sử
     backup_tools:
       en: Backup tools
       vi: Công cụ sao lưu
@@ -1191,9 +1211,19 @@ settings:
     agent_access:
       en: Agent access
       vi: Quyền của agent
-    mcp_server:
-      en: MCP server
-      vi: Máy chủ MCP
     advanced:
       en: Advanced
       vi: Nâng cao
+access_notice:
+  title:
+    en: MCP clients can now ask to run changes
+    vi: Client MCP giờ có thể xin chạy thay đổi
+  message:
+    en: "These connections are set to Read and write: %{names}. MCP clients may now ask to run changes on them; each change still needs your approval."
+    vi: "Các kết nối này được đặt ở mức Đọc và ghi: %{names}. Client MCP giờ có thể xin chạy thay đổi trên chúng; mỗi thay đổi vẫn cần bạn duyệt."
+  more:
+    en: " and %{count} more"
+    vi: " và %{count} kết nối khác"
+  open_settings:
+    en: Open AI settings
+    vi: Mở cài đặt AI

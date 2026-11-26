@@ -123,7 +123,7 @@ impl AppRoot {
             }
             _ => {
                 let own = self.palette.goto.nav.as_ref();
-                let navs: Vec<&NavigatorState> = std::iter::once(&self.navigator).chain(own).collect();
+                let navs: Vec<&NavigatorState> = std::iter::once(&*self.navigator).chain(own).collect();
                 let segment = Arc::new(self.catalog_segment_of(&navs, true));
                 self.palette.goto.catalog = Some(CatalogCache {
                     revision,
@@ -187,7 +187,7 @@ impl AppRoot {
             !self.settings.navigation.show_system_objects,
             u64::from(self.settings.navigation.navigator_page_size),
         );
-        for saved in &self.saved_connections {
+        for saved in self.saved_connections.iter() {
             let id = saved.id.to_string();
             if !self.sessions.is_connected(&id) {
                 continue;

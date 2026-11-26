@@ -456,6 +456,22 @@ fn keywords_follow_the_dialect() {
     )
     .has("ILIKE"));
     assert!(run(&sql_editor(SqlFlavor::Sqlite), "prag|", &EmptyCatalog).has("PRAGMA"));
+    // DuckDB: its own statements, clauses and library on top of the PostgreSQL-style vocabulary it shares.
+    let duckdb = sql_editor(SqlFlavor::Duckdb);
+    assert!(run(&duckdb, "prag|", &EmptyCatalog).has("PRAGMA"));
+    assert!(run(&duckdb, "select * from t qual|", &EmptyCatalog).has("QUALIFY"));
+    assert!(run(&duckdb, "select read_c|", &EmptyCatalog).has("READ_CSV"));
+    assert!(run(&duckdb, "select list_tr|", &EmptyCatalog).has("LIST_TRANSFORM"));
+    assert!(run(&duckdb, "select date_tr|", &EmptyCatalog).has("DATE_TRUNC"), "PostgreSQL's functions that DuckDB has");
+    assert!(run(&duckdb, "select count|", &EmptyCatalog).has("COUNT"), "the shared core");
+    assert!(run(&duckdb, "create table t (a huge|", &EmptyCatalog).has("HUGEINT"));
+    // What DuckDB does not have is not offered from PostgreSQL's list, and none of it leaks the other way.
+    assert!(!run(&duckdb, "create table t (a jsonb|", &EmptyCatalog).has("JSONB"));
+    assert!(!run(&duckdb, "create table t (a bigser|", &EmptyCatalog).has("BIGSERIAL"));
+    assert!(!run(&sql_editor(SqlFlavor::Postgres), "select read_c|", &EmptyCatalog).has("READ_CSV"));
+    assert!(!run(&sql_editor(SqlFlavor::Sqlite), "select * from t qual|", &EmptyCatalog).has("QUALIFY"));
+    // `$$ ... $$` is a string in DuckDB as in PostgreSQL: the cursor inside it completes nothing.
+    assert!(run(&duckdb, "select $$ sel| $$", &EmptyCatalog).items.is_empty());
     assert!(!run(&sql_editor(SqlFlavor::Postgres), "prag|", &EmptyCatalog).has("PRAGMA"));
     assert!(run(&sql_editor(SqlFlavor::Mysql), "us|", &EmptyCatalog).has("USE"));
 }

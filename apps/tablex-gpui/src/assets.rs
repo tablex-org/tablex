@@ -43,6 +43,7 @@ impl AssetSource for Assets {
                 "maximize.svg",
                 "mariadb.svg",
                 "clickhouse.svg",
+                "duckdb.svg",
                 "mongodb.svg",
                 "redis.svg",
                 "mysql.svg",
@@ -94,6 +95,7 @@ impl AssetSource for Assets {
                 "list-checks.svg",
                 "active-dot.svg",
                 "active-ring.svg",
+                "status-dot.svg",
                 "sliders-horizontal.svg",
                 "regex.svg",
                 "eraser.svg",
@@ -184,6 +186,7 @@ pub fn asset(path: &str) -> Option<&'static [u8]> {
         "icons/maximize.svg" => Some(include_bytes!("../assets/icons/maximize.svg")),
         "icons/mariadb.svg" => Some(include_bytes!("../assets/icons/mariadb.svg")),
         "icons/clickhouse.svg" => Some(include_bytes!("../assets/icons/clickhouse.svg")),
+        "icons/duckdb.svg" => Some(include_bytes!("../assets/icons/duckdb.svg")),
         "icons/plus.svg" => Some(include_bytes!("../assets/icons/plus.svg")),
         "icons/panel-bottom.svg" => Some(include_bytes!("../assets/icons/panel-bottom.svg")),
         "icons/panel-right.svg" => Some(include_bytes!("../assets/icons/panel-right.svg")),
@@ -235,6 +238,7 @@ pub fn asset(path: &str) -> Option<&'static [u8]> {
         "icons/trash.svg" => Some(include_bytes!("../assets/icons/trash.svg")),
         "icons/active-dot.svg" => Some(include_bytes!("../assets/icons/active-dot.svg")),
         "icons/active-ring.svg" => Some(include_bytes!("../assets/icons/active-ring.svg")),
+        "icons/status-dot.svg" => Some(include_bytes!("../assets/icons/status-dot.svg")),
         "icons/sliders-horizontal.svg" => {
             Some(include_bytes!("../assets/icons/sliders-horizontal.svg"))
         }
@@ -322,6 +326,7 @@ mod tests {
         assert!(super::asset("icons/mysql.svg").is_some());
         assert!(super::asset("icons/mariadb.svg").is_some());
         assert!(super::asset("icons/clickhouse.svg").is_some());
+        assert!(super::asset("icons/duckdb.svg").is_some());
         assert!(super::asset("icons/sql-server.svg").is_some());
         assert!(super::asset("icons/oracle.svg").is_some());
         assert!(super::asset("icons/firebird.svg").is_some());
@@ -347,6 +352,7 @@ mod tests {
         assert!(super::asset("icons/list-checks.svg").is_some());
         assert!(super::asset("icons/active-dot.svg").is_some());
         assert!(super::asset("icons/active-ring.svg").is_some());
+        assert!(super::asset("icons/status-dot.svg").is_some());
         assert!(super::asset("icons/regex.svg").is_some());
         assert!(super::asset("icons/sliders-horizontal.svg").is_some());
         assert!(super::asset("icons/eraser.svg").is_some());
@@ -410,6 +416,7 @@ mod tests {
             "icons/mysql-mark.svg",
             "icons/mariadb.svg",
             "icons/clickhouse.svg",
+            "icons/duckdb.svg",
             "icons/cockroachlabs.svg",
             "icons/cloud-spanner.svg",
         ] {
@@ -466,6 +473,7 @@ mod tests {
         assert!(names.iter().any(|name| name == "mysql-mark.svg"));
         assert!(names.iter().any(|name| name == "mariadb.svg"));
         assert!(names.iter().any(|name| name == "clickhouse.svg"));
+        assert!(names.iter().any(|name| name == "duckdb.svg"));
         assert!(names.iter().any(|name| name == "sql-server.svg"));
         assert!(names.iter().any(|name| name == "oracle.svg"));
         assert!(names.iter().any(|name| name == "firebird.svg"));

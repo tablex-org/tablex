@@ -15,6 +15,8 @@ pub enum CellDetailPlacement {
     Bottom,
     /// Floating, non-modal panel over the results area.
     Popup,
+    /// An OS window of its own, [`POPUP_DEFAULT_SIZE`] big at first.
+    Window,
 }
 
 /// Below this rendered panel width the tab strip drops labels (icon-only).
@@ -322,6 +324,8 @@ pub struct CellDetailState {
     pub row_json_mode: crate::cell_value::EjsonMode,
     pub popup: PopupGeometry,
     pub popup_drag: Option<PopupDrag>,
+    /// Where the panel goes back to when its window closes: the placement it had before `Window`.
+    pub before_window: CellDetailPlacement,
 }
 
 impl Default for CellDetailState {
@@ -343,6 +347,7 @@ impl Default for CellDetailState {
             row_json_mode: Default::default(),
             popup: PopupGeometry::default(),
             popup_drag: None,
+            before_window: CellDetailPlacement::Right,
         }
     }
 }
@@ -454,19 +459,30 @@ impl CellDetailState {
     }
 
     #[cfg(test)]
-    /// Right -> Bottom -> Popup -> Right.
+    /// Right -> Bottom -> Popup -> Right. `Window` is left out: it opens an OS window, so it is
+    /// picked from the placement menu only.
     pub fn cycle_placement(&mut self) {
         self.placement = match self.placement {
             CellDetailPlacement::Right => CellDetailPlacement::Bottom,
             CellDetailPlacement::Bottom => CellDetailPlacement::Popup,
-            CellDetailPlacement::Popup => CellDetailPlacement::Right,
+            CellDetailPlacement::Popup | CellDetailPlacement::Window => CellDetailPlacement::Right,
         };
         self.popup_drag = None;
     }
 
     pub fn set_placement(&mut self, placement: CellDetailPlacement) {
+        if placement == CellDetailPlacement::Window && self.placement != CellDetailPlacement::Window {
+            self.before_window = self.placement;
+        }
         self.placement = placement;
         self.popup_drag = None;
+    }
+
+    /// The window of the panel closed: back to the placement it had before (Right when it had none).
+    pub fn leave_window(&mut self) {
+        if self.placement == CellDetailPlacement::Window {
+            self.set_placement(self.before_window);
+        }
     }
 
     pub fn begin_popup_drag(
@@ -512,7 +528,9 @@ impl CellDetailState {
 
     pub fn panel_size(&self) -> f32 {
         match self.placement {
-            CellDetailPlacement::Right | CellDetailPlacement::Popup => self.right_width,
+            CellDetailPlacement::Right | CellDetailPlacement::Popup | CellDetailPlacement::Window => {
+                self.right_width
+            }
             CellDetailPlacement::Bottom => self.bottom_height,
         }
     }
@@ -521,8 +539,8 @@ impl CellDetailState {
         match self.placement {
             CellDetailPlacement::Right => self.right_width = size,
             CellDetailPlacement::Bottom => self.bottom_height = size,
-            // The popup has its own geometry; docked sizes are untouched.
-            CellDetailPlacement::Popup => {}
+            // The popup has its own geometry and the window its own size; docked sizes are untouched.
+            CellDetailPlacement::Popup | CellDetailPlacement::Window => {}
         }
     }
 }
@@ -724,6 +742,36 @@ mod tests {
         state.open_tab(CellDetailTab::Row);
         assert_eq!(state.row_tree.len(), 2);
         assert_eq!(state.row_tree[0].type_name, "jsonb");
+    }
+
+    #[test]
+    fn window_placement_remembers_where_the_panel_was_and_goes_back() {
+        let mut state = CellDetailState::default();
+        // Leaving a window the panel never docked from: Right.
+        state.leave_window();
+        assert_eq!(state.placement, CellDetailPlacement::Right);
+
+        state.set_placement(CellDetailPlacement::Bottom);
+        state.set_placement(CellDetailPlacement::Window);
+        assert_eq!(state.placement, CellDetailPlacement::Window);
+        assert_eq!(state.before_window, CellDetailPlacement::Bottom);
+        // Picking Window again keeps where the panel came from.
+        state.set_placement(CellDetailPlacement::Window);
+        assert_eq!(state.before_window, CellDetailPlacement::Bottom);
+        // The window has its own size: neither docked size moves.
+        let (right, bottom) = (state.right_width, state.bottom_height);
+        state.set_panel_size(999.0);
+        assert_eq!((state.right_width, state.bottom_height), (right, bottom));
+        state.leave_window();
+        assert_eq!(state.placement, CellDetailPlacement::Bottom);
+        // Not in a window: nothing to leave.
+        state.set_placement(CellDetailPlacement::Popup);
+        state.leave_window();
+        assert_eq!(state.placement, CellDetailPlacement::Popup);
+        // The window comes from the popup too.
+        state.set_placement(CellDetailPlacement::Window);
+        state.leave_window();
+        assert_eq!(state.placement, CellDetailPlacement::Popup);
     }
 
     #[test]

@@ -67,9 +67,10 @@ impl AppRoot {
         if let Some(message) = self.read_only_connection_message(connection, &format!("{activity} data is")) {
             return Err(message);
         }
-        if saved.kind == ConnectionKind::Sqlite && super::super::structure_edit::apply::sqlite_is_in_memory(&saved.uri) {
+        if saved.kind.is_file_database() && super::super::structure_edit::apply::sqlite_is_in_memory(&saved.uri) {
             return Err(format!(
-                "{activity} is off for an in-memory SQLite database: the load would run on a second connection that sees a different, empty database."
+                "{activity} is off for an in-memory {} database: the load would run on a second connection that sees a different, empty database.",
+                crate::connection_dialog::kind_label(saved.kind)
             ));
         }
         if self.scenario_ui.service.is_none() {

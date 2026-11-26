@@ -20,6 +20,8 @@ macro_rules! ts {
 }
 
 #[cfg(feature = "ui")]
+mod affected_rows;
+#[cfg(feature = "ui")]
 mod agent_access;
 mod aggregate;
 #[cfg(feature = "ui")]
@@ -53,6 +55,8 @@ mod connection_tls;
 mod connection_import;
 mod connections;
 mod credentials;
+#[cfg(feature = "ui")]
+mod ddl_refresh;
 mod drivers;
 #[cfg(feature = "ui")]
 mod error_log;

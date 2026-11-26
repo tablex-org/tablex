@@ -46,7 +46,7 @@ impl AccountEngine {
             ConnectionKind::Postgres => Some(Self::Postgres),
             ConnectionKind::Mysql => Some(Self::Mysql),
             ConnectionKind::Mariadb => Some(Self::Mariadb),
-            ConnectionKind::Sqlite | ConnectionKind::Clickhouse | ConnectionKind::Mongodb | ConnectionKind::Redis => None,
+            ConnectionKind::Sqlite | ConnectionKind::Duckdb | ConnectionKind::Clickhouse | ConnectionKind::Mssql | ConnectionKind::Mongodb | ConnectionKind::Redis => None,
         }
     }
 

@@ -17,6 +17,8 @@ mod rank;
 mod sql;
 mod sql_data;
 mod sql_data_clickhouse;
+mod sql_data_duckdb;
+mod sql_data_mssql;
 mod sql_lex;
 #[cfg(test)]
 mod tests;
@@ -41,6 +43,9 @@ pub enum SqlFlavor {
     Mysql,
     Mariadb,
     Clickhouse,
+    Duckdb,
+    /// SQL Server: `[name]` quotes a name, `TOP`, `OFFSET .. FETCH`.
+    Mssql,
 }
 
 /// What a candidate is, for the icon / ordering the menu shows.

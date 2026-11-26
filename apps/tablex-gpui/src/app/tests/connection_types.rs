@@ -24,7 +24,7 @@ fn with_override(mut profile: ConnectionProfile, id: &str, value: OverrideValue)
 /// "Replica" type that is read-only but asks nothing.
 fn publish_types(app: &gpui::Entity<AppRoot>, visual: &mut gpui::VisualTestContext, production_read_only: bool) {
     app.update(visual, |this, cx| {
-        let mut settings = (*this.settings).clone();
+        let mut settings = (**this.settings).clone();
         settings
             .connection_types
             .iter_mut()
@@ -37,7 +37,7 @@ fn publish_types(app: &gpui::Entity<AppRoot>, visual: &mut gpui::VisualTestConte
             read_only: true,
             ..Default::default()
         });
-        this.settings = std::sync::Arc::new(settings);
+        *this.settings = std::sync::Arc::new(settings);
         cx.notify();
     });
 }
@@ -247,9 +247,9 @@ fn the_read_only_guard_and_run_current_statement_read_a_line_comment_as_the_serv
         });
     });
     rig.app.update(rig.visual, |this, _| {
-        let mut settings = (*this.settings).clone();
+        let mut settings = (**this.settings).clone();
         settings.editor.run_scope = crate::settings::RunScope::Current;
-        this.settings = std::sync::Arc::new(settings);
+        *this.settings = std::sync::Arc::new(settings);
     });
     let run_scope = |rig: &ExplainRig| {
         rig.app.read_with(rig.visual, |this, cx| this.sql_in_run_scope(tab, script.to_owned(), None, cx))
@@ -504,9 +504,9 @@ fn the_overrides_tab_offers_use_global_or_a_custom_value_per_setting(cx: &mut Te
     cx.dispatcher.allow_parking();
     let (app, visual) = dialog_app(cx);
     app.update(visual, |this, _| {
-        let mut settings = (*this.settings).clone();
+        let mut settings = (**this.settings).clone();
         settings.query.query_timeout_secs = 45;
-        this.settings = std::sync::Arc::new(settings);
+        *this.settings = std::sync::Arc::new(settings);
     });
     let pg = crate::ui_fixture::POSTGRES_ID;
     let inputs = open_fixture_dialog(&app, visual, pg);
@@ -708,7 +708,7 @@ fn the_overrides_tab_sets_the_agent_access_through_a_real_select_and_it_survives
 }
 
 #[gpui::test]
-fn the_connection_types_page_sets_a_default_agent_access_that_caps_at_read(cx: &mut TestAppContext) {
+fn the_connection_types_page_sets_a_default_agent_access_up_to_read_and_write(cx: &mut TestAppContext) {
     cx.dispatcher.allow_parking();
     let (app, visual) = settings_app(cx);
     let path = settings_temp_path();
@@ -727,20 +727,24 @@ fn the_connection_types_page_sets_a_default_agent_access_that_caps_at_read(cx: &
     let level = |settings: &Settings, id: &str| settings.connection_type(id).unwrap().agent_access;
     assert_eq!(level(&draft_of(&app, visual), DEVELOPMENT), AgentLevel::Off);
 
-    // Pick `read` in the real dropdown (off, schema, read: a preset never writes).
+    // Pick `read` in the real dropdown (off, schema, read, read and write).
     click(visual, "connection-type-agent-select".into());
     visual.simulate_keystrokes("down down enter");
     settle(visual);
     assert_eq!(level(&draft_of(&app, visual), DEVELOPMENT), AgentLevel::Read, "the draft changed");
     assert_eq!(level(&applied(&app, visual), DEVELOPMENT), AgentLevel::Off, "the app did not");
-    // The dropdown offers three levels and no `read_write`: three steps wrap around to `read`.
+    // A type may preset Read and write too (the policy keeps it off Production).
     click(visual, "connection-type-agent-select".into());
-    visual.simulate_keystrokes("down down down enter");
+    visual.simulate_keystrokes("down enter");
     settle(visual);
-    assert_eq!(level(&draft_of(&app, visual), DEVELOPMENT), AgentLevel::Read);
+    assert_eq!(level(&draft_of(&app, visual), DEVELOPMENT), AgentLevel::ReadWrite);
     // Dismissal changes nothing.
     click(visual, "connection-type-agent-select".into());
     visual.simulate_keystrokes("up escape");
+    settle(visual);
+    assert_eq!(level(&draft_of(&app, visual), DEVELOPMENT), AgentLevel::ReadWrite);
+    click(visual, "connection-type-agent-select".into());
+    visual.simulate_keystrokes("up enter");
     settle(visual);
     assert_eq!(level(&draft_of(&app, visual), DEVELOPMENT), AgentLevel::Read);
 
@@ -841,9 +845,9 @@ fn saving_a_connection_whose_overrides_text_was_damaged_keeps_its_agent_level_an
     cx.dispatcher.allow_parking();
     let (app, visual) = dialog_app(cx);
     app.update(visual, |this, _| {
-        let mut settings = (*this.settings).clone();
+        let mut settings = (**this.settings).clone();
         settings.connection_types.iter_mut().find(|ty| ty.id == DEVELOPMENT).unwrap().agent_access = AgentLevel::Read;
-        this.settings = std::sync::Arc::new(settings);
+        *this.settings = std::sync::Arc::new(settings);
     });
     let record = engine_storage::connection::SavedConnectionRecord {
         id: "7A1C0E55-2C79-4D8B-9B19-3A1F0B6A5555".into(),
@@ -945,7 +949,7 @@ fn new_tabs_of_a_connection_use_its_page_size_override_and_fall_back_to_the_glob
     assert_eq!(limit(&app, visual, pg), (25, 25), "the override");
     assert_eq!(limit(&app, visual, sqlite), (200, 200), "another connection keeps the global size");
     app.update(visual, |this, cx| {
-        let mut settings = (*this.settings).clone();
+        let mut settings = (**this.settings).clone();
         settings.results.page_size = 300;
         this.apply_settings(settings, None, cx);
     });

@@ -585,7 +585,7 @@ impl ApplySession for InjectedSession {
     }
 }
 
-/// An in-memory SQLite database (`:memory:`, `mode=memory`) exists for one connection only: a second
+/// An in-memory SQLite or DuckDB database (`:memory:`, `mode=memory`) exists for one connection only: a second
 /// session would open a different, empty one.
 pub(in crate::app) fn sqlite_is_in_memory(uri: &str) -> bool {
     let lower = uri.to_ascii_lowercase();

@@ -313,7 +313,7 @@ fn mariadb_sequences_keep_their_names_in_the_structure_catalog(cx: &mut TestAppC
             disabled: false,
             ssh_tunnel: false,
         });
-        this.saved_connections = saved.clone();
+        *this.saved_connections = saved.clone();
         this.navigator.set_connections(saved);
         let nav = &mut this.navigator;
         let load = |nav: &mut NavigatorState, parent: NavigatorNodeId, children: Vec<crate::navigator::LoadedChild>| {

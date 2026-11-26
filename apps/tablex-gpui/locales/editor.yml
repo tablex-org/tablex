@@ -252,3 +252,63 @@ editor:
   statistics:
     en: Statistics
     vi: Thống kê
+  affected_counting:
+    en: Counting the rows it will change…
+    vi: Đang đếm số dòng sẽ bị thay đổi…
+  affected_counting_slow:
+    en: Still counting. You can run it anyway; the count stops when this closes.
+    vi: Vẫn đang đếm. Bạn có thể chạy ngay; việc đếm sẽ dừng khi hộp này đóng.
+  affected_update_one:
+    en: It will update 1 row.
+    vi: Sẽ cập nhật 1 dòng.
+  affected_update_other:
+    en: "It will update %{count} rows."
+    vi: "Sẽ cập nhật %{count} dòng."
+  affected_delete_one:
+    en: It will delete 1 row.
+    vi: Sẽ xóa 1 dòng.
+  affected_delete_other:
+    en: "It will delete %{count} rows."
+    vi: "Sẽ xóa %{count} dòng."
+  affected_whole_table:
+    en: "This changes every row in %{table}."
+    vi: "Câu lệnh này thay đổi mọi dòng trong %{table}."
+  affected_whole_table_one:
+    en: "This changes every row in %{table} (1 row)."
+    vi: "Câu lệnh này thay đổi mọi dòng trong %{table} (1 dòng)."
+  affected_whole_table_other:
+    en: "This changes every row in %{table} (%{count} rows)."
+    vi: "Câu lệnh này thay đổi mọi dòng trong %{table} (%{count} dòng)."
+  affected_unavailable:
+    en: Preview not available for this statement
+    vi: Không có bản xem trước cho câu lệnh này
+  affected_timeout:
+    en: Counting took too long; not previewed
+    vi: Việc đếm quá lâu; không có bản xem trước
+  affected_no_rows:
+    en: No rows match
+    vi: Không có dòng nào khớp
+  affected_in_transaction:
+    en: Not previewed inside an open transaction
+    vi: Không xem trước khi đang trong một transaction đang mở
+  affected_or_replace:
+    en: OR REPLACE also deletes the rows that conflict on a unique key; they are not counted here.
+    vi: OR REPLACE còn xóa các dòng trùng khóa duy nhất; chúng không được đếm ở đây.
+  affected_side_effects:
+    en: Not previewed; it calls a function whose effects stay after a rollback
+    vi: Không xem trước; câu lệnh gọi hàm có tác dụng vẫn còn sau khi rollback
+  affected_cancelled:
+    en: The count was cancelled
+    vi: Việc đếm đã bị hủy
+  affected_old_pg_driver:
+    en: Update the PostgreSQL driver to preview inside a transaction
+    vi: Cập nhật driver PostgreSQL để xem trước trong một transaction
+  affected_more_one:
+    en: 1 more UPDATE or DELETE is not previewed.
+    vi: 1 câu UPDATE hoặc DELETE nữa không được xem trước.
+  affected_more_other:
+    en: "%{count} more UPDATE or DELETE statements are not previewed."
+    vi: "%{count} câu UPDATE hoặc DELETE nữa không được xem trước."
+  affected_script_note:
+    en: Counted before the script runs; earlier statements of it may change these numbers.
+    vi: Được đếm trước khi script chạy; các câu lệnh đứng trước có thể làm các số này thay đổi.

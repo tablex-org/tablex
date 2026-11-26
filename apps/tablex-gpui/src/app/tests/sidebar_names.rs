@@ -418,7 +418,7 @@ fn typing_in_the_search_box_is_not_taken_for_the_delete_and_rename_keys(cx: &mut
     let (app, visual, ran, _) = oa_pg(cx);
     let orders = oa_pg_object("orders");
     sn_focus_sidebar_on(&app, visual, &orders);
-    let search = app.read_with(visual, |this, _| this.sidebar.search_input.clone()).expect("the search input is built");
+    let search = app.read_with(visual, |this, _| this.search_field.clone()).expect("the search input is built");
     visual.update(|window, cx| {
         search.update(cx, |state, cx| {
             state.set_value("abc", window, cx);

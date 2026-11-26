@@ -90,6 +90,9 @@ grid:
   query_failed:
     en: "Query failed: %{error}"
     vi: "Truy vấn thất bại: %{error}"
+  server_out_of_memory:
+    en: "The database server ran out of memory. This is a problem on the server (for example too many connections or its memory settings), not in tablex."
+    vi: "Máy chủ cơ sở dữ liệu đã hết bộ nhớ. Đây là sự cố ở phía máy chủ (ví dụ quá nhiều kết nối hoặc cấu hình bộ nhớ), không phải do tablex."
   results:
     en: Results
     vi: Kết quả
@@ -132,6 +135,9 @@ grid:
   could_not_open_results_window:
     en: "Could not open the results window: %{error}"
     vi: "Không mở được cửa sổ kết quả: %{error}"
+  could_not_open_detail_window:
+    en: "Could not open the details window: %{error}"
+    vi: "Không mở được cửa sổ chi tiết: %{error}"
   limit:
     en: "Limit %{count}"
     vi: "Giới hạn %{count}"
@@ -540,6 +546,9 @@ grid:
   popup:
     en: Popup
     vi: Cửa sổ nổi
+  panel_in_window:
+    en: In a window of its own
+    vi: Ở cửa sổ riêng
   length:
     en: Length
     vi: Độ dài

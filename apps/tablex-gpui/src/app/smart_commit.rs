@@ -163,7 +163,7 @@ impl<'a> Statement<'a> {
                     return Smart::No;
                 }
             }
-            ConnectionKind::Sqlite if any(lead, &["ATTACH", "DETACH"]) => return Smart::No,
+            ConnectionKind::Sqlite | ConnectionKind::Duckdb if any(lead, &["ATTACH", "DETACH"]) => return Smart::No,
             ConnectionKind::Mysql | ConnectionKind::Mariadb if commits_at(sql, self.start, lex, kind) => return Smart::No,
             _ => {}
         }

@@ -532,6 +532,8 @@ impl AppRoot {
                             connection: connection.clone(),
                         });
                         this.navigator_ui.generation = this.navigator.generation();
+                        // The connection's row in the tree drops its failure marker too.
+                        this.notify_chrome(cx);
                         this.notify_tab(tab_id, cx);
                     }))
                     .into_any_element()],

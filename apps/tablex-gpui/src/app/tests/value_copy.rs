@@ -575,7 +575,7 @@ fn value_make_mysql(this: &mut AppRoot, tab_id: u64, backslash_escapes: bool) {
     this.driver_runtime
         .capabilities
         .insert(tab.connection_id.clone(), std::sync::Arc::new(capabilities));
-    for saved in &mut this.saved_connections {
+    for saved in this.saved_connections.iter_mut() {
         if saved.matches_id(&tab.connection_id) {
             saved.kind = ConnectionKind::Mysql;
         }

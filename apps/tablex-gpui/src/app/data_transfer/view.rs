@@ -203,10 +203,11 @@ pub(super) const TARGET_KINDS: [&str; 2] = ["Tables of a database", "Files"];
 pub(super) const TRANSACTIONS: [&str; 2] = ["Commit every batch", "One transaction per table"];
 pub(super) const ON_ERRORS: [&str; 2] = ["Stop at the first error", "Skip the row or table and log it"];
 /// The dialects a SQL file can be written for, after "this connection's".
-pub(super) const SQL_DIALECTS: [(&str, ConnectionKind); 4] = [
+pub(super) const SQL_DIALECTS: [(&str, ConnectionKind); 5] = [
     ("PostgreSQL", ConnectionKind::Postgres),
     ("MySQL / MariaDB", ConnectionKind::Mysql),
     ("SQLite", ConnectionKind::Sqlite),
+    ("DuckDB", ConnectionKind::Duckdb),
     ("ClickHouse", ConnectionKind::Clickhouse),
 ];
 

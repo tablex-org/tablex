@@ -1851,7 +1851,7 @@ impl AppRoot {
             previous_version: (id == "postgresql").then(|| "1.2.0".to_string()),
             ..Default::default()
         };
-        let rows = [
+        let mut rows = Vec::from([
             ("postgresql", "PostgreSQL", "1.4.0", DriverCategory::Sql, 2, (!(missing_driver_dialog && missing_id == "postgresql")).then_some(("1.3.0", "ABCDE12345")), false),
             ("mysql", "MySQL", "1.2.0", DriverCategory::Sql, 3, Some(("1.2.0", "ABCDE12345")), false),
             ("clickhouse", "ClickHouse", "1.0.0", DriverCategory::Analytics, 2, None, false),
@@ -1859,7 +1859,13 @@ impl AppRoot {
             ("mongodb", "MongoDB", "2.1.0", DriverCategory::Nosql, 4, Some(("2.0.3", "ABCDE12345")), false),
             ("sqlite", "SQLite", "1.1.0", DriverCategory::Sql, 1, (!(missing_driver_dialog && missing_id == "sqlite")).then_some(("1.1.0", "ABCDE12345")), !(missing_driver && missing_id == "sqlite")),
             ("mariadb", "MariaDB", "1.2.0-dev", DriverCategory::Sql, 3, Some(("1.2.0-dev", "")), false),
-        ];
+        ]);
+        // Capture-only `TABLEX_SEED_EXTRA_DRIVERS=1`: DuckDB installed and current, SQL Server with
+        // an update waiting. Appended, so the fixed indices above and the default counts hold.
+        if std::env::var("TABLEX_SEED_EXTRA_DRIVERS").as_deref() == Ok("1") {
+            rows.push(("duckdb", "DuckDB", "1.3.0", DriverCategory::Analytics, 18, Some(("1.3.0", "ABCDE12345")), false));
+            rows.push(("sqlserver", "SQL Server", "1.1.0", DriverCategory::Sql, 6, Some(("1.0.0", "ABCDE12345")), false));
+        }
         let mut catalog = Vec::new();
         let mut records = BTreeMap::new();
         let catalog_disabled: HashSet<&str> =

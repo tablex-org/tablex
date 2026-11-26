@@ -81,13 +81,13 @@ fn navicat_import_selects_confirms_and_saves_with_the_password_in_the_credential
     import_pick(visual, "import-menu-navicat", vec![import_fixture("navicat.ncx")]);
     import_selection_dialog(visual);
     assert!(store.records().is_empty(), "nothing is saved before confirming");
-    // Supported rows start checked, unsupported ones (Oracle, SQL Server) do not.
+    // Supported rows start checked, unsupported ones (Oracle) do not.
     assert_eq!(
         import_checked(&app, visual),
-        ["Local MySQL", "Prod PG", "Notes", "Maria", "Replica", "Cache"]
+        ["Local MySQL", "Prod PG", "Notes", "Maria", "Replica", "Warehouse", "Cache"]
     );
     // Unsupported rows (listed after the supported ones) are not checked.
-    assert!(!import_checked(&app, visual).iter().any(|name| name == "Ledger" || name == "Warehouse"));
+    assert!(!import_checked(&app, visual).iter().any(|name| name == "Ledger"));
     // Unchecking a row through a real click drops it from the import.
     click_debug_button(visual, "import-row-2");
     assert!(!import_checked(&app, visual).contains(&"Notes".to_string()));
@@ -96,8 +96,8 @@ fn navicat_import_selects_confirms_and_saves_with_the_password_in_the_credential
     import_wait(visual, |v| v.debug_bounds("import-selection-list").is_none());
 
     let records = store.records();
-    assert_eq!(records.len(), 5);
-    assert_eq!(saved_count(&app, visual), before + 5, "imported connections appear in the sidebar");
+    assert_eq!(records.len(), 6);
+    assert_eq!(saved_count(&app, visual), before + 6, "imported connections appear in the sidebar");
     let mysql = records.iter().find(|r| r.name == "Local MySQL").unwrap();
     assert_eq!(mysql.uri, "mysql://root@127.0.0.1:3306/shop");
     assert!(mysql.save_password);
@@ -114,7 +114,7 @@ fn navicat_import_selects_confirms_and_saves_with_the_password_in_the_credential
     assert_eq!(ssh.key_path, "/keys/id_ed25519");
     assert!(!pg.network_settings_json.contains("ssh-secret"));
     let notice = app.read_with(visual, |this, _| this.sidebar.notice.clone().unwrap());
-    assert!(notice.starts_with("Imported 5 connections from Navicat NCX, skipped unsupported: Oracle, SQL Server"), "{notice}");
+    assert!(notice.starts_with("Imported 6 connections from Navicat NCX, skipped unsupported: Oracle"), "{notice}");
     assert!(!notice.contains("navicat-secret"));
     // A successful import reports nothing to the error log.
     app.read_with(visual, |this, _| assert_eq!(this.error_log.log.len(), 0));
@@ -128,21 +128,21 @@ fn importing_the_same_file_again_skips_what_is_already_saved(cx: &mut TestAppCon
     import_selection_dialog(visual);
     click_debug_button(visual, "import-row-2");
     click_debug_button(visual, "import-confirm");
-    import_wait(visual, |_| store.records().len() == 5);
+    import_wait(visual, |_| store.records().len() == 6);
     import_wait(visual, |v| v.debug_bounds("import-selection-list").is_none());
 
     // Everything again: only the connection left out the first time is new.
     import_pick(visual, "import-menu-navicat", vec![import_fixture("navicat.ncx")]);
     import_selection_dialog(visual);
     click_debug_button(visual, "import-confirm");
-    import_wait(visual, |_| store.records().len() == 6);
+    import_wait(visual, |_| store.records().len() == 7);
     import_wait(visual, |v| v.debug_bounds("import-selection-list").is_none());
-    assert_eq!(saved_count(&app, visual), before + 6, "no duplicates in the sidebar");
+    assert_eq!(saved_count(&app, visual), before + 7, "no duplicates in the sidebar");
     let names: Vec<_> = store.records().into_iter().map(|r| r.name).collect();
     assert_eq!(names.iter().filter(|name| *name == "Prod PG").count(), 1, "{names:?}");
     let notice = import_notice(&app, visual).unwrap();
     assert!(notice.starts_with("Imported 1 connection from Navicat NCX"), "{notice}");
-    assert!(notice.contains("; 5 already saved, skipped"), "{notice}");
+    assert!(notice.contains("; 6 already saved, skipped"), "{notice}");
 
     // A third time there is nothing left to import, and the user is told why.
     import_pick(visual, "import-menu-navicat", vec![import_fixture("navicat.ncx")]);
@@ -154,8 +154,8 @@ fn importing_the_same_file_again_skips_what_is_already_saved(cx: &mut TestAppCon
         import_notice(&app, visual).as_deref(),
         Some("The selected connections are already saved, nothing imported")
     );
-    assert_eq!(store.records().len(), 6);
-    assert_eq!(saved_count(&app, visual), before + 6);
+    assert_eq!(store.records().len(), 7);
+    assert_eq!(saved_count(&app, visual), before + 7);
 }
 
 #[gpui::test]
@@ -288,7 +288,7 @@ fn datagrip_import_takes_the_files_and_says_passwords_are_not_imported(cx: &mut 
         vec![import_fixture("datagrip/dataSources.xml"), import_fixture("datagrip/dataSources.local.xml")],
     );
     import_selection_dialog(visual);
-    assert_eq!(import_checked(&app, visual).len(), 6);
+    assert_eq!(import_checked(&app, visual).len(), 7);
     click_debug_button(visual, "import-confirm");
     import_wait(visual, |_| !store.records().is_empty());
     let records = store.records();
@@ -306,12 +306,12 @@ fn dbx_config_import_confirms_and_stores_passwords(cx: &mut TestAppContext) {
     let (app, visual, store) = import_test_app(cx);
     import_pick(visual, "import-menu-dbx", vec![import_fixture("dbx/plain.json")]);
     import_selection_dialog(visual);
-    // Redis is importable now; the two unsupported products are not checked.
-    assert_eq!(import_checked(&app, visual).len(), 7);
+    // Redis and SQL Server are importable; the unsupported product is not checked.
+    assert_eq!(import_checked(&app, visual).len(), 8);
     click_debug_button(visual, "import-confirm");
     import_wait(visual, |_| !store.records().is_empty());
     let records = store.records();
-    assert_eq!(records.len(), 7);
+    assert_eq!(records.len(), 8);
     let pg = records.iter().find(|r| r.name == "Prod PG").unwrap();
     assert_eq!(store.password(&pg.id).as_deref(), Some("pg-pass"));
     let mongo = records.iter().find(|r| r.name == "Replica set").unwrap();
@@ -340,10 +340,10 @@ fn encrypted_dbx_config_asks_for_the_passphrase(cx: &mut TestAppContext) {
     visual.simulate_input("correct horse battery");
     click_debug_button(visual, "import-passphrase-ok");
     import_selection_dialog(visual);
-    assert_eq!(import_checked(&app, visual).len(), 7);
+    assert_eq!(import_checked(&app, visual).len(), 8);
     click_debug_button(visual, "import-confirm");
     import_wait(visual, |_| !store.records().is_empty());
-    assert_eq!(store.records().len(), 7);
+    assert_eq!(store.records().len(), 8);
 }
 
 fn import_notice(app: &gpui::Entity<AppRoot>, visual: &mut gpui::VisualTestContext) -> Option<String> {

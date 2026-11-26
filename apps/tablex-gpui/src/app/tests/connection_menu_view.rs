@@ -262,7 +262,7 @@ fn connection_edit_dialog_cancel_changes_nothing(cx: &mut TestAppContext) {
         "Escape cancels the edit dialog"
     );
     app.update(visual, |this, _| {
-        assert_eq!(this.saved_connections, before);
+        assert_eq!(*this.saved_connections, before);
     });
 }
 
@@ -745,7 +745,7 @@ fn schema_select_event_targets_configured_database_and_reports_unavailable_sessi
             .clone()
     });
     select.update(visual, |_, cx| {
-        cx.emit(gpui_component::select::SelectEvent::<Vec<String>>::Confirm(
+        cx.emit(gpui_component::select::SelectEvent::<gpui_component::select::SearchableVec<String>>::Confirm(
             Some("warehouse".into()),
         ))
     });

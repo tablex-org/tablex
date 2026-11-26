@@ -279,6 +279,7 @@ impl AppRoot {
         let is_settings = tab.kind == TabKind::Settings;
         let is_welcome = tab.kind == TabKind::Welcome;
         let is_error_log = tab.kind == TabKind::ErrorLog;
+        let history = (tab.kind == TabKind::History).then(|| self.history.view.clone()).flatten();
         let is_diagram = tab.kind == TabKind::Diagram;
         let is_source = tab.kind == TabKind::Source;
         let is_compare = tab.kind == TabKind::Compare;
@@ -441,6 +442,7 @@ impl AppRoot {
         let accounts = accounts.map(|view| div().flex_1().min_h_0().min_w_0().child(view));
         let process_list = process_list.map(|view| div().flex_1().min_h_0().min_w_0().child(view));
         let error_log = is_error_log.then(|| self.render_error_log_tab(window, cx));
+        let history = history.map(|view| div().flex_1().min_h_0().min_w_0().child(view));
         let driver_manager = if is_driver_manager {
             self.render_driver_manager(window, cx)
         } else {
@@ -534,6 +536,7 @@ impl AppRoot {
             .children(accounts)
             .children(process_list)
             .children(error_log)
+            .children(history)
             .children(result_content)
             .children(drop_highlight)
             .into_any_element()

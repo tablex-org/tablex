@@ -387,11 +387,16 @@ impl AppRoot {
                     .child(t!("editor.filter")),
             )
             .child(
-                div().flex_1().min_w(px(0.0)).child(
-                    Input::new(&filter_input)
-                        .appearance(false)
-                        .disabled(find_expanded),
-                ),
+                super::editors::single_line_keys(
+                    div().relative().flex_1().min_w(px(0.0)).h(px(24.0)).overflow_hidden(),
+                    &filter_input,
+                    tab_id,
+                    cx,
+                )
+                .child(
+                    super::editors::inline_json_editor(&filter_input, find_expanded, cx),
+                )
+                .children(super::editors::empty_hint(&filter_input, super::editors::FILTER_HINT, "mongo-filter-hint", cx)),
             )
             .child(find_control);
         let sort_field = div()
@@ -412,11 +417,16 @@ impl AppRoot {
                     .child(t!("editor.sort")),
             )
             .child(
-                div().flex_1().min_w(px(0.0)).child(
-                    Input::new(&sort_input)
-                        .appearance(false)
-                        .disabled(sort_expanded),
-                ),
+                super::editors::single_line_keys(
+                    div().relative().flex_1().min_w(px(0.0)).h(px(24.0)).overflow_hidden(),
+                    &sort_input,
+                    tab_id,
+                    cx,
+                )
+                .child(
+                    super::editors::inline_json_editor(&sort_input, sort_expanded, cx),
+                )
+                .children(super::editors::empty_hint(&sort_input, super::editors::SORT_HINT, "mongo-sort-hint", cx)),
             )
             .child(sort_control);
         let filter_sort_handle = div()

@@ -261,6 +261,7 @@ pub(super) fn tab_label_parts(tab: &Tab, compact: bool) -> (std::borrow::Cow<'_,
         TabKind::Settings => t!("titlebar.settings"),
         TabKind::DriverManager => t!("titlebar.driver_manager"),
         TabKind::ErrorLog => t!("menu.error_log"),
+        TabKind::History => t!("history.title"),
         _ => Cow::Borrowed(tab.title.as_str()),
     };
     // A Redis key tab is already named `key@dbN`.
@@ -407,6 +408,7 @@ impl AppRoot {
             TabKind::Compare => TabIcon::Plain("icons/git-compare.svg"),
             TabKind::Results => TabIcon::Plain("icons/rows-3.svg"),
             TabKind::ErrorLog => TabIcon::Plain("icons/triangle-alert.svg"),
+            TabKind::History => TabIcon::Plain("icons/list-ordered.svg"),
             // The sidebar's glyph of the kind of object it shows.
             TabKind::Source => TabIcon::Plain(
                 match tab.source.as_ref().map(|source| source.kind) {
@@ -464,7 +466,7 @@ fn tab_width(tab: &Tab, compact: bool) -> f32 {
         TabKind::Settings => 140.0,
         TabKind::Diagram => 200.0,
         TabKind::Source => 220.0,
-        TabKind::Import | TabKind::Transfer | TabKind::SqlFile | TabKind::Backup | TabKind::Restore | TabKind::Accounts | TabKind::ProcessList | TabKind::Compare | TabKind::Results | TabKind::ErrorLog => 220.0,
+        TabKind::Import | TabKind::Transfer | TabKind::SqlFile | TabKind::Backup | TabKind::Restore | TabKind::Accounts | TabKind::ProcessList | TabKind::Compare | TabKind::Results | TabKind::ErrorLog | TabKind::History => 220.0,
     };
     if compact {
         (full - 40.0f32).max(120.0)

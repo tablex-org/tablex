@@ -495,8 +495,11 @@ impl AppRoot {
             }
             PromptAction::Cancel => self.abandon_missing_driver(cx),
             PromptAction::OpenManager => {
+                // The manager opens on the driver that is missing.
+                let missing = self.driver_ui.prompt.as_ref().map(|prompt| prompt.driver_id.clone());
                 self.abandon_missing_driver(cx);
                 self.open_driver_manager(cx);
+                self.driver_ui.selected = missing;
             }
         }
         cx.notify();

@@ -50,6 +50,7 @@ impl std::fmt::Display for AccountsError {
         match self {
             Self::ConnectionGone => f.write_str("This connection no longer exists."),
             Self::Unsupported(ConnectionKind::Sqlite) => f.write_str("SQLite has no users or privileges: access is the permission of the database file."),
+            Self::Unsupported(ConnectionKind::Duckdb) => f.write_str("DuckDB has no users or privileges: access is the permission of the database file."),
             Self::Unsupported(ConnectionKind::Clickhouse) => {
                 f.write_str("Users & Privileges covers PostgreSQL, MySQL and MariaDB. ClickHouse users are managed with its own SQL (CREATE USER, GRANT).")
             }

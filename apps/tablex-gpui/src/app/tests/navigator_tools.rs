@@ -9,7 +9,7 @@ fn tools_save_settings(
     change: impl FnOnce(&mut crate::settings::Settings),
 ) {
     app.update(visual, |this, cx| {
-        let mut next = (*this.settings).clone();
+        let mut next = (**this.settings).clone();
         change(&mut next);
         this.apply_settings(next, None, cx);
     });

@@ -4,7 +4,7 @@
 //! `AddColumn`, `AlterColumn`, ...). A [`draft::Draft`] collects them while the
 //! user edits a diagram; [`plan`] turns a change-set into ordered statements for
 //! one SQL dialect through the [`DdlDialect`] trait (PostgreSQL, MySQL, MariaDB,
-//! SQLite, ClickHouse), or into a typed [`DdlError`] naming what that dialect
+//! SQLite, DuckDB, ClickHouse), or into a typed [`DdlError`] naming what that dialect
 //! cannot do. [`apply::apply`] runs the statements, in a transaction where the
 //! dialect has transactional DDL, and reports exactly what ran.
 //!
@@ -36,6 +36,8 @@ mod classify;
 pub use classify::Flavor;
 mod clickhouse;
 pub mod draft;
+mod duckdb;
+mod mssql;
 mod mysql;
 mod objects;
 pub use objects::checked_name;
@@ -526,6 +528,8 @@ pub fn dialect_for(kind: ConnectionKind) -> Option<&'static dyn DdlDialect> {
         ConnectionKind::Mariadb => Some(&mysql::MySql { mariadb: true, no_backslash_escapes: false, ansi_quotes: false, bracket_identifiers: false }),
         ConnectionKind::Sqlite => Some(&sqlite::Sqlite),
         ConnectionKind::Clickhouse => Some(&clickhouse::ClickHouse),
+        ConnectionKind::Duckdb => Some(&duckdb::DuckDb),
+        ConnectionKind::Mssql => Some(&mssql::SqlServer),
         ConnectionKind::Mongodb | ConnectionKind::Redis => None,
     }
 }

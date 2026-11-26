@@ -26,7 +26,7 @@ use crate::columns_panel::Presentation;
 use gpui::{Rgba, SharedString};
 use gpui_component::combobox::{ComboboxEvent, ComboboxState};
 use gpui_component::searchable_list::SearchableListItem;
-use gpui_component::select::{SelectEvent, SelectState};
+use gpui_component::select::{SearchableVec, SelectEvent, SelectState};
 use gpui_component::IndexPath;
 use std::rc::Rc;
 
@@ -59,8 +59,9 @@ impl SearchableListItem for Choice {
     }
 }
 
-type ChoiceSelect = gpui::Entity<SelectState<Vec<Choice>>>;
-type ChoiceCombobox = gpui::Entity<ComboboxState<Vec<Choice>>>;
+// `SearchableVec`, not `Vec`: a plain `Vec` delegate shows the search box but never filters.
+type ChoiceSelect = gpui::Entity<SelectState<SearchableVec<Choice>>>;
+type ChoiceCombobox = gpui::Entity<ComboboxState<SearchableVec<Choice>>>;
 
 /// The settings controls of one tab, built for one list of columns.
 struct ChartControls {
@@ -260,21 +261,35 @@ fn point_budget(width: f32) -> usize {
     ((width.max(1.0) * 2.0).ceil() as usize).next_multiple_of(512).clamp(512, 8_192)
 }
 
-fn kind_choices() -> Vec<Choice> {
-    ChartKind::ALL.iter().enumerate().map(|(value, kind)| Choice { title: kind.label().into(), value }).collect()
+fn kind_choices() -> SearchableVec<Choice> {
+    SearchableVec::new(
+        ChartKind::ALL
+            .iter()
+            .enumerate()
+            .map(|(value, kind)| Choice { title: kind.label().into(), value })
+            .collect::<Vec<_>>(),
+    )
 }
 
-fn aggregation_choices() -> Vec<Choice> {
-    Aggregation::ALL.iter().enumerate().map(|(value, a)| Choice { title: a.label().into(), value }).collect()
+fn aggregation_choices() -> SearchableVec<Choice> {
+    SearchableVec::new(
+        Aggregation::ALL
+            .iter()
+            .enumerate()
+            .map(|(value, a)| Choice { title: a.label().into(), value })
+            .collect::<Vec<_>>(),
+    )
 }
 
-fn column_choices(columns: &[ChartColumn], leading_none: bool) -> Vec<Choice> {
+fn column_choices(columns: &[ChartColumn], leading_none: bool) -> SearchableVec<Choice> {
     let shift = usize::from(leading_none);
-    leading_none
-        .then(|| Choice { title: "None".into(), value: 0 })
-        .into_iter()
-        .chain(columns.iter().enumerate().map(|(i, c)| Choice { title: c.name.clone().into(), value: i + shift }))
-        .collect()
+    SearchableVec::new(
+        leading_none
+            .then(|| Choice { title: "None".into(), value: 0 })
+            .into_iter()
+            .chain(columns.iter().enumerate().map(|(i, c)| Choice { title: c.name.clone().into(), value: i + shift }))
+            .collect::<Vec<_>>(),
+    )
 }
 
 fn row(index: usize) -> Option<IndexPath> {
@@ -302,7 +317,7 @@ impl ChartControls {
             .multiple(true)
             .searchable(true)
         });
-        cx.subscribe(&kind, move |this: &mut AppRoot, _, event: &SelectEvent<Vec<Choice>>, cx| {
+        cx.subscribe(&kind, move |this: &mut AppRoot, _, event: &SelectEvent<SearchableVec<Choice>>, cx| {
             if let SelectEvent::Confirm(Some(choice)) = event {
                 let kind = ChartKind::ALL[*choice];
                 this.chart_shown(tab_id, |shown| shown.kind = kind);
@@ -321,7 +336,7 @@ impl ChartControls {
             }
         })
         .detach();
-        cx.subscribe(&x, move |this: &mut AppRoot, _, event: &SelectEvent<Vec<Choice>>, cx| {
+        cx.subscribe(&x, move |this: &mut AppRoot, _, event: &SelectEvent<SearchableVec<Choice>>, cx| {
             if let SelectEvent::Confirm(Some(column)) = event {
                 let column = *column;
                 this.chart_shown(tab_id, |shown| shown.x = column);
@@ -329,7 +344,7 @@ impl ChartControls {
             }
         })
         .detach();
-        cx.subscribe(&aggregation, move |this: &mut AppRoot, _, event: &SelectEvent<Vec<Choice>>, cx| {
+        cx.subscribe(&aggregation, move |this: &mut AppRoot, _, event: &SelectEvent<SearchableVec<Choice>>, cx| {
             if let SelectEvent::Confirm(Some(choice)) = event {
                 let aggregation = Aggregation::ALL[*choice];
                 this.chart_shown(tab_id, |shown| shown.aggregation = aggregation);
@@ -343,7 +358,7 @@ impl ChartControls {
             }
         })
         .detach();
-        cx.subscribe(&series_by, move |this: &mut AppRoot, _, event: &SelectEvent<Vec<Choice>>, cx| {
+        cx.subscribe(&series_by, move |this: &mut AppRoot, _, event: &SelectEvent<SearchableVec<Choice>>, cx| {
             if let SelectEvent::Confirm(Some(choice)) = event {
                 let by = choice.checked_sub(1);
                 this.chart_shown(tab_id, |shown| shown.series_by = by);
@@ -351,7 +366,7 @@ impl ChartControls {
             }
         })
         .detach();
-        cx.subscribe(&values, move |this: &mut AppRoot, _, event: &ComboboxEvent<Vec<Choice>>, cx| {
+        cx.subscribe(&values, move |this: &mut AppRoot, _, event: &ComboboxEvent<SearchableVec<Choice>>, cx| {
             if let ComboboxEvent::Change(columns) = event {
                 // The control already shows this selection (and its search text): only changes made from
                 // outside are pushed back into it, as that clears the query.

@@ -295,7 +295,7 @@ impl AppRoot {
     pub(in crate::app::command_palette) fn connections_signature(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        for saved in &self.saved_connections {
+        for saved in self.saved_connections.iter() {
             saved.id.hash(&mut hasher);
             saved.name.hash(&mut hasher);
             (saved.kind as u8).hash(&mut hasher);
@@ -470,7 +470,7 @@ impl AppRoot {
     /// Saved SQL / Mongo scripts and saved pipelines that are cached.
     fn palette_scripts_segment(&self) -> Segment {
         let mut builder = SegmentBuilder::new();
-        for saved in &self.saved_connections {
+        for saved in self.saved_connections.iter() {
             let id = saved.id.to_string();
             for entry in self.saved_sql_ui.entries(&id).unwrap_or_default() {
                 let place = match &entry.schema {
@@ -537,11 +537,13 @@ fn kind_label(kind: ConnectionKind) -> &'static str {
     match kind {
         ConnectionKind::Postgres => "PostgreSQL",
         ConnectionKind::Sqlite => "SQLite",
+        ConnectionKind::Duckdb => "DuckDB",
         ConnectionKind::Mongodb => "MongoDB",
         ConnectionKind::Mysql => "MySQL",
         ConnectionKind::Mariadb => "MariaDB",
         ConnectionKind::Redis => "Redis",
         ConnectionKind::Clickhouse => "ClickHouse",
+        ConnectionKind::Mssql => "SQL Server",
     }
 }
 

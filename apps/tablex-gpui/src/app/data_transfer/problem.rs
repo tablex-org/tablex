@@ -28,7 +28,7 @@ impl fmt::Display for Problem {
             Self::ConnectionGone => f.write_str("This connection no longer exists."),
             Self::NotSql => f.write_str("Data can be transferred out of the tables of SQL connections."),
             Self::InMemorySqlite => f.write_str(
-                "Transferring is off for an in-memory SQLite database: the transfer would read on a second connection that sees a different, empty database.",
+                "Transferring is off for an in-memory database: the transfer would read on a second connection that sees a different, empty database.",
             ),
             Self::NotOpen => f.write_str("The connection is not open."),
             Self::CannotPage => f.write_str("This driver cannot page the result of a query."),

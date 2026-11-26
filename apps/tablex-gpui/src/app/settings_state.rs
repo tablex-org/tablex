@@ -79,10 +79,11 @@ pub(super) struct SettingsUi {
     pub(super) pending: Option<Task<()>>,
     /// Number of file writes dispatched (tests assert debouncing with it).
     pub(super) writes: usize,
-    /// "Let MCP clients run changes" was turned off and the file may still say on (the write
-    /// failed): a later failed save keeps saying so, and the first save that lands takes the
-    /// notice back.
-    mcp_off_unsaved: bool,
+    /// The saved connections could not be read at start: the one-time access notice waits.
+    pub(super) connections_unreadable: bool,
+    /// The texts of the one-time access notice (tests read what it said).
+    #[cfg(test)]
+    pub(super) access_notices: Vec<String>,
     /// The Settings tab's draft and controls, alive while the tab is open.
     pub(super) page: Option<super::settings_view::SettingsPage>,
     /// The text each script tab last saved to disk (unsaved-close check).
@@ -97,13 +98,15 @@ pub(super) struct SettingsUi {
 }
 
 impl SettingsUi {
-    pub(super) fn new(path: Option<PathBuf>) -> Self {
+    pub(super) fn new(path: Option<PathBuf>, connections_unreadable: bool) -> Self {
         Self {
             path,
             writer: Arc::new(SessionWriter::default()),
             pending: None,
             writes: 0,
-            mcp_off_unsaved: false,
+            connections_unreadable,
+            #[cfg(test)]
+            access_notices: Vec::new(),
             page: None,
             saved_scripts: HashMap::new(),
             #[cfg(test)]
@@ -157,7 +160,7 @@ impl AppRoot {
             let legacy = store::Legacy::read(self.sidebar.path.as_deref());
             let loaded = store::load(&path, &legacy);
             notice = loaded.notice;
-            self.settings = Arc::new(loaded.settings);
+            *self.settings = Arc::new(loaded.settings);
             crate::i18n::apply(self.settings.appearance.language);
             language_applied = true;
             if loaded.needs_save {
@@ -168,15 +171,10 @@ impl AppRoot {
                 async {}
             }));
         }
-        // The copy default used to live in its own file: a choice made there
-        // (and not yet in Settings) carries over once.
-        if self.settings.results.default_copy_format == crate::settings::CopyDefault::Smart {
-            if let Some(choice) = self.grid_prefs.copy_default.to_setting() {
-                let mut next = (*self.settings).clone();
-                next.results.default_copy_format = choice;
-                self.settings = Arc::new(next);
-                self.save_settings_now(cx);
-            }
+        self.carry_over_old_copy_default(cx);
+        // Old runs of the Query History go, in batches, off the UI thread (a test keeps its store).
+        if !cfg!(test) && self.scenario_ui.service.is_none() {
+            self.prune_history_in_background(cx);
         }
         if !language_applied {
             crate::i18n::apply(self.settings.appearance.language);
@@ -188,6 +186,34 @@ impl AppRoot {
         self.after_settings_changed(&Settings::default(), None, cx);
     }
 
+    /// The copy default used to live in its own file. A choice made there (and not yet in
+    /// Settings) carries over once; the file is then renamed to `<name>.migrated` (kept, never
+    /// read again), so a later choice of Smart in Settings is not overwritten at the next start.
+    /// The rename waits for the settings to be on disk; a failed save leaves the file for the
+    /// next start.
+    fn carry_over_old_copy_default(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.grid_prefs.copy_default_path.clone() else {
+            return;
+        };
+        let Some(old) = results::copy::read_old_copy_default(&path) else {
+            return;
+        };
+        if self.settings.results.default_copy_format == crate::settings::CopyDefault::Smart {
+            if let Some(choice) = old.to_setting().filter(|choice| *choice != crate::settings::CopyDefault::Smart) {
+                let mut next = (**self.settings).clone();
+                next.results.default_copy_format = choice;
+                *self.settings = Arc::new(next);
+                if let Err(error) = self.flush_settings_blocking() {
+                    self.settings_save_failed(&error, cx);
+                    return;
+                }
+            }
+        }
+        if let Err(error) = results::copy::retire_old_copy_default(&path) {
+            self.report_error(Area::App, None, format!("Could not rename the old copy default file: {error}"));
+        }
+    }
+
     /// Replaces the applied settings with `new`, saves them (debounced, off
     /// the UI thread) and updates only the views the changed settings feed.
     pub(super) fn apply_settings(
@@ -196,36 +222,28 @@ impl AppRoot {
         window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
-        if new == *self.settings {
+        if new == **self.settings {
             return;
         }
-        let old = std::mem::replace(&mut self.settings, Arc::new(new));
+        let old = std::mem::replace(&mut *self.settings, Arc::new(new));
         if let Some(page) = self.settings_ui.page.as_mut() {
             page.rebase(&old, &self.settings);
         }
         self.after_settings_changed(&old, window, cx);
         self.schedule_settings_save(cx);
-        // Turning "Let MCP clients run changes" off is a safety switch that `tablex-mcp` reads from
-        // the file at the time of each write: it must not wait out the debounce, or a client's yes
-        // that arrives in that window would still run. Written now, on this thread (a few bytes,
-        // only on this change), and the pending timer is dropped since there is nothing left to save.
-        // If that write fails the file still says ON while the page says off: that is said, in the
-        // way a failed debounced save is said, and the debounce stays armed to try again.
-        // Lowering the default agent access is the same kind of switch: `tablex-mcp` reads it from
-        // the file when it lists connections and opens sessions.
-        let mcp_off = old.ai.mcp_writes && !self.settings.ai.mcp_writes;
+        // Lowering the default agent access is a safety switch: `tablex-mcp` reads it from the file
+        // when it lists connections and opens sessions, so it must not wait out the debounce, or a
+        // client that opens a session in that window would still get the old level. Written now, on
+        // this thread (a few bytes, only on this change), and the pending timer is dropped since
+        // there is nothing left to save. If that write fails the file still has the old level while
+        // the page shows the lowered one: that is said, in the way a failed debounced save is said,
+        // and the debounce stays armed to try again.
         let agent_lowered =
             self.settings.ai.agent_access.access() < old.ai.agent_access.access();
-        if (mcp_off || agent_lowered) && self.settings_ui.path.is_some() {
+        if agent_lowered && self.settings_ui.path.is_some() {
             match self.flush_settings_blocking() {
-                Ok(()) => {
-                    self.settings_ui.pending = None;
-                    self.settings_reached_the_file(cx);
-                }
-                Err(error) => {
-                    self.settings_ui.mcp_off_unsaved |= mcp_off;
-                    self.settings_save_failed(&error, "tablex will try again", cx);
-                }
+                Ok(()) => self.settings_ui.pending = None,
+                Err(error) => self.settings_save_failed(&error, cx),
             }
         }
     }
@@ -239,7 +257,7 @@ impl AppRoot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let mut next = (*self.settings).clone();
+        let mut next = (**self.settings).clone();
         next.appearance.theme = choice;
         self.apply_settings(next, Some(window), cx);
         self.notify_pane_views(cx);
@@ -254,7 +272,7 @@ impl AppRoot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let mut next = (*self.settings).clone();
+        let mut next = (**self.settings).clone();
         next.appearance.language = choice;
         self.apply_settings(next, Some(window), cx);
         self.notify_pane_views(cx);
@@ -265,16 +283,16 @@ impl AppRoot {
     /// row): record it in the settings without pushing it back.
     pub(super) fn mirror_sidebar_into_settings(&mut self, cx: &mut Context<Self>) {
         let prefs = self.navigator.preferences();
-        let mut next = (*self.settings).clone();
+        let mut next = (**self.settings).clone();
         next.navigation.connection_sort = prefs.sort;
         next.navigation.global_search = prefs.global_search;
         next.appearance.tab_group_by = prefs.tab_group_by;
         next.appearance.compact_tab_titles = prefs.compact_tab_titles;
         next.appearance.tab_rows = prefs.tab_rows;
-        if next == *self.settings {
+        if next == **self.settings {
             return;
         }
-        let old = std::mem::replace(&mut self.settings, Arc::new(next));
+        let old = std::mem::replace(&mut *self.settings, Arc::new(next));
         if let Some(page) = self.settings_ui.page.as_mut() {
             page.rebase(&old, &self.settings);
         }
@@ -465,9 +483,9 @@ impl AppRoot {
             eprintln!("TABLEX_THEME: expected dark, light or system, got '{value}'");
             return;
         };
-        let mut next = (*self.settings).clone();
+        let mut next = (**self.settings).clone();
         next.appearance.theme = choice;
-        let old = std::mem::replace(&mut self.settings, Arc::new(next));
+        let old = std::mem::replace(&mut *self.settings, Arc::new(next));
         self.after_settings_changed(&old, None, cx);
     }
 
@@ -481,9 +499,9 @@ impl AppRoot {
             eprintln!("TABLEX_LANGUAGE: expected system, en or vi, got '{value}'");
             return;
         };
-        let mut next = (*self.settings).clone();
+        let mut next = (**self.settings).clone();
         next.appearance.language = choice;
-        let old = std::mem::replace(&mut self.settings, Arc::new(next));
+        let old = std::mem::replace(&mut *self.settings, Arc::new(next));
         self.after_settings_changed(&old, None, cx);
     }
 
@@ -650,48 +668,19 @@ impl AppRoot {
                 .spawn(async move { writer.write(&path, ticket, &bytes) })
                 .await;
             let _ = this.update(cx, |this, cx| match result {
-                Ok(_) => this.settings_reached_the_file(cx),
-                Err(error) => this.settings_save_failed(
-                    &error,
-                    "it is written again at the next settings change and when tablex quits",
-                    cx,
-                ),
+                Ok(_) => {}
+                Err(error) => this.settings_save_failed(&error, cx),
             });
         })
         .detach();
     }
 
-    /// A save failed: logged and shown. While the MCP switch was turned off and has not reached
-    /// the file, the notice says what that means (`then` is what happens next) instead of the
-    /// plain failure, on every failed attempt and not only the first.
-    fn settings_save_failed(&mut self, error: &std::io::Error, then: &str, cx: &mut Context<Self>) {
-        let message = if self.settings_ui.mcp_off_unsaved && !self.settings.ai.mcp_writes {
-            format!(
-                "Could not save the settings: {error}. {MCP_STILL_ON}, so MCP clients can still \
-                 be asked to run changes; {then}."
-            )
-        } else {
-            format!("Could not save the settings: {error}")
-        };
+    /// A save failed: logged and shown.
+    fn settings_save_failed(&mut self, error: &std::io::Error, cx: &mut Context<Self>) {
+        let message = format!("Could not save the settings: {error}");
         self.report_error(Area::App, None, message.clone());
         self.sidebar.notice = Some(message);
         cx.notify();
-    }
-
-    /// A save landed: the file says what the page says, so a "still ON" notice is no longer true.
-    fn settings_reached_the_file(&mut self, cx: &mut Context<Self>) {
-        if !std::mem::take(&mut self.settings_ui.mcp_off_unsaved) {
-            return;
-        }
-        if self
-            .sidebar
-            .notice
-            .as_deref()
-            .is_some_and(|notice| notice.contains(MCP_STILL_ON))
-        {
-            self.sidebar.notice = None;
-            cx.notify();
-        }
     }
 
     /// Quit-time flush: synchronous, so a change made in the last 300 ms
@@ -707,9 +696,6 @@ impl AppRoot {
         self.settings_ui.writer.write_now(&path, &bytes).map(drop)
     }
 }
-
-/// The part of a failed-save notice that says the MCP switch did not reach the file.
-const MCP_STILL_ON: &str = "\"Let MCP clients run changes\" is still ON in the settings file";
 
 /// The editor's tab setting.
 pub(super) fn tab_size_of(

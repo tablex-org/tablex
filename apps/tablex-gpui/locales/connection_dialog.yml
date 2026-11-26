@@ -15,6 +15,12 @@ connection_dialog:
   mongodb_checks_the_certificate:
     en: MongoDB checks the certificate against the host of the URL.
     vi: MongoDB kiểm tra chứng chỉ theo máy chủ trong URL.
+  sql_server_has_no_client_certificates:
+    en: SQL Server logins here use a user name and password; client certificates are not used.
+    vi: Đăng nhập SQL Server ở đây dùng tên người dùng và mật khẩu; không dùng chứng chỉ máy khách.
+  sql_server_certificate_name:
+    en: Optional. The name in the server certificate when it differs from the host (hostNameInCertificate).
+    vi: Không bắt buộc. Tên trong chứng chỉ máy chủ khi khác với máy chủ (hostNameInCertificate).
   key:
     en: Key
     vi: Khoá
@@ -234,6 +240,15 @@ connection_dialog:
   choose_a_database_file:
     en: Choose a database file
     vi: Chọn tệp cơ sở dữ liệu
+  open_read_only:
+    en: Open read-only
+    vi: Mở ở chế độ chỉ đọc
+  in_memory:
+    en: In memory
+    vi: Trong bộ nhớ
+  in_memory_hint:
+    en: Use a temporary database that lives only in memory (:memory:)
+    vi: Dùng cơ sở dữ liệu tạm chỉ nằm trong bộ nhớ (:memory:)
   custom_color:
     en: Custom color
     vi: Màu tuỳ chọn

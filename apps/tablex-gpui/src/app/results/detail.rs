@@ -373,9 +373,26 @@ impl AppRoot {
         placement: CellDetailPlacement,
         cx: &mut Context<Self>,
     ) {
+        let in_window = self.cell_detail_in_window(tab_id);
+        if placement == CellDetailPlacement::Window {
+            // A window shows an open panel; picking Window again brings its window to the front.
+            if in_window {
+                self.show_cell_detail_window(tab_id, cx);
+                return;
+            }
+            if !self.cell_detail_open(tab_id) {
+                return;
+            }
+        }
         if let Some(runtime) = self.workspace.runtime_mut(tab_id) {
             runtime.cell_detail.set_placement(placement);
         }
+        if placement == CellDetailPlacement::Window {
+            // The viewers made for the window that showed the panel are made again in its own.
+            self.forget_cell_detail_inputs(tab_id);
+            self.open_cell_detail_window(tab_id, cx);
+        }
+        // Leaving the window closes it (see `sync_cell_detail_window`).
         self.notify_tab(tab_id, cx);
     }
 

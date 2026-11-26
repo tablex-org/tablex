@@ -373,6 +373,8 @@ fn flavor_of(kind: Option<ConnectionKind>) -> SqlFlavor {
         Some(ConnectionKind::Mysql) => SqlFlavor::Mysql,
         Some(ConnectionKind::Mariadb) => SqlFlavor::Mariadb,
         Some(ConnectionKind::Clickhouse) => SqlFlavor::Clickhouse,
+        Some(ConnectionKind::Duckdb) => SqlFlavor::Duckdb,
+        Some(ConnectionKind::Mssql) => SqlFlavor::Mssql,
         _ => SqlFlavor::Postgres,
     }
 }
@@ -478,7 +480,7 @@ struct CompletionWait {
 #[derive(Default)]
 pub(super) struct CompletionLoads {
     /// Navigator nodes in flight that completion started (not the ones a sidebar click started).
-    started: std::collections::HashSet<NavigatorNodeId>,
+    pub(super) started: std::collections::HashSet<NavigatorNodeId>,
     wait: Option<CompletionWait>,
 }
 
@@ -781,6 +783,7 @@ fn suggest(
     let catalog = NavigatorCatalog {
         nav: &root.navigator,
         foreign_keys: &root.completion_foreign_keys,
+        schema_columns: &root.schema_columns,
         session: root.driver_runtime.connection_ids.get(&tab.connection_id).copied().unwrap_or(0),
         uncached_keys: RefCell::new(Vec::new()),
         connection: &tab.connection_id,
@@ -828,6 +831,9 @@ fn default_namespace(kind: Option<ConnectionKind>, tab: &Tab) -> Option<&str> {
             schema.or(database)
         }
         Some(ConnectionKind::Mongodb | ConnectionKind::Redis) => None,
+        // DuckDB's default schema, `main`, in the default catalog.
+        Some(ConnectionKind::Duckdb) => schema.or(Some("main")),
+        Some(ConnectionKind::Mssql) => schema.or(Some("dbo")),
         _ => schema.or(Some("public")),
     }
 }
@@ -900,6 +906,8 @@ fn to_lsp(
 struct NavigatorCatalog<'n> {
     nav: &'n NavigatorState,
     foreign_keys: &'n ForeignKeyCache,
+    /// The columns of whole schemas, read once from the driver (checked before a table's own Columns folder).
+    schema_columns: &'n super::schema_columns::SchemaColumnsCache,
     /// Engine connection id of the tab (0 = not connected), part of the key foreign keys are cached by.
     session: u64,
     /// Tables whose foreign keys were asked for but are not cached.
@@ -1168,6 +1176,15 @@ impl Catalog for NavigatorCatalog<'_> {
             self.want_objects(namespace);
             return false;
         };
+        if let NavigatorNodeId::Object { database, schema, object, .. } = node {
+            let stored = self.schema_columns.table(self.connection, database, schema, self.session, object);
+            if let Some(columns) = stored {
+                for column in columns {
+                    visit(Column { name: &column.name, data_type: Some(&*column.data_type).filter(|data_type| !data_type.is_empty()) });
+                }
+                return true;
+            }
+        }
         // A table's columns are the children of its Columns folder; a provider node's are its own.
         let columns = node.table_folder(crate::navigator::TableFolder::Columns);
         let columns = columns.as_ref().unwrap_or(node);
@@ -1250,6 +1267,8 @@ mod tests {
 
     static NO_FOREIGN_KEYS: std::sync::LazyLock<ForeignKeyCache> =
         std::sync::LazyLock::new(ForeignKeyCache::default);
+    static NO_SCHEMA_COLUMNS: std::sync::LazyLock<crate::app::schema_columns::SchemaColumnsCache> =
+        std::sync::LazyLock::new(Default::default);
 
     fn nav(kind: ConnectionKind) -> NavigatorState {
         NavigatorState::new(vec![SavedConnection {
@@ -1338,6 +1357,7 @@ mod tests {
         NavigatorCatalog {
             nav,
             foreign_keys: &NO_FOREIGN_KEYS,
+            schema_columns: &NO_SCHEMA_COLUMNS,
             session: 1,
             uncached_keys: RefCell::new(Vec::new()),
             connection: CONN,

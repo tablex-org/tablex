@@ -151,6 +151,35 @@ const POSTGRES: Table = &[
     ),
 ];
 
+/// SQL Server (T-SQL). `CREATE VIEW`, `PROCEDURE`, `FUNCTION` and `TRIGGER` must be alone in their batch, and each
+/// template is one statement run on its own, so that holds.
+const MSSQL: Table = &[
+    (CreateKind::View, "-- Name the view and write its query, then run the statement.\nCREATE VIEW {ns}{q:new_view} AS\nSELECT column_name\nFROM table_name;"),
+    (
+        CreateKind::Function,
+        "-- Name the function, list its arguments and return type, and write its body.\nCREATE FUNCTION {ns}{q:new_function}(@arg1 INT)\nRETURNS INT\nAS\nBEGIN\n  RETURN @arg1;\nEND;",
+    ),
+    (
+        CreateKind::Procedure,
+        "-- Name the procedure, list its parameters and write its body; run it with EXEC.\nCREATE PROCEDURE {ns}{q:new_procedure} @arg1 INT\nAS\nBEGIN\n  SET NOCOUNT ON;\n  SELECT @arg1;\nEND;",
+    ),
+    (CreateKind::Sequence, "-- Name the sequence and set where it starts and how it steps.\nCREATE SEQUENCE {ns}{q:new_sequence}\n  AS BIGINT\n  START WITH 1\n  INCREMENT BY 1;"),
+    (
+        CreateKind::Trigger,
+        "-- Name the trigger, choose the table and the event, and write what it does (inserted and deleted hold the rows).\nCREATE TRIGGER {ns}{q:new_trigger}\n  ON {tbl}\n  AFTER INSERT\nAS\nBEGIN\n  SET NOCOUNT ON;\n  SELECT 1;\nEND;",
+    ),
+    (CreateKind::Column, "-- Name the column and set its type, then run the statement.\nALTER TABLE {tbl}\n  ADD {q:new_column} NVARCHAR(255) NULL;"),
+    (CreateKind::Index, "-- Name the index and list the columns it covers.\nCREATE INDEX {q:new_index}\n  ON {tbl} ({q:column_name});"),
+    (
+        CreateKind::Constraint,
+        "-- Name the constraint and list the columns that must be unique (or write a CHECK instead).\nALTER TABLE {tbl}\n  ADD CONSTRAINT {q:new_constraint} UNIQUE ({q:column_name});",
+    ),
+    (
+        CreateKind::ForeignKey,
+        "-- Name the foreign key, the column, and the table and column it references.\nALTER TABLE {tbl}\n  ADD CONSTRAINT {q:new_foreign_key} FOREIGN KEY ({q:column_name})\n  REFERENCES {ns}{q:referenced_table} ({q:referenced_column});",
+    ),
+];
+
 /// MySQL and MariaDB. A routine's or trigger's body is one statement: a `BEGIN ... END` block holds
 /// `;` and needs the client's `DELIMITER`.
 const MYSQL: Table = &[
@@ -197,6 +226,21 @@ const SQLITE: Table = &[
     ),
 ];
 
+/// DuckDB has no triggers or routines to browse, and adds neither a unique constraint nor a foreign
+/// key to a table that exists: a unique index is its unique constraint, and a foreign key means a new
+/// table. An index lives in the schema of its table.
+const DUCKDB: Table = &[
+    (CreateKind::View, "-- Name the view and write its query, then run the statement.\nCREATE VIEW {ns}{q:new_view} AS\nSELECT column_name\nFROM table_name;"),
+    (CreateKind::Sequence, "-- Name the sequence and set where it starts and how it steps.\nCREATE SEQUENCE {ns}{q:new_sequence}\n  START WITH 1\n  INCREMENT BY 1;"),
+    (CreateKind::Type, "-- Name the type and list its values (an enum).\nCREATE TYPE {ns}{q:new_type} AS ENUM ('value_1', 'value_2');"),
+    (CreateKind::Column, "-- Name the column and set its type, then run the statement.\nALTER TABLE {tbl}\n  ADD COLUMN {q:new_column} VARCHAR;"),
+    (CreateKind::Index, "-- Name the index and list the columns it covers.\nCREATE INDEX {q:new_index}\n  ON {tbl} ({q:column_name});"),
+    (
+        CreateKind::Constraint,
+        "-- DuckDB adds a unique constraint as a unique index: name it and list the columns that must be unique.\nCREATE UNIQUE INDEX {q:new_unique_index}\n  ON {tbl} ({q:column_name});",
+    ),
+];
+
 /// ClickHouse has no procedures, sequences, triggers, types, unique constraints or foreign keys; its
 /// indexes are data-skipping ones.
 const CLICKHOUSE: Table = &[
@@ -217,6 +261,8 @@ fn tables(kind: ConnectionKind) -> [Table; 2] {
         ConnectionKind::Mariadb => [MYSQL, MARIADB_ONLY],
         ConnectionKind::Sqlite => [SQLITE, &[]],
         ConnectionKind::Clickhouse => [CLICKHOUSE, &[]],
+        ConnectionKind::Duckdb => [DUCKDB, &[]],
+        ConnectionKind::Mssql => [MSSQL, &[]],
         ConnectionKind::Mongodb | ConnectionKind::Redis => [&[], &[]],
     }
 }
@@ -314,8 +360,8 @@ mod tests {
     use super::*;
     use engine_driver_kit::sql::{classify, Keyword, SqlLexOptions};
 
-    const SQL_KINDS: [ConnectionKind; 5] =
-        [ConnectionKind::Postgres, ConnectionKind::Mysql, ConnectionKind::Mariadb, ConnectionKind::Sqlite, ConnectionKind::Clickhouse];
+    const SQL_KINDS: [ConnectionKind; 6] =
+        [ConnectionKind::Postgres, ConnectionKind::Mysql, ConnectionKind::Mariadb, ConnectionKind::Sqlite, ConnectionKind::Clickhouse, ConnectionKind::Duckdb];
 
     fn lex(kind: ConnectionKind) -> SqlLexOptions {
         crate::app::data_transfer::order::lex_options(kind)
@@ -329,7 +375,7 @@ mod tests {
     fn every_template() -> Vec<(ConnectionKind, CreateKind, Template)> {
         let mut all = Vec::new();
         for kind in SQL_KINDS {
-            let namespace = if kind == ConnectionKind::Sqlite { "main" } else { "ns" };
+            let namespace = if matches!(kind, ConnectionKind::Sqlite | ConnectionKind::Duckdb) { "main" } else { "ns" };
             for create in CreateKind::ALL {
                 if source(kind, create).is_some() {
                     for table in [None, Some("orders")] {
@@ -397,6 +443,9 @@ mod tests {
         assert_eq!(table(ConnectionKind::Sqlite), [Column, Index, Constraint]);
         assert_eq!(ns(ConnectionKind::Clickhouse), [View, MaterializedView]);
         assert_eq!(table(ConnectionKind::Clickhouse), [Column, Index]);
+        // DuckDB: no triggers or routines; a unique index is its unique constraint, and no foreign key is added later.
+        assert_eq!(ns(ConnectionKind::Duckdb), [View, Sequence, Type]);
+        assert_eq!(table(ConnectionKind::Duckdb), [Column, Index, Constraint]);
         for kind in [ConnectionKind::Mongodb, ConnectionKind::Redis] {
             assert!(ns(kind).is_empty() && table(kind).is_empty(), "{kind:?}");
         }

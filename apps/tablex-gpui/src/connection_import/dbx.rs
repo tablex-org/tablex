@@ -273,7 +273,7 @@ mod tests {
         let all = parse(PLAIN, None).unwrap();
         assert_eq!(by_name(&all, "Ledger").kind, ImportKind::Unsupported("Oracle".into()));
         assert_eq!(by_name(&all, "Cache").kind, ImportKind::Supported(ConnectionKind::Redis));
-        assert_eq!(by_name(&all, "Warehouse").kind, ImportKind::Unsupported("SQL Server".into()));
+        assert_eq!(by_name(&all, "Warehouse").kind, ImportKind::Supported(ConnectionKind::Mssql));
     }
 
     #[test]

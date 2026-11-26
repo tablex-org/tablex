@@ -1605,7 +1605,7 @@ fn value_server_text_and_clickhouse_composite_columns_are_read_only_up_front(
     });
     app.update(visual, |this, _| {
         let connection = this.workspace.tab(tab_id).unwrap().connection_id.clone();
-        for saved in &mut this.saved_connections {
+        for saved in this.saved_connections.iter_mut() {
             if saved.matches_id(&connection) {
                 saved.kind = ConnectionKind::Clickhouse;
             }

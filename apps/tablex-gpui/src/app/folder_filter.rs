@@ -71,8 +71,9 @@ impl AppRoot {
         let key = navigator::folder_key(id)?;
         let saved = self.saved_connections.iter().find(|saved| saved.matches_id(&key.connection))?;
         let offered = match key.folder {
-            // SQLite lists the one database of its file; Redis has no databases to name.
-            FolderKind::Databases => !saved.disabled && !matches!(saved.kind, ConnectionKind::Sqlite | ConnectionKind::Redis),
+            // A file database lists the one database of its file (DuckDB lists what is attached,
+            // and only the current one opens); Redis has no databases to name.
+            FolderKind::Databases => !saved.disabled && !saved.kind.is_file_database() && saved.kind != ConnectionKind::Redis,
             FolderKind::Schemas => crate::navigator::sql_driver::is_sql_kind(saved.kind) && self.sql_supports_schemas(&key.connection),
             FolderKind::Objects(_) => crate::navigator::sql_driver::is_sql_kind(saved.kind),
         };

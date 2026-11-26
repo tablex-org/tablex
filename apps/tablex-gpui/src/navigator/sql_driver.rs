@@ -32,6 +32,8 @@ pub fn is_sql_kind(kind: ConnectionKind) -> bool {
             | ConnectionKind::Mysql
             | ConnectionKind::Mariadb
             | ConnectionKind::Clickhouse
+            | ConnectionKind::Duckdb
+            | ConnectionKind::Mssql
     )
 }
 

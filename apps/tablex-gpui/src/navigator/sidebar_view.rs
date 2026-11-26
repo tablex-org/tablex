@@ -235,12 +235,15 @@ impl NavigatorState {
         self.selection_mode && self.selected_connection_count() > 0
     }
 
+    /// The selected rows in tree order: one lookup per selected id, not a scan of every row.
     pub fn selection_in_visible_order(&self) -> Vec<NavigatorNodeId> {
-        self.visible
+        let mut at: Vec<usize> = self
+            .selected_ids
             .iter()
-            .filter(|row| self.selected_ids.contains(&row.id))
-            .map(|row| row.id.clone())
-            .collect()
+            .filter_map(|id| self.visible_lookup.get(id).copied())
+            .collect();
+        at.sort_unstable();
+        at.into_iter().filter_map(|index| self.visible.get(index)).map(|row| row.id.clone()).collect()
     }
 
     pub fn set_search(&mut self, options: SearchOptions) -> Result<(), regex::Error> {
@@ -269,6 +272,9 @@ impl NavigatorState {
     }
 
     pub fn set_connected_ids(&mut self, ids: HashSet<String>) {
+        if self.connected_ids == ids {
+            return;
+        }
         self.connected_ids = ids;
         self.rebuild_visible();
     }

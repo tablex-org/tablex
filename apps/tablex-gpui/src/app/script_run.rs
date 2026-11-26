@@ -94,6 +94,8 @@ impl AppRoot {
             return;
         }
         let Some(window) = self.driver_runtime.window else {
+            // No dialog follows to take what the last confirmation read.
+            self.drop_preview_handoff();
             let text = statements.iter().map(|statement| statement.sql.as_str()).collect::<Vec<_>>().join(";\n");
             self.refuse_statement(tab_id, &text, "Could not ask for confirmation: no window to ask in".into(), cx);
             return;
@@ -130,6 +132,14 @@ impl AppRoot {
             .collect();
         let more = dangers.len().saturating_sub(LISTED);
         let flagged: Vec<usize> = dangers.iter().map(|(index, _)| *index).collect();
+        // The script's UPDATE / DELETE statements show the rows they will change (counted before it runs).
+        let preview = self.affected_preview_for_statements(
+            tab_id,
+            statements.iter().map(|statement| statement.sql.as_str()),
+            super::affected_preview::Chain::Continued,
+            window,
+            cx,
+        );
         window.open_alert_dialog(cx, move |dialog, _, _| {
             let root = root.clone();
             let mut statements = statements.clone();
@@ -158,7 +168,8 @@ impl AppRoot {
                                 .text_color(theme::text_muted())
                                 .children(lines.iter().cloned().map(|line| div().truncate().child(line)))
                                 .when(more > 0, |list| list.child(format!("and {more} more"))),
-                        ),
+                        )
+                        .children(preview.clone()),
                 )
                 .button_props(gpui_component::dialog::DialogButtonProps::default().ok_text(t!("editor.run_anyway")))
                 .confirm()
@@ -186,6 +197,7 @@ impl AppRoot {
     }
 
     fn run_planned_script(&mut self, tab_id: u64, statements: Vec<PlannedStatement>, cx: &mut Context<Self>) {
+        self.drop_preview_handoff();
         let Some(first) = statements.first().map(|statement| statement.sql.clone()) else {
             return;
         };
@@ -248,6 +260,7 @@ impl AppRoot {
         cx: &mut Context<Self>,
     ) {
         let tab_id = request.tab_id;
+        let elapsed = self.query_elapsed_ms(tab_id, run);
         self.finish_query_timing(tab_id, run);
         self.finish_query_task(tab_id, run);
         let outcome = match result {
@@ -269,13 +282,15 @@ impl AppRoot {
                 };
                 // The rows are ours now: the driver's page goes back.
                 drop(guard);
-                self.record_query_history(&request, page.row_count as i64, cx);
+                self.record_query_history(&request, page.row_count as i64, elapsed, cx);
+                self.note_ddl_run(tab_id, &request.sql);
                 outcome
             }
             Err(error) => {
                 let message = crate::sessions::redact_secrets(&error.status_text());
                 let cancelled = error.is_cancelled();
                 if !cancelled {
+                    self.record_query_failure(&request, &message, elapsed, cx);
                     self.report_query_failure(tab_id, &error.to_string());
                     self.note_driver_connection_lost(tab_id, &error);
                 }
@@ -395,6 +410,8 @@ impl AppRoot {
         view: ScriptView,
         cx: &mut Context<Self>,
     ) {
+        // The objects the script created, dropped or altered: the navigator lists them once, at the end.
+        self.refresh_navigator_after_ddl(tab_id, cx);
         let shown = view.shown;
         let rows = view.results.iter().map(|result| result.source.row_count()).sum();
         if let Some(runtime) = self.workspace.runtime_mut(tab_id) {

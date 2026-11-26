@@ -20,7 +20,7 @@ use gpui::{
 use gpui_component::button::Button;
 use gpui_component::checkbox::Checkbox;
 use gpui_component::input::{Input, NumberInput};
-use gpui_component::select::{Select, SelectEvent, SelectState};
+use gpui_component::select::{SearchableVec, Select, SelectEvent, SelectState};
 use gpui_component::switch::Switch;
 use gpui_component::{Disableable, Icon, IndexPath};
 
@@ -101,7 +101,7 @@ pub struct SshTabInputs {
     proxy_password: Entity<gpui_component::input::InputState>,
     proxy_kind_select: Entity<SelectState<Vec<&'static str>>>,
     auth_select: Entity<SelectState<Vec<&'static str>>>,
-    config_select: Entity<SelectState<Vec<String>>>,
+    config_select: Entity<SelectState<SearchableVec<String>>>,
     config: Rc<RefCell<SshConfig>>,
     /// What the connection had when the dialog opened (to tell a changed bastion).
     initial: Rc<SshSettings>,
@@ -135,7 +135,9 @@ impl SshTabInputs {
         });
         // Empty until `load_config` delivers the aliases.
         let config_select =
-            cx.new(|cx| SelectState::new(Vec::<String>::new(), None, window, cx).searchable(true));
+            cx.new(|cx| {
+                SelectState::new(SearchableVec::new(Vec::<String>::new()), None, window, cx).searchable(true)
+            });
         let this = Self {
             enabled: Rc::new(Cell::new(settings.enabled)),
             auth: Rc::new(Cell::new(settings.auth)),
@@ -274,7 +276,7 @@ impl SshTabInputs {
         let inputs = Self { _subscriptions: Rc::new(RefCell::new(Vec::new())), ..self.clone() };
         let config_subscription = cx.subscribe(
             &self.config_select,
-            move |_, event: &SelectEvent<Vec<String>>, cx| {
+            move |_, event: &SelectEvent<SearchableVec<String>>, cx| {
                 let SelectEvent::Confirm(Some(alias)) = event else {
                     return;
                 };
@@ -372,7 +374,7 @@ impl SshTabInputs {
         let aliases = config.host_aliases();
         *self.config.borrow_mut() = config;
         self.config_select
-            .update(cx, |select, cx| select.set_items(aliases, window, cx));
+            .update(cx, |select, cx| select.set_items(SearchableVec::new(aliases), window, cx));
         cx.refresh_windows();
     }
 

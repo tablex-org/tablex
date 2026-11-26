@@ -367,12 +367,12 @@ pub fn copy_info(
     if item == CopyInfo::HostPort {
         return host_port(conn.kind, &conn.uri);
     }
-    if conn.kind != ConnectionKind::Sqlite {
+    if !conn.kind.is_file_database() {
         host_port(conn.kind, &conn.uri)?;
     }
     // Reuse the export allowlist: unknown query keys can contain proxy tokens.
     let safe = connections::public_connection_uri(&conn.uri)?;
-    if item == CopyInfo::ConnectionUrl || conn.kind == ConnectionKind::Sqlite {
+    if item == CopyInfo::ConnectionUrl || conn.kind.is_file_database() {
         return Ok(safe);
     }
     if !conn.save_password {
@@ -399,8 +399,8 @@ pub fn copy_saved_connection_info(
 }
 
 fn host_port(kind: ConnectionKind, uri: &str) -> Result<String, String> {
-    if kind == ConnectionKind::Sqlite {
-        return Err("SQLite connections have no host or port".into());
+    if kind.is_file_database() {
+        return Err(format!("{} connections have no host or port", crate::connection_dialog::kind_label(kind)));
     }
     let authority = uri
         .split_once("://")
@@ -534,7 +534,7 @@ impl super::AppRoot {
             .ok_or("Saved connection unavailable")?;
         if !matches!(
             saved.kind,
-            ConnectionKind::Postgres | ConnectionKind::Sqlite
+            ConnectionKind::Postgres | ConnectionKind::Sqlite | ConnectionKind::Duckdb
         ) {
             return Err("This database does not expose SQL schemas".into());
         }
@@ -886,7 +886,7 @@ impl super::AppRoot {
             || (!is_mongo_script
                 && !matches!(
                     saved_kind,
-                    ConnectionKind::Postgres | ConnectionKind::Sqlite
+                    ConnectionKind::Postgres | ConnectionKind::Sqlite | ConnectionKind::Duckdb
                 ))
         {
             return Err("Query language does not match the saved connection".into());
@@ -955,7 +955,7 @@ impl super::AppRoot {
                 && !saved.disabled
                 && match saved.kind {
                     ConnectionKind::Mongodb => entry.dialect == QueryMode::MongoScript.as_str(),
-                    ConnectionKind::Postgres | ConnectionKind::Sqlite => entry.dialect == "sql",
+                    ConnectionKind::Postgres | ConnectionKind::Sqlite | ConnectionKind::Duckdb => entry.dialect == "sql",
                     _ => false,
                 }
         }) {
@@ -986,7 +986,7 @@ impl super::AppRoot {
                             && !saved.disabled
                             && match saved.kind {
                                 ConnectionKind::Mongodb => dialect == QueryMode::MongoScript.as_str(),
-                                ConnectionKind::Postgres | ConnectionKind::Sqlite => {
+                                ConnectionKind::Postgres | ConnectionKind::Sqlite | ConnectionKind::Duckdb => {
                                     dialect == "sql"
                                 }
                                 _ => false,

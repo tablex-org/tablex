@@ -1653,8 +1653,13 @@ fn native_scenario_uses_one_isolated_root_for_snowflake_copy_and_saved_sql(
             Some(root.join("grid-copy-default.json").as_path())
         );
         assert_eq!(this.grid_prefs.copy_default, CopyFormat::Smart);
-        this.set_copy_default(this.active_id(), CopyFormat::CsvWithHeaders, cx);
-        assert!(root.join("grid-copy-default.json").exists());
+        this.set_copy_default(CopyFormat::CsvWithHeaders, cx);
+        // The setting is the one place the choice is kept: no old file is written.
+        assert!(!root.join("grid-copy-default.json").exists());
+        assert_eq!(
+            this.settings().results.default_copy_format,
+            crate::settings::CopyDefault::CsvWithHeaders
+        );
         this.av().grid_ui
             .selection
             .borrow_mut()
@@ -1691,7 +1696,7 @@ fn scenario_env_root_child_uses_isolated_storage(cx: &mut TestAppContext) {
             this.grid_prefs.copy_default_path.as_deref(),
             Some(root.join("grid-copy-default.json").as_path())
         );
-        this.set_copy_default(this.active_id(), CopyFormat::CsvWithHeaders, cx);
+        this.set_copy_default(CopyFormat::CsvWithHeaders, cx);
         this.av().grid_ui
             .selection
             .borrow_mut()
@@ -1699,7 +1704,7 @@ fn scenario_env_root_child_uses_isolated_storage(cx: &mut TestAppContext) {
         this.start_snowflake_generation(this.active_id(), 17, cx).unwrap();
     });
     visual.run_until_parked();
-    assert!(root.join("grid-copy-default.json").exists());
+    assert!(!root.join("grid-copy-default.json").exists());
     assert!(root.join("snowflake/worker-17.state").exists());
 }
 
@@ -2860,10 +2865,8 @@ fn context_menu_dsv_dialog_validates_then_copies(cx: &mut TestAppContext) {
     app.update(visual, |this, _| {
         assert_eq!(
             this.grid_prefs.copy_default,
-            super::results::copy::read_copy_default(
-                this.grid_prefs.copy_default_path.as_ref().unwrap(),
-            ),
-            "one-off DSV copy must not change the persisted default"
+            CopyFormat::from_setting(this.settings().results.default_copy_format),
+            "one-off DSV copy must not change the default"
         );
     });
 }

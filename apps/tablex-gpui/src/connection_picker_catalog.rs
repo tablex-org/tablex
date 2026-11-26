@@ -145,7 +145,7 @@ impl PickerEntry {
     }
 }
 
-const CATALOG: [PickerEntry; 20] = [
+const CATALOG: [PickerEntry; 21] = [
     PickerEntry {
         id: "mysql",
         label: "MySQL",
@@ -164,7 +164,7 @@ const CATALOG: [PickerEntry; 20] = [
         id: "sql-server",
         label: "SQL Server",
         category: PickerCategory::Relational,
-        kind: None,
+        kind: Some(ConnectionKind::Mssql),
         monogram: "SQL",
     },
     PickerEntry {
@@ -264,6 +264,13 @@ const CATALOG: [PickerEntry; 20] = [
         category: PickerCategory::Analytics,
         kind: Some(ConnectionKind::Clickhouse),
         monogram: "CH",
+    },
+    PickerEntry {
+        id: "duckdb",
+        label: "DuckDB",
+        category: PickerCategory::Analytics,
+        kind: Some(ConnectionKind::Duckdb),
+        monogram: "DK",
     },
     PickerEntry {
         id: "sqlite",
@@ -390,6 +397,9 @@ mod tests {
             .is_available(&DriverAvailability::default()));
         assert!(entry_for_kind(ConnectionKind::Clickhouse)
             .expect("ClickHouse should be catalogued")
+            .is_available(&DriverAvailability::default()));
+        assert!(entry_for_kind(ConnectionKind::Mssql)
+            .expect("SQL Server should be catalogued")
             .is_available(&DriverAvailability::default()));
         assert!(entry_for_kind(ConnectionKind::Redis)
             .expect("Redis should be catalogued")

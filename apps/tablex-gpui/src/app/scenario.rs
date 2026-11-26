@@ -694,7 +694,7 @@ impl AppRoot {
             );
         }
         service.save(record);
-        self.saved_connections = service.saved_connections().to_vec();
+        *self.saved_connections = service.saved_connections().to_vec();
         if let Some(profile) = form.profile.clone() {
             self.connection_policy.set_profile(&record_id, profile);
         }
@@ -1567,7 +1567,7 @@ impl AppRoot {
                     run,
                     Ok(crate::query::QueryResultBatch { batches: vec![Arc::new(batch)], total_count: rows }),
                 );
-                self.record_query_history(&request, rows, cx);
+                self.record_query_history(&request, rows, None, cx);
             }
             Err(CommandRefusal::Confirm(reason)) => self.await_sql_confirmation(run, request, reason, cx),
             Err(CommandRefusal::Blocked(message) | CommandRefusal::Failed(message)) => {

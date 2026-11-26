@@ -550,8 +550,8 @@ pub(in crate::app) fn mongo_document_preview(value: &str) -> String {
 /// Mongo toolbar editors, keyed by tab id (entities that live as long as the tab).
 #[derive(Default)]
 pub(in crate::app) struct MongoUiState {
-    pub(in crate::app) filter_editors: HashMap<u64, gpui::Entity<InputState>>,
-    pub(in crate::app) sort_editors: HashMap<u64, gpui::Entity<InputState>>,
+    pub(in crate::app) filter_editors: HashMap<u64, gpui::Entity<EditorState>>,
+    pub(in crate::app) sort_editors: HashMap<u64, gpui::Entity<EditorState>>,
     pub(in crate::app) column_search_editors: HashMap<u64, gpui::Entity<InputState>>,
     pub(in crate::app) expanded_find_editors: HashMap<u64, gpui::Entity<EditorState>>,
     pub(in crate::app) expanded_sort_editors: HashMap<u64, gpui::Entity<EditorState>>,

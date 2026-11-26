@@ -12,11 +12,22 @@ geometry; there are no scripts, stylesheets, images, or remote references.
 | Firebird | `firebird.svg` | [devicon/icons/firebird/firebird-plain.svg](https://github.com/devicons/devicon/blob/7330accdbc47e2dc0c19789a48533c4a3c50fe58/icons/firebird/firebird-plain.svg) | [MIT](https://github.com/devicons/devicon/blob/7330accdbc47e2dc0c19789a48533c4a3c50fe58/LICENSE) |
 | CockroachDB | `cockroachlabs.svg` | [simple-icons/icons/cockroachlabs.svg](https://github.com/simple-icons/simple-icons/blob/5d5d4d1d28cbb00b21770bb69d8112da52211a95/icons/cockroachlabs.svg) | [CC0 1.0](https://github.com/simple-icons/simple-icons/blob/5d5d4d1d28cbb00b21770bb69d8112da52211a95/LICENSE.md) |
 | Cloud Spanner | `cloud-spanner.svg` | [simple-icons/icons/googlecloudspanner.svg](https://github.com/simple-icons/simple-icons/blob/5d5d4d1d28cbb00b21770bb69d8112da52211a95/icons/googlecloudspanner.svg) | [CC0 1.0](https://github.com/simple-icons/simple-icons/blob/5d5d4d1d28cbb00b21770bb69d8112da52211a95/LICENSE.md) |
+| DuckDB | `duckdb.svg` | [simple-icons/icons/duckdb.svg](https://github.com/simple-icons/simple-icons/blob/5d5d4d1d28cbb00b21770bb69d8112da52211a95/icons/duckdb.svg) | [CC0 1.0](https://github.com/simple-icons/simple-icons/blob/5d5d4d1d28cbb00b21770bb69d8112da52211a95/LICENSE.md) |
+
+`sql-server.svg` (devicon, MIT, above) is the icon of the SQL Server connection kind everywhere:
+the picker tile, the connection rows of the sidebar, the connection form and the command palette.
+It keeps the vendor's own red, which reads on both themes.
 
 The vendored monochrome marks (`mysql.svg`, `mariadb.svg`, `cockroachlabs.svg`)
 were near-white for the dark surface; they are filled with each vendor's brand
 color instead (`#4479A1`, `#C0765A`, `#7B52FF`) so they read on both the Dark
-and the Light theme.
+and the Light theme. `duckdb.svg` is filled with DuckDB's yellow `#FFF000` for
+the same reason; its geometry is the unmodified Simple Icons path. The
+Simple Icons files are CC0; the DuckDB name and logo remain the trademark of
+their owner (the DuckDB Foundation), shown only to name the database.
+
+`status-dot.svg` is an original filled circle drawn for this app: the connecting dot of a sidebar row,
+painted in the status color and faded by the window's own animation clock.
 
 `clickhouse.svg` is an original four-bar mark drawn for this app (no vendor
 artwork copied); it uses ClickHouse's yellow `#FFCC01` so it reads on the dark

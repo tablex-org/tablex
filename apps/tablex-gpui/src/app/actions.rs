@@ -75,6 +75,7 @@ gpui::actions!(
         NextTabGroup,
         PreviousTabGroup,
         ToggleErrorLog,
+        OpenQueryHistory,
         ToggleAssistant,
         AssistantEscape,
         AssistantExplain,

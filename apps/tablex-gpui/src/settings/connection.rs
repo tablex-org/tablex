@@ -299,4 +299,30 @@ mod tests {
         assert_eq!(shared.effective(&development).agent_access, AgentAccess::Read);
         assert_eq!(shared.effective(&production).agent_access, AgentAccess::Off);
     }
+
+    #[test]
+    fn a_global_read_write_reaches_every_connection_that_is_not_production_and_the_mcp_reader_agrees() {
+        let mut settings = Settings::default();
+        settings.ai.agent_access = AgentLevel::ReadWrite;
+        let plain = profile("", &[]);
+        let development = profile(DEVELOPMENT, &[]);
+        let production = profile(PRODUCTION, &[]);
+        let own = profile(DEVELOPMENT, &[(AGENT_ACCESS, OverrideValue::Text("read".into()))]);
+        assert_eq!(settings.for_connection(&plain).agent_access, AgentAccess::ReadWrite);
+        assert_eq!(settings.for_connection(&development).agent_access, AgentAccess::ReadWrite);
+        assert_eq!(settings.for_connection(&production).agent_access, AgentAccess::Off, "production as before");
+        assert_eq!(settings.for_connection(&own).agent_access, AgentAccess::Read, "its own level wins");
+        // What the app writes is what `tablex-mcp` and the in-app assistant read back.
+        let path = std::env::temp_dir().join(format!("tablex-global-rw-{}.json", std::process::id()));
+        std::fs::write(&path, serde_json::to_string(&settings).unwrap()).unwrap();
+        let shared = engine_connect::profile::ProfileSettings::load(&path).unwrap();
+        assert_eq!(
+            engine_connect::profile::mcp_writes_state(Some(&path)),
+            engine_connect::profile::McpWrites::Allowed
+        );
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(shared.effective(&development).agent_access, AgentAccess::ReadWrite);
+        assert_eq!(shared.effective(&plain).agent_access, AgentAccess::ReadWrite);
+        assert_eq!(shared.effective(&production).agent_access, AgentAccess::Off);
+    }
 }

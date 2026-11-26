@@ -110,12 +110,12 @@ impl SqlRig<'_> {
         let key = self.key.clone();
         self.app.update(self.visual, |this, cx| {
             let profile = crate::settings::connection::ConnectionProfile { type_id: "test-type".into(), ..Default::default() };
-            let mut settings = (*this.settings).clone();
+            let mut settings = (**this.settings).clone();
             let mut ty = crate::settings::connection::ConnectionType { id: "test-type".into(), name: "test".into(), ..Default::default() };
             change(&mut ty);
             settings.connection_types.retain(|existing| existing.id != "test-type");
             settings.connection_types.push(ty);
-            this.settings = std::sync::Arc::new(settings);
+            *this.settings = std::sync::Arc::new(settings);
             this.connection_policy.set_profile(&key, profile);
             cx.notify();
         });
@@ -218,11 +218,11 @@ impl SqlRig<'_> {
         let key = self.key.clone();
         self.app.update(self.visual, |this, cx| {
             let profile = crate::settings::connection::ConnectionProfile { type_id: "read-only-test".into(), ..Default::default() };
-            let mut settings = (*this.settings).clone();
+            let mut settings = (**this.settings).clone();
             let mut ty = crate::settings::connection::ConnectionType { id: "read-only-test".into(), name: "ro".into(), ..Default::default() };
             ty.read_only = read_only;
             settings.connection_types.push(ty);
-            this.settings = std::sync::Arc::new(settings);
+            *this.settings = std::sync::Arc::new(settings);
             this.connection_policy.set_profile(&key, profile);
             cx.notify();
         });
@@ -584,7 +584,7 @@ fn a_connection_type_that_is_not_auto_commit_starts_its_tabs_manual(cx: &mut Tes
     let mut rig = SqlRig::sqlite(cx, &db);
     let key = rig.key.clone();
     rig.app.update(rig.visual, |this, cx| {
-        let mut settings = (*this.settings).clone();
+        let mut settings = (**this.settings).clone();
         let ty = crate::settings::connection::ConnectionType {
             id: "manual-type".into(),
             name: "manual".into(),
@@ -592,7 +592,7 @@ fn a_connection_type_that_is_not_auto_commit_starts_its_tabs_manual(cx: &mut Tes
             ..Default::default()
         };
         settings.connection_types.push(ty);
-        this.settings = std::sync::Arc::new(settings);
+        *this.settings = std::sync::Arc::new(settings);
         let profile = crate::settings::connection::ConnectionProfile { type_id: "manual-type".into(), ..Default::default() };
         this.connection_policy.set_profile(&key, profile);
         cx.notify();
@@ -824,14 +824,14 @@ fn table_data_tabs_have_no_commit_mode_and_never_open_a_transaction(cx: &mut Tes
     let (tab, key) = (rig.tab, rig.key.clone());
     // Even on a connection type that starts tabs in manual commit.
     rig.app.update(rig.visual, |this, cx| {
-        let mut settings = (*this.settings).clone();
+        let mut settings = (**this.settings).clone();
         settings.connection_types.push(crate::settings::connection::ConnectionType {
             id: "manual-type".into(),
             name: "manual".into(),
             auto_commit: false,
             ..Default::default()
         });
-        this.settings = std::sync::Arc::new(settings);
+        *this.settings = std::sync::Arc::new(settings);
         let profile = crate::settings::connection::ConnectionProfile { type_id: "manual-type".into(), ..Default::default() };
         this.connection_policy.set_profile(&key, profile);
         cx.notify();
@@ -2417,7 +2417,7 @@ fn the_toolbars_tooltips_are_built_once_per_settings_snapshot(cx: &mut TestAppCo
     let (first, second) = rig.app.read_with(rig.visual, |this, _| (this.end_tooltips(), this.end_tooltips()));
     assert_eq!((builds(&rig), first.0.clone()), (1, second.0));
     assert!(first.0.contains("Commit") && first.1.contains("Roll back"));
-    rig.app.update(rig.visual, |this, _| this.settings = std::sync::Arc::new((*this.settings).clone()));
+    rig.app.update(rig.visual, |this, _| *this.settings = std::sync::Arc::new((**this.settings).clone()));
     rig.app.read_with(rig.visual, |this, _| this.end_tooltips());
     assert_eq!(builds(&rig), 2, "a new snapshot builds new ones");
 }

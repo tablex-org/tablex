@@ -1,0 +1,287 @@
+_version: 2
+history:
+  title:
+    en: Query History
+    vi: Lịch sử truy vấn
+  show_all:
+    en: Show all…
+    vi: Xem tất cả…
+  show_all_history:
+    en: Show all history…
+    vi: Xem toàn bộ lịch sử…
+  strip_empty:
+    en: No saved queries for this table
+    vi: Bảng này chưa có truy vấn nào được lưu
+  source_all:
+    en: All
+    vi: Tất cả
+  source_sql:
+    en: SQL queries
+    vi: Truy vấn SQL
+  source_mcp:
+    en: MCP calls
+    vi: Lời gọi MCP
+  kind_all:
+    en: All
+    vi: Tất cả
+  kind_query:
+    en: Queries
+    vi: Truy vấn
+  kind_data:
+    en: Data changes
+    vi: Thay đổi dữ liệu
+  kind_schema:
+    en: Schema changes
+    vi: Thay đổi lược đồ
+  kind_redis:
+    en: Redis commands
+    vi: Lệnh Redis
+  kind_failed:
+    en: Failed
+    vi: Thất bại
+  kind_succeeded:
+    en: Succeeded
+    vi: Thành công
+  k_query:
+    en: Query
+    vi: Truy vấn
+  k_data:
+    en: Data change
+    vi: Thay đổi dữ liệu
+  k_schema:
+    en: Schema change
+    vi: Thay đổi lược đồ
+  k_redis:
+    en: Redis command
+    vi: Lệnh Redis
+  k_mcp:
+    en: MCP call
+    vi: Lời gọi MCP
+  search_placeholder:
+    en: Search history…
+    vi: Tìm trong lịch sử…
+  refresh:
+    en: Refresh
+    vi: Làm mới
+  all_tools:
+    en: All tools
+    vi: Mọi công cụ
+  col_time:
+    en: Time
+    vi: Thời điểm
+  col_duration:
+    en: Duration
+    vi: Thời gian
+  col_result:
+    en: Result
+    vi: Kết quả
+  col_connection:
+    en: Connection
+    vi: Kết nối
+  col_statement:
+    en: Statement
+    vi: Câu lệnh
+  rows_n:
+    en: "%{count} rows"
+    vi: "%{count} dòng"
+  unknown_connection:
+    en: Unknown connection
+    vi: Kết nối không xác định
+  loading:
+    en: Loading…
+    vi: Đang tải…
+  empty:
+    en: No history yet
+    vi: Chưa có lịch sử
+  empty_filtered:
+    en: No history matches the current filters
+    vi: Không có lịch sử nào khớp với bộ lọc hiện tại
+  read_failed:
+    en: The history could not be read.
+    vi: Không đọc được lịch sử.
+  read_error:
+    en: "Could not read the history: %{error}"
+    vi: "Không đọc được lịch sử: %{error}"
+  select_hint:
+    en: Select a row to see its statement.
+    vi: Chọn một dòng để xem câu lệnh của nó.
+  shown:
+    en: "%{count} shown"
+    vi: "Đang hiện %{count}"
+  shown_more:
+    en: "%{count} shown, more available"
+    vi: "Đang hiện %{count}, còn nữa"
+  load_more:
+    en: Load more
+    vi: Tải thêm
+  scope_all:
+    en: All connections
+    vi: Mọi kết nối
+  scope_search:
+    en: Search connections or databases…
+    vi: Tìm kết nối hoặc cơ sở dữ liệu…
+  scope_current:
+    en: Current
+    vi: Hiện tại
+  scope_reset:
+    en: Reset
+    vi: Đặt lại
+  scope_connections:
+    en: Connections
+    vi: Kết nối
+  scope_databases:
+    en: Databases
+    vi: Cơ sở dữ liệu
+  scope_none:
+    en: No matching options
+    vi: Không có lựa chọn khớp
+  scope_count_connections:
+    en: "%{count} connections"
+    vi: "%{count} kết nối"
+  scope_count_databases:
+    en: "%{count} databases"
+    vi: "%{count} cơ sở dữ liệu"
+  range_all:
+    en: All time
+    vi: Mọi lúc
+  range_today:
+    en: Today
+    vi: Hôm nay
+  range_week:
+    en: Last 7 days
+    vi: 7 ngày qua
+  range_month:
+    en: Last 30 days
+    vi: 30 ngày qua
+  range_start:
+    en: Start date (YYYY-MM-DD)
+    vi: Từ ngày (YYYY-MM-DD)
+  range_end:
+    en: End date (YYYY-MM-DD)
+    vi: Đến ngày (YYYY-MM-DD)
+  range_apply:
+    en: Apply
+    vi: Áp dụng
+  range_clear:
+    en: Clear
+    vi: Xoá
+  range_invalid:
+    en: Start date cannot be later than end date
+    vi: Ngày bắt đầu không được sau ngày kết thúc
+  range_bad_date:
+    en: "Use the form YYYY-MM-DD"
+    vi: "Dùng dạng YYYY-MM-DD"
+  open_in_tab:
+    en: Open in new tab
+    vi: Mở trong tab mới
+  insert:
+    en: Insert into editor
+    vi: Chèn vào trình soạn thảo
+  copy:
+    en: Copy SQL
+    vi: Sao chép SQL
+  copied:
+    en: Copied
+    vi: Đã sao chép
+  run:
+    en: Run
+    vi: Chạy
+  analyze:
+    en: Analyze with AI
+    vi: Phân tích bằng AI
+  details:
+    en: View details
+    vi: Xem chi tiết
+  close:
+    en: Close
+    vi: Đóng
+  delete:
+    en: Delete
+    vi: Xoá
+  delete_title:
+    en: Delete this history entry?
+    vi: Xoá mục lịch sử này?
+  deleted:
+    en: Deleted
+    vi: Đã xoá
+  clear:
+    en: Clear
+    vi: Xoá hết
+  clear_title:
+    en: Clear history
+    vi: Xoá lịch sử
+  clear_all_body:
+    en: "Delete all %{count} entries of the SQL history? This cannot be undone."
+    vi: "Xoá toàn bộ %{count} mục của lịch sử SQL? Không thể hoàn tác."
+  clear_filtered_body:
+    en: "Delete the %{count} entries that match the current filters? This cannot be undone."
+    vi: "Xoá %{count} mục khớp với bộ lọc hiện tại? Không thể hoàn tác."
+  nothing_to_clear:
+    en: Nothing to clear
+    vi: Không có gì để xoá
+  cleared:
+    en: "Deleted %{count} entries"
+    vi: "Đã xoá %{count} mục"
+  mcp_read_only:
+    en: "MCP calls are read from the audit log that the MCP server also writes: they cannot be cleared here."
+    vi: "Lời gọi MCP được đọc từ nhật ký kiểm toán mà máy chủ MCP cũng ghi vào: không thể xoá ở đây."
+  run_title:
+    en: Run this statement?
+    vi: Chạy câu lệnh này?
+  run_body:
+    en: "It is not a plain read: it can change data or schema on %{connection}."
+    vi: "Đây không phải câu lệnh chỉ đọc: nó có thể thay đổi dữ liệu hoặc lược đồ trên %{connection}."
+  connection_gone:
+    en: The connection of this entry no longer exists.
+    vi: Kết nối của mục này không còn nữa.
+  statement:
+    en: Statement
+    vi: Câu lệnh
+  mcp_request:
+    en: Request
+    vi: Yêu cầu
+  mcp_response_note:
+    en: "The audit log keeps only a summary of the response: how the call ended, how many rows it returned and how long it took."
+    vi: "Nhật ký kiểm toán chỉ giữ bản tóm tắt phản hồi: lời gọi kết thúc ra sao, trả về bao nhiêu dòng và mất bao lâu."
+  status_ok:
+    en: Succeeded
+    vi: Thành công
+  status_failed:
+    en: Failed
+    vi: Thất bại
+  d_kind:
+    en: Type
+    vi: Loại
+  d_connection:
+    en: Connection
+    vi: Kết nối
+  d_database:
+    en: Database
+    vi: Cơ sở dữ liệu
+  d_table:
+    en: Table
+    vi: Bảng
+  d_time:
+    en: Time
+    vi: Thời điểm
+  d_duration:
+    en: Duration
+    vi: Thời gian
+  d_rows:
+    en: Rows
+    vi: Số dòng
+  d_status:
+    en: Status
+    vi: Trạng thái
+  d_error:
+    en: Error
+    vi: Lỗi
+  d_tool:
+    en: MCP tool
+    vi: Công cụ MCP
+  d_outcome:
+    en: Outcome
+    vi: Kết quả
+  d_approval:
+    en: Approval
+    vi: Phê duyệt

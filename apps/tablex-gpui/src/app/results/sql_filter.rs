@@ -19,9 +19,11 @@ use crate::sql_filter::{
     self, SqlFilterColumnKind, SqlFilterConjunction, SqlFilterMode, SqlFilterRule,
 };
 use crate::sql_table::{self, SqlDialect};
-use gpui_component::select::{Select, SelectEvent, SelectState};
+use gpui_component::select::{Select, SelectEvent, SearchableVec, SelectState};
 
-type TextSelect = SelectState<Vec<String>>;
+// A searchable Select needs `SearchableVec`: the plain `Vec` delegate shows the
+// search box but never filters.
+type TextSelect = SelectState<SearchableVec<String>>;
 
 /// Editors of one rule row. Created lazily while the popover is open and
 /// dropped with the rule, so memory is proportional to the rules shown.
@@ -367,7 +369,7 @@ impl AppRoot {
         let column_ix = columns.iter().position(|name| *name == rule.column);
         let column = cx.new(|cx| {
             SelectState::new(
-                columns.to_vec(),
+                SearchableVec::new(columns.to_vec()),
                 column_ix.map(|row| gpui_component::IndexPath::default().row(row)),
                 window,
                 cx,
@@ -376,7 +378,7 @@ impl AppRoot {
         });
         cx.subscribe(
             &column,
-            move |this: &mut Self, _, event: &SelectEvent<Vec<String>>, cx| {
+            move |this: &mut Self, _, event: &SelectEvent<SearchableVec<String>>, cx| {
                 if let SelectEvent::Confirm(Some(name)) = event {
                     let name = name.clone();
                     this.update_sql_filter_rule(tab_id, rule_id, move |rule| rule.column = name, cx);
@@ -387,7 +389,7 @@ impl AppRoot {
         let mode_ix = SqlFilterMode::ALL.iter().position(|mode| *mode == rule.mode);
         let mode = cx.new(|cx| {
             SelectState::new(
-                mode_labels(),
+                SearchableVec::new(mode_labels()),
                 mode_ix.map(|row| gpui_component::IndexPath::default().row(row)),
                 window,
                 cx,
@@ -395,7 +397,7 @@ impl AppRoot {
         });
         cx.subscribe(
             &mode,
-            move |this: &mut Self, _, event: &SelectEvent<Vec<String>>, cx| {
+            move |this: &mut Self, _, event: &SelectEvent<SearchableVec<String>>, cx| {
                 if let SelectEvent::Confirm(Some(label)) = event {
                     if let Some(mode) = SqlFilterMode::from_label(label) {
                         this.update_sql_filter_rule(tab_id, rule_id, move |rule| rule.mode = mode, cx);
@@ -499,7 +501,7 @@ impl AppRoot {
                 continue;
             };
             if columns_changed {
-                let items = columns.to_vec();
+                let items = SearchableVec::new(columns.to_vec());
                 let column = rule.column.clone();
                 editors.column.update(cx, |state, cx| {
                     state.set_items(items, window, cx);

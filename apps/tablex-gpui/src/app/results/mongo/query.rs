@@ -173,6 +173,14 @@ impl AppRoot {
         self.driver_runtime
             .query_operations
             .insert(tab_id, operation);
+        // A find (not an aggregate, not a script) goes in the query history as the shell statement it is.
+        let history = (aggregate.is_none() && script.is_none()).then(|| (
+            connection.clone(),
+            database.clone(),
+            collection.clone(),
+            mongo_find_statement(&collection, &filter, &sort, &project),
+            limit,
+        ));
         let mut request = match aggregate {
             Some(payload) => mongo_aggregate_request(
                 operation_id,
@@ -278,7 +286,34 @@ impl AppRoot {
             let _ = this.update(cx, |this, cx| {
                 let lost = result.as_ref().err().is_some_and(|error| crate::sessions::is_connection_lost_error(error));
                 let ok = result.is_ok();
+                let elapsed = this.query_elapsed_ms(tab_id, run);
+                let outcome = result.as_ref().map(|(page, ..)| page.row_count as i64).map_err(|error| error.clone());
                 let applied = this.apply_driver_query_result(tab_id, run, connection, result);
+                if let Some((connection, database, collection, statement, limit)) = history {
+                    // A failure counts when it is the tab's own (a cancel leaves the run replaced).
+                    let failed_here = this.workspace.runtime(tab_id).is_some_and(|runtime| matches!(runtime.query.status(), crate::query::QueryStatus::Failed(_)));
+                    let recorded = match outcome {
+                        Ok(rows) if applied => Some((rows, None)),
+                        Err(error) if failed_here => Some((0, Some(crate::app::history::clip_error(&error)))),
+                        _ => None,
+                    };
+                    if let Some((rows, error)) = recorded {
+                        this.record_history(
+                            crate::app::history::Recorded {
+                                connection,
+                                database,
+                                collection,
+                                statement,
+                                limit,
+                                rows,
+                                duration_ms: elapsed,
+                                error,
+                                kind: engine_storage::history::KIND_QUERY,
+                            },
+                            cx,
+                        );
+                    }
+                }
                 if applied {
                     this.select_mongo_document(tab_id, 0, cx);
                 }
@@ -294,4 +329,26 @@ impl AppRoot {
         self.query_tasks.tasks.insert(tab_id, task);
         self.notify_tab(tab_id, cx);
     }
+}
+
+/// The shell statement a Mongo find stands for, as the history keeps it: `db.users.find({...}, {...}).sort({...})`.
+pub(in crate::app) fn mongo_find_statement(collection: &str, filter: &str, sort: &str, project: &str) -> String {
+    let plain = !collection.is_empty()
+        && collection.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !collection.starts_with(|c: char| c.is_ascii_digit());
+    let target = if plain {
+        format!("db.{collection}")
+    } else {
+        format!("db.getCollection({})", serde_json::to_string(collection).unwrap_or_default())
+    };
+    let or_empty = |text: &str| if text.trim().is_empty() { "{}".to_owned() } else { text.trim().to_owned() };
+    let mut statement = format!("{target}.find({}", or_empty(filter));
+    if !project.trim().is_empty() {
+        statement.push_str(&format!(", {}", project.trim()));
+    }
+    statement.push(')');
+    if !sort.trim().is_empty() && sort.trim() != "{}" {
+        statement.push_str(&format!(".sort({})", sort.trim()));
+    }
+    statement
 }

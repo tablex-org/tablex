@@ -426,6 +426,8 @@ pub(super) fn begin_error_matters(kind: ConnectionKind, error: &DriverQueryError
     let text = error.to_string();
     match kind {
         ConnectionKind::Sqlite => !text.contains("within a transaction"),
+        // The same two answers: a second `BEGIN`, and a transaction a failed statement aborted.
+        ConnectionKind::Duckdb => !(text.contains("within a transaction") || is_aborted(error)),
         ConnectionKind::Postgres => !is_aborted(error),
         _ => true,
     }
@@ -484,10 +486,18 @@ fn exec_end(
     Ok(EndResult::Done)
 }
 
-/// PostgreSQL's "current transaction is aborted, commands ignored until end of transaction block".
+/// PostgreSQL's "current transaction is aborted, commands ignored until end of transaction block",
+/// and DuckDB's "Current transaction is aborted (please ROLLBACK)".
 fn is_aborted(error: &DriverQueryError) -> bool {
     let text = error.to_string();
-    text.contains("25P02") || text.contains("current transaction is aborted")
+    text.contains("25P02") || text.to_ascii_lowercase().contains("current transaction is aborted")
+}
+
+/// A failed statement aborts the transaction around it, and a COMMIT of that transaction rolls it back
+/// without saying so: PostgreSQL and DuckDB (neither has the savepoint a failure could be undone to
+/// here).
+fn failure_aborts_transaction(kind: Option<ConnectionKind>) -> bool {
+    matches!(kind, Some(ConnectionKind::Postgres | ConnectionKind::Duckdb))
 }
 
 /// Runs a transaction statement (`BEGIN`, `COMMIT`, `ROLLBACK`) on `session`, blocking, as an
@@ -528,14 +538,15 @@ const NO_CONNECTION: &str = "This tab has no connection.";
 const AUTO_TAB_NOTICE: &str =
     "Auto-commit tab: the open transaction was rolled back \u{2014} use Manual mode to keep a transaction";
 
-/// Said when a PostgreSQL tab prepared its transaction: the session has none any more.
-/// Said when COMMIT ran in a PostgreSQL transaction a failed statement had aborted.
-const ABORTED_COMMIT: &str = "The transaction was aborted; COMMIT rolled it back";
+/// Said when COMMIT ran in a PostgreSQL or DuckDB transaction a failed statement had aborted: both roll it
+/// back and report a success, so without this the user would believe the changes were saved.
+const ABORTED_COMMIT: &str = "The transaction was aborted by an earlier error; COMMIT rolled it back and nothing was committed";
 
+/// Said when a PostgreSQL tab prepared its transaction: the session has none any more.
 const PREPARED_NOTICE: &str =
     "The transaction was prepared and is no longer this tab's: finish it with COMMIT PREPARED or ROLLBACK PREPARED";
 
-const ABORTED_HINT: &str = "PostgreSQL: the transaction is aborted until you roll back";
+const ABORTED_HINT: &str = "The transaction is aborted until you roll back";
 
 /// How long (and how often) the end of a cancelled statement is waited for before its session is
 /// closed under it anyway: the server rolls back with the session.
@@ -594,7 +605,7 @@ impl AppRoot {
         let facts = match saved {
             None => Facts::UNCONNECTED,
             Some(saved) => {
-                let in_memory = saved.kind == ConnectionKind::Sqlite && sqlite_is_in_memory(&saved.uri);
+                let in_memory = saved.kind.is_file_database() && sqlite_is_in_memory(&saved.uri);
                 let unavailable = manual_unavailable(saved.kind, effective.read_only, in_memory);
                 Facts {
                     kind: Some(saved.kind),
@@ -1095,7 +1106,7 @@ impl AppRoot {
             Some(error) if error.confirmation_reason().is_some() || error.is_read_only_violation() => Outcome::NotRun,
             Some(_) => Outcome::Failed,
         };
-        let postgres = counted.kind == ConnectionKind::Postgres;
+        let postgres = failure_aborts_transaction(Some(counted.kind));
         let mut undo_smart = false;
         if let Some(tx) = self.transactions.tabs.get_mut(&tab_id) {
             let now = Instant::now();
@@ -1174,7 +1185,7 @@ impl AppRoot {
     /// modifying (nobody knows how far it got) and PostgreSQL has aborted the transaction around it;
     /// on an auto-commit tab it may have been a `BEGIN`.
     pub(super) fn tx_run_cancelled(&mut self, tab_id: u64, cx: &mut Context<Self>) {
-        let postgres = self.tx_kind(tab_id) == Some(ConnectionKind::Postgres);
+        let postgres = failure_aborts_transaction(self.tx_kind(tab_id));
         if let Some(tx) = self.transactions.tabs.get_mut(&tab_id) {
             // Cancelled before it was sent (the session was still opening): nothing was started.
             let unsent = std::mem::take(&mut tx.smart_fresh) && tx.statements == 0;
@@ -1677,7 +1688,7 @@ impl AppRoot {
             return None;
         }
         let (session, database) = (Arc::clone(&own.session), own.database.clone());
-        let postgres = self.tx_kind(tab_id) == Some(ConnectionKind::Postgres);
+        let postgres = failure_aborts_transaction(self.tx_kind(tab_id));
         self.notify_transaction(tab_id, cx);
         Some(
             cx.background_executor()

@@ -98,7 +98,7 @@ impl AppRoot {
         tab.schema.clone().unwrap_or_else(|| {
             if tab.query_mode.is_sqlite_table()
                 || self.saved_connections.iter().any(|saved| {
-                    saved.matches_id(&tab.connection_id) && saved.kind == ConnectionKind::Sqlite
+                    saved.matches_id(&tab.connection_id) && matches!(saved.kind, ConnectionKind::Sqlite | ConnectionKind::Duckdb)
                 })
             {
                 "main".into()

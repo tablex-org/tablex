@@ -23,6 +23,8 @@ pub struct ConnectionFormState {
     pub auth_database: String,
     pub uri_options: String,
     pub file_path: String,
+    /// DuckDB: open the file read-only (`?mode=ro`).
+    pub read_only: bool,
     pub use_uri: bool,
     /// Sidebar color (`""` = none). `None` keeps the stored/default color.
     pub color_hex: Option<String>,
@@ -65,6 +67,7 @@ impl Default for ConnectionFormState {
             auth_database: String::new(),
             uri_options: String::new(),
             file_path: String::new(),
+            read_only: false,
             use_uri: true,
             color_hex: None,
             connect_timeout: String::new(),
@@ -168,7 +171,7 @@ impl ConnectionFormState {
             || self
                 .password_from_uri()
                 .is_some_and(|password| !password.trim().is_empty());
-        if self.kind != ConnectionKind::Sqlite && !has_password {
+        if !self.kind.is_file_database() && !has_password {
             return Err("Connection password is required".to_string());
         }
         Ok(())
@@ -182,7 +185,7 @@ impl ConnectionFormState {
     pub fn runtime_uri(&self) -> Result<String, String> {
         self.validate()?;
         let uri = self.effective_uri()?;
-        if self.kind == ConnectionKind::Sqlite || self.password.is_empty() {
+        if self.kind.is_file_database() || self.password.is_empty() {
             return Ok(connections::with_default_postgres_database(uri));
         }
         connections::runtime_uri(&uri, &self.password)
@@ -252,6 +255,8 @@ impl ConnectionFormState {
             ConnectionKind::Mariadb => connections::DB_TYPE_MARIADB.to_string(),
             ConnectionKind::Redis => connections::DB_TYPE_REDIS.to_string(),
             ConnectionKind::Clickhouse => connections::DB_TYPE_CLICKHOUSE.to_string(),
+            ConnectionKind::Duckdb => connections::DB_TYPE_DUCKDB.to_string(),
+            ConnectionKind::Mssql => connections::DB_TYPE_MSSQL.to_string(),
         };
         let reuses_saved_password = self.password.is_empty()
             && original.is_some_and(|original| {
@@ -292,13 +297,22 @@ impl ConnectionFormState {
     }
 
     pub fn parse_uri_fields(&mut self) {
-        if self.kind == ConnectionKind::Sqlite {
+        if self.kind.is_file_database() {
             let uri = self.uri.trim();
+            let scheme = format!("{}://", self.kind.expected_scheme());
             if uri
-                .get(..9)
-                .is_some_and(|scheme| scheme.eq_ignore_ascii_case("sqlite://"))
+                .get(..scheme.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(&scheme))
             {
-                self.file_path = uri[9..].to_string();
+                let rest = &uri[scheme.len()..];
+                // DuckDB's one option: the file is opened read-only. (A SQLite path may hold a `?`.)
+                match rest.split_once('?') {
+                    Some((path, "mode=ro")) if self.kind == ConnectionKind::Duckdb => {
+                        self.file_path = path.to_string();
+                        self.read_only = true;
+                    }
+                    _ => self.file_path = rest.to_string(),
+                }
                 self.use_uri = false;
             }
             return;
@@ -360,6 +374,7 @@ impl ConnectionFormState {
         match self.kind {
             ConnectionKind::Postgres => Some(format!("connect_timeout={seconds}")),
             ConnectionKind::Mongodb => Some(format!("connectTimeoutMS={}", seconds * 1000)),
+            ConnectionKind::Mssql => Some(format!("loginTimeout={seconds}")),
             _ => None,
         }
     }
@@ -404,6 +419,9 @@ impl ConnectionFormState {
                 (ConnectionKind::Postgres, Some(("connect_timeout", value))) => {
                     self.connect_timeout = value.to_string();
                 }
+                (ConnectionKind::Mssql, Some(("loginTimeout", value))) if value.parse::<u32>().is_ok() => {
+                    self.connect_timeout = value.to_string();
+                }
                 (ConnectionKind::Mongodb, Some(("connectTimeoutMS", value))) => {
                     if let Ok(ms) = value.parse::<u32>() {
                         self.connect_timeout = (ms / 1000).max(1).to_string();
@@ -422,12 +440,13 @@ impl ConnectionFormState {
             let uri = self.uri.trim();
             return Ok(connections::normalize_uri_scheme(uri));
         }
-        if self.kind == ConnectionKind::Sqlite {
+        if self.kind.is_file_database() {
             let uri = self.uri.trim();
+            let scheme = format!("{}://", self.kind.expected_scheme());
             let path = if self.file_path.trim().is_empty() {
-                uri.get(..9)
-                    .filter(|scheme| scheme.eq_ignore_ascii_case("sqlite://"))
-                    .map(|_| &uri[9..])
+                uri.get(..scheme.len())
+                    .filter(|prefix| prefix.eq_ignore_ascii_case(&scheme))
+                    .map(|_| &uri[scheme.len()..])
                     .unwrap_or_default()
             } else {
                 self.file_path.trim()
@@ -435,7 +454,8 @@ impl ConnectionFormState {
             if path.is_empty() {
                 return Ok(String::new());
             }
-            return Ok(format!("sqlite://{path}"));
+            let read_only = self.kind == ConnectionKind::Duckdb && self.read_only && path != ":memory:";
+            return Ok(format!("{scheme}{path}{}", if read_only { "?mode=ro" } else { "" }));
         }
         let host = self.host.trim();
         if host.is_empty() {
@@ -598,6 +618,45 @@ mod tests {
 
         assert_eq!(form.persisted_uri().unwrap(), "sqlite:///tmp/tablex.db");
         assert_eq!(form.runtime_uri().unwrap(), "sqlite:///tmp/tablex.db");
+    }
+
+    #[test]
+    fn duckdb_form_builds_its_uri_from_a_file_a_memory_database_and_the_read_only_choice() {
+        let mut form = ConnectionFormState::new(ConnectionKind::Duckdb);
+        form.name = "Analytics".into();
+        form.file_path = "/tmp/my data/a#b.duckdb".into();
+        assert_eq!(form.persisted_uri().unwrap(), "duckdb:///tmp/my data/a#b.duckdb");
+        assert_eq!(form.runtime_uri().unwrap(), "duckdb:///tmp/my data/a#b.duckdb");
+        form.read_only = true;
+        assert_eq!(form.persisted_uri().unwrap(), "duckdb:///tmp/my data/a#b.duckdb?mode=ro");
+        // A database in memory is never read-only (it would be empty for good), and has no file.
+        form.file_path = ":memory:".into();
+        assert_eq!(form.persisted_uri().unwrap(), "duckdb://:memory:");
+        form.validate().unwrap();
+        // No password is asked for, saved or required to recover.
+        assert!(form.validate_recovery().is_ok());
+        let record = form.to_record_saving(1.0, None, true).unwrap();
+        assert_eq!((record.db_type.as_str(), record.uri.as_str(), record.save_password), ("duckdb", "duckdb://:memory:", false));
+    }
+
+    #[test]
+    fn duckdb_uri_fills_the_file_and_the_read_only_fields_back() {
+        let mut form = form(ConnectionKind::Duckdb, "DUCKDB:///data/sales.duckdb?mode=ro");
+        form.parse_uri_fields();
+        assert_eq!((form.file_path.as_str(), form.read_only, form.use_uri), ("/data/sales.duckdb", true, false));
+        assert_eq!(form.persisted_uri().unwrap(), "duckdb:///data/sales.duckdb?mode=ro");
+        let mut plain = super::ConnectionFormState { uri: "duckdb:///data/other.ddb".into(), kind: ConnectionKind::Duckdb, ..super::ConnectionFormState::default() };
+        plain.parse_uri_fields();
+        assert_eq!((plain.file_path.as_str(), plain.read_only), ("/data/other.ddb", false));
+        // A SQLite path is a path: `?mode=ro` is not DuckDB's option there.
+        let mut sqlite = form_of_sqlite_with_query();
+        sqlite.parse_uri_fields();
+        assert_eq!((sqlite.file_path.as_str(), sqlite.read_only), ("/data/x.db?mode=ro", false));
+        assert!(ConnectionFormState::new(ConnectionKind::Postgres).validate().is_err());
+    }
+
+    fn form_of_sqlite_with_query() -> ConnectionFormState {
+        ConnectionFormState { uri: "sqlite:///data/x.db?mode=ro".into(), kind: ConnectionKind::Sqlite, ..ConnectionFormState::default() }
     }
 
     #[test]
@@ -1217,6 +1276,34 @@ mod tests {
         assert_eq!(reopened.username, "al ice");
         // Re-saving the reopened form keeps the same persisted URI.
         assert_eq!(reopened.persisted_uri().unwrap(), record.uri);
+    }
+
+    #[test]
+    fn sql_server_form_writes_and_reads_its_uri_with_encrypt_and_trust() {
+        use crate::connection_tls::{TlsMode, TlsSettings};
+        let mut form = ConnectionFormState::new(ConnectionKind::Mssql);
+        form.name = "Sales".into();
+        form.host = "db.example.com".into();
+        form.port = "1433".into();
+        form.username = "sa".into();
+        form.password = "p@ss".into();
+        form.database = "sales".into();
+        form.connect_timeout = "9".into();
+        form.tls = TlsSettings { mode: TlsMode::Require, ..TlsSettings::default() };
+        let uri = form.persisted_uri().unwrap();
+        assert!(uri.starts_with("sqlserver://sa@db.example.com:1433/sales?"), "{uri}");
+        assert!(uri.contains("loginTimeout=9") && uri.contains("encrypt=true") && uri.contains("trustServerCertificate=true"), "{uri}");
+        assert!(!uri.contains("p%40ss") && !uri.contains("p@ss"), "the password never reaches the stored URI: {uri}");
+        assert_eq!(ConnectionKind::from_persisted("mssql"), Some(ConnectionKind::Mssql));
+        assert!(connections::validate_uri(ConnectionKind::Mssql, "sqlserver://h/db").is_ok());
+        assert!(connections::validate_uri(ConnectionKind::Mssql, "mssql://h/db").is_ok());
+        assert!(connections::validate_uri(ConnectionKind::Mssql, "postgres://h/db").is_err());
+
+        let saved = connections::SavedConnection { id: uuid::Uuid::nil(), name: "Sales".into(), uri, kind: ConnectionKind::Mssql, save_password: false, is_pinned: false, disabled: false, ssh_tunnel: false };
+        let reopened = ConnectionFormState::from_saved(&saved);
+        assert_eq!((reopened.host.as_str(), reopened.port.as_str(), reopened.database.as_str()), ("db.example.com", "1433", "sales"));
+        assert_eq!((reopened.tls.mode, reopened.connect_timeout.as_str()), (TlsMode::Require, "9"));
+        assert_eq!(reopened.uri_options, "");
     }
 
     #[test]

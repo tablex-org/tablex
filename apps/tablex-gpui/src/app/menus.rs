@@ -11,7 +11,7 @@
 //! re-implemented here) or to an application-level platform call.
 
 use super::actions::{
-    CloseActiveTab, OpenCommandPalette, OpenSettings, ToggleAssistant, ToggleErrorLog,
+    CloseActiveTab, OpenCommandPalette, OpenQueryHistory, OpenSettings, ToggleAssistant, ToggleErrorLog,
 };
 use super::command_palette::StaticAction;
 use super::AppRoot;
@@ -32,6 +32,7 @@ gpui::actions!(
         NewConnection,
         NewQuery,
         RunSqlFile,
+        OpenDataFile,
         BackupDatabase,
         RestoreDatabase,
         PendingTransactions,
@@ -148,6 +149,9 @@ fn register_actions(cx: &mut App) {
     on_app_root::<RunSqlFile>(cx, |app, window, cx| {
         StaticAction::RunSqlFile.run(app, window, cx)
     });
+    on_app_root::<OpenDataFile>(cx, |app, window, cx| {
+        StaticAction::OpenDataFile.run(app, window, cx)
+    });
     on_app_root::<BackupDatabase>(cx, |app, window, cx| {
         StaticAction::BackupDatabase.run(app, window, cx)
     });
@@ -191,6 +195,7 @@ pub(super) fn build() -> Vec<Menu> {
             MenuItem::action(t!("menu.new_connection"), NewConnection),
             MenuItem::action(t!("menu.new_query"), NewQuery),
             MenuItem::action(t!("menu.run_sql_file"), RunSqlFile),
+            MenuItem::action(t!("menu.open_data_file"), OpenDataFile),
             MenuItem::action(t!("menu.backup"), BackupDatabase),
             MenuItem::action(t!("menu.restore"), RestoreDatabase),
             MenuItem::action(t!("menu.pending_transactions"), PendingTransactions),
@@ -209,6 +214,7 @@ pub(super) fn build() -> Vec<Menu> {
         Menu::new(t!("menu.view")).items([
             MenuItem::action(t!("menu.toggle_sidebar"), ToggleSidebar),
             MenuItem::action(t!("menu.error_log"), ToggleErrorLog),
+            MenuItem::action(t!("history.title"), OpenQueryHistory),
             MenuItem::action(t!("menu.ai_assistant"), ToggleAssistant),
             MenuItem::separator(),
             MenuItem::action(t!("menu.split_right"), SplitRight),
@@ -278,7 +284,7 @@ mod tests {
         );
         assert_eq!(
             names(&menus[1]),
-            ["New Connection", "New Query", "Run SQL File…", "Backup…", "Restore…", "Pending Transactions…", "-", "Close Tab"]
+            ["New Connection", "New Query", "Run SQL File…", "Open Data File…", "Backup…", "Restore…", "Pending Transactions…", "-", "Close Tab"]
         );
         assert_eq!(
             names(&menus[2]),
@@ -289,6 +295,7 @@ mod tests {
             [
                 "Toggle Sidebar",
                 "Error Log",
+                "Query History",
                 "AI Assistant",
                 "-",
                 "Split Right",
@@ -314,6 +321,7 @@ mod tests {
                 })
                 .unwrap_or_else(|| panic!("menu item {label}"))
         };
+        assert_eq!(action_of(1, "Open Data File…"), "tablex_menu::OpenDataFile");
         assert_eq!(action_of(1, "Backup…"), "tablex_menu::BackupDatabase");
         assert_eq!(action_of(1, "Restore…"), "tablex_menu::RestoreDatabase");
         assert_eq!(action_of(1, "Pending Transactions…"), "tablex_menu::PendingTransactions");
@@ -326,6 +334,7 @@ mod tests {
         assert_eq!(action_of(0, "Quit tablex"), "tablex_menu::Quit");
         assert_eq!(action_of(1, "Close Tab"), "tablex::CloseActiveTab");
         assert_eq!(action_of(3, "Error Log"), "tablex::ToggleErrorLog");
+        assert_eq!(action_of(3, "Query History"), "tablex::OpenQueryHistory");
         assert_eq!(action_of(3, "AI Assistant"), "tablex::ToggleAssistant");
         assert_eq!(
             action_of(3, "Command Palette"),

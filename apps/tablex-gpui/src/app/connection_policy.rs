@@ -440,7 +440,7 @@ impl AppRoot {
         true
     }
 
-    fn open_execute_confirmation(
+    pub(super) fn open_execute_confirmation(
         &mut self,
         tab_id: u64,
         sql: String,
@@ -450,9 +450,14 @@ impl AppRoot {
         cx: &mut Context<Self>,
     ) {
         let root = cx.entity().downgrade();
+        // An UPDATE / DELETE also shows the rows it will change (read while the dialog is open).
+        let preview = (then == GatedRun::Run)
+            .then(|| self.affected_preview_for(tab_id, &sql, super::affected_preview::Chain::First, window, cx))
+            .flatten();
         window.open_alert_dialog(cx, move |dialog, _, _| {
             let root = root.clone();
             let sql_for_run = sql.clone();
+            let preview_for_run = preview.clone();
             dialog
                 .width(px(520.0))
                 .title(if then == GatedRun::MongoShell {
@@ -478,7 +483,8 @@ impl AppRoot {
                                 .text_size(px(12.0))
                                 .text_color(theme::text_muted())
                                 .child(sql.clone()),
-                        ),
+                        )
+                        .children(preview.clone()),
                 )
                 .button_props(gpui_component::dialog::DialogButtonProps::default().ok_text("Run"))
                 .confirm()
@@ -503,7 +509,11 @@ impl AppRoot {
                 .on_ok(move |_, _, cx| {
                     let sql = sql_for_run.clone();
                     let _ = root.update(cx, |this, cx| match then {
-                        GatedRun::Run => this.run_editor_sql(tab_id, sql, cx),
+                        GatedRun::Run => {
+                            // What the preview read goes to the dialog this run may ask next.
+                            this.hand_off_preview(tab_id, preview_for_run.as_ref(), cx);
+                            this.run_editor_sql(tab_id, sql, cx)
+                        }
                         GatedRun::Explain(mode) => this.explain_confirmed(tab_id, mode, &sql, cx),
                         GatedRun::MongoShell => this.run_confirmed_shell_script(tab_id, sql, cx),
                     });

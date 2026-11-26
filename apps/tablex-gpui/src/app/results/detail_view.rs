@@ -693,6 +693,23 @@ impl AppRoot {
             .into_any_element()
     }
 
+    /// The panel in the window of its own: the whole window, following the selection of its tab.
+    pub(in crate::app) fn render_cell_detail_window(
+        &mut self,
+        tab_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.sync_cell_detail_viewers(tab_id, window, cx);
+        let Some(state) = self.tab_cell_detail(tab_id).cloned() else {
+            return div().into_any_element();
+        };
+        div()
+            .size_full()
+            .child(self.render_cell_detail_panel(tab_id, &state, state.detail.as_ref(), cx))
+            .into_any_element()
+    }
+
     pub(in crate::app) fn render_cell_detail_panel(
         &self,
         tab_id: u64,
@@ -713,6 +730,7 @@ impl AppRoot {
         };
         let panel_is_bottom = state.placement == CellDetailPlacement::Bottom;
         let panel_is_popup = state.placement == CellDetailPlacement::Popup;
+        let panel_is_window = state.placement == CellDetailPlacement::Window;
         let header_height = if panel_is_popup {
             34.0
         } else if panel_is_bottom {
@@ -753,11 +771,21 @@ impl AppRoot {
                     (CellDetailPlacement::Right, t!("grid.side_right")),
                     (CellDetailPlacement::Bottom, t!("grid.bottom")),
                     (CellDetailPlacement::Popup, t!("grid.popup")),
+                    (CellDetailPlacement::Window, t!("grid.panel_in_window")),
                 ] {
                     let root = placement_root.clone();
+                    // The icon and label of the Results place menu (`place_menu_item`).
                     menu = menu.item(
-                        PopupMenuItem::new(label)
-                            .checked(current_placement == option)
+                        PopupMenuItem::element(move |_, _| {
+                            div()
+                                .debug_selector(move || format!("cell-detail-placement-{}", placement_slug(option)))
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .child(placement_icon(option).size(px(13.0)))
+                                .child(label.clone())
+                        })
+                        .checked(current_placement == option)
                             .on_click(move |_, _, app| {
                                 let _ = root.update(app, |this, cx| {
                                     this.set_cell_detail_placement(tab_id, option, cx);
@@ -1477,7 +1505,7 @@ impl AppRoot {
             .flex_col()
             .overflow_hidden()
             .bg(theme::background())
-            .when(!panel_is_bottom && !panel_is_popup, |this| this.border_l_1())
+            .when(!panel_is_bottom && !panel_is_popup && !panel_is_window, |this| this.border_l_1())
             .when(panel_is_bottom, |this| this.border_t_1())
             .border_color(theme::border())
             .child(width_probe)
@@ -1523,6 +1551,17 @@ fn placement_icon(placement: CellDetailPlacement) -> Icon {
         CellDetailPlacement::Right => Icon::new(IconName::PanelRight),
         CellDetailPlacement::Bottom => Icon::new(IconName::PanelBottom),
         CellDetailPlacement::Popup => Icon::empty().path("icons/maximize.svg"),
+        // The icon of the Results place menu's window.
+        CellDetailPlacement::Window => Icon::empty().path("icons/maximize-2.svg"),
+    }
+}
+
+fn placement_slug(placement: CellDetailPlacement) -> &'static str {
+    match placement {
+        CellDetailPlacement::Right => "right",
+        CellDetailPlacement::Bottom => "bottom",
+        CellDetailPlacement::Popup => "popup",
+        CellDetailPlacement::Window => "window",
     }
 }
 

@@ -185,7 +185,7 @@ impl AppRoot {
         let ids: Vec<String> = self
             .saved_connections
             .iter()
-            .filter(|saved| saved.kind != ConnectionKind::Sqlite)
+            .filter(|saved| !saved.kind.is_file_database())
             .map(|saved| saved.id.to_string())
             .collect();
         for id in ids {
@@ -1419,6 +1419,7 @@ impl AppRoot {
             cx.notify();
             return;
         }
+        self.data_files_connect_failed(connection_key, &message, cx);
         self.sync_sidebar_connections(cx);
         match failure.code() {
             Some(code) => {

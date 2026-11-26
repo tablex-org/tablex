@@ -728,6 +728,12 @@ fn build_registry() -> Vec<SettingDescriptor> {
         )
         .overridable(),
         toggle(
+            place!("editor.preview_affected_rows", Editor, "Safety", "Preview affected rows before UPDATE/DELETE", "When a confirmation asks before an UPDATE or DELETE, also count the rows it will change and show the first few, read-only. A statement without WHERE is called out. Statements it cannot read beforehand (joins, CTEs) run as before."),
+            |s| s.editor.preview_affected_rows,
+            |s, v| s.editor.preview_affected_rows = v,
+            d,
+        ),
+        toggle(
             place!("editor.confirm_unsaved_close", Editor, "Safety", "Confirm closing unsaved scripts", "Ask before closing a query tab whose script was never saved."),
             |s| s.editor.confirm_unsaved_close,
             |s, v| s.editor.confirm_unsaved_close = v,
@@ -1004,6 +1010,19 @@ fn build_registry() -> Vec<SettingDescriptor> {
             d,
         )
         .overridable(),
+        toggle(
+            place!("query.history_record", Query, "History", "Record query history", "Put every run in the Query History: when, how long, how many rows or the error, and the statement. Off records nothing new; what is already there stays until you delete it."),
+            |s| s.query.history_record,
+            |s, v| s.query.history_record = v,
+            d,
+        ),
+        number::<u32>(
+            place!("query.history_keep_days", Query, "History", "Keep query history for (days)", "Runs older than this are deleted from the Query History when tablex starts. 0 keeps them for ever."),
+            (0.0, 36_500.0, 1.0),
+            |s| s.query.history_keep_days,
+            |s, v| s.query.history_keep_days = v,
+            d,
+        ),
         text(
             place!("query.pg_dump_path", Query, "Backup tools", "pg_dump", "The pg_dump program to back up PostgreSQL with. Empty looks for it on your PATH and in the usual install folders and takes the newest version that is not older than the server. A path set here is used as it is."),
             1024,
@@ -1171,15 +1190,9 @@ fn build_registry() -> Vec<SettingDescriptor> {
             d,
         ),
         choice::<AgentLevel>(
-            place!("ai.agent_access", Ai, "Agent access", "Default agent access", "How far the assistant and MCP clients may go on a connection that sets no level itself. Production connections stay off; writes always need Read and write on the connection."),
+            place!("ai.agent_access", Ai, "Agent access", "Default agent access", "How far the assistant and MCP clients may go on a connection that sets no level itself. Production connections stay off: they need a level of their own. Read and write applies to connections that are not Production; each change is still put to you for approval. A client set to auto-approve can run changes without you seeing them, so only use clients you trust."),
             |s| s.ai.agent_access,
             |s, v| s.ai.agent_access = v,
-            d,
-        ),
-        toggle(
-            place!("ai.mcp_writes", Ai, "MCP server", "Let MCP clients run changes", "An MCP client (the program you connected tablex's MCP server to) may then ask to run statements that change data on connections whose assistant access is \"Read and write\". tablex asks that client to put each one to you; a client set to answer by itself can run them without you seeing them, so turn this on only for a client you trust. Never on a connection of a production type (only the built-in Production type counts; a custom type is not production). Off by default."),
-            |s| s.ai.mcp_writes,
-            |s, v| s.ai.mcp_writes = v,
             d,
         ),
         text(

@@ -495,7 +495,7 @@ fn settings_survive_a_relaunch_and_a_changed_value_reaches_the_grid_display(
 
     // "Relaunch": the settings are read back from the same file.
     app.update(visual, |this, cx| {
-        this.settings = std::sync::Arc::new(Settings::default());
+        *this.settings = std::sync::Arc::new(Settings::default());
         this.settings_ui.path = Some(path.clone());
         this.init_settings(cx);
     });
@@ -545,7 +545,7 @@ fn the_unsaved_script_check_follows_its_setting(cx: &mut TestAppContext) {
 
     // On: closing asks first; confirming closes.
     let tab = app.update(visual, |this, cx| {
-        let mut next = (*this.settings).clone();
+        let mut next = (**this.settings).clone();
         next.editor.confirm_unsaved_close = true;
         this.apply_settings(next, None, cx);
         let tab = this.workspace.open_query_tab("Draft");
@@ -628,7 +628,7 @@ fn turning_the_dangerous_statement_confirmation_off_runs_the_statement_without_a
     let db = SqliteDb::new(ITEMS_SEED);
     let mut rig = SqlRig::sqlite(cx, &db);
     rig.app.update(rig.visual, |this, cx| {
-        let mut next = (*this.settings).clone();
+        let mut next = (**this.settings).clone();
         next.editor.confirm_dangerous = false;
         this.apply_settings(next, None, cx);
     });
@@ -652,7 +652,7 @@ fn the_query_timeout_cancels_a_run_that_outlives_it(cx: &mut TestAppContext) {
     let db = SqliteDb::new(ITEMS_SEED);
     let mut rig = SqlRig::sqlite(cx, &db);
     rig.app.update(rig.visual, |this, cx| {
-        let mut next = (*this.settings).clone();
+        let mut next = (**this.settings).clone();
         next.query.query_timeout_secs = 1;
         this.apply_settings(next, None, cx);
     });
@@ -673,7 +673,7 @@ fn the_query_timeout_cancels_a_run_that_outlives_it(cx: &mut TestAppContext) {
     rig.wait_driver_idle();
     // A run that finishes inside the limit is left alone.
     rig.app.update(rig.visual, |this, cx| {
-        let mut next = (*this.settings).clone();
+        let mut next = (**this.settings).clone();
         next.query.query_timeout_secs = 60;
         this.apply_settings(next, None, cx);
     });
@@ -687,7 +687,7 @@ fn the_query_timeout_cancels_a_run_that_outlives_it(cx: &mut TestAppContext) {
 fn a_new_tab_uses_the_default_page_size_setting(cx: &mut TestAppContext) {
     let (app, visual) = settings_app(cx);
     app.update(visual, |this, cx| {
-        let mut next = (*this.settings).clone();
+        let mut next = (**this.settings).clone();
         next.results.page_size = 50;
         this.apply_settings(next, None, cx);
         let tab = this.workspace.open_query_tab("Paged");
@@ -743,9 +743,9 @@ fn restore_tabs_on_start_honours_none_and_pinned(cx: &mut TestAppContext) {
             }
             this.workspace.open_welcome_tab();
             this.shell.closed_tabs.clear();
-            let mut next = (*this.settings).clone();
+            let mut next = (**this.settings).clone();
             next.navigation.restore_tabs = mode;
-            this.settings = std::sync::Arc::new(next);
+            *this.settings = std::sync::Arc::new(next);
             this.shell.session.path = Some(session_path.clone());
             this.restore_workspace_session(false, |_, _| {}, cx);
         });
@@ -1128,12 +1128,14 @@ fn first_launch_imports_the_sidebar_choices_and_the_old_copy_default(cx: &mut Te
     )
     .unwrap();
     let settings_path = dir.join("settings.json");
+    let old_copy_file = dir.join("config").join("grid-copy-default.json");
+    results::copy::write_old_copy_default(&old_copy_file, results::copy::CopyFormat::Csv).unwrap();
     app.update(visual, |this, cx| {
         this.sidebar.path = Some(sidebar.clone());
         this.settings_ui.path = Some(settings_path.clone());
-        this.settings = std::sync::Arc::new(Settings::default());
+        *this.settings = std::sync::Arc::new(Settings::default());
         // The copy default used to live in its own file.
-        this.grid_prefs.copy_default = results::copy::CopyFormat::Csv;
+        this.grid_prefs.copy_default_path = Some(old_copy_file.clone());
         this.init_settings(cx);
     });
     let settings = applied(&app, visual);
@@ -1148,6 +1150,9 @@ fn first_launch_imports_the_sidebar_choices_and_the_old_copy_default(cx: &mut Te
         settings.results.default_copy_format,
         crate::settings::CopyDefault::Csv
     );
+    // The old file was carried over once: renamed, kept.
+    assert!(!old_copy_file.exists());
+    assert!(old_copy_file.with_file_name("grid-copy-default.json.migrated").exists());
     // The file was written right away (it is a first run), by the background writer.
     wait_until(visual, "the first settings file", |_| {
         settings_path.exists()
@@ -1162,6 +1167,94 @@ fn first_launch_imports_the_sidebar_choices_and_the_old_copy_default(cx: &mut Te
     assert!(std::fs::read_to_string(&sidebar)
         .unwrap()
         .contains("descending"));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A start of the app on `dir`: settings from its `settings.json`, the old copy file in `config/`.
+fn start_on(
+    app: &gpui::Entity<AppRoot>,
+    visual: &mut gpui::VisualTestContext,
+    dir: &std::path::Path,
+) {
+    app.update(visual, |this, cx| {
+        this.settings_ui.path = Some(dir.join("settings.json"));
+        this.grid_prefs.copy_default_path = Some(dir.join("config").join("grid-copy-default.json"));
+        *this.settings = std::sync::Arc::new(Settings::default());
+        this.init_settings(cx);
+    });
+}
+
+#[gpui::test]
+fn the_old_copy_default_carries_over_once_and_smart_chosen_in_settings_survives_restarts(
+    cx: &mut TestAppContext,
+) {
+    use crate::settings::CopyDefault;
+    cx.dispatcher.allow_parking();
+    let (app, visual) = settings_app(cx);
+    let dir = std::env::temp_dir().join(format!("tablex-copy-migrate-{}", uuid::Uuid::new_v4()));
+    let old = dir.join("config").join("grid-copy-default.json");
+    let migrated = dir.join("config").join("grid-copy-default.json.migrated");
+    results::copy::write_old_copy_default(&old, results::copy::CopyFormat::TsvWithHeaders).unwrap();
+
+    // First start: no settings file, an old file: carried over, saved, the file renamed.
+    start_on(&app, visual, &dir);
+    assert_eq!(applied(&app, visual).results.default_copy_format, CopyDefault::TsvWithHeaders);
+    app.read_with(visual, |this, _| {
+        assert_eq!(this.grid_prefs.copy_default, results::copy::CopyFormat::TsvWithHeaders);
+    });
+    assert!(!old.exists() && migrated.exists());
+    let on_disk = |name: &str| {
+        crate::settings::store::load(&dir.join(name), &crate::settings::store::Legacy::default())
+            .settings
+            .results
+            .default_copy_format
+    };
+    assert_eq!(on_disk("settings.json"), CopyDefault::TsvWithHeaders);
+
+    // The user picks Smart in Settings (the page writes the setting only).
+    app.update(visual, |this, cx| {
+        let mut next = (**this.settings()).clone();
+        next.results.default_copy_format = CopyDefault::Smart;
+        this.apply_settings(next, None, cx);
+    });
+    // The page's change is saved after the debounce.
+    visual.cx.executor().advance_clock(std::time::Duration::from_secs(2));
+    wait_until(visual, "Smart in the settings file", |_| on_disk("settings.json") == CopyDefault::Smart);
+
+    // Every later start keeps Smart: the old file is not read again.
+    for _ in 0..2 {
+        start_on(&app, visual, &dir);
+        assert_eq!(applied(&app, visual).results.default_copy_format, CopyDefault::Smart);
+        app.read_with(visual, |this, _| {
+            assert_eq!(this.grid_prefs.copy_default, results::copy::CopyFormat::Smart);
+        });
+        assert!(!old.exists() && migrated.exists());
+    }
+    // The renamed copy is kept (user data), and a read of the old name finds nothing.
+    assert_eq!(results::copy::read_old_copy_default(&migrated), Some(results::copy::CopyFormat::TsvWithHeaders));
+    assert_eq!(results::copy::read_old_copy_default(&old), None);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[gpui::test]
+fn a_setting_already_chosen_wins_over_the_old_copy_file_which_is_still_retired(
+    cx: &mut TestAppContext,
+) {
+    use crate::settings::CopyDefault;
+    cx.dispatcher.allow_parking();
+    let (app, visual) = settings_app(cx);
+    let dir = std::env::temp_dir().join(format!("tablex-copy-wins-{}", uuid::Uuid::new_v4()));
+    let old = dir.join("config").join("grid-copy-default.json");
+    results::copy::write_old_copy_default(&old, results::copy::CopyFormat::Csv).unwrap();
+    let mut chosen = Settings::default();
+    chosen.results.default_copy_format = CopyDefault::Markdown;
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("settings.json"), crate::settings::store::encode(&chosen).unwrap()).unwrap();
+
+    start_on(&app, visual, &dir);
+    assert_eq!(applied(&app, visual).results.default_copy_format, CopyDefault::Markdown);
+    assert!(!old.exists(), "a stale file must not come back later");
+    assert!(dir.join("config").join("grid-copy-default.json.migrated").exists());
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -1442,7 +1535,6 @@ fn the_ai_page_shows_the_key_row_and_every_setting_with_its_default(cx: &mut Tes
         "setting-control-ai.model",
         "setting-control-ai.effort",
         "setting-control-ai.fallback",
-        "setting-control-ai.mcp_writes",
         "setting-control-ai.base_url",
     ] {
         assert!(rendered(visual, selector.into()), "{selector}");
@@ -1462,164 +1554,66 @@ fn the_ai_page_shows_the_key_row_and_every_setting_with_its_default(cx: &mut Tes
 }
 
 #[gpui::test]
-fn the_mcp_switch_is_off_by_default_and_apply_persists_it_where_the_mcp_server_reads_it(
+fn the_ai_page_has_no_mcp_switch_and_its_default_agent_access_offers_read_and_write(
     cx: &mut TestAppContext,
 ) {
+    use engine_connect::profile::{AgentLevel, McpWrites, ProfileSettings};
     cx.dispatcher.allow_parking();
     let (app, visual) = settings_app(cx);
     let path = settings_temp_path();
     app.update(visual, |this, _| this.settings_ui.path = Some(path.clone()));
     open_settings_page(&app, visual);
     settings_nav(visual, "ai");
-    assert!(rendered(visual, "setting-ai.mcp_writes".into()));
-    assert!(rendered(visual, "setting-control-ai.mcp_writes".into()));
-    assert!(!Settings::default().ai.mcp_writes);
-    assert!(!draft_of(&app, visual).ai.mcp_writes, "off by default");
-    assert!(!applied(&app, visual).ai.mcp_writes);
-
-    // The draft changes at once, the app's settings only on Apply.
-    toggle_setting(visual, "ai.mcp_writes");
-    assert!(draft_of(&app, visual).ai.mcp_writes);
-    assert!(!applied(&app, visual).ai.mcp_writes);
-    click(visual, "settings-apply".into());
+    // The old switch is gone from the page (and from the registry): one control, the default level.
+    assert!(!rendered(visual, "setting-ai.mcp_writes".into()));
+    assert!(!rendered(visual, "setting-control-ai.mcp_writes".into()));
+    assert!(rendered(visual, "setting-control-ai.agent_access".into()));
+    assert!(crate::settings::registry::registry().iter().all(|descriptor| descriptor.id != "ai.mcp_writes"));
+    // The hidden key stays `true` in the app's data, for an older `tablex-mcp`.
+    assert!(Settings::default().ai.mcp_writes);
     assert!(applied(&app, visual).ai.mcp_writes);
-    // Persisted after the debounce, and `tablex-mcp`'s reader sees it in that very file.
-    visual
-        .executor()
-        .advance_clock(std::time::Duration::from_millis(400));
-    wait_until(visual, "the switch on disk", |_| {
-        engine_connect::profile::mcp_writes_enabled(Some(&path))
-    });
-    let saved = crate::settings::store::load(&path, &crate::settings::store::Legacy::default());
-    assert!(saved.settings.ai.mcp_writes);
-    assert_eq!(
-        saved.settings.schema_version,
-        crate::settings::SCHEMA_VERSION
-    );
 
-    // Back off: Apply again, and the file says so at once, not after the 300 ms debounce (a
-    // client's yes in that window must not run a write): no clock advance, no waiting.
-    toggle_setting(visual, "ai.mcp_writes");
-    click(visual, "settings-apply".into());
-    assert!(!applied(&app, visual).ai.mcp_writes);
-    assert!(
-        std::fs::read_to_string(&path).is_ok_and(|text| text.contains(r#""mcp_writes": false"#))
-    );
-    assert!(!engine_connect::profile::mcp_writes_enabled(Some(&path)));
-    assert!(
-        app.read_with(visual, |this, _| this.settings_ui.pending.is_none()),
-        "no debounce is left running"
-    );
-    // The reset button puts the default back in the draft.
-    toggle_setting(visual, "ai.mcp_writes");
-    assert!(draft_of(&app, visual).ai.mcp_writes);
-    click(visual, "setting-reset-ai.mcp_writes".into());
-    assert!(!draft_of(&app, visual).ai.mcp_writes);
-    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
-}
-
-#[gpui::test]
-fn a_failed_write_of_the_mcp_switch_off_is_said_and_tried_again(cx: &mut TestAppContext) {
-    cx.dispatcher.allow_parking();
-    let (app, visual) = settings_app(cx);
-    let path = settings_temp_path();
-    app.update(visual, |this, _| this.settings_ui.path = Some(path.clone()));
-    open_settings_page(&app, visual);
-    settings_nav(visual, "ai");
-    toggle_setting(visual, "ai.mcp_writes");
-    click(visual, "settings-apply".into());
-    visual
-        .executor()
-        .advance_clock(std::time::Duration::from_millis(400));
-    wait_until(visual, "the switch on disk", |_| {
-        engine_connect::profile::mcp_writes_enabled(Some(&path))
-    });
-
-    // The file can no longer be replaced: a non-empty directory sits where it is (the rename of
-    // the new file onto it fails), whatever the platform.
-    let kept = std::fs::read_to_string(&path).unwrap();
-    std::fs::remove_file(&path).unwrap();
-    std::fs::create_dir_all(path.join("blocker")).unwrap();
-    let errors_before = app.read_with(visual, |this, _| this.sidebar.notice.clone());
-    assert_eq!(errors_before, None);
-
-    toggle_setting(visual, "ai.mcp_writes");
-    click(visual, "settings-apply".into());
-    assert!(!applied(&app, visual).ai.mcp_writes, "the page says off");
-    let notice = app
-        .read_with(visual, |this, _| this.sidebar.notice.clone())
-        .expect("the failure is shown");
-    assert!(
-        notice.contains("Could not save the settings")
-            && notice.contains("still ON in the settings file"),
-        "{notice}"
-    );
-    assert!(
-        app.read_with(visual, |this, _| this.settings_ui.pending.is_some()),
-        "a retry is pending"
-    );
-
-    // The obstacle goes; the retry writes `false`.
-    std::fs::remove_dir_all(&path).unwrap();
-    visual
-        .executor()
-        .advance_clock(std::time::Duration::from_millis(400));
-    wait_until(visual, "the retried write", |_| {
-        std::fs::read_to_string(&path).is_ok_and(|text| text.contains(r#""mcp_writes": false"#))
-    });
-    assert!(!engine_connect::profile::mcp_writes_enabled(Some(&path)));
-    assert!(kept.contains(r#""mcp_writes": true"#));
-    // The notice is no longer true once the write landed, so it is taken back.
-    wait_until(visual, "the notice to go", |cx| {
-        app.read_with(cx, |this, _| this.sidebar.notice.is_none())
-    });
-    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
-}
-
-#[gpui::test]
-fn a_retry_of_the_mcp_switch_off_that_fails_too_still_says_the_switch_is_on(
-    cx: &mut TestAppContext,
-) {
-    cx.dispatcher.allow_parking();
-    let (app, visual) = settings_app(cx);
-    let path = settings_temp_path();
-    app.update(visual, |this, _| this.settings_ui.path = Some(path.clone()));
-    open_settings_page(&app, visual);
-    settings_nav(visual, "ai");
-    toggle_setting(visual, "ai.mcp_writes");
-    click(visual, "settings-apply".into());
-    visual
-        .executor()
-        .advance_clock(std::time::Duration::from_millis(400));
-    wait_until(visual, "the switch on disk", |_| {
-        engine_connect::profile::mcp_writes_enabled(Some(&path))
-    });
-    std::fs::remove_file(&path).unwrap();
-    std::fs::create_dir_all(path.join("blocker")).unwrap();
-
-    toggle_setting(visual, "ai.mcp_writes");
-    click(visual, "settings-apply".into());
-    let first = app
-        .read_with(visual, |this, _| this.sidebar.notice.clone())
-        .expect("the failure is shown");
-    assert!(first.contains("tablex will try again"), "{first}");
-
-    // The obstacle stays: the retry fails as well, and the notice still names the switch.
-    visual
-        .executor()
-        .advance_clock(std::time::Duration::from_millis(400));
-    wait_until(visual, "the retry to fail", |cx| {
-        app.read_with(cx, |this, _| {
-            this.sidebar
-                .notice
-                .as_deref()
-                .is_some_and(|notice| notice.contains("next settings change"))
-        })
-    });
-    let second = app
-        .read_with(visual, |this, _| this.sidebar.notice.clone())
+    // The dropdown lists every level, Read and write last, and the row says what it means.
+    let descriptor = crate::settings::registry::registry()
+        .iter()
+        .find(|descriptor| descriptor.id == "ai.agent_access")
         .unwrap();
-    assert!(second.contains("still ON in the settings file"), "{second}");
+    let crate::settings::registry::Kind::Choice { options } = &descriptor.kind else {
+        panic!("a choice");
+    };
+    let labels: Vec<_> = options.iter().map(|(id, _)| descriptor.option_text(id).into_owned()).collect();
+    assert_eq!(labels, ["Off", "Schema only", "Read", "Read and write"]);
+    let help = descriptor.description_text();
+    for phrase in [
+        "not Production",
+        "put to you for approval",
+        "auto-approve",
+        "only use clients you trust",
+    ] {
+        assert!(help.contains(phrase), "{phrase}: {help}");
+    }
+
+    // Off -> Read and write through the dropdown (three steps down), applied and saved.
+    click(visual, "setting-control-ai.agent_access".into());
+    visual.simulate_keystrokes("down down down enter");
+    settle(visual);
+    assert_eq!(draft_of(&app, visual).ai.agent_access, AgentLevel::ReadWrite);
+    assert_eq!(applied(&app, visual).ai.agent_access, AgentLevel::Off, "still a draft");
+    click(visual, "settings-apply".into());
+    assert_eq!(applied(&app, visual).ai.agent_access, AgentLevel::ReadWrite);
+    visual
+        .executor()
+        .advance_clock(std::time::Duration::from_millis(400));
+    wait_until(visual, "Read and write on disk", |_| {
+        ProfileSettings::load(&path)
+            .is_ok_and(|settings| settings.globals().agent_access == AgentLevel::ReadWrite)
+    });
+    // `tablex-mcp` reads the same file: the level counts, and no switch gates the writes.
+    assert_eq!(engine_connect::profile::mcp_writes_state(Some(&path)), McpWrites::Allowed);
+    let saved = crate::settings::store::load(&path, &crate::settings::store::Legacy::default());
+    assert_eq!(saved.settings.schema_version, crate::settings::SCHEMA_VERSION);
+    assert!(saved.settings.ai.mcp_writes);
+    assert!(!saved.needs_save);
     std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }
 
@@ -2598,4 +2592,165 @@ fn a_preset_found_on_the_path_fills_the_command(cx: &mut TestAppContext) {
     assert_eq!(shown(visual, "editor.format_external_program"), "pg_format");
     assert_eq!(draft_of(&app, visual).editor.format_external_args, "-");
     assert_eq!(draft_of(&app, visual).editor.format_external_exit_codes, "0");
+}
+
+// ---- The one-time notice after the 6 -> 7 migration --------------------------------------------
+
+/// The connections the sample fixture shows, by id and name.
+fn fixture_connections(app: &gpui::Entity<AppRoot>, visual: &mut gpui::VisualTestContext) -> Vec<(String, String)> {
+    app.read_with(visual, |this, _| {
+        this.saved_connections
+            .iter()
+            .map(|saved| (saved.id.to_string(), saved.name.clone()))
+            .collect()
+    })
+}
+
+/// Publishes `settings` and a profile for each of `profiles`, and lets the frames run.
+fn publish_for_notice(
+    app: &gpui::Entity<AppRoot>,
+    visual: &mut gpui::VisualTestContext,
+    settings: Settings,
+    profiles: Vec<(String, engine_connect::profile::ConnectionProfile)>,
+) {
+    app.update(visual, |this, cx| {
+        *this.settings = std::sync::Arc::new(settings);
+        for (id, profile) in profiles {
+            this.connection_policy.set_profile(&id, profile);
+        }
+        cx.notify();
+    });
+    for _ in 0..3 {
+        settle(visual);
+    }
+}
+
+#[gpui::test]
+fn the_notice_after_the_migration_lists_the_read_and_write_connections_once(cx: &mut TestAppContext) {
+    use engine_connect::profile::{AgentLevel, ConnectionProfile, OverrideValue, AGENT_ACCESS, PRODUCTION};
+    cx.dispatcher.allow_parking();
+    let (app, visual) = settings_app(cx);
+    // The fixture has three; more of them, so that the list is longer than the notice names.
+    app.update(visual, |this, _| {
+        for n in 1..=6 {
+            let mut extra = this.saved_connections[0].clone();
+            extra.id = uuid::Uuid::new_v4();
+            extra.name = format!("Extra {n}");
+            this.saved_connections.push(extra);
+        }
+    });
+    let all = fixture_connections(&app, visual);
+    assert_eq!(all.len(), 9, "{all:?}");
+    let (production, off) = (all[0].0.clone(), all[1].0.clone());
+    let mut off_profile = ConnectionProfile::default();
+    off_profile.overrides.set(AGENT_ACCESS, OverrideValue::Text("off".into()));
+    let production_profile = ConnectionProfile { type_id: PRODUCTION.into(), ..Default::default() };
+    // What the migration leaves: the default is Read and write, the flag is set.
+    let mut settings = Settings::default();
+    settings.ai.agent_access = AgentLevel::ReadWrite;
+    settings.ai.access_notice_pending = true;
+    publish_for_notice(
+        &app,
+        visual,
+        settings,
+        vec![(production.clone(), production_profile), (off.clone(), off_profile)],
+    );
+
+    // One notice, with the connections that can now be asked to change: not the production one, not
+    // the one set to off. Named in order, the rest counted.
+    let mut expected: Vec<String> = all
+        .iter()
+        .filter(|(id, _)| *id != production && *id != off)
+        .map(|(_, name)| name.clone())
+        .collect();
+    expected.sort_by_key(|name| name.to_lowercase());
+    let said = app.read_with(visual, |this, _| this.settings_ui.access_notices.clone());
+    assert_eq!(said.len(), 1, "{said:?}");
+    let message = &said[0];
+    for name in expected.iter().take(5) {
+        assert!(message.contains(name.as_str()), "{name}: {message}");
+    }
+    if expected.len() > 5 {
+        assert!(message.contains(&format!("and {} more", expected.len() - 5)), "{message}");
+    }
+    for name in all.iter().filter(|(id, _)| *id == production || *id == off).map(|(_, name)| name) {
+        assert!(!message.contains(name.as_str()), "{name} is not Read and write: {message}");
+    }
+    assert!(message.contains("each change still needs your approval"), "{message}");
+    assert!(visual.update(|window, cx| window.notifications(cx).len()) == 1);
+    assert!(rendered(visual, "access-notice-settings".into()), "a way to Settings > AI");
+    // Recorded: the applied settings no longer carry the flag.
+    assert!(!applied(&app, visual).ai.access_notice_pending);
+
+    // Later frames, and the flag set again with nothing to say, show nothing more.
+    for _ in 0..3 {
+        settle(visual);
+    }
+    assert_eq!(app.read_with(visual, |this, _| this.settings_ui.access_notices.len()), 1);
+
+    // The button opens Settings > AI and takes the notice away.
+    click(visual, "access-notice-settings".into());
+    assert_eq!(active_kind(&app, visual), Some(TabKind::Settings));
+    assert!(rendered(visual, "setting-control-ai.agent_access".into()), "the AI page is shown");
+    visual.cx.executor().advance_clock(std::time::Duration::from_secs(2));
+    settle(visual);
+    assert_eq!(visual.update(|window, cx| window.notifications(cx).len()), 0);
+}
+
+#[gpui::test]
+fn the_notice_is_never_shown_when_no_connection_is_read_and_write_or_when_not_flagged(cx: &mut TestAppContext) {
+    use engine_connect::profile::AgentLevel;
+    cx.dispatcher.allow_parking();
+    let (app, visual) = settings_app(cx);
+    // Flagged, but nothing is Read and write (the default is Read): nothing to say, the flag is cleared.
+    let mut settings = Settings::default();
+    settings.ai.agent_access = AgentLevel::Read;
+    settings.ai.access_notice_pending = true;
+    publish_for_notice(&app, visual, settings, Vec::new());
+    assert!(app.read_with(visual, |this, _| this.settings_ui.access_notices.is_empty()));
+    assert!(!applied(&app, visual).ai.access_notice_pending, "cleared, so it never comes back");
+    assert_eq!(visual.update(|window, cx| window.notifications(cx).len()), 0);
+
+    // Read and write everywhere but the flag is not set (the switch was on, or this is no upgrade).
+    let mut settings = Settings::default();
+    settings.ai.agent_access = AgentLevel::ReadWrite;
+    publish_for_notice(&app, visual, settings, Vec::new());
+    assert!(app.read_with(visual, |this, _| this.settings_ui.access_notices.is_empty()));
+    assert_eq!(visual.update(|window, cx| window.notifications(cx).len()), 0);
+}
+
+#[gpui::test]
+fn the_notice_leaves_out_production_at_read_and_write_and_waits_while_the_connections_are_unreadable(cx: &mut TestAppContext) {
+    use engine_connect::profile::{AgentLevel, ConnectionProfile, OverrideValue, AGENT_ACCESS, PRODUCTION};
+    cx.dispatcher.allow_parking();
+    let (app, visual) = settings_app(cx);
+    let all = fixture_connections(&app, visual);
+    let (production, other) = (all[0].clone(), all[1].clone());
+    let mut read_write = ConnectionProfile::default();
+    read_write.overrides.set(AGENT_ACCESS, OverrideValue::Text("read_write".into()));
+    let production_profile = ConnectionProfile { type_id: PRODUCTION.into(), ..read_write.clone() };
+    let mut settings = Settings::default();
+    settings.ai.agent_access = AgentLevel::Off;
+    settings.ai.access_notice_pending = true;
+
+    // The store could not be read at start: nothing is said, and the flag stays for the next launch.
+    app.update(visual, |this, _| this.settings_ui.connections_unreadable = true);
+    publish_for_notice(
+        &app,
+        visual,
+        settings.clone(),
+        vec![(production.0.clone(), production_profile.clone()), (other.0.clone(), read_write.clone())],
+    );
+    assert!(app.read_with(visual, |this, _| this.settings_ui.access_notices.is_empty()));
+    assert!(applied(&app, visual).ai.access_notice_pending, "kept, not cleared");
+
+    // Readable: one notice that names the connection set to Read and write, not the production one
+    // (MCP refuses it at every level).
+    app.update(visual, |this, _| this.settings_ui.connections_unreadable = false);
+    publish_for_notice(&app, visual, settings, Vec::new());
+    let said = app.read_with(visual, |this, _| this.settings_ui.access_notices.clone());
+    assert_eq!(said.len(), 1, "{said:?}");
+    assert!(said[0].contains(other.1.as_str()), "{}", said[0]);
+    assert!(!said[0].contains(production.1.as_str()), "{}", said[0]);
+    assert!(!applied(&app, visual).ai.access_notice_pending);
 }

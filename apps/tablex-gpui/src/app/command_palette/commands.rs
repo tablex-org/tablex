@@ -18,6 +18,7 @@ pub(in crate::app) enum StaticAction {
     SaveSqlFileAs,
     OpenSqlFile,
     RunSqlFile,
+    OpenDataFile,
     BackupDatabase,
     RestoreDatabase,
     UsersAndPrivileges,
@@ -37,6 +38,7 @@ pub(in crate::app) enum StaticAction {
     DriverManager,
     Settings,
     ErrorLog,
+    QueryHistory,
     Assistant,
     ExplainQuery,
     FixQuery,
@@ -63,13 +65,14 @@ pub(in crate::app) enum StaticAction {
 }
 
 impl StaticAction {
-    pub(super) const ALL: [Self; 48] = [
+    pub(super) const ALL: [Self; 50] = [
         Self::NewQuery,
         Self::NewConnection,
         Self::SaveQuery,
         Self::SaveSqlFileAs,
         Self::OpenSqlFile,
         Self::RunSqlFile,
+        Self::OpenDataFile,
         Self::BackupDatabase,
         Self::RestoreDatabase,
         Self::UsersAndPrivileges,
@@ -89,6 +92,7 @@ impl StaticAction {
         Self::DriverManager,
         Self::Settings,
         Self::ErrorLog,
+        Self::QueryHistory,
         Self::Assistant,
         Self::ExplainQuery,
         Self::FixQuery,
@@ -122,6 +126,7 @@ impl StaticAction {
             Self::SaveSqlFileAs => "Save SQL File As",
             Self::OpenSqlFile => "Open SQL File",
             Self::RunSqlFile => "Run SQL File",
+            Self::OpenDataFile => "Open Data File",
             Self::BackupDatabase => "Backup Database",
             Self::RestoreDatabase => "Restore Database",
             Self::UsersAndPrivileges => "Users & Privileges",
@@ -141,6 +146,7 @@ impl StaticAction {
             Self::DriverManager => "Driver Manager",
             Self::Settings => "Settings",
             Self::ErrorLog => "Error Log",
+            Self::QueryHistory => "Query History",
             Self::Assistant => "AI Assistant",
             Self::ExplainQuery => "Assistant: Explain Query",
             Self::FixQuery => "Assistant: Fix Query",
@@ -182,6 +188,7 @@ impl StaticAction {
             Self::SaveSqlFileAs => hinted("Write the query to a .sql file and keep the tab bound to it", "editor.save_sql_file_as"),
             Self::OpenSqlFile => hinted("Open a .sql file in a query tab", "editor.open_sql_file"),
             Self::RunSqlFile => "Run a .sql file of any size on a connection, without opening it".into(),
+            Self::OpenDataFile => "Open a CSV, TSV, JSON, NDJSON or Parquet file as a table (read by the DuckDB driver)".into(),
             Self::BackupDatabase => "Back a PostgreSQL, MySQL or MariaDB database up with pg_dump or mysqldump".into(),
             Self::RestoreDatabase => "Restore a backup with pg_restore, or an SQL script with Run SQL File".into(),
             Self::ProcessList => "List the sessions running on the focused connection's server, and cancel a query or kill a session after a confirmation (PostgreSQL, MySQL, MariaDB, ClickHouse)".into(),
@@ -207,6 +214,7 @@ impl StaticAction {
             Self::DriverManager => "Install and manage database drivers".into(),
             Self::Settings => hinted("Open application settings", "workspace.open_settings"),
             Self::ErrorLog => hinted("Show the event and error log", "workspace.toggle_error_log"),
+            Self::QueryHistory => "Search what was run on every connection, and the calls MCP clients made".into(),
             Self::Assistant => hinted("Show or hide the AI assistant panel", "workspace.toggle_assistant"),
             Self::ExplainQuery => {
                 "Ask the assistant to explain the selected SQL, or the whole editor".into()
@@ -261,6 +269,7 @@ impl StaticAction {
             Self::SaveSqlFileAs => "write export file disk",
             Self::OpenSqlFile => "load import file disk script",
             Self::RunSqlFile => "execute large dump restore script file stream",
+            Self::OpenDataFile => "csv tsv json ndjson jsonl parquet duckdb import read table file spreadsheet",
             Self::BackupDatabase => "dump export pg_dump mysqldump mariadb-dump save copy archive",
             Self::RestoreDatabase => "import load pg_restore archive dump recover",
             Self::ProcessList => "processes sessions connections running queries activity kill cancel terminate processlist pg_stat_activity slow long blocking",
@@ -280,6 +289,7 @@ impl StaticAction {
             Self::DriverManager => "drivers plugins install",
             Self::Settings => "preferences options configuration appearance editor fonts",
             Self::ErrorLog => "errors warnings logs incidents",
+            Self::QueryHistory => "history queries sql ran past recent log audit mcp calls failed",
             Self::Assistant => "ai chat claude llm ask sql help copilot",
             Self::ExplainQuery => "ai assistant explain describe sql query what does",
             Self::FixQuery => "ai assistant fix repair error failed sql query",
@@ -314,6 +324,7 @@ impl StaticAction {
             Self::SaveSqlFileAs => "icons/download.svg",
             Self::OpenSqlFile => "icons/folder-open.svg",
             Self::RunSqlFile => "icons/play.svg",
+            Self::OpenDataFile => "icons/folder-open.svg",
             Self::BackupDatabase => "icons/download.svg",
             Self::RestoreDatabase => "icons/upload.svg",
             Self::UsersAndPrivileges => "icons/key-round.svg",
@@ -331,6 +342,7 @@ impl StaticAction {
             Self::DriverManager => "icons/settings-2.svg",
             Self::Settings => "icons/settings.svg",
             Self::ErrorLog => "icons/triangle-alert.svg",
+            Self::QueryHistory => "icons/list-ordered.svg",
             Self::Assistant | Self::ExplainQuery | Self::FixQuery | Self::OptimiseQuery => {
                 "icons/wand-sparkles.svg"
             }
@@ -370,6 +382,7 @@ impl StaticAction {
             Self::SaveSqlFileAs => app.save_sql_file_as(window, cx),
             Self::OpenSqlFile => app.open_sql_file(window, cx),
             Self::RunSqlFile => app.run_sql_file_from_context(window, cx),
+            Self::OpenDataFile => app.open_data_file(window, cx),
             Self::BackupDatabase => app.open_backup_from_context(super::super::backup::Mode::Backup, window, cx),
             Self::RestoreDatabase => app.open_backup_from_context(super::super::backup::Mode::Restore, window, cx),
             Self::UsersAndPrivileges => app.open_accounts_from_context(window, cx),
@@ -389,6 +402,7 @@ impl StaticAction {
             Self::DriverManager => app.open_driver_manager(cx),
             Self::Settings => app.open_settings(window, cx),
             Self::ErrorLog => app.toggle_error_log(window, cx),
+            Self::QueryHistory => app.open_query_history(None, window, cx),
             Self::Assistant => app.toggle_assistant(window, cx),
             Self::ExplainQuery => {
                 app.assistant_editor_ask(super::super::assistant::EditorAsk::Explain, window, cx)

@@ -192,7 +192,8 @@ impl ProcessEngine {
             ConnectionKind::Mysql => Some(&MYSQL),
             ConnectionKind::Mariadb => Some(&MARIADB),
             ConnectionKind::Clickhouse => Some(&CLICKHOUSE),
-            ConnectionKind::Sqlite | ConnectionKind::Mongodb | ConnectionKind::Redis => None,
+            ConnectionKind::Mssql => Some(&MSSQL),
+            ConnectionKind::Sqlite | ConnectionKind::Duckdb | ConnectionKind::Mongodb | ConnectionKind::Redis => None,
         }
     }
 
@@ -450,6 +451,74 @@ static CLICKHOUSE: ProcessEngine = ProcessEngine {
     kill: None,
 };
 
+// ---- SQL Server ---------------------------------------------------------------------------------------------------------------------------
+
+/// `sys.dm_exec_sessions` of the user sessions with the request each is running (`sys.dm_exec_requests`) and its text. Without the
+/// VIEW SERVER STATE permission the server shows a login its own sessions only. `total_elapsed_time` is milliseconds.
+const MSSQL_LIST: &str = "SELECT CAST(s.session_id AS varchar(10)), ISNULL(s.login_name, ''), ISNULL(DB_NAME(s.database_id), ''), ISNULL(s.status, ''), \
+     ISNULL(s.host_name, ''), ISNULL(s.program_name, ''), ISNULL(r.wait_type, ''), CAST(ISNULL(r.total_elapsed_time, 0) / 1000.0 AS varchar(40)), \
+     ISNULL(CONVERT(varchar(19), s.login_time, 120), ''), CAST(CASE WHEN s.session_id = @@SPID THEN 1 ELSE 0 END AS varchar(1)), ISNULL(t.text, '') \
+     FROM sys.dm_exec_sessions s LEFT JOIN sys.dm_exec_requests r ON r.session_id = s.session_id \
+     OUTER APPLY sys.dm_exec_sql_text(r.sql_handle) t WHERE s.is_user_process = 1 ORDER BY s.session_id";
+
+static MSSQL_COLUMNS: [Column; 9] = [
+    number("Session", 80.0),
+    column("Login", 110.0),
+    column("Database", 120.0),
+    column("Status", 90.0),
+    number("Elapsed", 90.0),
+    column("Query", QUERY_WIDTH),
+    column("Host", 130.0),
+    column("Program", 150.0),
+    column("Wait", 130.0),
+];
+
+fn mssql_row(row: &Fields) -> Result<ProcessRow, String> {
+    let id = row.id(0)?;
+    let (user, database, status) = (row.text(1)?, row.text(2)?, row.text(3)?);
+    let seconds = row.seconds(7)?;
+    let cells = vec![
+        id.to_string(),
+        user.to_owned(),
+        database.to_owned(),
+        status.to_owned(),
+        if row.text(10)?.is_empty() { String::new() } else { duration_text(seconds) },
+        String::new(),
+        row.text(4)?.to_owned(),
+        row.text(5)?.to_owned(),
+        row.text(6)?.to_owned(),
+    ];
+    Ok(Parts {
+        target: Target::Number(id),
+        cells,
+        summary: format!("Session {id} \u{00B7} {}", if user.is_empty() { "no user" } else { user }),
+        user,
+        database,
+        query: row.text(10)?,
+        idle: status == "sleeping",
+        own: row.flag(9)?,
+        seconds,
+    }
+    .build(0, 5))
+}
+
+/// SQL Server has no statement to stop a running query from another session: `KILL` ends the session (and rolls its transaction back).
+fn mssql_kill(target: &Target) -> Option<String> {
+    match target {
+        Target::Number(id) => Some(format!("KILL {id}")),
+        Target::Text(_) => None,
+    }
+}
+
+static MSSQL: ProcessEngine = ProcessEngine {
+    label: "SQL Server",
+    list: MSSQL_LIST,
+    columns: &MSSQL_COLUMNS,
+    parse: mssql_row,
+    cancel: None,
+    kill: Some(Action { label: "Kill Session", question: "Kill this session? Its open transaction is rolled back.", statement: mssql_kill }),
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -460,6 +529,27 @@ mod tests {
 
     fn pg_row<'a>(pid: &'a str, state: &'a str, seconds: &'a str, own: &'a str, query: &'a str) -> [&'a str; 14] {
         [pid, "app", "warehouse", "psql", "10.0.0.5", state, "Lock", "relation", "2026-11-06 09:00:00", "", "2026-11-06 09:01:00", seconds, own, query]
+    }
+
+    #[test]
+    fn sql_server_lists_sessions_and_can_only_end_them() {
+        let engine = ProcessEngine::of(ConnectionKind::Mssql).expect("SQL Server has a process list");
+        assert!(engine.list.contains("sys.dm_exec_sessions") && engine.list.contains("sys.dm_exec_requests") && engine.list.contains("is_user_process = 1"));
+        let rows = engine
+            .rows(&answer(&[
+                &["54", "app", "sales", "sleeping", "host-a", "tablex", "", "0", "2026-11-06 09:00:00", "0", ""],
+                &["55", "report", "sales", "running", "host-b", "ssms", "LCK_M_S", "12.5", "2026-11-06 09:01:00", "1", "SELECT * FROM orders"],
+            ]))
+            .unwrap();
+        // The running one first; the session this list reads through is marked.
+        assert_eq!(rows[0].target, Target::Number(55));
+        assert!(rows[0].own && !rows[0].idle && rows[1].idle);
+        assert_eq!(rows[0].query.as_ref(), "SELECT * FROM orders");
+        assert!(rows[0].cells[0].contains("(this app)"));
+        // No statement stops a query without ending the session: only Kill is offered.
+        assert!(engine.action(ActionKind::Cancel).is_none());
+        assert_eq!(engine.action(ActionKind::Kill).unwrap().statement(&Target::Number(55)).as_deref(), Some("KILL 55"));
+        assert_eq!(engine.action(ActionKind::Kill).unwrap().statement(&Target::Text("x".into())), None);
     }
 
     #[test]

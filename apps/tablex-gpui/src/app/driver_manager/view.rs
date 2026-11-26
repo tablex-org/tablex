@@ -101,6 +101,8 @@ fn driver_icon(id: &str) -> Option<&'static str> {
         "mysql" => "icons/mysql.svg",
         "mariadb" => "icons/mariadb.svg",
         "clickhouse" => "icons/clickhouse.svg",
+        "duckdb" => "icons/duckdb.svg",
+        "mssql" => "icons/sql-server.svg",
         "redis" => "icons/redis.svg",
         _ => return None,
     })
@@ -960,7 +962,8 @@ impl AppRoot {
             .child(kv(
                 "Signed by",
                 match record.map(|record| record.team_id.as_str()).or(row.entry.as_ref().map(|e| e.team_id.as_str())) {
-                    Some("") => "none (developer build)".into(),
+                    Some("") if row.developer => "none (developer build)".into(),
+                    Some("") => "none (signed catalog)".into(),
                     Some(team) => format!("Team {team}"),
                     None => "\u{2014}".into(),
                 },
@@ -1140,7 +1143,7 @@ mod tests {
 
     #[test]
     fn every_catalog_driver_has_brand_art_or_a_monogram() {
-        for id in ["postgresql", "mysql", "mariadb", "sqlite", "mongodb", "redis", "clickhouse"] {
+        for id in ["postgresql", "mysql", "mariadb", "sqlite", "mongodb", "redis", "clickhouse", "duckdb", "mssql"] {
             let asset = driver_icon(id).unwrap_or_else(|| panic!("{id} has art"));
             assert!(crate::assets::asset(asset).is_some(), "{asset} is registered");
         }

@@ -124,29 +124,27 @@ pub(super) fn copy_default_path() -> Option<std::path::PathBuf> {
     dirs::config_dir().map(|directory| directory.join("TableX/grid-copy-default.json"))
 }
 
-pub(in crate::app) fn read_copy_default(path: &std::path::Path) -> CopyFormat {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or(CopyFormat::Smart)
+/// The old file's choice; `None` when there is no such file (a `.migrated` one is another name
+/// and never matches) or it does not parse.
+pub(in crate::app) fn read_old_copy_default(path: &std::path::Path) -> Option<CopyFormat> {
+    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
 }
 
-pub(in crate::app) fn write_copy_default(
+/// Renames the old file to `<name>.migrated`: kept, since it is the user's data, but out of
+/// every read.
+pub(in crate::app) fn retire_old_copy_default(path: &std::path::Path) -> std::io::Result<()> {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".migrated");
+    std::fs::rename(path, path.with_file_name(name))
+}
+
+#[cfg(test)]
+pub(in crate::app) fn write_old_copy_default(
     path: &std::path::Path,
     format: CopyFormat,
-) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .ok_or("Copy preference directory unavailable")?;
-    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    let temporary = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
-    let value = serde_json::to_vec(&format).map_err(|error| error.to_string())?;
-    std::fs::write(&temporary, value).map_err(|error| error.to_string())?;
-    if let Err(error) = std::fs::rename(&temporary, path) {
-        let _ = std::fs::remove_file(temporary);
-        return Err(error.to_string());
-    }
-    Ok(())
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(path.parent().unwrap())?;
+    std::fs::write(path, serde_json::to_vec(&format)?)
 }
 
 impl CopyFormat {
@@ -1276,30 +1274,16 @@ impl AppRoot {
 
     pub(in crate::app) fn set_copy_default(
         &mut self,
-        tab_id: u64,
         format: CopyFormat,
         cx: &mut Context<Self>,
     ) {
-        let result = self
-            .grid_prefs
-            .copy_default_path
-            .clone()
-            .ok_or("Copy preference directory unavailable".to_string())
-            .and_then(|path| write_copy_default(&path, format));
-        match result {
-            Ok(()) => {
-                self.grid_prefs.copy_default = format;
-                // The setting follows the menu choice (when it offers it).
-                if let Some(choice) = format.to_setting() {
-                    let mut next = (*self.settings).clone();
-                    next.results.default_copy_format = choice;
-                    self.apply_settings(next, None, cx);
-                }
-            }
-            Err(error) => {
-                self.report_error(Area::App, None, &error);
-                self.view_mut(tab_id).detail_ui.error = Some(error);
-            }
+        // The setting is the one place the choice is kept; a format the setting does not offer
+        // is the default of this run only.
+        self.grid_prefs.copy_default = format;
+        if let Some(choice) = format.to_setting() {
+            let mut next = (**self.settings).clone();
+            next.results.default_copy_format = choice;
+            self.apply_settings(next, None, cx);
         }
         // The default is shared by every tab's context menu.
         cx.notify();
@@ -1577,13 +1561,16 @@ mod tests {
     }
 
     #[test]
-    fn configured_default_persists_independently_from_one_off_copy() {
-        let path =
-            std::env::temp_dir().join(format!("tablex-copy-default-{}.json", uuid::Uuid::new_v4()));
-        assert_eq!(read_copy_default(&path), CopyFormat::Smart);
-        write_copy_default(&path, CopyFormat::CsvWithHeaders).unwrap();
-        assert_eq!(read_copy_default(&path), CopyFormat::CsvWithHeaders);
-        std::fs::remove_file(path).unwrap();
+    fn the_old_default_file_is_read_until_it_is_retired_and_never_after() {
+        let dir = std::env::temp_dir().join(format!("tablex-copy-default-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("grid-copy-default.json");
+        assert_eq!(read_old_copy_default(&path), None);
+        write_old_copy_default(&path, CopyFormat::CsvWithHeaders).unwrap();
+        assert_eq!(read_old_copy_default(&path), Some(CopyFormat::CsvWithHeaders));
+        retire_old_copy_default(&path).unwrap();
+        assert_eq!(read_old_copy_default(&path), None);
+        assert!(dir.join("grid-copy-default.json.migrated").exists(), "kept, not deleted");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

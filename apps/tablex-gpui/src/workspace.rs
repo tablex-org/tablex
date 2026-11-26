@@ -64,6 +64,9 @@ pub enum TabKind {
     /// The Error Log in a tab of its own (singleton; the app keeps the one log view). Never
     /// persisted: the place is a setting, and the log opens again on demand.
     ErrorLog,
+    /// The Query History across every connection (singleton; the app keeps the one view). Never
+    /// persisted: it opens again on demand.
+    History,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -244,6 +247,9 @@ pub struct TabRuntime {
     pub shell: Option<crate::mongo_shell::ShellView>,
     /// The script run in flight (several statements, one at a time).
     pub script_run: Option<crate::script_run::ScriptRun>,
+    /// Groups of the navigator that statements run from this tab changed (created, dropped, altered) since the last refresh:
+    /// a script lists each once and the navigator reloads them when it ends.
+    pub pending_ddl: Vec<crate::ddl_refresh::DdlTarget>,
     /// The last script run: its result tabs and Statistics. Cleared by the next run typed in
     /// the editor; paging and Refresh of a result tab keep it.
     pub script: Option<crate::script_run::ScriptView>,
@@ -332,6 +338,7 @@ impl Default for TabRuntime {
             plan: None,
             shell: None,
             script_run: None,
+            pending_ddl: Vec::new(),
             script: None,
             editor_run_pending: false,
             param_values: HashMap::new(),
@@ -556,7 +563,7 @@ enum Slot<'a> {
 /// the start of the tabs row whatever group is shown. Connection-less query
 /// tabs stay in the "Other" chip.
 fn is_global_tab(tab: &Tab) -> bool {
-    tab.is_pinned || matches!(tab.kind, TabKind::Welcome | TabKind::DriverManager | TabKind::Settings)
+    tab.is_pinned || matches!(tab.kind, TabKind::Welcome | TabKind::DriverManager | TabKind::Settings | TabKind::History)
 }
 
 /// Where a dragged tab is being dropped.
@@ -607,7 +614,7 @@ fn session_tab(tab: &Tab) -> Option<crate::gpui_session::SessionTab> {
         // Singleton utility tab; reopened on demand.
         TabKind::DriverManager | TabKind::Settings => return None,
         // A wizard over a file and a load in flight: nothing to restore.
-        TabKind::Import | TabKind::Transfer | TabKind::SqlFile | TabKind::Backup | TabKind::Restore | TabKind::Accounts | TabKind::ProcessList | TabKind::Compare | TabKind::Results | TabKind::ErrorLog => return None,
+        TabKind::Import | TabKind::Transfer | TabKind::SqlFile | TabKind::Backup | TabKind::Restore | TabKind::Accounts | TabKind::ProcessList | TabKind::Compare | TabKind::Results | TabKind::ErrorLog | TabKind::History => return None,
     };
     Some(SessionTab {
         kind: kind.into(),
@@ -1002,6 +1009,16 @@ impl WorkspaceState {
             return id;
         }
         self.open_tab_with_kind(TabKind::ErrorLog, title.to_string())
+    }
+
+    /// Opens the Query History tab, or shows the one that is open.
+    pub fn open_history_tab(&mut self, title: &str) -> u64 {
+        if let Some(tab) = self.tabs.iter().find(|tab| tab.kind == TabKind::History) {
+            let id = tab.id;
+            self.activate_tab(id);
+            return id;
+        }
+        self.open_tab_with_kind(TabKind::History, title.to_string())
     }
 
     /// "Open data tabs next to the active tab": a new data tab sits right

@@ -707,3 +707,107 @@ fn live_mysql_navigator_and_create_database_smoke(cx: &mut TestAppContext) {
 fn live_mariadb_navigator_and_create_database_smoke(cx: &mut TestAppContext) {
     live_navigator_smoke(cx, ConnectionKind::Mariadb, ("dbengine-mariadb", "abi-v2"), "TABLEX_TEST_MARIADB_URI");
 }
+
+// ---- DDL run from the SQL editor refreshes the loaded navigator groups ----------------------------
+
+impl SqlRig<'_> {
+    fn generation(&self) -> u64 {
+        self.app.read_with(self.visual, |this, _| this.navigator.generation())
+    }
+
+    fn wait_children_include(&mut self, group: &NavigatorNodeId, name: &'static str) {
+        let group = group.clone();
+        let app = self.app.clone();
+        wait_until(self.visual, "the new object in the group", |visual| {
+            app.read_with(visual, |this, _| {
+                let Some(children) = this.navigator.loaded_children(&group) else { return false };
+                children.iter().any(|child| matches!(child, NavigatorNodeId::Object { object, .. } if object == name))
+            })
+        });
+        settle(self.visual);
+    }
+}
+
+#[gpui::test]
+fn a_create_table_run_from_the_editor_lists_the_table_without_collapsing_the_tree(cx: &mut TestAppContext) {
+    let db = SqliteDb::new(NAV_SEED);
+    let mut rig = nav_rig_sqlite(cx, &db);
+    let tables = rig.expand_to_tables("main", "main");
+    let key = rig.key.clone();
+    let schema = schema_node(&key, "main", "main");
+    let views = group_node(&key, "main", "main", ObjectGroup::Views);
+    assert_eq!(rig.tree_children(&tables), ["items"]);
+    rig.run("CREATE TABLE extra(id INTEGER)");
+    rig.wait_status("the CREATE TABLE to run", ready);
+    rig.wait_children_include(&tables, "extra");
+    assert_eq!(rig.tree_children(&tables), ["extra", "items"]);
+    rig.app.read_with(rig.visual, |this, _| {
+        assert!(this.navigator.is_expanded(&tables) && this.navigator.is_expanded(&schema), "nothing collapsed");
+        assert!(this.navigator.load_state(&views).is_none(), "a group that was never loaded is not loaded by the refresh");
+    });
+}
+
+#[gpui::test]
+fn a_statement_that_is_not_ddl_does_not_refresh_the_navigator(cx: &mut TestAppContext) {
+    let db = SqliteDb::new(NAV_SEED);
+    let mut rig = nav_rig_sqlite(cx, &db);
+    let tables = rig.expand_to_tables("main", "main");
+    db.sql("CREATE TABLE sidedoor(id INTEGER);");
+    let before = rig.generation();
+    for sql in ["SELECT 1", "INSERT INTO items(name) VALUES ('f')"] {
+        rig.run(sql);
+        rig.wait_status("the statement to run", ready);
+    }
+    settle(rig.visual);
+    assert_eq!(rig.generation(), before, "no group was loaded again");
+    assert_eq!(rig.tree_children(&tables), ["items"], "the table made behind the app's back is not listed yet");
+    rig.run("CREATE TABLE later(id INTEGER)");
+    rig.wait_status("the CREATE TABLE to run", ready);
+    rig.wait_children_include(&tables, "later");
+    assert_eq!(rig.tree_children(&tables), ["items", "later", "sidedoor"]);
+}
+
+/// A script of many DDL statements lists the changed group once, when it ends.
+#[gpui::test]
+fn a_script_of_ddl_statements_refreshes_each_group_once_at_its_end(cx: &mut TestAppContext) {
+    let db = SqliteDb::new(NAV_SEED);
+    let mut rig = nav_rig_sqlite(cx, &db);
+    let tables = rig.expand_to_tables("main", "main");
+    let single = rig.generation();
+    rig.run("CREATE TABLE one(id INTEGER)");
+    rig.wait_status("the CREATE TABLE to run", ready);
+    rig.wait_children_include(&tables, "one");
+    let one_refresh = rig.generation() - single;
+    assert!(one_refresh > 0);
+    let script: String = (0..20).map(|n| format!("CREATE TABLE s{n:02}(id INTEGER);\n")).collect();
+    let before = rig.generation();
+    rig.run(&script);
+    rig.wait_status("the script to run", ready);
+    rig.wait_children_include(&tables, "s19");
+    assert_eq!(rig.generation() - before, one_refresh, "one refresh for the whole script");
+    assert_eq!(rig.tree_children(&tables).len(), 22);
+}
+
+/// Only a statement typed in a SQL editor can change what a schema lists: the page fetch of a statement
+/// (paging, Refresh, a table browse) and a Mongo tab record no pending DDL and reload nothing.
+#[gpui::test]
+fn a_page_fetch_and_a_mongo_tab_do_not_refresh_the_navigator(cx: &mut TestAppContext) {
+    let db = SqliteDb::new(NAV_SEED);
+    let mut rig = nav_rig_sqlite(cx, &db);
+    let tables = rig.expand_to_tables("main", "main");
+    let tab = rig.tab;
+    let before = rig.generation();
+    // A page fetch is not typed in the editor, even when its statement is DDL.
+    rig.app.update(rig.visual, |this, cx| this.run_sql(tab, "CREATE TABLE paged(id INTEGER)".into(), Some(0), cx));
+    rig.wait_status("the page fetch to run", ready);
+    settle(rig.visual);
+    assert_eq!(rig.generation(), before, "a page fetch loads no group again");
+    assert_eq!(rig.tree_children(&tables), ["items"]);
+    rig.app.read_with(rig.visual, |this, _| {
+        assert!(this.workspace.runtime(tab).unwrap().pending_ddl.is_empty());
+        assert!(this.explain_dialect_of(tab).is_some(), "a SQL editor on a SQL connection is read for DDL");
+    });
+    // A Mongo tab is no SQL editor, so no dialect reads its text.
+    rig.app.update(rig.visual, |this, _| this.workspace.tab_mut(tab).unwrap().query_mode = Some(crate::query_mode::QueryMode::MongoFind));
+    rig.app.read_with(rig.visual, |this, _| assert!(this.explain_dialect_of(tab).is_none()));
+}

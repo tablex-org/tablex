@@ -251,6 +251,172 @@ fn completion_mongo_filter_editor_menu_completes_result_fields_as_quoted_json_ke
     );
 }
 
+/// Types into the inline FILTER / SORT box of a populated Mongo find tab, with real keystrokes, and
+/// returns what the box shows after each step.
+fn inline_box_app(cx: &mut TestAppContext) -> (gpui::Entity<AppRoot>, &mut gpui::VisualTestContext, u64) {
+    let (app, visual) = context_test_app(cx, "mongo-grid", "populated");
+    visual.simulate_resize(gpui::size(gpui::px(1400.0), gpui::px(850.0)));
+    settle(visual);
+    let tab_id = app.read_with(visual, |this, _| this.workspace.active_tab().unwrap().id);
+    (app, visual, tab_id)
+}
+
+/// What the box holds, trailing line breaks included (which `editor_value` trims).
+fn raw_value(editor: &gpui::Entity<EditorState>, visual: &gpui::VisualTestContext) -> String {
+    visual.cx.read(|cx| editor.read(cx).value().to_string())
+}
+
+fn focus_inline_box(
+    app: &gpui::Entity<AppRoot>,
+    visual: &mut gpui::VisualTestContext,
+    editor: &gpui::Entity<EditorState>,
+) {
+    app.update_in(visual, |_, window, cx| editor.update(cx, |state, cx| state.focus(window, cx)));
+    settle(visual);
+    visual.simulate_keystrokes("secondary-a");
+}
+
+#[gpui::test]
+fn completion_inline_mongo_filter_box_completes_fields_and_enter_runs_the_query(cx: &mut TestAppContext) {
+    let (app, visual, tab_id) = inline_box_app(cx);
+    let natural = first_name(&app, visual, tab_id).expect("first row");
+    let editor = app.update_in(visual, |this, window, cx| this.mongo_filter_editor(tab_id, window, cx));
+    focus_inline_box(&app, visual, &editor);
+    visual.simulate_input("{}");
+    visual.simulate_keystrokes("left");
+    visual.simulate_input("na");
+    settle(visual);
+    let (open, labels, _) = menu_state(&editor, visual);
+    assert!(open, "{labels:?} text={:?}", editor_value(&editor, visual));
+    assert_eq!(labels[0], "name", "{labels:?}");
+    // Enter accepts the highlighted item: it neither runs the query nor breaks the line.
+    visual.simulate_keystrokes("enter");
+    settle(visual);
+    let value = raw_value(&editor, visual);
+    assert!(value.contains("\"name\"") && !value.contains('\n'), "{value:?}");
+    assert_eq!(first_name(&app, visual, tab_id).as_deref(), Some(natural.as_str()), "accepting did not run");
+    visual.simulate_input("\"no such name\"");
+    settle(visual);
+    // Shift+Enter is not a newline in a one-line box.
+    visual.simulate_keystrokes("shift-enter");
+    settle(visual);
+    assert!(!raw_value(&editor, visual).contains('\n'));
+    // Enter with no menu open runs the query with what the box holds.
+    assert!(!menu_state(&editor, visual).0);
+    visual.simulate_keystrokes("enter");
+    for _ in 0..3 {
+        settle(visual);
+    }
+    let value = raw_value(&editor, visual);
+    assert!(!value.contains('\n'), "{value:?}");
+    app.read_with(visual, |this, _| assert_eq!(this.workspace.runtime(tab_id).unwrap().mongo.filter, value));
+    assert_ne!(first_name(&app, visual, tab_id).as_deref(), Some(natural.as_str()), "Enter ran the filter");
+}
+
+#[gpui::test]
+fn completion_inline_mongo_sort_box_completes_fields_and_enter_runs_the_query(cx: &mut TestAppContext) {
+    let (app, visual, tab_id) = inline_box_app(cx);
+    let natural = first_name(&app, visual, tab_id).expect("first row");
+    let editor = app.update_in(visual, |this, window, cx| this.mongo_sort_editor(tab_id, window, cx));
+    focus_inline_box(&app, visual, &editor);
+    visual.simulate_input("{}");
+    visual.simulate_keystrokes("left");
+    visual.simulate_input("na");
+    settle(visual);
+    let (open, labels, _) = menu_state(&editor, visual);
+    assert!(open, "{labels:?} text={:?}", editor_value(&editor, visual));
+    assert_eq!(labels[0], "name", "{labels:?}");
+    visual.simulate_keystrokes("enter");
+    settle(visual);
+    assert!(raw_value(&editor, visual).contains("\"name\""), "{:?}", raw_value(&editor, visual));
+    visual.simulate_input("-1");
+    settle(visual);
+    assert!(!menu_state(&editor, visual).0);
+    visual.simulate_keystrokes("enter");
+    for _ in 0..3 {
+        settle(visual);
+    }
+    app.read_with(visual, |this, _| {
+        assert_eq!(this.workspace.runtime(tab_id).unwrap().mongo.sort, raw_value(&editor, visual));
+        assert!(!this.workspace.runtime(tab_id).unwrap().mongo.sort.contains('\n'));
+    });
+    assert_ne!(first_name(&app, visual, tab_id).as_deref(), Some(natural.as_str()), "Enter ran the sort");
+}
+
+/// The completion menu of the inline box is really there below the bar, not clipped by its 24px height:
+/// a click where its first row stands, under the box and over the grid, takes that item. Typed one key
+/// at a time, as a user does.
+#[gpui::test]
+fn the_inline_mongo_box_shows_its_completion_menu_below_the_bar(cx: &mut TestAppContext) {
+    let (app, visual, tab_id) = inline_box_app(cx);
+    let editor = app.update_in(visual, |this, window, cx| this.mongo_filter_editor(tab_id, window, cx));
+    focus_inline_box(&app, visual, &editor);
+    visual.simulate_input("{");
+    visual.simulate_input("n");
+    settle(visual);
+    let (open, labels, _) = menu_state(&editor, visual);
+    assert!(open && labels[0] == "name", "{labels:?}");
+    let field = visual.debug_bounds("mongo-filter-field").expect("the filter field");
+    let caret = visual
+        .update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+            editor.read(cx).prepaint_caret_geometry()
+        })
+        .expect("the box is painted");
+    // The menu's first row: under the caret line, its padding and gap.
+    let row = gpui::point(caret.cursor_bounds().origin.x + gpui::px(40.0), field.bottom() + gpui::px(14.0));
+    assert!(row.y > field.bottom());
+    visual.simulate_click(row, Default::default());
+    settle(visual);
+    let value = raw_value(&editor, visual);
+    assert!(value.contains("\"name\""), "the click reached the menu row: {value:?}");
+}
+
+/// Ctrl+Space in the inline box asks for the menu, also for text that was inserted whole (a paste, a
+/// dictation) rather than typed key by key.
+#[gpui::test]
+fn ctrl_space_opens_the_inline_mongo_menu_for_text_that_was_not_typed(cx: &mut TestAppContext) {
+    let (app, visual, tab_id) = inline_box_app(cx);
+    let editor = app.update_in(visual, |this, window, cx| this.mongo_filter_editor(tab_id, window, cx));
+    app.update_in(visual, |_, window, cx| {
+        editor.update(cx, |state, cx| {
+            state.set_value("{n", window, cx);
+            state.focus(window, cx);
+            state.set_cursor_position(gpui_component::input::Position::new(0, 2), window, cx);
+        });
+    });
+    settle(visual);
+    assert!(!menu_state(&editor, visual).0);
+    visual.simulate_keystrokes("ctrl-space");
+    settle(visual);
+    let (open, labels, _) = menu_state(&editor, visual);
+    assert!(open, "{labels:?} text={:?}", raw_value(&editor, visual));
+    assert!(labels.iter().any(|label| label == "name"), "{labels:?}");
+}
+
+/// A paste with line breaks lands as one line, and the line sits inside the 24px bar.
+#[gpui::test]
+fn the_inline_mongo_box_pastes_as_one_line_and_fits_the_bar(cx: &mut TestAppContext) {
+    let (app, visual, tab_id) = inline_box_app(cx);
+    let editor = app.update_in(visual, |this, window, cx| this.mongo_filter_editor(tab_id, window, cx));
+    focus_inline_box(&app, visual, &editor);
+    visual.write_to_clipboard(gpui::ClipboardItem::new_string("{\"a\":\n  1,\r\n\"b\": 2}".into()));
+    visual.simulate_keystrokes("secondary-v");
+    settle(visual);
+    let value = raw_value(&editor, visual);
+    assert!(!value.contains(['\n', '\r']) && value.contains("\"a\":") && value.contains("\"b\": 2"), "{value:?}");
+    let field = visual.debug_bounds("mongo-filter-field").expect("the filter field");
+    let caret = visual.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear(cx);
+        editor.read(cx).prepaint_caret_geometry().map(|geometry| geometry.cursor_bounds())
+    });
+    let caret = caret.expect("the box is painted");
+    assert!(caret.top() >= field.top() && caret.bottom() <= field.bottom(), "caret {caret:?} in field {field:?}");
+    assert!(field.size.height <= gpui::px(26.0), "the bar keeps its height: {field:?}");
+}
+
 #[gpui::test]
 fn completion_warms_uncached_columns_of_tables_in_scope_then_completes_them(
     cx: &mut TestAppContext,

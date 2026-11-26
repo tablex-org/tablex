@@ -209,7 +209,7 @@ pub(super) fn runtime_uri_for_form(
     // The box means nothing while passwords are not being saved (Settings > Security).
     let save_password = form.save_password && engine_connect::key_home::passwords_saved();
     // Nothing typed, nothing saved, but typed earlier in this run for the same connection.
-    if form.kind != ConnectionKind::Sqlite
+    if !form.kind.is_file_database()
         && form.password.is_empty()
         && form.password_from_uri().is_none_or(|password| password.is_empty())
         && !save_password
@@ -224,7 +224,7 @@ pub(super) fn runtime_uri_for_form(
             }
         }
     }
-    if form.kind != ConnectionKind::Sqlite
+    if !form.kind.is_file_database()
         && form.password.is_empty()
         && form
             .password_from_uri().is_none_or(|password| password.is_empty())
@@ -483,6 +483,9 @@ impl AppRoot {
         // thread below, and the driver connects to its local port. The session's URI stays the URI
         // as the user wrote it: later sessions rewrite it again with their own tunnel.
         let request = self.connect_request(saved, uri_override, connect_timeout);
+        // The Files connection's in-memory instance starts empty: its views come back with the
+        // session, before the tabs that read them run again.
+        let files_views = self.data_files.views_for(&connection_key);
         // Blocking work (the SSH handshake may wait for the user's answer) belongs on a thread of
         // its own, never on the executor that also runs the UI's callbacks.
         let connect_task = cx.background_executor().spawn(async move {
@@ -490,6 +493,7 @@ impl AppRoot {
                 connector
                     .open_request(request, &prompts)
                     .map(Connected::from)
+                    .inspect(|connected| super::data_files::recreate_views(&connected.session, &files_views))
             })
             .await
         });
@@ -597,6 +601,7 @@ impl AppRoot {
                         this.connection_came_up(&connection_key_task, cx);
                         this.rerun_tabs_after_reconnect(&connection_key_task, cx);
                         this.connected_for_create_database(&connection_key_task, cx);
+                        this.connected_for_data_files(&connection_key_task, cx);
                     }
                     Err(failure) => {
                         this.handle_connect_failure(retry_saved, retry_uri, attempt, failure, cx);
@@ -1393,12 +1398,14 @@ impl AppRoot {
         }
         self.sessions.disconnect(connection_id);
         self.driver_runtime.connection_ids.remove(connection_id);
+        let orphaned = self.schema_columns.forget_connection(connection_id);
         self.driver_runtime.capabilities.remove(connection_id);
         self.driver_runtime.server_versions.remove(connection_id);
         self.driver_runtime.session_handles.remove(connection_id);
         self.driver_runtime.session_uris.remove(connection_id);
         self.sync_sidebar_connections(cx);
         if !had_session && !self.navigator_ui.pending_loads.contains_key(connection_id) {
+            self.redispatch_schema_waiters(orphaned, cx);
             return;
         }
         self.navigator_ui.pending_loads.remove(connection_id);
@@ -1406,6 +1413,7 @@ impl AppRoot {
             connection: connection_id.to_string(),
         });
         self.navigator_ui.generation = self.navigator.generation();
+        self.redispatch_schema_waiters(orphaned, cx);
         cx.notify();
     }
 
@@ -1427,9 +1435,10 @@ impl AppRoot {
                 return false;
             }
         };
+        self.settings_ui.connections_unreadable = false;
         let saved = records.iter().map(SavedConnection::from_record).collect();
         self.welcome = super::welcome::WelcomeState::from_records(&records);
-        self.connection_policy = connection_policy::ConnectionPolicy::from_records(&records);
+        *self.connection_policy = connection_policy::ConnectionPolicy::from_records(&records);
         self.apply_saved_connections(saved, cx);
         self.assistant_sync(cx);
         true
@@ -1445,7 +1454,7 @@ impl AppRoot {
     ) {
         // A password typed for this run belongs to the connection as it was: another address or
         // user, or no connection at all, and it is gone.
-        for old in &self.saved_connections {
+        for old in self.saved_connections.iter() {
             let changed = saved
                 .iter()
                 .find(|new| new.id == old.id)
@@ -1454,7 +1463,7 @@ impl AppRoot {
                 self.connection_ui.session_passwords.clear(&old.id.to_string());
             }
         }
-        self.saved_connections = saved;
+        *self.saved_connections = saved;
         let live: HashSet<_> = self
             .saved_connections
             .iter()

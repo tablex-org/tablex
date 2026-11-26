@@ -222,8 +222,8 @@ fn unquote(argument: &str) -> String {
 impl Executor for DriverExecutor {
     fn begin(&mut self) -> Result<(), Failure> {
         // MySQL and MariaDB spell it START TRANSACTION: only that is a transaction in every mode of the server.
-        let sql = if matches!(self.kind, ConnectionKind::Mysql | ConnectionKind::Mariadb) { "START TRANSACTION" } else { "BEGIN" };
-        self.send(sql, true).map(|_| ())
+        // SQL Server's bare BEGIN opens a block.
+        self.send(crate::transaction::start_transaction_statement(self.kind), true).map(|_| ())
     }
 
     fn execute(&mut self, sql: &str) -> Result<Done, Failure> {

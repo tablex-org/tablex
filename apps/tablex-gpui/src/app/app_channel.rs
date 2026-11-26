@@ -40,6 +40,8 @@ impl AppRoot {
         let Some(path) = engine_connect::app_channel::socket_path() else {
             return;
         };
+        // The socket and token of older versions sat in the data folder: they moved into `channel/`.
+        engine_connect::app_channel::remove_legacy_files();
         match self.listen_on_app_channel(&path, cx) {
             Ok(()) | Err(BindError::Unsupported) => {}
             Err(error) => self.report_warning(
@@ -60,9 +62,17 @@ impl AppRoot {
         // Runs on a connection thread: never the UI thread, so a request that waits for the UI
         // blocks nothing but its own connection.
         let handler: Handler = Arc::new(move |request| {
+            // A question waits for the user, as long as they take (the channel ends the wait when
+            // its client goes); everything else only for the UI to take it up.
+            let waits_for_user = matches!(request, Request::Approval { .. });
             let (reply_to, reply) = std::sync::mpsc::channel();
             if requests.send_blocking((request, reply_to)).is_err() {
                 return Reply::error("tablex is closing");
+            }
+            if waits_for_user {
+                return reply
+                    .recv()
+                    .unwrap_or_else(|_| Reply::error("the question was withdrawn or tablex is closing"));
             }
             reply
                 .recv_timeout(UI_WAIT)
@@ -71,12 +81,28 @@ impl AppRoot {
         self.app_channel.listener = Some(Listener::bind(path, handler)?);
         self.app_channel._task = Some(cx.spawn(async move |this, cx| {
             while let Ok((request, reply_to)) = inbox.recv().await {
-                match this.update(cx, |this, cx| this.handle_channel_request(request, cx)) {
-                    Ok(reply) => {
-                        let _ = reply_to.send(reply);
+                // A question keeps its sender until the user answers it.
+                let mut reply_to = Some(reply_to);
+                let done = this.update(cx, |this, cx| match request {
+                    Request::Approval { ask, .. } => {
+                        if let Some(reply_to) = reply_to.take() {
+                            this.enqueue_approval(ask, reply_to, cx);
+                        }
+                        None
                     }
+                    request => Some(this.handle_channel_request(request, cx)),
+                });
+                match done {
+                    Ok(Some(reply)) => {
+                        if let Some(reply_to) = reply_to.take() {
+                            let _ = reply_to.send(reply);
+                        }
+                    }
+                    Ok(None) => {}
                     Err(_) => {
-                        let _ = reply_to.send(Reply::error("tablex is closing"));
+                        if let Some(reply_to) = reply_to.take() {
+                            let _ = reply_to.send(Reply::error("tablex is closing"));
+                        }
                         break;
                     }
                 }
@@ -85,6 +111,7 @@ impl AppRoot {
         // The socket file goes with a clean exit.
         self.app_channel._quit = Some(cx.on_app_quit(|this, _| {
             this.app_channel.stop();
+            this.decline_approvals();
             async {}
         }));
         Ok(())
@@ -97,6 +124,13 @@ impl AppRoot {
             // The channel answers pings itself.
             Request::Ping { .. } => Ok(()),
             Request::ConnectionsChanged {} => self.channel_reload_connections(cx),
+            // The client of a question went away (the channel says so).
+            Request::Withdraw { id } => {
+                self.withdraw_approval(&id, cx);
+                Ok(())
+            }
+            // Questions are taken by `enqueue_approval`, from the channel's own task only.
+            Request::Approval { .. } => Err("a question is not taken here".into()),
             Request::OpenObject {
                 connection_id,
                 database,
@@ -212,6 +246,10 @@ impl AppRoot {
         let saved = self.channel_connection(connection_id)?;
         let id = saved.id.to_string();
         let database = database.unwrap_or_default();
+        // DuckDB SQL reads and writes files and URLs, and this tab runs on the instance of the user's
+        // own connection, with file access on: a query from an MCP client is only put in the editor,
+        // whatever the client asked (the tool layer says the same; this is the second check).
+        let run = run && saved.kind != ConnectionKind::Duckdb;
         let tab_id = match saved.kind {
             ConnectionKind::Mongodb => {
                 self.open_mongo_script_tab(&id, &database, "");
@@ -252,12 +290,24 @@ impl AppRoot {
     }
 
     /// The app and its window to the front (once the current update has finished: the window
-    /// cannot be updated while this entity is).
+    /// cannot be updated while this entity is). While a question of an MCP client is on screen or
+    /// waiting, the window is not activated, only the system's attention is asked for (the dock
+    /// icon bounces): a window that comes forward over what the user is typing would give a
+    /// keystroke meant for something else to the approval dialog.
     fn bring_window_to_front(&self, cx: &mut Context<Self>) {
-        cx.activate(true);
+        let questioning = self.approvals.busy();
+        if !questioning {
+            cx.activate(true);
+        }
         if let Some(window) = self.driver_runtime.window {
             cx.defer(move |cx| {
-                let _ = window.update(cx, |_, window, _| window.activate_window());
+                let _ = window.update(cx, |_, window, _| {
+                    if questioning {
+                        window.request_attention();
+                    } else {
+                        window.activate_window();
+                    }
+                });
             });
         }
     }

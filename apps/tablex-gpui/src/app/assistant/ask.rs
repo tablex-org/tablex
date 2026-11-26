@@ -582,6 +582,35 @@ impl AppRoot {
         self.assistant_ask(scope, label, compose_table(&qualified), window, cx);
     }
 
+    /// "Analyze with AI" on a run of the Query History: the statement (and, for a run that failed,
+    /// its error, which was masked of secrets when it was recorded) goes to the assistant of the
+    /// run's connection, as an Explain or a Fix of the editor would.
+    pub(in crate::app) fn assistant_history_ask(
+        &mut self,
+        connection: &str,
+        database: &str,
+        sql: &str,
+        error: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(saved) = self.saved_connections.iter().find(|saved| saved.matches_id(connection)) else {
+            return;
+        };
+        let non_empty = |text: &str| (!text.is_empty()).then(|| text.to_owned());
+        let scope = engine_ai::Scope {
+            connection_id: saved.id.to_string(),
+            database: non_empty(database),
+            schema: None,
+        };
+        let label = saved.name.clone();
+        let message = match error {
+            Some(error) => compose(EditorAsk::Fix, sql, Some(error)),
+            None => compose(EditorAsk::Explain, sql, None),
+        };
+        self.assistant_ask(scope, label, message, window, cx);
+    }
+
     /// Whether the chat cannot be replaced by one for `scope` now: it is working (or a statement
     /// waits) and about something else.
     fn assistant_chat_blocks(&self, scope: &engine_ai::Scope, cx: &gpui::App) -> bool {

@@ -534,7 +534,7 @@ fn overrides_are_saved_loaded_at_start_and_unknown_ids_are_ignored(cx: &mut Test
         let path = path.clone();
         let (fresh, visual) = settings_app(cx);
         fresh.update(visual, |this, cx| {
-            this.settings = std::sync::Arc::new(Settings::default());
+            *this.settings = std::sync::Arc::new(Settings::default());
             this.settings_ui.path = Some(path);
             this.init_settings(cx);
         });

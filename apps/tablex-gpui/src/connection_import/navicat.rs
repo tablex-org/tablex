@@ -148,7 +148,7 @@ fn product_of(node: &Node, port: Option<u16>) -> Option<ImportKind> {
     }
     match key.as_str() {
         "4" => return Some(ImportKind::Unsupported("Oracle".into())),
-        "7" => return Some(ImportKind::Unsupported("SQL Server".into())),
+        "7" => return Some(ImportKind::from_kind(ConnectionKind::Mssql)),
         _ => {}
     }
 
@@ -173,7 +173,7 @@ fn product_of(node: &Node, port: Option<u16>) -> Option<ImportKind> {
         Some(27017) => Some(ImportKind::from_kind(ConnectionKind::Mongodb)),
         Some(5432) => Some(ImportKind::from_kind(ConnectionKind::Postgres)),
         Some(3306) => Some(ImportKind::from_kind(ConnectionKind::Mysql)),
-        Some(1433) => Some(ImportKind::Unsupported("SQL Server".into())),
+        Some(1433) => Some(ImportKind::from_kind(ConnectionKind::Mssql)),
         Some(1521) => Some(ImportKind::Unsupported("Oracle".into())),
         _ => None,
     };
@@ -522,7 +522,7 @@ mod tests {
         );
         assert_eq!(
             by_name(&all, "Warehouse").kind,
-            ImportKind::Unsupported("SQL Server".into())
+            ImportKind::Supported(ConnectionKind::Mssql)
         );
         assert_eq!(
             by_name(&all, "Cache").kind,
@@ -534,7 +534,7 @@ mod tests {
         assert_eq!(all.len(), 8);
         assert_eq!(
             super::super::unsupported_labels(all.iter()),
-            ["Oracle", "SQL Server"]
+            ["Oracle"]
         );
     }
 

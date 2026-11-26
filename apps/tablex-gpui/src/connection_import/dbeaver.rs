@@ -379,6 +379,7 @@ fn connection_of(id: &str, entry: &Value, credentials: &Value) -> Option<Importe
         .unwrap_or(target.user.clone());
     connection.password = Secret::new(password).or(target.password);
     connection.tls = target.tls;
+    connection.trust_certificate = target.trust_certificate;
     if let Some((ssh, note)) = ssh_of(config, id, credentials) {
         connection.ssh = Some(ssh);
         connection.route_note = note;

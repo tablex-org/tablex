@@ -10,7 +10,8 @@
 // * idle: `AppRoot` notified every frame, nothing else changes (the cost of an unrelated notify),
 //   also with the sidebar collapsed (the shell without the tree).
 // * frequency: AppRoot renders (`FRAME_COUNT`) and navigator list passes / rows built per frame for typing 30
-//   characters into a SQL editor, hovering 20 sidebar rows, a Connecting dot for 2 s, scrolling the results grid.
+//   characters into a SQL editor, hovering 20 sidebar rows, a Connecting dot for 2 s, scrolling the results grid,
+//   (a scroll notifies the tab only, as the wheel does) and how many times the cached sidebar view itself was rendered per frame (`sb/fr`).
 //
 // No perf asserts: the numbers are informational.
 
@@ -66,6 +67,7 @@ struct SbStamp {
     renders: u64,
     list_passes: u64,
     rows_built: u64,
+    sidebar_renders: u64,
 }
 
 fn sb_now_stamp() -> SbStamp {
@@ -76,6 +78,7 @@ fn sb_now_stamp() -> SbStamp {
         renders: crate::app::frame_count(),
         list_passes: crate::app::navigator_ui::LIST_PASSES.load(Ordering::Relaxed),
         rows_built: crate::app::navigator_ui::ROWS_BUILT.load(Ordering::Relaxed),
+        sidebar_renders: crate::app::navigator_ui::sidebar_renders(),
     }
 }
 
@@ -277,7 +280,9 @@ fn run_sidebar_case(case: SbCase, report: &gpui::BenchReport) -> (Vec<Vec<SbStam
                         app.update(cx, |this, cx| {
                             let base = this.av().grid_scroll.0.borrow().base_handle.clone();
                             base.set_offset(gpui::point(base.offset().x, gpui::px(-(t * max))));
-                            cx.notify();
+                            // As a wheel scroll over the grid does: the tab's own view, not the root.
+                            let tab = this.active_id();
+                            this.notify_tab(tab, cx);
                         });
                     }
                     SbAction::IdleNotify => app.update(cx, |_, cx| cx.notify()),
@@ -344,6 +349,7 @@ struct SbSummary {
     renders: f64,
     passes: f64,
     rows: f64,
+    sidebar: f64,
     per_second: f64,
     allocs_per_second: f64,
 }
@@ -353,7 +359,7 @@ struct SbSummary {
 fn sb_summarise(sessions: &[Vec<SbStamp>], skip: usize) -> SbSummary {
     let warm = if sessions.len() > 1 { &sessions[1..] } else { sessions };
     let (mut times, mut allocs) = (Vec::new(), Vec::new());
-    let (mut bytes, mut renders, mut passes, mut rows) = (0u64, 0u64, 0u64, 0u64);
+    let (mut bytes, mut renders, mut passes, mut rows, mut sidebar) = (0u64, 0u64, 0u64, 0u64, 0u64);
     let mut seconds = 0.0;
     for stamps in warm {
         for pair in stamps.windows(2).skip(skip) {
@@ -365,6 +371,7 @@ fn sb_summarise(sessions: &[Vec<SbStamp>], skip: usize) -> SbSummary {
             renders += pair[1].renders - pair[0].renders;
             passes += pair[1].list_passes - pair[0].list_passes;
             rows += pair[1].rows_built - pair[0].rows_built;
+            sidebar += pair[1].sidebar_renders - pair[0].sidebar_renders;
         }
     }
     assert!(!times.is_empty(), "the benchmark recorded no frames");
@@ -381,6 +388,7 @@ fn sb_summarise(sessions: &[Vec<SbStamp>], skip: usize) -> SbSummary {
         renders: renders as f64 / n,
         passes: passes as f64 / n,
         rows: rows as f64 / n,
+        sidebar: sidebar as f64 / n,
         per_second: renders as f64 / seconds,
         allocs_per_second: total_allocs / seconds,
     }
@@ -429,13 +437,13 @@ fn sidebar_bench_context() {
     }
     eprintln!("sidebar frame times, warm sessions only ({SB_FRAMES} frames per scroll/idle session)");
     eprintln!(
-        "{:>25} {:>7} {:>7} {:>8} {:>8} {:>8} {:>10} {:>9} {:>9} {:>8} {:>8} {:>9} {:>10}",
-        "case", "rows", "frames", "p50 ms", "p95 ms", "max ms", "allocs/fr", "KiB/fr", "renders/fr", "passes/fr", "rows/fr", "renders/s", "allocs/s"
+        "{:>25} {:>7} {:>7} {:>8} {:>8} {:>8} {:>10} {:>9} {:>9} {:>8} {:>8} {:>7} {:>9} {:>10}",
+        "case", "rows", "frames", "p50 ms", "p95 ms", "max ms", "allocs/fr", "KiB/fr", "renders/fr", "passes/fr", "rows/fr", "sb/fr", "renders/s", "allocs/s"
     );
     for (label, tree_rows, s, sessions) in &rows {
         eprintln!(
-            "{:>25} {:>7} {:>7} {:>8.3} {:>8.3} {:>8.3} {:>10.0} {:>9.1} {:>9.2} {:>9.2} {:>8.1} {:>9.1} {:>10.0}   ({sessions} sessions)",
-            label, tree_rows, s.frames, s.p50_ms, s.p95_ms, s.max_ms, s.allocs, s.kib, s.renders, s.passes, s.rows, s.per_second, s.allocs_per_second,
+            "{:>25} {:>7} {:>7} {:>8.3} {:>8.3} {:>8.3} {:>10.0} {:>9.1} {:>9.2} {:>9.2} {:>8.1} {:>7.2} {:>9.1} {:>10.0}   ({sessions} sessions)",
+            label, tree_rows, s.frames, s.p50_ms, s.p95_ms, s.max_ms, s.allocs, s.kib, s.renders, s.passes, s.rows, s.sidebar, s.per_second, s.allocs_per_second,
         );
     }
 }

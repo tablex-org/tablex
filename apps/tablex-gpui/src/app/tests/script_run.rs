@@ -75,9 +75,9 @@ impl SqlRig<'_> {
 
     fn set_settings(&mut self, edit: impl FnOnce(&mut crate::settings::Settings)) {
         self.app.update(self.visual, |this, _| {
-            let mut next = (*this.settings).clone();
+            let mut next = (**this.settings).clone();
             edit(&mut next);
-            this.settings = std::sync::Arc::new(next);
+            *this.settings = std::sync::Arc::new(next);
         });
     }
 

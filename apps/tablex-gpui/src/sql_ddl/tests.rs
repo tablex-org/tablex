@@ -377,6 +377,67 @@ fn sqlite_creates_tables_with_inline_foreign_keys_and_alters_what_it_can() {
 }
 
 #[test]
+fn duckdb_creates_tables_with_inline_foreign_keys_and_alters_what_it_can() {
+    let duckdb = ConnectionKind::Duckdb;
+    let inline = ForeignKeySpec { on_delete: None, ..fk("fk_orders_customers") };
+    let create = Change::CreateTable {
+        table: table("orders"),
+        columns: orders_columns().into_iter().map(|column| ColumnSpec { comment: None, ..column }).collect(),
+        primary_key: vec!["id".into()],
+        comment: None,
+    };
+    assert_eq!(
+        dialect(duckdb).statements(&create, &[inline]).expect("generates"),
+        ["CREATE TABLE \"shop\".\"orders\" (\n  \"id\" bigint NOT NULL DEFAULT 1,\n  \"customer_id\" bigint,\n  \"status\" varchar(20) NOT NULL DEFAULT 'new',\n  PRIMARY KEY (\"id\"),\n  CONSTRAINT \"fk_orders_customers\" FOREIGN KEY (\"customer_id\") REFERENCES \"shop\".\"customers\" (\"id\")\n)"]
+    );
+    assert_eq!(
+        sql(duckdb, Change::AddColumn { table: table("orders"), column: column("note", "VARCHAR", true) }),
+        ["ALTER TABLE \"shop\".\"orders\" ADD COLUMN \"note\" VARCHAR"]
+    );
+    // Unlike SQLite it adds a NOT NULL column by its default, and has no need to name a rebuild.
+    assert_eq!(
+        sql(duckdb, Change::RenameColumn { table: table("orders"), from: "a".into(), to: "b".into() }),
+        ["ALTER TABLE \"shop\".\"orders\" RENAME COLUMN \"a\" TO \"b\""]
+    );
+    assert_eq!(sql(duckdb, Change::DropColumn { table: table("orders"), column: "a".into() }), ["ALTER TABLE \"shop\".\"orders\" DROP COLUMN \"a\""]);
+    assert_eq!(sql(duckdb, Change::RenameTable { table: table("orders"), to: "sales".into() }), ["ALTER TABLE \"shop\".\"orders\" RENAME TO \"sales\""]);
+    assert_eq!(
+        sql(duckdb, Change::CreateIndex { table: table("orders"), index: index("ix_ab", true) }),
+        ["CREATE UNIQUE INDEX \"ix_ab\" ON \"shop\".\"orders\" (\"a\", \"b\")"]
+    );
+    assert_eq!(sql(duckdb, Change::DropIndex { table: table("orders"), name: "ix_ab".into() }), ["DROP INDEX \"shop\".\"ix_ab\""]);
+    assert_eq!(sql(duckdb, Change::DropTable { table: table("orders"), cascade: true }), ["DROP TABLE \"shop\".\"orders\" CASCADE"]);
+    assert_eq!(sql(duckdb, Change::TruncateTable { table: table("orders"), restart_identity: false, cascade: false }), ["TRUNCATE TABLE \"shop\".\"orders\""]);
+    assert_eq!(sql(duckdb, Change::CreateNamespace { kind: NamespaceKind::Schema, name: "reports".into() }), ["CREATE SCHEMA \"reports\""]);
+    assert_eq!(
+        sql(duckdb, Change::RenameView { table: table("v"), to: "w".into(), materialized: false }),
+        ["ALTER VIEW \"shop\".\"v\" RENAME TO \"w\""]
+    );
+    let capabilities = dialect(duckdb).capabilities();
+    assert!(capabilities.indexes && !capabilities.foreign_keys && !capabilities.alter_column && !capabilities.primary_key_edit);
+    assert!(dialect(duckdb).transactional() && dialect(duckdb).inline_foreign_keys());
+}
+
+#[test]
+fn duckdb_refuses_what_it_cannot_do_in_the_editor() {
+    let duckdb = ConnectionKind::Duckdb;
+    for (change, words) in [
+        (Change::AlterColumn { table: table("t"), from: column("a", "integer", true), to: column("a", "bigint", true) }, "cannot change the type"),
+        (Change::SetPrimaryKey { table: table("t"), columns: vec!["a".into()], previous: None }, "primary key"),
+        (Change::AddForeignKey { table: table("t"), foreign_key: fk("f") }, "goes in the CREATE TABLE"),
+        (Change::DropForeignKey { table: table("t"), name: "f".into() }, "created again"),
+    ] {
+        assert!(refusal(duckdb, change).contains(words), "{words}");
+    }
+    assert!(refusal(duckdb, Change::DropView { table: table("v"), materialized: true, cascade: false }).contains("no materialized views"));
+    // No referential action but NO ACTION: it is an error there.
+    let with_cascade = Change::CreateTable { table: table("o"), columns: vec![column("a", "integer", false)], primary_key: Vec::new(), comment: None };
+    let error = dialect(duckdb).statements(&with_cascade, &[fk("f")]).unwrap_err().to_string();
+    assert!(error.contains("no referential actions"), "{error}");
+    assert!(refusal(duckdb, Change::TruncateTable { table: table("t"), restart_identity: true, cascade: false }).contains("RESTART IDENTITY"));
+}
+
+#[test]
 fn sqlite_refuses_what_needs_a_table_rebuild() {
     use ConnectionKind::Sqlite as Lite;
     let t = table("orders");

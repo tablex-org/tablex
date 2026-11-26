@@ -647,10 +647,10 @@ mod assistant_panel_tests {
         model: &str,
     ) {
         app.update(visual, |this, cx| {
-            let mut settings = (*this.settings).clone();
+            let mut settings = (**this.settings).clone();
             settings.ai.provider = provider;
             settings.ai.selected_mut().model = model.into();
-            this.settings = std::sync::Arc::new(settings);
+            *this.settings = std::sync::Arc::new(settings);
             this.assistant_sync(cx);
             cx.notify();
         });
@@ -737,10 +737,10 @@ mod assistant_panel_tests {
         ] {
             if provider == AiProvider::OpenAiCompatible {
                 app.update(visual, |this, _| {
-                    let mut settings = (*this.settings).clone();
+                    let mut settings = (**this.settings).clone();
                     settings.ai.providers.openai_compatible.base_url =
                         "http://127.0.0.1:1234/v1".into();
-                    this.settings = std::sync::Arc::new(settings);
+                    *this.settings = std::sync::Arc::new(settings);
                 });
             }
             use_provider(&app, visual, provider, "some-model");
@@ -886,19 +886,50 @@ mod assistant_panel_tests {
     }
 
     #[gpui::test]
+    fn a_global_read_and_write_is_the_assistants_access_except_on_production(cx: &mut TestAppContext) {
+        cx.dispatcher.allow_parking();
+        let (app, visual) = assistant_app(cx);
+        let scope = engine_ai::Scope { connection_id: WAREHOUSE.into(), database: None, schema: None };
+        let access = |app: &gpui::Entity<AppRoot>, visual: &mut gpui::VisualTestContext| {
+            app.read_with(visual, |this, _| this.assistant_status(Some(&scope)).access)
+        };
+        assert_eq!(access(&app, visual), AgentAccess::Off);
+        // Settings > AI > Default agent access = Read and write: the connection has no level or type
+        // of its own, so the assistant may propose writes there (each one is asked about in the app).
+        app.update(visual, |this, cx| {
+            let mut settings = (**this.settings).clone();
+            settings.ai.agent_access = AgentLevel::ReadWrite;
+            *this.settings = std::sync::Arc::new(settings);
+            cx.notify();
+        });
+        assert_eq!(access(&app, visual), AgentAccess::ReadWrite);
+        let offered = app.read_with(visual, |this, _| this.assistant_offered_levels(WAREHOUSE));
+        assert_eq!(offered, [AgentLevel::Schema, AgentLevel::Read, AgentLevel::ReadWrite]);
+        // A production type gets no default, whatever the global says.
+        app.update(visual, |this, _| {
+            let profile = ConnectionProfile {
+                type_id: crate::settings::connection::PRODUCTION.into(),
+                ..Default::default()
+            };
+            this.connection_policy.set_profile(WAREHOUSE, profile);
+        });
+        assert_eq!(access(&app, visual), AgentAccess::Off);
+    }
+
+    #[gpui::test]
     fn a_read_only_production_connection_is_offered_no_more_than_read(cx: &mut TestAppContext) {
         cx.dispatcher.allow_parking();
         let (app, visual) = assistant_app(cx);
         arm(&app, visual, vec![], None, true);
         app.update(visual, |this, cx| {
-            let mut settings = (*this.settings).clone();
+            let mut settings = (**this.settings).clone();
             settings
                 .connection_types
                 .iter_mut()
                 .find(|ty| ty.id == crate::settings::connection::PRODUCTION)
                 .unwrap()
                 .read_only = true;
-            this.settings = std::sync::Arc::new(settings);
+            *this.settings = std::sync::Arc::new(settings);
             let profile = ConnectionProfile {
                 type_id: crate::settings::connection::PRODUCTION.into(),
                 ..Default::default()
@@ -2069,14 +2100,14 @@ mod assistant_panel_tests {
         let armed = arm(&app, visual, vec![], None, true);
         // A read-only connection type: it grants no more than Read, so Read and write is refused.
         app.update(visual, |this, cx| {
-            let mut settings = (*this.settings).clone();
+            let mut settings = (**this.settings).clone();
             settings
                 .connection_types
                 .iter_mut()
                 .find(|ty| ty.id == crate::settings::connection::PRODUCTION)
                 .unwrap()
                 .read_only = true;
-            this.settings = std::sync::Arc::new(settings);
+            *this.settings = std::sync::Arc::new(settings);
             let profile = ConnectionProfile {
                 type_id: crate::settings::connection::PRODUCTION.into(),
                 ..Default::default()
@@ -2115,9 +2146,9 @@ mod assistant_panel_tests {
         };
         assert_eq!(destination(visual), "Anthropic (api.anthropic.com)");
         app.update(visual, |this, cx| {
-            let mut settings = (*this.settings).clone();
+            let mut settings = (**this.settings).clone();
             settings.ai.selected_mut().base_url = "http://localhost:4000".into();
-            this.settings = std::sync::Arc::new(settings);
+            *this.settings = std::sync::Arc::new(settings);
             this.assistant_sync(cx);
         });
         settle(visual);
@@ -2241,9 +2272,9 @@ mod assistant_panel_tests {
         arm(&app, visual, vec![say("never")], Some("read"), true);
         open_dock(&app, visual);
         app.update(visual, |this, _| {
-            let mut settings = (*this.settings).clone();
+            let mut settings = (**this.settings).clone();
             settings.ai.selected_mut().base_url = "http://api.example.com".into();
-            this.settings = std::sync::Arc::new(settings);
+            *this.settings = std::sync::Arc::new(settings);
         });
         assert_eq!(
             app.update(visual, |this, cx| this.assistant_send("hi".into(), cx)),
@@ -2314,9 +2345,9 @@ mod assistant_panel_tests {
             |app: &gpui::Entity<AppRoot>, visual: &mut gpui::VisualTestContext, address: &str| {
                 let address = address.to_owned();
                 app.update(visual, |this, _| {
-                    let mut settings = (*this.settings).clone();
+                    let mut settings = (**this.settings).clone();
                     settings.ai.selected_mut().base_url = address;
-                    this.settings = std::sync::Arc::new(settings);
+                    *this.settings = std::sync::Arc::new(settings);
                 });
             };
         set_address(&app, visual, "http://api.example.com");
@@ -4190,7 +4221,7 @@ mod assistant_panel_tests {
                     ..read_profile("read_write")
                 },
             );
-            let old = (*this.settings).clone();
+            let old = (**this.settings).clone();
             let mut settings = old.clone();
             settings
                 .connection_types
@@ -4198,7 +4229,7 @@ mod assistant_panel_tests {
                 .find(|ty| ty.id == crate::settings::connection::PRODUCTION)
                 .unwrap()
                 .read_only = true;
-            this.settings = std::sync::Arc::new(settings);
+            *this.settings = std::sync::Arc::new(settings);
             this.after_settings_changed(&old, None, cx);
         });
         let start = std::time::Instant::now();
@@ -5106,7 +5137,7 @@ mod assistant_panel_tests {
         let set_switch =
             |app: &gpui::Entity<AppRoot>, visual: &mut gpui::VisualTestContext, on: bool| {
                 app.update(visual, |this, cx| {
-                    let mut next = (*this.settings).clone();
+                    let mut next = (**this.settings).clone();
                     next.ai.keep_conversations = on;
                     this.apply_settings(next, None, cx);
                 });
@@ -5298,7 +5329,7 @@ mod assistant_panel_tests {
         assert!(shown(visual, "assistant-keep-text"));
         // With the switch off the text says the opposite.
         app.update(visual, |this, cx| {
-            let mut next = (*this.settings).clone();
+            let mut next = (**this.settings).clone();
             next.ai.keep_conversations = false;
             this.apply_settings(next, None, cx);
         });
@@ -6161,7 +6192,7 @@ mod assistant_panel_tests {
         on: bool,
     ) {
         app.update(visual, |this, cx| {
-            let mut next = (*this.settings).clone();
+            let mut next = (**this.settings).clone();
             next.ai.keep_conversations = on;
             this.apply_settings(next, None, cx);
         });
@@ -7281,7 +7312,7 @@ mod assistant_panel_tests {
     /// `read`.
     fn make_read_only(app: &gpui::Entity<AppRoot>, visual: &mut gpui::VisualTestContext) {
         app.update(visual, |this, cx| {
-            let mut settings = (*this.settings).clone();
+            let mut settings = (**this.settings).clone();
             settings
                 .connection_types
                 .push(crate::settings::connection::ConnectionType {
@@ -7290,7 +7321,7 @@ mod assistant_panel_tests {
                     read_only: true,
                     ..Default::default()
                 });
-            this.settings = std::sync::Arc::new(settings);
+            *this.settings = std::sync::Arc::new(settings);
             let mut profile = read_profile("read");
             profile.type_id = "replica".into();
             this.connection_policy.set_profile(WAREHOUSE, profile);

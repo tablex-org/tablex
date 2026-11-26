@@ -3,8 +3,8 @@
 
 use engine_driver_host::{
     DownloadError, DriverCatalogItem, DriverCatalogState, DriverCategory, DriverManifestEntry,
-    DriverTarget, DriverVerificationError, InstallError as HostInstallError, InstallProgress, InstallStep,
-    InstalledDriverRecord, TrustPolicy,
+    DriverTarget, DriverVerificationError, InstallError as HostInstallError, InstallProgress, InstallSource,
+    InstallStep, InstalledDriverRecord, TrustPolicy,
 };
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -468,7 +468,8 @@ pub(in crate::app) struct DriverRow {
     pub schemes: Vec<String>,
     pub status: RowStatus,
     pub disabled: bool,
-    /// Installed without a pinned Team ID (a developer / ad-hoc build).
+    /// Installed under the developer policy (an ad-hoc build, an unsigned or local manifest, an
+    /// imported file), see [`is_developer_build`].
     pub developer: bool,
     pub entry: Option<DriverManifestEntry>,
     pub record: Option<InstalledDriverRecord>,
@@ -508,10 +509,18 @@ pub(in crate::app) fn category_for(
             }
             "mongodb" | "mongodb+srv" => Some(DriverCategory::Nosql),
             "redis" | "rediss" => Some(DriverCategory::KeyValue),
-            "clickhouse" => Some(DriverCategory::Analytics),
+            "clickhouse" | "duckdb" => Some(DriverCategory::Analytics),
             _ => None,
         }
     })
+}
+
+/// Whether an installed driver is a developer build: the record says how it was installed. The
+/// Team ID says nothing (official release drivers have none either: the signed catalog pins none and
+/// the install is accepted because the manifest is signed), and a record that predates `source` was
+/// installed from the catalog, the only way before developer installs were recorded.
+fn is_developer_build(record: &InstalledDriverRecord) -> bool {
+    matches!(record.source, Some(InstallSource::Developer))
 }
 
 impl DriverRow {
@@ -552,7 +561,7 @@ impl DriverRow {
             schemes,
             status,
             disabled: item.disabled,
-            developer: record.is_some_and(|record| record.team_id.is_empty()),
+            developer: record.is_some_and(is_developer_build),
             entry: item.manifest.clone(),
             record: record.cloned(),
             search: String::new(),
@@ -753,7 +762,8 @@ pub(in crate::app) fn badge_for(row: &DriverRow, job: Option<&InstallJob>) -> Op
     if row.disabled {
         return Some(Badge::Disabled);
     }
-    if row.developer && row.is_installed() {
+    // An update comes before the developer mark: the row must keep offering it.
+    if row.developer && row.is_installed() && row.status != RowStatus::UpdateAvailable {
         return Some(Badge::Developer);
     }
     match &row.status {
@@ -1166,7 +1176,7 @@ mod tests {
         assert_eq!(badge_for(pg, None), Some(Badge::Update));
         assert_eq!(primary_action(pg, None), Some(PrimaryAction::Update));
         let mysql = model.row("mysql").unwrap();
-        assert_eq!(badge_for(mysql, None), Some(Badge::Developer), "no Team ID: a developer driver");
+        assert_eq!(badge_for(mysql, None), Some(Badge::Installed), "no Team ID, but the signed catalog lists this version: a release driver");
         assert_eq!(primary_action(mysql, None), None);
         let ch = model.row("clickhouse").unwrap();
         assert_eq!(badge_for(ch, None), None);
@@ -1188,6 +1198,50 @@ mod tests {
         assert_eq!(primary_action(ch, queue.job("clickhouse")), Some(PrimaryAction::Cancel));
         queue.finish("clickhouse", JobOutcome::Failed(failure()));
         assert_eq!(primary_action(ch, queue.job("clickhouse")), Some(PrimaryAction::Retry));
+    }
+
+    /// The badge of `record` against a catalog whose entry for it is `listed` (`None`: the catalog is
+    /// not loaded, so no item carries an entry).
+    fn badge_of(record: InstalledDriverRecord, listed: Option<(&str, &str)>) -> Option<Badge> {
+        let mut manifest = entry(&record.id, listed.map_or(record.version.as_str(), |(version, _)| version));
+        manifest.team_id = listed.map_or(String::new(), |(_, team)| team.into());
+        let item = DriverCatalogItem {
+            id: record.id.clone(),
+            display_name: record.id.clone(),
+            version: record.version.clone(),
+            state: match listed {
+                Some((version, _)) if version != record.version => {
+                    DriverCatalogState::UpdateAvailable { installed: record.version.clone(), latest: version.into() }
+                }
+                _ => DriverCatalogState::Installed { version: record.version.clone() },
+            },
+            manifest: listed.map(|_| manifest),
+            disabled: false,
+        };
+        let records = BTreeMap::from([(record.id.clone(), record)]);
+        let mut model = CatalogModel::default();
+        model.rebuild(&[item], &records, &crate::drivers::current_target());
+        badge_for(model.rows().first().unwrap(), None)
+    }
+
+    #[test]
+    fn the_developer_badge_follows_how_the_driver_was_installed_not_its_team_id() {
+        let with = |source: Option<InstallSource>, team: &str| InstalledDriverRecord { source, ..record("pg", "0.1.4", team) };
+        // The install says so: no Team ID is what an official release driver has too.
+        for listed in [None, Some(("0.1.4", "")), Some(("0.1.4", "TEAM"))] {
+            assert_eq!(badge_of(with(Some(InstallSource::Catalog), ""), listed), Some(Badge::Installed), "{listed:?}");
+            assert_eq!(badge_of(with(Some(InstallSource::Developer), "TEAM"), listed), Some(Badge::Developer), "{listed:?}");
+        }
+        // An old record without a source (every install before it was recorded) came from the catalog:
+        // no developer badge, whatever the catalog lists now.
+        assert_eq!(badge_of(with(None, ""), Some(("0.1.4", ""))), Some(Badge::Installed), "a catalog driver of an older install");
+        assert_eq!(badge_of(with(None, ""), Some(("0.1.4", "TEAM"))), Some(Badge::Installed), "the catalog pins a Team ID it lacks");
+        assert_eq!(badge_of(with(None, ""), None), Some(Badge::Installed), "the catalog is not loaded");
+        assert_eq!(badge_of(with(None, "TEAM"), Some(("0.1.4", "TEAM"))), Some(Badge::Installed));
+        // ... and a newer catalog version is offered as an update (it was hidden by "Developer driver").
+        assert_eq!(badge_of(with(None, ""), Some(("0.2.0", ""))), Some(Badge::Update), "an upgrading user sees Update");
+        assert_eq!(badge_of(with(Some(InstallSource::Catalog), ""), Some(("0.2.0", ""))), Some(Badge::Update));
+        assert_eq!(badge_of(with(Some(InstallSource::Developer), ""), Some(("0.2.0", ""))), Some(Badge::Update), "a developer build still shows its update");
     }
 
     #[test]

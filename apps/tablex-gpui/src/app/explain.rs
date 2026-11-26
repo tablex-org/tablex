@@ -53,7 +53,7 @@ pub(super) fn is_pure_read(sql: &str, lex: &SqlLexOptions) -> bool {
     classify(sql, lex).pageable
 }
 
-/// The explain dialect of a connection kind; `None` for MongoDB and Redis.
+/// The explain dialect of a connection kind; `None` for MongoDB, Redis and SQL Server.
 pub(super) fn explain_dialect(kind: ConnectionKind) -> Option<ExplainDialect> {
     match kind {
         ConnectionKind::Postgres => Some(ExplainDialect::Postgres),
@@ -61,7 +61,9 @@ pub(super) fn explain_dialect(kind: ConnectionKind) -> Option<ExplainDialect> {
         ConnectionKind::Mariadb => Some(ExplainDialect::MariaDb),
         ConnectionKind::Sqlite => Some(ExplainDialect::Sqlite),
         ConnectionKind::Clickhouse => Some(ExplainDialect::ClickHouse),
-        ConnectionKind::Mongodb | ConnectionKind::Redis => None,
+        ConnectionKind::Duckdb => Some(ExplainDialect::DuckDb),
+        // SHOWPLAN_XML is not parsed into a plan tree yet: no Explain for SQL Server.
+        ConnectionKind::Mssql | ConnectionKind::Mongodb | ConnectionKind::Redis => None,
     }
 }
 

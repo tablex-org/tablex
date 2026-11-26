@@ -1013,7 +1013,7 @@ impl AppRoot {
                                         let root = default_root.clone();
                                         let format = *format;
                                         submenu.item(PopupMenuItem::new(*label).checked(copy_default == format).on_click(move |_, _, app| {
-                                            let _ = root.update(app, |this, cx| this.set_copy_default(tab_id, format, cx));
+                                            let _ = root.update(app, |this, cx| this.set_copy_default(format, cx));
                                         }))
                                     })
                                 },
@@ -1977,6 +1977,10 @@ impl AppRoot {
         if !state.open {
             return closed_layout(grid_pane, rail);
         }
+        // The panel is in a window of its own: the grid keeps the whole area.
+        if state.placement == CellDetailPlacement::Window {
+            return closed_layout(grid_pane, rail);
+        }
         // Open without a target (nothing selected yet): tabs show empty states.
         let detail = state.detail.as_ref();
         if state.placement == CellDetailPlacement::Popup {
@@ -2021,7 +2025,9 @@ impl AppRoot {
                             .child(detail_panel),
                     )
             }
-            CellDetailPlacement::Popup => unreachable!("popup returns before the docked layouts"),
+            CellDetailPlacement::Popup | CellDetailPlacement::Window => {
+                unreachable!("popup and window return before the docked layouts")
+            }
             CellDetailPlacement::Bottom => {
                 let root = cx.entity().downgrade();
                 gpui_component::resizable::v_resizable(("cell-detail-layout", tab_id))
@@ -2074,7 +2080,8 @@ impl AppRoot {
 }
 
 /// What the result area says about a failed run: a lost connection in plain words with what to
-/// do (the banner above has Reconnect), anything else as the driver said it.
+/// do (the banner above has Reconnect), a server out of memory as a server problem first, anything
+/// else as the driver said it.
 pub(in crate::app) fn failed_query_text(error: &str) -> String {
     let error = crate::sessions::redact_secrets(error);
     if crate::sessions::is_connection_lost_error(&error) {
@@ -2083,7 +2090,11 @@ pub(in crate::app) fn failed_query_text(error: &str) -> String {
             .unwrap_or(&error);
         return t!("grid.connection_lost", detail = detail).into_owned();
     }
-    t!("grid.query_failed", error = error).into_owned()
+    let failed = t!("grid.query_failed", error = error);
+    if crate::error_log::is_server_out_of_memory(&error) {
+        return format!("{}\n{failed}", t!("grid.server_out_of_memory"));
+    }
+    failed.into_owned()
 }
 
 #[cfg(test)]

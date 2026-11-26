@@ -88,6 +88,7 @@ impl std::fmt::Display for GateError {
         match self {
             Self::Gone => f.write_str("This connection no longer exists."),
             Self::Unsupported(ConnectionKind::Sqlite) => f.write_str("Backup uses the server's own tools, which SQLite does not have: copy the database file instead."),
+            Self::Unsupported(ConnectionKind::Duckdb) => f.write_str("Backup uses the server's own tools, which DuckDB does not have: copy the database file instead."),
             Self::Unsupported(_) => f.write_str("Backup and restore use the native tools of PostgreSQL, MySQL and MariaDB."),
             Self::ReadOnly(message) => f.write_str(message),
             Self::NotOpen => f.write_str("The connection is not open."),

@@ -26,7 +26,7 @@ use crate::theme;
 
 type ModeSelect = Entity<SelectState<Vec<&'static str>>>;
 
-const FAMILIES: [TlsFamily; 3] = [TlsFamily::Postgres, TlsFamily::MySql, TlsFamily::Mongo];
+const FAMILIES: [TlsFamily; 4] = [TlsFamily::Postgres, TlsFamily::MySql, TlsFamily::Mongo, TlsFamily::SqlServer];
 
 /// What the event handlers need. Kept apart from the subscriptions that hold the handlers, so no
 /// handler owns the list it is stored in.
@@ -234,7 +234,13 @@ impl TlsInputs {
         body = body.child(config_row(
             t!("connection_dialog.client_cert"),
             "connection-config-ssl-cert",
-            if family.has_key_file() {
+            if family == TlsFamily::SqlServer {
+                unsupported(
+                    "connection-config-ssl-cert-unsupported",
+                    &self.parts.cert,
+                    t!("connection_dialog.sql_server_has_no_client_certificates"),
+                )
+            } else if family.has_key_file() {
                 file_control("tls-browse-cert", t!("connection_dialog.choose_the_client_certificate"), &self.parts.cert, false)
             } else {
                 div()
@@ -260,7 +266,11 @@ impl TlsInputs {
                 unsupported(
                     "connection-config-ssl-key-unsupported",
                     &self.parts.key,
-                    t!("connection_dialog.mongodb_reads_the_key_from_the_client_certificat"),
+                    if family == TlsFamily::SqlServer {
+                        t!("connection_dialog.sql_server_has_no_client_certificates")
+                    } else {
+                        t!("connection_dialog.mongodb_reads_the_key_from_the_client_certificat")
+                    },
                 )
             },
         ));
@@ -268,7 +278,13 @@ impl TlsInputs {
             t!("connection_dialog.server_name"),
             "connection-config-ssl-server-name",
             if family.has_server_name() {
-                Input::new(&self.parts.server_name).appearance(true).into_any_element()
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(Input::new(&self.parts.server_name).appearance(true))
+                    .children((family == TlsFamily::SqlServer).then(|| hint(None, t!("connection_dialog.sql_server_certificate_name"))))
+                    .into_any_element()
             } else {
                 unsupported(
                     "connection-config-ssl-server-name-unsupported",

@@ -10,6 +10,7 @@ use std::path::Path;
 pub use engine_connect::profile::{
     default_settings_path as default_path, SETTINGS_FILE as FILE_NAME,
 };
+use engine_connect::profile::{AgentLevel, MCP_WRITES_IGNORED_FROM_SCHEMA};
 
 /// Data older versions kept elsewhere, offered to the migrations.
 #[derive(Default)]
@@ -60,7 +61,30 @@ const MIGRATIONS: &[Migration] = &[
         to: 6,
         apply: run_the_current_statement,
     },
+    Migration {
+        to: 7,
+        apply: merge_mcp_writes_into_agent_access,
+    },
 ];
+
+/// 7: "Let MCP clients run changes" is gone; the access level decides, and every change is asked
+/// about one by one. The file keeps `ai.mcp_writes: true` so an older `tablex-mcp` paired with this
+/// app still allows writes on a Read and write connection. When the switch was off, a connection
+/// that is set to Read and write could not be changed through MCP until now: the next start tells
+/// the user which ones (once, see `access_notice_pending`).
+fn merge_mcp_writes_into_agent_access(settings: &mut Settings, _: &Legacy) {
+    // With the switch on, a hand-edited Read and write default or type preset (capped at Read until
+    // now) widens as well: the user is told about those too.
+    let widened = settings.ai.agent_access == AgentLevel::ReadWrite
+        || settings.connection_types.iter().any(|ty| ty.agent_access == AgentLevel::ReadWrite);
+    settings.ai.access_notice_pending = !settings.ai.mcp_writes || widened;
+    settings.ai.mcp_writes = true;
+}
+
+/// `ai.mcp_writes` as the file says it (`None`: no such key, or a file that is not an object).
+fn mcp_writes_key(text: &str) -> Option<bool> {
+    serde_json::from_str::<serde_json::Value>(text).ok()?.get("ai")?.get("mcp_writes")?.as_bool()
+}
 
 /// 6: Run / Ctrl+Enter runs the statement at the cursor, as in other database tools, and Run Script
 /// (Option+X) the whole script. Earlier versions wrote "Whole script" into every file as the
@@ -141,6 +165,8 @@ pub fn load(path: &Path, legacy: &Legacy) -> Loaded {
             ..Settings::default()
         };
         migrate(&mut settings, legacy);
+        // Nothing was switched off by the user: there is nothing to tell them about.
+        settings.ai.access_notice_pending = false;
         Loaded {
             settings,
             notice,
@@ -164,21 +190,40 @@ pub fn load(path: &Path, legacy: &Legacy) -> Loaded {
         }
     };
     match serde_json::from_str::<Settings>(&text) {
-        Ok(settings) if settings.schema_version > SCHEMA_VERSION => Loaded {
-            notice: Some(format!(
-                "The settings were written by a newer version of tablex (format {}); unknown settings are ignored",
-                settings.schema_version
-            )),
-            needs_save: false,
-            settings,
-        },
+        Ok(mut settings) if settings.schema_version > SCHEMA_VERSION => {
+            // The key is `true` from schema 7 on; a file without it reads `false` (the default of
+            // the older switch), which a save would then write down as the user's "no".
+            if mcp_writes_key(&text).is_none() {
+                settings.ai.mcp_writes = true;
+            }
+            Loaded {
+                notice: Some(format!(
+                    "The settings were written by a newer version of tablex (format {}); unknown settings are ignored",
+                    settings.schema_version
+                )),
+                needs_save: false,
+                settings,
+            }
+        }
         Ok(mut settings) => {
             let stale = settings.schema_version < SCHEMA_VERSION;
+            let from_schema_7 = u64::from(settings.schema_version) >= MCP_WRITES_IGNORED_FROM_SCHEMA;
+            let switched_off = from_schema_7 && mcp_writes_key(&text) == Some(false);
             migrate(&mut settings, legacy);
+            if from_schema_7 {
+                settings.ai.mcp_writes = true;
+            }
+            // `tablex-mcp` honours an explicit `false` at any schema: the old switch, turned off by an
+            // older app that opened a file a newer one wrote (a downgrade and back). This app has no
+            // switch to show it: it is put back to `true`, and the one-time notice says what is
+            // allowed now, so the user can decide again.
+            if switched_off {
+                settings.ai.access_notice_pending = true;
+            }
             Loaded {
                 settings,
                 notice: None,
-                needs_save: stale,
+                needs_save: stale || switched_off,
             }
         }
         Err(error) => {
@@ -329,16 +374,19 @@ mod tests {
         let loaded = load(&path, &Legacy::default());
         assert!(loaded.needs_save, "rewritten at the current version");
         assert_eq!(loaded.settings.schema_version, SCHEMA_VERSION);
-        assert_eq!(loaded.settings.ai, super::super::AiSettings::default());
+        // (An upgrade from before the switch had it off: the notice is flagged, see migration 7.)
+        let flagged = super::super::AiSettings { access_notice_pending: true, ..Default::default() };
+        assert_eq!(loaded.settings.ai, flagged);
         assert!(loaded.settings.editor.soft_wrap);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn a_version_three_file_gains_the_mcp_switch_off_and_keeps_everything_else() {
+    fn a_version_three_file_goes_through_every_step_and_keeps_everything_else() {
         let dir = temp_dir();
         let path = dir.join(FILE_NAME);
-        // A version-3 file: everything else is the user's, and a stray `mcp_writes` is not trusted.
+        // A version-3 file: everything else is the user's. A stray `mcp_writes` is not trusted at 4
+        // (the switch is off), and step 7 then sets the hidden key to `true` and flags the notice.
         std::fs::write(
             &path,
             r#"{"schema_version": 3, "editor": {"soft_wrap": true}, "results": {"page_size": 321},
@@ -351,30 +399,150 @@ mod tests {
         assert!(loaded.needs_save, "rewritten at the current version");
         let settings = loaded.settings;
         assert_eq!(settings.schema_version, SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 6);
-        assert!(!settings.ai.mcp_writes, "off after the upgrade");
+        assert_eq!(SCHEMA_VERSION, 7);
+        assert!(settings.ai.mcp_writes && settings.ai.access_notice_pending);
         assert!(settings.editor.soft_wrap && settings.results.page_size == 321);
         // Version 3 -> 5: the model of the file ends up under Anthropic.
         assert_eq!(settings.ai.providers.anthropic.model, "claude-haiku-5-5");
         assert_eq!(settings.ai.effort, engine_ai::Effort::Max);
         assert!(!settings.ai.keep_conversations);
         assert_eq!(settings.shortcuts["workspace.close_tab"], ["secondary-q"]);
-        // A file without the key (a plain version-3 file) is off too.
+        // A file without the key (a plain version-3 file) is the same.
         std::fs::write(
             &path,
             r#"{"schema_version": 3, "ai": {"model": "claude-haiku-5-5"}}"#,
         )
         .unwrap();
-        assert!(!load(&path, &Legacy::default()).settings.ai.mcp_writes);
-        // At the current version the user's choice stands, and the MCP server's reader sees it.
+        let ai = load(&path, &Legacy::default()).settings.ai;
+        assert!(ai.mcp_writes && ai.access_notice_pending);
+        // At the current version nothing is touched.
         std::fs::write(
             &path,
             format!(r#"{{"schema_version": {SCHEMA_VERSION}, "ai": {{"mcp_writes": true}}}}"#),
         )
         .unwrap();
         let loaded = load(&path, &Legacy::default());
-        assert!(loaded.settings.ai.mcp_writes && !loaded.needs_save);
+        assert!(loaded.settings.ai.mcp_writes && !loaded.settings.ai.access_notice_pending);
+        assert!(!loaded.needs_save);
         assert!(engine_connect::profile::mcp_writes_enabled(Some(&path)));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_version_six_file_with_the_switch_off_gets_it_on_and_the_notice_flagged_once() {
+        let dir = temp_dir();
+        let path = dir.join(FILE_NAME);
+        let write = |switch: &str| {
+            std::fs::write(
+                &path,
+                format!(
+                    r#"{{"schema_version": 6, "ai": {{{switch} "agent_access": "read"}}, "editor": {{"soft_wrap": true}}}}"#
+                ),
+            )
+            .unwrap();
+        };
+        // Off (or absent: the default was off): on after the step, and the notice is flagged.
+        for switch in [r#""mcp_writes": false,"#, ""] {
+            write(switch);
+            // A new `tablex-mcp` ignores the key at 7; an older one would still have blocked at 6.
+            assert!(!engine_connect::profile::mcp_writes_enabled(Some(&path)));
+            let loaded = load(&path, &Legacy::default());
+            assert!(loaded.needs_save && loaded.notice.is_none());
+            let ai = &loaded.settings.ai;
+            assert!(ai.mcp_writes && ai.access_notice_pending, "{switch}");
+            // What was chosen stays.
+            assert_eq!(ai.agent_access, engine_connect::profile::AgentLevel::Read);
+            assert!(loaded.settings.editor.soft_wrap);
+            // Written back, the file keeps the key `true` for an older `tablex-mcp`, at version 7.
+            save(&path, &loaded.settings).unwrap();
+            let written: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(written["schema_version"], 7);
+            assert_eq!(written["ai"]["mcp_writes"], true);
+            assert_eq!(written["ai"]["access_notice_pending"], true);
+            assert!(engine_connect::profile::mcp_writes_enabled(Some(&path)));
+            // Loading it again does not flag anything new or migrate again.
+            let again = load(&path, &Legacy::default());
+            assert!(!again.needs_save && again.settings == loaded.settings);
+        }
+        // On already: nothing to tell.
+        write(r#""mcp_writes": true,"#);
+        let loaded = load(&path, &Legacy::default());
+        assert!(loaded.needs_save);
+        assert!(loaded.settings.ai.mcp_writes && !loaded.settings.ai.access_notice_pending);
+        save(&path, &loaded.settings).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(!written.contains("access_notice_pending"), "a cleared flag is not written");
+        // A fresh file has nothing to tell either.
+        std::fs::remove_file(&path).unwrap();
+        let fresh = load(&path, &Legacy::default());
+        assert!(fresh.settings.ai.mcp_writes && !fresh.settings.ai.access_notice_pending);
+        assert_eq!(fresh.settings.ai, super::super::AiSettings::default());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_old_switch_turned_off_after_a_downgrade_is_put_back_and_flagged_again() {
+        let dir = temp_dir();
+        let path = dir.join(FILE_NAME);
+        // 0.1.11 wrote schema 7 with the key `true`; an older app turned the switch off and kept the
+        // version number: `tablex-mcp` honours the `false`, and the app puts it back with the notice.
+        std::fs::write(
+            &path,
+            format!(r#"{{"schema_version": {SCHEMA_VERSION}, "ai": {{"mcp_writes": false, "agent_access": "read"}}}}"#),
+        )
+        .unwrap();
+        assert!(!engine_connect::profile::mcp_writes_enabled(Some(&path)), "the reader honours the false");
+        let loaded = load(&path, &Legacy::default());
+        assert!(loaded.settings.ai.mcp_writes && loaded.settings.ai.access_notice_pending);
+        assert!(loaded.needs_save, "written back with the key true");
+        save(&path, &loaded.settings).unwrap();
+        assert!(engine_connect::profile::mcp_writes_enabled(Some(&path)));
+        // Once shown (the flag cleared) and written, it does not come back.
+        let mut shown = loaded.settings.clone();
+        shown.ai.access_notice_pending = false;
+        save(&path, &shown).unwrap();
+        let again = load(&path, &Legacy::default());
+        assert!(!again.settings.ai.access_notice_pending && !again.needs_save);
+        // A file without the key at schema 7 is nothing to put back.
+        std::fs::write(&path, format!(r#"{{"schema_version": {SCHEMA_VERSION}, "ai": {{}}}}"#)).unwrap();
+        let loaded = load(&path, &Legacy::default());
+        assert!(!loaded.settings.ai.access_notice_pending && !loaded.needs_save);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_hand_edited_read_write_default_or_type_flags_the_notice_even_with_the_switch_on() {
+        let dir = temp_dir();
+        let path = dir.join(FILE_NAME);
+        let load_text = |text: &str| {
+            std::fs::write(&path, text).unwrap();
+            load(&path, &Legacy::default()).settings.ai.access_notice_pending
+        };
+        // Switch on, and a Read and write global default: it widens now.
+        assert!(load_text(r#"{"schema_version": 6, "ai": {"mcp_writes": true, "agent_access": "read_write"}}"#));
+        // A type preset of Read and write.
+        assert!(load_text(
+            r##"{"schema_version": 6, "ai": {"mcp_writes": true},
+                "connection_types": [{"id": "dev", "name": "Dev", "color": "#000000", "agent_access": "read_write"}]}"##
+        ));
+        // Switch on and nothing at Read and write: nothing to tell.
+        assert!(!load_text(r#"{"schema_version": 6, "ai": {"mcp_writes": true, "agent_access": "read"}}"#));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_hand_edited_read_write_default_is_kept_as_it_is() {
+        let dir = temp_dir();
+        let path = dir.join(FILE_NAME);
+        std::fs::write(
+            &path,
+            format!(r#"{{"schema_version": {SCHEMA_VERSION}, "ai": {{"agent_access": "read_write"}}}}"#),
+        )
+        .unwrap();
+        let loaded = load(&path, &Legacy::default());
+        assert_eq!(loaded.settings.ai.agent_access, engine_connect::profile::AgentLevel::ReadWrite);
+        assert!(!loaded.needs_save);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -440,7 +608,8 @@ mod tests {
         )
         .unwrap();
         let ai = load(&path, &Legacy::default()).settings.ai;
-        assert_eq!(ai, super::super::AiSettings::default());
+        let flagged = super::super::AiSettings { access_notice_pending: true, ..Default::default() };
+        assert_eq!(ai, flagged);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

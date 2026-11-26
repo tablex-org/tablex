@@ -493,6 +493,34 @@ fn repeated_auto_refresh_failures_collapse_into_one_row_with_a_count(cx: &mut Te
     assert!(visual.debug_bounds("error-row-1").is_some());
 }
 
+/// A server that ran out of memory is said so in plain words first, in the result area and in the
+/// log entry; the driver's own text stays in both.
+#[gpui::test]
+fn a_server_out_of_memory_failure_leads_with_a_plain_line_and_keeps_the_driver_text(cx: &mut TestAppContext) {
+    let (app, visual) = error_log_app(cx);
+    let tab = app.update(visual, |this, _| this.workspace.open_query_tab("Memory"));
+    let raw = "driver rejected the request: query.failed: ERROR: out of memory DETAIL: Failed on request of size 8192 in memory context \"MessageContext\".";
+    app.update(visual, |this, cx| {
+        let run = this.workspace.runtime_mut(tab).unwrap().query.begin().unwrap();
+        this.apply_query_result(tab, run, Err(raw.into()));
+        cx.notify();
+    });
+    settle(visual);
+    assert!(visual.debug_bounds("result-empty-state").is_some(), "the result area shows the failure");
+    app.read_with(visual, |this, _| {
+        let crate::query::QueryStatus::Failed(error) = this.workspace.runtime(tab).unwrap().query.status() else {
+            panic!("the run failed");
+        };
+        let shown = super::results::grid::failed_query_text(error);
+        assert!(shown.starts_with("The database server ran out of memory."), "{shown}");
+        assert!(shown.contains("not in tablex") && shown.contains("Failed on request of size 8192"), "{shown}");
+        let entry = this.error_log.log.last().unwrap();
+        assert!(entry.first_line.starts_with("The database server ran out of memory."), "{}", entry.first_line);
+        assert_eq!(entry.code.as_deref(), Some("query.failed"));
+        assert!(entry.details.as_deref().unwrap().contains("Failed on request of size 8192"));
+    });
+}
+
 #[gpui::test]
 fn cancelled_runs_are_not_errors_and_interrupts_are_warnings(cx: &mut TestAppContext) {
     let (app, visual) = error_log_app(cx);
@@ -887,7 +915,7 @@ fn the_toggle_works_in_every_place(cx: &mut TestAppContext) {
     let query = active_tab(&app, visual);
     for place in [ErrorLogPlace::Bottom, ErrorLogPlace::Right, ErrorLogPlace::Tab] {
         app.update(visual, |this, cx| {
-            let mut next = (*this.settings).clone();
+            let mut next = (**this.settings).clone();
             next.appearance.error_log_place = place;
             this.apply_settings(next, None, cx);
         });
@@ -961,7 +989,7 @@ fn the_chosen_place_survives_a_restart(cx: &mut TestAppContext) {
 
     // "Relaunch": defaults in memory, the file read back.
     app.update(visual, |this, cx| {
-        this.settings = std::sync::Arc::new(Settings::default());
+        *this.settings = std::sync::Arc::new(Settings::default());
         this.settings_ui.path = Some(path.clone());
         this.init_settings(cx);
     });

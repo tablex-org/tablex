@@ -16,7 +16,6 @@ pub(super) struct SidebarState {
     pub(super) notice: Option<String>,
     pub(super) locate_error: Option<String>,
     pending_locate: Option<PendingLocate>,
-    pub(super) search_input: Option<gpui::Entity<InputState>>,
     pub(super) remote: super::remote_search::RemoteSearch,
     pub(super) scroll: UniformListScrollHandle,
     pub(super) focus: FocusHandle,
@@ -40,7 +39,6 @@ impl SidebarState {
             notice: None,
             locate_error: None,
             pending_locate: None,
-            search_input: None,
             remote: Default::default(),
             scroll: UniformListScrollHandle::new(),
             focus: cx.focus_handle(),
@@ -934,7 +932,7 @@ impl AppRoot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::Entity<InputState> {
-        if let Some(input) = &self.sidebar.search_input {
+        if let Some(input) = &self.search_field {
             return input.clone();
         }
         let input = cx.new(|cx| InputState::new(window, cx).placeholder(t!("sidebar.search")));
@@ -950,7 +948,7 @@ impl AppRoot {
             },
         )
         .detach();
-        self.sidebar.search_input = Some(input.clone());
+        self.search_field = Some(input.clone());
         input
     }
 

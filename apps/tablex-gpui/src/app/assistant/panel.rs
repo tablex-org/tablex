@@ -364,6 +364,7 @@ fn is_sql_lang(lang: Option<&str>) -> bool {
                 | "mysql"
                 | "mariadb"
                 | "sqlite"
+                | "duckdb"
                 | "tsql"
                 | "plsql"
                 | "clickhouse"

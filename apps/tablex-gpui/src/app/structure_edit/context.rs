@@ -133,9 +133,11 @@ impl AppRoot {
         let disabled = self
             .read_only_connection_message(connection, "Structure editing is")
             .or_else(|| {
-                (saved.kind == ConnectionKind::Sqlite && sqlite_is_in_memory(&saved.uri)).then(|| {
-                    "Structure editing is off for an in-memory SQLite database: the change would run on a second connection that sees a different, empty database."
-                        .to_owned()
+                (saved.kind.is_file_database() && sqlite_is_in_memory(&saved.uri)).then(|| {
+                    format!(
+                        "Structure editing is off for an in-memory {} database: the change would run on a second connection that sees a different, empty database.",
+                        crate::connection_dialog::kind_label(saved.kind)
+                    )
                 })
             })
             .or_else(|| {

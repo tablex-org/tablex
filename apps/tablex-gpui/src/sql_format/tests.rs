@@ -442,8 +442,9 @@ mod processes {
     #[test]
     fn explain_dialects_map_to_the_wire_dialects() {
         use engine_plan::ExplainDialect::*;
-        let wire = [Postgres, MySql, MariaDb, Sqlite, ClickHouse].map(wire_dialect);
-        assert_eq!(wire, [Dialect::Postgres, Dialect::Mysql, Dialect::Mariadb, Dialect::Sqlite, Dialect::Clickhouse]);
+        let wire = [Postgres, MySql, MariaDb, Sqlite, ClickHouse, DuckDb].map(wire_dialect);
+        // DuckDB's SQL is PostgreSQL's, and the formatter has no grammar of its own for it.
+        assert_eq!(wire, [Dialect::Postgres, Dialect::Mysql, Dialect::Mariadb, Dialect::Sqlite, Dialect::Clickhouse, Dialect::Postgres]);
     }
 
     #[test]

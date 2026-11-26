@@ -23,7 +23,7 @@ use crate::mongo_aggregate as engine;
 use crate::mongo_result::{flatten_tree, MongoTreeRow};
 use gpui::Subscription;
 use gpui_component::input::InputEvent;
-use gpui_component::select::{SelectEvent, SelectState};
+use gpui_component::select::{SearchableVec, SelectEvent, SelectState};
 use std::collections::VecDeque;
 
 pub(super) mod run;
@@ -121,7 +121,7 @@ struct RunningJob {
 /// Editors of one stage card. Created lazily, dropped with the stage.
 pub(super) struct StageEditors {
     pub(super) body: gpui::Entity<EditorState>,
-    pub(super) operator: gpui::Entity<SelectState<Vec<String>>>,
+    pub(super) operator: gpui::Entity<SelectState<SearchableVec<String>>>,
     pub(super) custom: gpui::Entity<InputState>,
     _subscriptions: Vec<Subscription>,
 }
@@ -222,7 +222,7 @@ impl AggregateUi {
 /// `(body editor, operator Select, custom operator input)` of a stage card.
 pub(super) type StageEditorHandles = (
     gpui::Entity<EditorState>,
-    gpui::Entity<SelectState<Vec<String>>>,
+    gpui::Entity<SelectState<SearchableVec<String>>>,
     gpui::Entity<InputState>,
 );
 
@@ -402,7 +402,7 @@ impl AppRoot {
         let selected = items.iter().position(|item| *item == choice);
         let operator = cx.new(|cx| {
             SelectState::new(
-                items,
+                SearchableVec::new(items),
                 selected.map(|row| gpui_component::IndexPath::default().row(row)),
                 window,
                 cx,
@@ -434,7 +434,7 @@ impl AppRoot {
             window,
             move |this: &mut Self,
                   _,
-                  event: &SelectEvent<Vec<String>>,
+                  event: &SelectEvent<SearchableVec<String>>,
                   window: &mut Window,
                   cx: &mut Context<Self>| {
                 if let SelectEvent::Confirm(Some(choice)) = event {

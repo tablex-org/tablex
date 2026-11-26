@@ -48,6 +48,19 @@ pub(super) struct DriverRuntime {
     /// page is released through the connection that owns it).
     #[cfg(test)]
     pub(super) released_pages: Vec<(String, u64)>,
+    /// What the confirmation answered Run read of an UPDATE / DELETE, for the next dialog of the same run.
+    pub(super) preview_handoff: Option<super::affected_preview::Handoff>,
+    /// The preview of the last confirmation opened, and how many in-flight preview reads a closed
+    /// dialog cancelled (tests).
+    #[cfg(test)]
+    pub(super) last_preview: Option<gpui::WeakEntity<super::affected_preview::AffectedPreview>>,
+    #[cfg(test)]
+    pub(super) cancelled_previews: usize,
+    #[cfg(test)]
+    pub(super) preview_reads: usize,
+    /// A preview the capture builds by hand, handed to the next confirmation.
+    #[cfg(all(test, feature = "bench"))]
+    pub(super) preview_fixture: Option<gpui::Entity<super::affected_preview::AffectedPreview>>,
 }
 
 pub(super) struct DriverQueryOperation {
@@ -848,6 +861,8 @@ impl AppRoot {
                 .map(|reporting| reporting.route),
         ) {
             if self.retry_run_after_loss(run, &request, error, route, cx) {
+                // The run goes on without asking again: nothing is handed on.
+                self.drop_preview_handoff();
                 return;
             }
         }
@@ -860,17 +875,34 @@ impl AppRoot {
             self.await_sql_confirmation(run, request, reason, cx);
             return;
         }
+        // The run ended without asking again: nothing is handed on.
+        self.drop_preview_handoff();
         let rows = result.as_ref().ok().map(|(page, ..)| page.row_count as i64);
+        // A run that failed is recorded with its error; the user's own cancel is not a failure.
+        let failure = result.as_ref().err().filter(|error| !error.is_cancelled()).map(DriverQueryError::status_text);
+        // Landing the result ends the timing: read it first.
+        let elapsed = self.query_elapsed_ms(request.tab_id, run);
+        // Landing the result ends the flag: read it first. Only a statement typed in a SQL editor can
+        // change what a schema lists; a page, a refresh, a table browse or a Mongo run cannot.
+        let from_editor = self.workspace.runtime(request.tab_id).is_some_and(|runtime| runtime.editor_run_pending);
         let applied =
             self.apply_driver_arrow_query_result(request.tab_id, run, request.connection.clone(), result);
         if applied {
+            if from_editor && request.kind == RunKind::Sql && self.explain_dialect_of(request.tab_id).is_some() {
+                self.note_ddl_run(request.tab_id, &request.sql);
+                self.refresh_navigator_after_ddl(request.tab_id, cx);
+            }
             self.ensure_table_structure(request.tab_id, cx);
             if request.kind == RunKind::RedisKey {
                 self.after_redis_key_page(request.tab_id, cx);
             }
         }
-        if let (true, Some(rows), true) = (applied, rows, request.kind != RunKind::RedisKey) {
-            self.record_query_history(&request, rows, cx);
+        if request.kind != RunKind::RedisKey {
+            match (applied, rows, failure) {
+                (true, Some(rows), _) => self.record_query_history(&request, rows, elapsed, cx),
+                (_, None, Some(error)) => self.record_query_failure(&request, &error, elapsed, cx),
+                _ => {}
+            }
         }
     }
 
@@ -922,6 +954,11 @@ impl AppRoot {
         cx: &mut Context<Self>,
     ) {
         let root = cx.entity().downgrade();
+        // The driver flags a statement without WHERE (any connection): the dialog shows what it
+        // would change.
+        let preview = (request.kind == RunKind::Sql)
+            .then(|| self.affected_preview_for(request.tab_id, &request.sql, super::affected_preview::Chain::Continued, window, cx))
+            .flatten();
         window.open_alert_dialog(cx, move |dialog, _, _| {
             let root = root.clone();
             let request = request.clone();
@@ -946,7 +983,8 @@ impl AppRoot {
                                 .text_size(px(12.0))
                                 .text_color(theme::text_muted())
                                 .child(request.sql.clone()),
-                        ),
+                        )
+                        .children(preview.clone()),
                 )
                 .button_props(
                     gpui_component::dialog::DialogButtonProps::default().ok_text("Run anyway"),
@@ -980,6 +1018,7 @@ impl AppRoot {
 
     /// Resends a confirmed statement as a new run of its tab.
     fn run_confirmed_sql(&mut self, mut request: SqlRun, cx: &mut Context<Self>) {
+        self.drop_preview_handoff();
         let Some(run) = self
             .workspace
             .runtime_mut(request.tab_id)

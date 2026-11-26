@@ -351,6 +351,14 @@ impl AppRoot {
         };
         self.completion_foreign_keys
             .forget(|key| key.covered_by(connection, database, schema, object));
+        self.schema_columns.forget(
+            |key| {
+                key.connection == *connection
+                    && database.is_none_or(|value| value == key.database)
+                    && schema.is_none_or(|value| value == key.schema)
+            },
+            object,
+        );
         self.table_folder_describes
             .forget(|key| key.covered_by(connection, database, schema, object));
         let ids: Vec<u64> = self.workspace.tabs().iter().map(|tab| tab.id).collect();

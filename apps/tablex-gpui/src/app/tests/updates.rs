@@ -286,17 +286,17 @@ fn a_failing_manual_check_shows_the_error_and_a_failing_automatic_one_shows_noth
 fn the_launch_check_does_not_fetch_when_the_preference_is_off_the_build_is_debug_or_the_version_is_dev(cx: &mut TestAppContext) {
     let mut rig = UpdateRig::new(cx, FakeReleases::tag("v0.2.0"), "0.1.0");
     rig.app.update(rig.visual, |this, _| {
-        let mut settings = (*this.settings).clone();
+        let mut settings = (**this.settings).clone();
         settings.updates.check_automatically = false;
-        this.settings = std::sync::Arc::new(settings);
+        *this.settings = std::sync::Arc::new(settings);
     });
     rig.launch_check();
     assert_eq!(rig.releases.calls(), 0, "preference off");
 
     rig.app.update(rig.visual, |this, _| {
-        let mut settings = (*this.settings).clone();
+        let mut settings = (**this.settings).clone();
         settings.updates.check_automatically = true;
-        this.settings = std::sync::Arc::new(settings);
+        *this.settings = std::sync::Arc::new(settings);
         this.update_ui.debug_build = true;
     });
     rig.launch_check();

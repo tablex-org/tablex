@@ -560,6 +560,7 @@ impl AppRoot {
         cx: &mut Context<Self>,
     ) {
         let RunContext { tab_id, run, .. } = context;
+        let elapsed = self.query_elapsed_ms(tab_id, run);
         let ReadyReply { checked, rows, page } = ready;
         let CheckedReply {
             output,
@@ -647,7 +648,7 @@ impl AppRoot {
         if let Some(message) = &failed_message {
             self.report_query_failure(tab_id, message);
         }
-        if context.history && failed_message.is_none() {
+        if context.history {
             let request = SqlRun {
                 tab_id,
                 kind: RunKind::Sql,
@@ -664,7 +665,10 @@ impl AppRoot {
                 confirmed: false,
                 read_only: false,
             };
-            self.record_query_history(&request, rows as i64, cx);
+            match &failed_message {
+                None => self.record_query_history(&request, rows as i64, elapsed, cx),
+                Some(message) => self.record_query_failure(&request, message, elapsed, cx),
+            }
         }
         self.view_mut(tab_id)
             .grid_scroll

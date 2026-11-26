@@ -2,7 +2,8 @@
 //! editor tab or on a navigator row they open in the editor, one file-backed tab each, bound to that tab's
 //! connection and database or to that row's connection and namespace. A file already open in a tab activates that
 //! tab. A file over the editor's size limit (`sql_file::MAX_BYTES`) goes to the Run SQL File wizard on the same
-//! target instead, which streams it. Paths that are not `.sql` are named in a notification and skipped.
+//! target instead, which streams it. Data files (CSV, TSV, JSON, NDJSON, Parquet) in the same drop open as tables
+//! through `data_files`, wherever they land; paths that are neither are named in a notification and skipped.
 //!
 //! Only the containers listen (the editor tab, the navigator); the row under the pointer is found from the list's
 //! painted bounds and scroll offset, so no row carries a listener.
@@ -19,7 +20,7 @@ use super::FileRunInit;
 use crate::theme;
 
 /// What the user is told when a drop holds nothing to run.
-const NOT_SQL: &str = "Only .sql files can be opened. Drop a .sql file.";
+const NOT_SQL: &str = "Only .sql files and data files (CSV, TSV, JSON, NDJSON, Parquet) can be opened.";
 
 pub(in crate::app) fn is_sql_file(path: &Path) -> bool {
     path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("sql"))
@@ -108,19 +109,37 @@ impl AppRoot {
         }
     }
 
+    /// Opens the data files among `paths` as tables and returns the others, and whether there were any.
+    fn take_data_files(&mut self, paths: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) -> (Vec<PathBuf>, bool) {
+        let (data, rest): (Vec<PathBuf>, Vec<PathBuf>) = paths.iter().cloned().partition(|path| super::super::data_files::is_data_file(path));
+        let any = !data.is_empty();
+        if any {
+            self.open_data_files(data, window, cx);
+        }
+        (rest, any)
+    }
+
     /// Files dropped on the editor tab `tab_id`: they open beside it, on its connection and database.
     pub(in crate::app) fn drop_files_on_tab(&mut self, tab_id: u64, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
         self.file_drag_left(cx);
+        let (paths, opened_data) = self.take_data_files(paths.paths(), window, cx);
+        if opened_data && paths.is_empty() {
+            return;
+        }
         let metadata = self.workspace.tab(tab_id).map(|tab| self.metadata_beside(tab)).unwrap_or_default();
         let run = self.namespace_from_context(Some(tab_id));
-        self.open_dropped_sql_files(paths.paths(), metadata, run, window, cx);
+        self.open_dropped_sql_files(&paths, metadata, run, window, cx);
     }
 
     /// Files dropped on the navigator: they open on the row under the pointer.
     pub(in crate::app) fn drop_files_on_navigator(&mut self, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
         self.file_drag_left(cx);
+        let (paths, opened_data) = self.take_data_files(paths.paths(), window, cx);
+        if opened_data && paths.is_empty() {
+            return;
+        }
         let Some(target) = self.navigator_row_at(window.mouse_position()).and_then(|id| self.file_run_target_of_node(&id)) else {
-            if paths.paths().iter().any(|path| is_sql_file(path)) {
+            if paths.iter().any(|path| is_sql_file(path)) {
                 window.push_notification("Drop the file on a connection, a database or a schema.", cx);
             } else {
                 window.push_notification(NOT_SQL, cx);
@@ -132,7 +151,7 @@ impl AppRoot {
         } else {
             TabMetadata::default()
         };
-        self.open_dropped_sql_files(paths.paths(), metadata, Some(target), window, cx);
+        self.open_dropped_sql_files(&paths, metadata, Some(target), window, cx);
     }
 
     /// One editor tab per `.sql` file of `paths`, bound by `metadata`; `run` is where a file too big for an editor runs.
@@ -143,7 +162,7 @@ impl AppRoot {
             return;
         }
         if skipped > 0 {
-            window.push_notification(format!("{skipped} dropped file{} skipped: only .sql files can be opened.", if skipped == 1 { " was" } else { "s were" }), cx);
+            window.push_notification(format!("{skipped} dropped file{} skipped: only .sql files and data files can be opened.", if skipped == 1 { " was" } else { "s were" }), cx);
         }
         for path in files {
             self.open_sql_path_on(path, Some(DroppedFile { metadata: metadata.clone(), run: run.clone() }), window, cx);

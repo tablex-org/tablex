@@ -362,6 +362,74 @@ impl AppRoot {
         }
     }
 
+    /// [`Self::reload_navigator_node`] for several nodes, rebuilding the sidebar once.
+    fn reload_navigator_nodes(&mut self, ids: &[NavigatorNodeId], cx: &mut Context<Self>) {
+        if self.scenario_ui.service.is_some() {
+            return;
+        }
+        let requests = self.navigator.reload_children_of(ids);
+        self.navigator_ui.generation = self.navigator.generation();
+        for request in requests {
+            self.ensure_connected_then_load(request, cx);
+        }
+    }
+
+    /// Remembers what the statement `sql` run from the tab `tab_id` changed in the navigator (nothing for a
+    /// statement that does not create, drop, alter or rename an object); [`Self::refresh_navigator_after_ddl`] acts on it.
+    pub(in crate::app) fn note_ddl_run(&mut self, tab_id: u64, sql: &str) {
+        let targets = crate::ddl_refresh::ddl_targets(sql, &self.sql_lex(tab_id));
+        if let Some(runtime) = self.workspace.runtime_mut(tab_id).filter(|_| !targets.is_empty()) {
+            for target in targets {
+                if !runtime.pending_ddl.contains(&target) {
+                    runtime.pending_ddl.push(target);
+                }
+            }
+        }
+    }
+
+    /// The groups that statements run from the tab `tab_id` changed are loaded again where they stand (nothing
+    /// collapses): once for a whole script, at its end. Only groups already loaded are reloaded; this never
+    /// connects or loads what was not listed. The tab's namespace is where an unqualified name lands; a name
+    /// qualified by a schema (or MySQL database) lands there.
+    pub(in crate::app) fn refresh_navigator_after_ddl(&mut self, tab_id: u64, cx: &mut Context<Self>) {
+        let targets = self.workspace.runtime_mut(tab_id).map(|runtime| std::mem::take(&mut runtime.pending_ddl)).unwrap_or_default();
+        if targets.is_empty() {
+            return;
+        }
+        let Some(namespace) = self.namespace_from_context(Some(tab_id)) else { return };
+        // What a statement created, dropped or altered is not what the stored columns of its schema say, listed
+        // in the navigator or not.
+        let (connection, database, schema) = (namespace.connection.as_str(), namespace.database.as_str(), namespace.schema.as_str());
+        self.schema_columns.forget(
+            |key| {
+                key.connection == connection
+                    && targets.iter().filter(|target| target.group.has_data(None) || target.group == ObjectGroup::Sequences).any(|target| match &target.qualifier {
+                        Some(qualifier) => (key.database == database && key.schema.eq_ignore_ascii_case(qualifier)) || key.database.eq_ignore_ascii_case(qualifier),
+                        None => key.database == database && (schema.is_empty() || key.schema == schema),
+                    })
+            },
+            None,
+        );
+        let nodes: Vec<NavigatorNodeId> = self
+            .navigator
+            .loaded_object_groups(&namespace.connection, |node| {
+                let NavigatorNodeId::ObjectGroup { database, schema, group, .. } = node else { return false };
+                targets.iter().any(|target| {
+                    target.group == *group
+                        && match &target.qualifier {
+                            Some(qualifier) => {
+                                (*database == namespace.database && schema.eq_ignore_ascii_case(qualifier)) || database.eq_ignore_ascii_case(qualifier)
+                            }
+                            None => *database == namespace.database && (namespace.schema.is_empty() || *schema == namespace.schema),
+                        }
+                })
+            });
+        for node in &nodes {
+            self.invalidate_table_properties(node);
+        }
+        self.reload_navigator_nodes(&nodes, cx);
+    }
+
     /// The Visible Object Filter of a connection is a whitelist of databases (and hides the system
     /// ones unless asked): a database created behind it would stay hidden and could not be revealed.
     /// Its name joins the whitelist (and system databases are shown when it is one). A connection

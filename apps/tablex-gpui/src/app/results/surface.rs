@@ -19,7 +19,10 @@
 //! * [`AppRoot::notify_chrome`] — nothing in the results, for changes that
 //!   cannot affect them (fps counter, sidebar-only state). It notifies the
 //!   window's `Root` instead of `AppRoot`, so the (uncached) shell redraws and
-//!   the cached results views are replayed.
+//!   the cached results views are replayed. The left pane is a cached view
+//!   too (`navigator_ui::SidebarView`): a plain `AppRoot` notification and this
+//!   one refresh it; [`AppRoot::notify_tab`] refreshes it only when the state it
+//!   draws moved (see `sidebar_watch`).
 
 use super::super::*;
 
@@ -107,6 +110,9 @@ impl AppRoot {
     /// Re-renders only `tab_id`'s result area (and, as ancestors, the window's
     /// uncached views). Other tabs' cached views are replayed.
     pub(in crate::app) fn notify_tab(&mut self, tab_id: u64, cx: &mut Context<Self>) {
+        self.sync_sidebar(cx);
+        // The cell detail panel in a window of its own follows its tab (a no-op without one).
+        self.sync_cell_detail_window(tab_id, cx);
         match self
             .tab_views
             .get(&tab_id)
@@ -124,17 +130,67 @@ impl AppRoot {
     }
 
     /// Re-renders the chrome without touching any tab's cached results: for a
-    /// change that cannot affect them (fps counter, sidebar-only state). Falls
-    /// back to a plain notification before the first render.
+    /// change that cannot affect them (fps counter, sidebar-only state). The
+    /// left pane, a cached view too, is notified with it when what it draws changed. Falls back to a plain
+    /// notification before the first render.
     pub(in crate::app) fn notify_chrome(&mut self, cx: &mut Context<Self>) {
         match self
             .window_root
             .as_ref()
             .and_then(gpui::WeakEntity::upgrade)
         {
-            Some(root) => root.update(cx, |_, cx| cx.notify()),
+            Some(root) => {
+                root.update(cx, |_, cx| cx.notify());
+                // The left pane is cached too: told if what it draws changed (not for the fps counter).
+                self.sync_sidebar(cx);
+            }
             None => cx.notify(),
         }
+    }
+
+    /// Re-renders the left pane (a cached view, see `SidebarView`) and notes that it was told about the state as it
+    /// is now. Not for use while the window draws: GPUI drops a notification sent from inside a draw (the root's
+    /// render uses [`Self::sidebar_behind`] instead).
+    pub(in crate::app) fn notify_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.sync_sidebar_marker();
+        let app: &mut gpui::App = cx;
+        app.notify(self.sidebar_view.entity_id());
+    }
+
+    /// Brings the tree's copy of the live set up to date and notes where the pane's state is now.
+    fn sync_sidebar_marker(&mut self) {
+        if self.sessions.revision() != self.sidebar_seen.1 {
+            // The tree filters on the live set (active connections only): it follows the sessions on every path,
+            // not only on those that remember to copy them over.
+            self.sync_connected_ids();
+        }
+        self.sidebar_seen = (self.sidebar_epoch.now(), self.sessions.revision());
+    }
+
+    /// What the left pane draws changed since it was notified: it notifies it now. The state it draws is held in
+    /// `Watched` fields (see `sidebar_watch`: every `&mut` borrow of one moves the epoch) and a connection's status
+    /// has its own revision. A path that changes either and then notifies only a tab or nothing would leave the pane
+    /// showing the old tree; this runs where those paths end (a tab's or the chrome's notification, the root's
+    /// notification). The root's render does the same through [`Self::sidebar_behind`].
+    pub(in crate::app) fn sync_sidebar(&mut self, cx: &mut Context<Self>) {
+        if self.sidebar_seen != (self.sidebar_epoch.now(), self.sessions.revision()) {
+            self.notify_sidebar(cx);
+        }
+    }
+
+    /// The root's render asks, before it embeds the pane: has the state the pane draws moved since it last rendered?
+    /// If so the root embeds it uncached for this frame, so it renders in this very draw. Notifying it from here
+    /// would not do: the root renders inside a draw, GPUI only records the view as dirty then (the draw has already
+    /// taken its set of dirty views, and nothing asks for another frame), so the cached pane would replay its old
+    /// frame and, `sidebar_seen` being current, nothing would try again. Next frame it is cached again.
+    pub(in crate::app) fn sidebar_behind(&mut self) -> bool {
+        self.sync_sidebar_marker();
+        self.sidebar_drawn != self.sidebar_seen
+    }
+
+    /// The pane renders: it shows the state as it is now.
+    pub(in crate::app) fn mark_sidebar_drawn(&mut self) {
+        self.sidebar_drawn = (self.sidebar_epoch.now(), self.sessions.revision());
     }
 
     /// `AppRoot` itself was notified: every tab view may be stale. Runs as the
@@ -143,6 +199,8 @@ impl AppRoot {
         // The assistant dock follows the active tab (free while it is closed).
         self.assistant_push_context(cx);
         self.notify_pane_views(cx);
+        self.sync_cell_detail_windows(cx);
+        self.sync_sidebar(cx);
         let app: &mut gpui::App = cx;
         for view in self.tab_views.values() {
             if let Some(surface) = &view.surface {

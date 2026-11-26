@@ -1341,7 +1341,7 @@ fn the_tools_row_installs_with_progress_then_shows_the_path_and_the_copy_buttons
         assert!(!rig.rendered(selector), "{selector} must not show before the install");
     }
     let note = rig.read(|_| driver_manager::MCP_CAPABILITY_NOTE);
-    assert!(note.contains("assistant access") && note.contains("\"Let MCP clients run changes\"") && note.contains("Settings \u{2192} AI"), "{note}");
+    assert!(note.contains("assistant access") && !note.contains("Let MCP clients run changes") && note.contains("Settings \u{2192} AI"), "{note}");
     assert!(
         note.contains("names of your connections are listed") && note.contains("even where access is off")
             && note.contains("\"Read and write\"") && note.contains("production"),
