@@ -558,6 +558,12 @@ fn bad_requests_are_refused_before_anything_is_sent() {
     assert_eq!(bad("mongo_aggregate", find(json!({"pipeline": {"$match": {}}}))), invalid);
     assert_eq!(bad("mongo_aggregate", find(json!({"pipeline": ["$match"]}))), invalid);
     assert_eq!(bad("mongo_aggregate", find(json!({"pipeline": [], "limit": 0}))), invalid);
+    // A stage that is no BSON (an extended-JSON value that does not parse) is refused, not skipped: a
+    // skipped stage is one whose databases were never looked at.
+    assert_eq!(
+        bad("mongo_aggregate", find(json!({"pipeline": [{"$match": {"_id": {"$oid": "not-an-oid"}}}]}))),
+        invalid
+    );
     assert_eq!(bad("mongo_count", find(json!({"filter": 1}))), invalid);
     assert_eq!(bad("mongo_count", find(json!({"limit": 1}))), invalid);
     assert!(rig.mongo.mongo_calls().is_empty(), "nothing reached the server");
@@ -590,10 +596,7 @@ fn the_tools_are_for_mongodb_connections_and_the_sql_tools_point_to_them() {
     let outcome = rig.call("mongo_aggregate", json!({"connection_id": SQL, "database": "shop", "collection": "orders", "pipeline": []}));
     assert_eq!(code(&outcome), "agent.unsupported");
     for (tool, args) in [
-        ("execute_query", json!({"connection_id": MONGO, "statement": "SELECT 1"})),
         ("explain_query", json!({"connection_id": MONGO, "statement": "SELECT 1"})),
-        ("describe_table", json!({"connection_id": MONGO, "table": "orders", "database": "shop"})),
-        ("get_schema_context", json!({"connection_id": MONGO, "database": "shop"})),
         ("list_routines", json!({"connection_id": MONGO, "kind": "function", "database": "shop"})),
     ] {
         let outcome = rig.call(tool, args);
@@ -604,6 +607,10 @@ fn the_tools_are_for_mongodb_connections_and_the_sql_tools_point_to_them() {
             outcome.to_text()
         );
     }
+    // `execute_query` takes a shell command there, and says what it takes instead of SQL.
+    let outcome = rig.call("execute_query", json!({"connection_id": MONGO, "statement": "SELECT 1"}));
+    assert_eq!(code(&outcome), "agent.invalid_arguments");
+    assert!(outcome.to_text().contains("starts with `db.`"), "{}", outcome.to_text());
 }
 
 // ------------------------------------------------------------------ access

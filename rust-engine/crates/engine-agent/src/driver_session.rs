@@ -47,6 +47,10 @@ pub struct DriverSessionAdapter {
     kind: ConnectionKind,
     lex: Option<SqlLexOptions>,
     secrets: Vec<SecretText>,
+    /// DuckDB: the instance has file access off and a locked configuration, as the driver reported
+    /// it in its connect reply. Nothing else is asked: a query is answered by what the database
+    /// file defines, and the file is the user's data, not the agent's to trust.
+    file_access_locked: bool,
 }
 
 impl DriverSessionAdapter {
@@ -69,6 +73,7 @@ impl DriverSessionAdapter {
             session.server_version(),
         );
         let connection_id = session.connection_id();
+        let file_access_locked = kind == ConnectionKind::DuckDb && session.file_access_locked();
         Ok(Self {
             handle,
             session: Arc::new(SharedDriverSession::new(session)),
@@ -76,6 +81,7 @@ impl DriverSessionAdapter {
             kind,
             lex,
             secrets: Vec::new(),
+            file_access_locked,
         })
     }
 
@@ -340,6 +346,7 @@ impl Session for DriverSessionAdapter {
             lex: self.lex,
             supports_schemas: self.supports_schemas(),
             rich_describe: self.rich_describe(),
+            file_access_locked: self.file_access_locked,
         }
     }
 
@@ -388,6 +395,12 @@ impl Session for DriverSessionAdapter {
                 Node {
                     name,
                     kind: node.kind,
+                    comment: node
+                        .payload
+                        .get("comment")
+                        .and_then(Value::as_str)
+                        .filter(|text| !text.is_empty())
+                        .map(str::to_owned),
                 }
             })
             .collect();
@@ -593,9 +606,22 @@ impl Session for DriverSessionAdapter {
             .as_object()
             .and_then(|command| command.keys().next())
             .map(String::as_str);
-        if !matches!(first, Some("insert" | "update" | "delete")) {
+        if !matches!(
+            first,
+            Some(
+                "insert"
+                    | "update"
+                    | "delete"
+                    | "findAndModify"
+                    | "createIndexes"
+                    | "dropIndexes"
+                    | "drop"
+                    | "renameCollection"
+                    | "aggregate"
+            )
+        ) {
             return Err(AgentError::Internal(
-                "a MongoDB write is an insert, update or delete command".into(),
+                "a MongoDB write is an insert, update, delete, findAndModify, createIndexes, dropIndexes, drop, renameCollection or writing aggregate command".into(),
             ));
         }
         self.mongo_run(database, command, max_time, cancel, false)
@@ -603,11 +629,18 @@ impl Session for DriverSessionAdapter {
 
     /// `BEGIN` / `COMMIT` / `ROLLBACK` as a plain driver query, not read-only and not through
     /// the agent policy (which refuses statements that change transaction state). Only for the
-    /// engines whose transaction lives on one session: PostgreSQL and SQLite.
+    /// engines whose transaction lives on one session: PostgreSQL, MySQL, MariaDB, SQLite and DuckDB.
     fn control(&self, action: TxControl, cancel: &CancelToken) -> Result<(), AgentError> {
-        if !matches!(self.kind, ConnectionKind::PostgreSql | ConnectionKind::Sqlite) {
+        if !matches!(
+            self.kind,
+            ConnectionKind::PostgreSql
+                | ConnectionKind::Sqlite
+                | ConnectionKind::MySql
+                | ConnectionKind::MariaDb
+                | ConnectionKind::DuckDb
+        ) {
             return Err(AgentError::Unsupported(
-                "transactions are available on PostgreSQL and SQLite connections".into(),
+                "transactions are available on PostgreSQL, MySQL, MariaDB, SQLite and DuckDB connections".into(),
             ));
         }
         self.run(

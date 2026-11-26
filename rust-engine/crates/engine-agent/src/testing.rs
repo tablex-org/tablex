@@ -39,6 +39,10 @@ pub fn connection(id: &str, kind: ConnectionKind, access: Option<AgentAccess>) -
         },
         agent_access: access,
         statement_timeout_secs: None,
+        allowed_databases: None,
+        endpoint: None,
+        group: Vec::new(),
+        notes: None,
         revision: Revision::UNKNOWN,
     }
 }
@@ -185,6 +189,8 @@ pub struct FakeSession {
     /// The fake driver can run statements read-only.
     pub read_only_capable: bool,
     pub tables: Mutex<Vec<TableDescription>>,
+    /// The comment `list_nodes` gives a table, by name.
+    pub table_comments: Mutex<std::collections::HashMap<String, String>>,
     /// Functions, procedures, triggers and events, each with its source text.
     pub routines: Mutex<Vec<(SchemaObjectRef, String)>>,
     /// Every reference `routine_source` was asked for, in order.
@@ -225,8 +231,11 @@ impl FakeSession {
                 lex: kind.lex_options(),
                 supports_schemas: false,
                 rich_describe: true,
+                // A fake has no engine to lock; a test of the refusal sets it to `false`.
+                file_access_locked: true,
             },
             tables: Mutex::new(Vec::new()),
+            table_comments: Mutex::new(std::collections::HashMap::new()),
             routines: Mutex::new(Vec::new()),
             routine_lookups: Mutex::new(Vec::new()),
             databases: vec!["main".into()],
@@ -345,6 +354,7 @@ impl Session for FakeSession {
             nodes: page
                 .into_iter()
                 .map(|(name, kind)| Node {
+                    comment: lock(&self.table_comments).get(&name).cloned(),
                     name,
                     kind: kind.into(),
                 })

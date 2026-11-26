@@ -48,10 +48,8 @@ pub fn check_statement(
         _ => return Err(AgentError::MultiStatement),
     }
     if classified.session_state {
-        return Err(AgentError::Unsupported(format!(
-            "`{}` changes transaction or session state, which agents cannot use: every tool call is one self-contained {what}",
-            classified.verb
-        )));
+        let text = classified.session_statement.as_deref().unwrap_or(&classified.verb);
+        return Err(session_state_refusal(access, what, &[(None, text)]));
     }
     if let Some(clause) = &classified.unsupported_clause {
         return Err(AgentError::Unsupported(format!(
@@ -84,6 +82,68 @@ pub fn check_statement(
     }
 }
 
+/// Session-state statements of a script a refusal names one by one.
+const MAX_NAMED: usize = 5;
+
+/// Settings whose `SET` a model reaches for to bound a wait; `lock_timeout_secs` does it for them.
+const TIMEOUT_SETTINGS: [&str; 5] = [
+    "lock_timeout",
+    "lock_wait_timeout",
+    "statement_timeout",
+    "max_execution_time",
+    "max_statement_time",
+];
+
+/// The refusal of session-state statements (`SET`, `BEGIN`, ...): names each one to leave out
+/// (`(Some(n), text)` is statement `n` of a script) and says what is still allowed, so a model does
+/// not conclude that the whole script, or DDL, is blocked.
+pub fn session_state_refusal(
+    access: AgentAccess,
+    what: &str,
+    statements: &[(Option<usize>, &str)],
+) -> AgentError {
+    // The message is clipped at 2000 characters by the layer: five names leave room for the rest.
+    let mut names = statements
+        .iter()
+        .take(MAX_NAMED)
+        .map(|(number, text)| match number {
+            Some(number) => format!("statement {number} `{text}`"),
+            None => format!("`{text}`"),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    if statements.len() > MAX_NAMED {
+        names.push_str(&format!(" and {} more", statements.len() - MAX_NAMED));
+    }
+    let (verb, pronoun) = if statements.len() == 1 {
+        ("changes", "it")
+    } else {
+        ("change", "them")
+    };
+    let sql = what == "SQL statement";
+    let allowed = match access {
+        AgentAccess::ReadWrite if sql => "; other statements, including additive DDL such as ALTER TABLE ... ADD COLUMN, are allowed at access `read_write`",
+        AgentAccess::Read if sql => "; other statements are judged on their own at access `read` (reads run)",
+        _ => "",
+    };
+    let lowered = statements
+        .iter()
+        .map(|(_, text)| text.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let hint = if sql
+        && lowered
+            .iter()
+            .any(|text| TIMEOUT_SETTINGS.iter().any(|setting| text.contains(setting)))
+    {
+        " To bound lock waits on PostgreSQL, MySQL or MariaDB, pass `lock_timeout_secs` (1-600) to execute_query or execute_batch instead; tablex applies it for that call only."
+    } else {
+        ""
+    };
+    AgentError::Unsupported(format!(
+        "{names} {verb} transaction or session state, which agents cannot use: every tool call is one self-contained {what}. Leave {pronoun} out{allowed}.{hint}"
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,6 +157,7 @@ mod tests {
             driver_confirms: false,
             verb: "X".into(),
             session_state: false,
+            session_statement: None,
             unsupported_clause: None,
             blocked_function: None,
         }
@@ -157,6 +218,7 @@ mod tests {
         let empty = stmt(StatementClass::Read, None, 0);
         let session = Classified {
             session_state: true,
+            session_statement: Some("SET x = 1".into()),
             ..stmt(StatementClass::Read, None, 1)
         };
         let function = Classified {
@@ -333,5 +395,66 @@ mod tests {
         let write = stmt(StatementClass::Write, None, 1);
         let error = check_statement(Read, &write, false, "SQL statement").unwrap_err();
         assert!(error.to_string().contains("read_write"));
+    }
+
+    fn refusal(sql: &str, access: AgentAccess) -> String {
+        use crate::classify::classify_sql;
+        use crate::ports::ConnectionKind;
+        use engine_driver_kit::sql::SqlLexOptions;
+        let classified = classify_sql(sql, ConnectionKind::PostgreSql, &SqlLexOptions::postgres());
+        check_statement(access, &classified, false, "SQL statement")
+            .unwrap_err()
+            .to_string()
+    }
+
+    #[test]
+    fn a_session_state_refusal_names_the_statement_and_says_ddl_is_allowed() {
+        let message = refusal("SET lock_timeout = '5s';", ReadWrite);
+        assert!(message.starts_with("`SET lock_timeout = '5s'` changes transaction or session state"));
+        assert!(message.contains("Leave it out"));
+        assert!(message.contains("additive DDL such as ALTER TABLE ... ADD COLUMN, are allowed at access `read_write`"));
+        assert!(message.contains("`lock_timeout_secs` (1-600)"));
+        // A statement timeout and the MySQL spellings point to it too; other settings do not.
+        for sql in ["SET statement_timeout = 0", "SET SESSION innodb_lock_wait_timeout = 1", "SET max_execution_time = 5"] {
+            assert!(refusal(sql, ReadWrite).contains("lock_timeout_secs"), "{sql}");
+        }
+        let plain = refusal("SET search_path TO app", ReadWrite);
+        assert!(plain.contains("`SET search_path TO app`"));
+        assert!(!plain.contains("lock_timeout_secs"));
+        assert!(!refusal("BEGIN", ReadWrite).contains("lock_timeout_secs"));
+        // At `read` it must not claim that DDL runs.
+        let read = refusal("SET lock_timeout = '5s'", Read);
+        assert!(!read.contains("ALTER TABLE"));
+        assert!(read.contains("at access `read`"));
+        // A long statement is clipped, not echoed whole.
+        assert!(refusal(&format!("SET x = '{}'", "a".repeat(500)), ReadWrite).len() < 600);
+    }
+
+    #[test]
+    fn a_script_refusal_names_every_statement_and_a_redis_one_only_the_verb() {
+        let error = session_state_refusal(
+            ReadWrite,
+            "SQL statement",
+            &[(Some(1), "SET lock_timeout = '5s'"), (Some(3), "RESET ALL")],
+        )
+        .to_string();
+        assert!(error.starts_with("statement 1 `SET lock_timeout = '5s'`, statement 3 `RESET ALL` change transaction"));
+        assert!(error.contains("Leave them out"));
+        // Many: five are named, the rest counted, and the hint and the access sentence survive.
+        let many: Vec<(Option<usize>, String)> = (1..=40)
+            .map(|n| (Some(n), format!("SET lock_timeout = '{}'", "5".repeat(100))))
+            .collect();
+        let many: Vec<(Option<usize>, &str)> = many.iter().map(|(n, t)| (*n, t.as_str())).collect();
+        let error = session_state_refusal(ReadWrite, "SQL statement", &many).to_string();
+        assert!(error.contains("statement 5 ") && !error.contains("statement 6 "), "{error}");
+        assert!(error.contains("and 35 more change transaction"), "{error}");
+        assert!(error.contains("lock_timeout_secs") && error.contains("read_write"), "{error}");
+        assert!(error.chars().count() < 1500, "{}", error.chars().count());
+        let redis = crate::classify::classify_redis("AUTH hunter2");
+        let error = check_statement(ReadWrite, &redis, false, "Redis command")
+            .unwrap_err()
+            .to_string();
+        assert!(error.starts_with("`AUTH` changes"), "{error}");
+        assert!(!error.contains("hunter2") && !error.contains("ALTER TABLE"));
     }
 }

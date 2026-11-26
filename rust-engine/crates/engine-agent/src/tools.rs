@@ -77,6 +77,49 @@ impl ToolName {
         Self::RemoveConnection,
     ];
 
+    /// The tools that work inside one database of a connection, and so are limited by its
+    /// allowed databases.
+    pub const fn is_database_scoped(self) -> bool {
+        matches!(
+            self,
+            Self::ListNamespaces
+                | Self::ListTables
+                | Self::DescribeTable
+                | Self::GetSchemaContext
+                | Self::ListRoutines
+                | Self::GetRoutineSource
+                | Self::ExecuteQuery
+                | Self::ExecuteBatch
+                | Self::ExplainQuery
+                | Self::ExecuteRedisCommand
+                | Self::MongoFind
+                | Self::MongoAggregate
+                | Self::MongoCount
+                | Self::MongoInsert
+                | Self::MongoUpdate
+                | Self::MongoDelete
+                | Self::OpenTable
+                | Self::ExecuteAndShow
+        )
+    }
+
+    /// The statement tools that run on a pinned session when they name its `session_id`.
+    pub const fn takes_session(self) -> bool {
+        matches!(
+            self,
+            Self::ExecuteQuery
+                | Self::ExecuteBatch
+                | Self::ExplainQuery
+                | Self::ExecuteRedisCommand
+                | Self::MongoFind
+                | Self::MongoAggregate
+                | Self::MongoCount
+                | Self::MongoInsert
+                | Self::MongoUpdate
+                | Self::MongoDelete
+        )
+    }
+
     /// The tools only a layer built with `with_transactions` offers.
     pub const fn is_transaction_tool(self) -> bool {
         matches!(
@@ -220,8 +263,29 @@ pub struct ListConnectionsRequest {}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConnectionRequest {
-    /// For `open_session`, `close_session`, `begin_transaction` and `remove_connection`.
+    /// For `begin_transaction` and `remove_connection`.
     pub connection_id: String,
+}
+
+/// `open_session`: the connection's shared session, or with `pinned` a connection of its own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpenSessionRequest {
+    pub connection_id: String,
+    /// Open a pinned session (see [`OpenSessionResult::session_id`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned: Option<bool>,
+}
+
+/// `close_session`: the connection's shared session (`connection_id`), or one pinned session
+/// (`session_id`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloseSessionRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -276,6 +340,12 @@ pub struct GetSchemaContextRequest {
     /// Size limit in the front end's estimator unit (about tokens).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget: Option<usize>,
+    /// Describe these tables (collections) only, by exact name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tables: Option<Vec<String>>,
+    /// Describe at most this many tables, from 1 to 20 (larger or smaller values are clamped).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tables: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -297,6 +367,17 @@ pub struct ExecuteQueryRequest {
     /// Run the statement inside this open transaction (see `begin_transaction`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transaction_id: Option<String>,
+    /// Seconds (1 to 600) the statement waits for a lock before it fails; applied by the layer
+    /// for this call only (PostgreSQL, MySQL, MariaDB). Checked by the layer, not by serde, so a
+    /// bad value gets a clear message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock_timeout_secs: Option<i64>,
+    /// Characters to skip at the start of every string cell (to read a long value in pieces).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cell_char_offset: Option<usize>,
+    /// Characters of every string cell to return (at most 4000).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cell_char_limit: Option<usize>,
 }
 
 /// `execute_batch`: several SQL statements in one call.
@@ -321,6 +402,15 @@ pub struct ExecuteBatchRequest {
     /// Run the script inside this open transaction (see `begin_transaction`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transaction_id: Option<String>,
+    /// As for `execute_query`: every statement of the script waits at most this long for a lock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock_timeout_secs: Option<i64>,
+    /// See [`ExecuteQueryRequest::cell_char_offset`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cell_char_offset: Option<usize>,
+    /// See [`ExecuteQueryRequest::cell_char_limit`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cell_char_limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -511,6 +601,18 @@ pub struct ConnectionSummary {
     /// The connection's own setting; absent when it was never set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub configured_access: Option<AgentAccess>,
+    /// The folders of the user's sidebar the connection is in, outermost first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub group: Vec<String>,
+    /// `host:port/database`, with no user, password or file path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    /// The user's note on the connection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    /// The only databases agents may use on the connection, when the user limited them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_databases: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -528,6 +630,12 @@ pub struct OpenSessionResult {
     pub supports_schemas: bool,
     pub already_open: bool,
     pub statement_timeout_secs: u64,
+    /// A pinned session: its id, which the statement tools take as `session_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// A pinned session is closed after this many idle seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -535,12 +643,18 @@ pub struct CloseSessionResult {
     pub connection_id: String,
     /// A session was open and is now closed.
     pub closed: bool,
+    /// The pinned session that was closed (or asked for).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NameItem {
     pub name: String,
     pub kind: String,
+    /// The comment of a table or view (`list_tables`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -748,6 +862,9 @@ pub struct ExecuteAndShowResult {
     pub shown: bool,
     /// tablex was asked to run it (it may ask the user first, or refuse by its own rules).
     pub run: bool,
+    /// Why the query was put in the editor but not run although `run` was asked for (DuckDB).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// `add_connection`. The password is the one secret in any request: `Debug` leaves it out.
@@ -766,7 +883,7 @@ pub struct AddConnectionRequest {
     pub database: Option<String>,
     #[serde(default)]
     pub user: Option<String>,
-    /// SQLite: the database file.
+    /// SQLite or DuckDB: the database file.
     #[serde(default)]
     pub path: Option<String>,
     #[serde(default)]
@@ -774,6 +891,10 @@ pub struct AddConnectionRequest {
     /// The id or name of a connection type of the user's settings; default `development`.
     #[serde(default)]
     pub connection_type: Option<String>,
+    /// Encrypt the connection with TLS (`true`) or not (`false`): `options.tls` `require` (on
+    /// MongoDB `verify_full`, which it takes) or `disable`. The finer choice is `options.tls`.
+    #[serde(default)]
+    pub ssl: Option<bool>,
     #[serde(default)]
     pub options: Option<ConnectionOptions>,
 }
@@ -800,6 +921,9 @@ pub struct ConnectionOptions {
     /// `disable`, `require` or `verify_full`.
     #[serde(default)]
     pub tls: Option<String>,
+    /// The same as the request's `ssl`.
+    #[serde(default)]
+    pub ssl: Option<bool>,
 }
 
 /// `duplicate_connection`.

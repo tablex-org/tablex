@@ -13,6 +13,7 @@
 
 use crate::functions;
 use crate::ports::ConnectionKind;
+use crate::sanitize::clean;
 use engine_driver_kit::sql::{
     classify, tokens, Classification, Keyword, SqlLexOptions, SqlToken, SqlTokenKind,
 };
@@ -45,12 +46,22 @@ pub struct Classified {
     /// `USE`, `MULTI`, `SELECT` (Redis db), ...): each tool call is one
     /// self-contained statement, so agents may not run it at any level.
     pub session_state: bool,
+    /// The text of a session-state statement, one clipped line, for the refusal message
+    /// (`None` when it is not session state; Redis: the verb only, as `AUTH` carries a secret).
+    pub session_statement: Option<String>,
     /// A clause agents may not send (ClickHouse `SETTINGS`): `agent.unsupported`.
     pub unsupported_clause: Option<String>,
     /// A function or clause that reaches beyond the tables (see
     /// [`crate::functions`]); refused at every level.
     pub blocked_function: Option<String>,
 }
+
+/// What the refusal of a DuckDB text with a Unicode space character in its code names (the message
+/// reads "the {clause} clause is not available to agents; send the query without it").
+const UNICODE_SPACE_CLAUSE: &str = "Unicode space character outside quotes (U+00A0, U+2000, U+3000, ...: use an ASCII space)";
+
+/// Characters of a session-state statement a refusal message quotes.
+const SESSION_STATEMENT_CHARS: usize = 100;
 
 /// First words of SQL statements that change transaction or session state, or
 /// hide the statement they run (`PREPARE` / `EXECUTE` / `DO`), or keep a
@@ -125,6 +136,15 @@ pub const REDIS_SESSION_VERBS: &[&str] = &[
 
 /// Classifies SQL text for `kind` (whose lexer settings are `options`).
 pub fn classify_sql(sql: &str, kind: ConnectionKind, options: &SqlLexOptions) -> Classified {
+    // DuckDB rewrites some Unicode spaces to ASCII ones before it reads the text, and the lexer
+    // takes them for word bytes: the text is judged as DuckDB reads it, and an agent never needs
+    // such a character in code, so a text that has one is refused (it can only hide what the
+    // lexer would read differently).
+    let normalized = (kind == ConnectionKind::DuckDb)
+        .then(|| engine_driver_kit::sql::normalize_duckdb_spaces(sql))
+        .flatten();
+    let unicode_space = normalized.is_some();
+    let sql = normalized.as_deref().unwrap_or(sql);
     let classification = classify(sql, options);
     let verb = classification
         .statements
@@ -133,6 +153,9 @@ pub fn classify_sql(sql: &str, kind: ConnectionKind, options: &SqlLexOptions) ->
         .map(|range| sql[range].to_ascii_uppercase())
         .unwrap_or_default();
     let (danger, driver_confirms) = agent_danger(sql, &classification, options);
+    let session_state = SQL_SESSION_WORDS.contains(&functions::first_word(sql, options).as_str())
+        || (matches!(kind, ConnectionKind::MySql | ConnectionKind::MariaDb)
+            && assigns_user_variable(sql, options));
     Classified {
         statements: classification.statements.len(),
         class: if classification.pageable {
@@ -142,11 +165,63 @@ pub fn classify_sql(sql: &str, kind: ConnectionKind, options: &SqlLexOptions) ->
         },
         danger,
         driver_confirms,
-        session_state: SQL_SESSION_WORDS.contains(&functions::first_word(sql, options).as_str()),
-        unsupported_clause: functions::unsupported_clause(sql, kind, options),
+        session_state,
+        session_statement: session_state
+            .then(|| clean(sql.trim().trim_end_matches(';').trim_end(), SESSION_STATEMENT_CHARS)),
+        unsupported_clause: unicode_space
+            .then(|| UNICODE_SPACE_CLAUSE.to_owned())
+            .or_else(|| functions::unsupported_clause(sql, kind, options)),
         blocked_function: functions::blocked_function(sql, kind, options),
         verb,
     }
+}
+
+/// MySQL / MariaDB: the statement assigns a user variable (`SELECT @a := 1`, `SELECT 1 INTO @a`).
+/// A user variable lives as long as the session, so this changes session state like `SET @a = 1`
+/// does; and tablex's own bookkeeping must never be something a statement can write to. Strings and
+/// comments do not count. (`:=` is not looked at in PostgreSQL, where it names an argument.)
+fn assigns_user_variable(sql: &str, options: &SqlLexOptions) -> bool {
+    if !sql.contains(":=") && !sql.contains('@') {
+        return false;
+    }
+    let scan = tokens(sql, options);
+    // The body of a stored routine, trigger or event assigns variables when it runs, not now.
+    let mut words = scan
+        .tokens
+        .iter()
+        .filter(|token| token.kind == SqlTokenKind::Word)
+        .map(|token| &sql[token.range.clone()]);
+    if words
+        .next()
+        .is_some_and(|first| first.eq_ignore_ascii_case("CREATE") || first.eq_ignore_ascii_case("ALTER"))
+        && words.take(16).any(|word| {
+            ["PROCEDURE", "FUNCTION", "TRIGGER", "EVENT"]
+                .iter()
+                .any(|kind| word.eq_ignore_ascii_case(kind))
+        })
+    {
+        return false;
+    }
+    let at = |index: usize| scan.tokens.get(index);
+    let byte = |index: usize| at(index).map(|token| sql.as_bytes()[token.range.start]);
+    (0..scan.tokens.len()).any(|index| {
+        let token = &scan.tokens[index];
+        let assign = token.kind == SqlTokenKind::Other
+            && byte(index) == Some(b':')
+            && at(index + 1).is_some_and(|next| {
+                next.kind == SqlTokenKind::Other
+                    && next.range.start == token.range.end
+                    && sql.as_bytes()[next.range.start] == b'='
+            });
+        let into = token.kind == SqlTokenKind::Word
+            && sql[token.range.clone()].eq_ignore_ascii_case("INTO")
+            && byte(index + 1) == Some(b'@')
+            && at(index + 1).is_some_and(|next| {
+                // `@name`, not `@@system_variable`.
+                sql.as_bytes().get(next.range.start + 1) != Some(&b'@')
+            });
+        assign || into
+    })
 }
 
 /// The first dangerous statement of the script, as the agent policy sees it, and whether an
@@ -505,6 +580,9 @@ pub fn classify_redis(command: &str) -> Classified {
         danger,
         driver_confirms: false,
         session_state: REDIS_SESSION_VERBS.contains(&verb.as_str()),
+        session_statement: REDIS_SESSION_VERBS
+            .contains(&verb.as_str())
+            .then(|| verb.clone()),
         unsupported_clause: None,
         blocked_function: None,
         verb,
@@ -702,6 +780,7 @@ mod tests {
             ConnectionKind::MariaDb => SqlLexOptions::mariadb(),
             ConnectionKind::Sqlite => SqlLexOptions::sqlite(),
             ConnectionKind::ClickHouse => SqlLexOptions::clickhouse(),
+            ConnectionKind::DuckDb => SqlLexOptions::duckdb(),
             other => panic!("{other:?} is not SQL"),
         }
     }
@@ -988,6 +1067,55 @@ mod tests {
     }
 
     #[test]
+    fn a_user_variable_assignment_is_session_state_on_mysql_and_mariadb_only() {
+        let mysql = |sql: &str| classify_sql(sql, ConnectionKind::MySql, &SqlLexOptions::mysql());
+        let mariadb =
+            |sql: &str| classify_sql(sql, ConnectionKind::MariaDb, &SqlLexOptions::mariadb());
+        for sql in [
+            "SELECT @tablex_lock_wait_timeout := 31536000",
+            "select @a:=1",
+            "SELECT 1, @a := @a + 1 FROM t",
+            "SELECT id INTO @a FROM t",
+            "SELECT 1 into @a",
+            "SET @a = 1",
+        ] {
+            for classified in [mysql(sql), mariadb(sql)] {
+                assert!(classified.session_state, "{sql}");
+                assert!(classified.session_statement.is_some(), "{sql}");
+            }
+        }
+        for sql in [
+            "SELECT @a",
+            "SELECT @@SESSION.lock_wait_timeout",
+            "SELECT ':= @a', 'INTO @a'",
+            "SELECT 1 -- @a := 1",
+            "SELECT id FROM t WHERE name = '@x'",
+            "SELECT @@session.lock_wait_timeout, @@global.x INTO OUTFILE '/x'",
+            "UPDATE t SET a = 1 WHERE id = 1",
+        ] {
+            assert!(!mysql(sql).session_state, "{sql}");
+            assert!(!mariadb(sql).session_state, "{sql}");
+        }
+        // A routine, trigger or event body assigns when it runs, not when it is created.
+        for sql in [
+            "CREATE PROCEDURE p() BEGIN SELECT @a := 1; END",
+            "CREATE DEFINER=`root`@`localhost` FUNCTION f() RETURNS int RETURN (@a := 1)",
+            "create or replace procedure p() select 1 into @a",
+            "CREATE TRIGGER t BEFORE INSERT ON x FOR EACH ROW SET NEW.a = (@n := @n + 1)",
+            "CREATE DEFINER = 'u'@'h' EVENT e ON SCHEDULE EVERY 1 DAY DO SELECT @a := 1",
+            "ALTER EVENT e DO SELECT @a := 1",
+        ] {
+            assert!(!mysql(sql).session_state, "{sql}");
+            assert!(!mariadb(sql).session_state, "{sql}");
+        }
+        // ... but a plain statement of the same shape is refused.
+        assert!(mysql("SELECT @a := 1 FROM t WHERE name = 'function'").session_state);
+        // PostgreSQL uses `:=` to name an argument.
+        assert!(!pg("SELECT f(a := 1)").session_state);
+        assert!(!pg("SELECT 1 INTO x").session_state);
+    }
+
+    #[test]
     fn redis_session_commands_are_flagged() {
         for command in [
             "MULTI",
@@ -1073,6 +1201,89 @@ mod tests {
         ] {
             let got = classify_sql(sql, ConnectionKind::MySql, &mysql);
             assert_eq!(got.class, StatementClass::Write, "{sql}");
+        }
+    }
+
+    fn duck(sql: &str) -> Classified {
+        classify_sql(sql, ConnectionKind::DuckDb, &ConnectionKind::DuckDb.lex_options().unwrap())
+    }
+
+    #[test]
+    fn duckdb_reads_are_reads_and_nothing_else_is() {
+        for sql in [
+            "SELECT 1",
+            "WITH c AS (SELECT 1) SELECT * FROM c",
+            "SELECT * FROM main.orders WHERE note = 'x.csv'",
+            "SHOW TABLES",
+            "DESCRIBE orders",
+            "EXPLAIN SELECT * FROM orders",
+            "SELECT * FROM duckdb_tables()",
+        ] {
+            let got = duck(sql);
+            assert_eq!((got.class, got.blocked_function.as_deref(), got.session_state), (StatementClass::Read, None, false), "{sql}");
+        }
+        // Writes, `CREATE ... AS`, `INSERT OR REPLACE` and the maintenance statements are writes.
+        for sql in [
+            "INSERT INTO t VALUES (1)",
+            "INSERT OR REPLACE INTO t VALUES (1)",
+            "INSERT INTO t SELECT * FROM u ON CONFLICT DO NOTHING",
+            "CREATE TABLE t AS SELECT 1",
+            "CREATE OR REPLACE TABLE t AS SELECT 1",
+            "CREATE VIEW v AS SELECT 1",
+            "UPDATE t SET a = 1 WHERE id = 1",
+            "CHECKPOINT",
+            "FORCE CHECKPOINT",
+            "VACUUM",
+            "CALL pragma_version()",
+            "CALL dbgen(sf = 1)",
+            "FROM t",
+            "EXPLAIN ANALYZE INSERT INTO t VALUES (1)",
+        ] {
+            let got = duck(sql);
+            assert_eq!(got.class, StatementClass::Write, "{sql}");
+            assert_eq!(got.blocked_function, None, "{sql}");
+        }
+        assert!(duck("CREATE OR REPLACE TABLE t AS SELECT 1").danger.is_some());
+        assert!(duck("DROP TABLE t").danger.is_some());
+        assert!(duck("DELETE FROM t").danger.is_some());
+    }
+
+    #[test]
+    fn duckdb_session_statements_are_session_state() {
+        for sql in [
+            "SET enable_external_access = true",
+            "SET GLOBAL threads = 1",
+            "SET VARIABLE x = 1",
+            "RESET threads",
+            "PRAGMA enable_profiling",
+            "PRAGMA database_list",
+            "USE other",
+            "BEGIN",
+            "COMMIT",
+            "PREPARE p AS SELECT 1",
+            "EXECUTE p",
+        ] {
+            assert!(duck(sql).session_state, "{sql}");
+        }
+    }
+
+    #[test]
+    fn duckdb_file_and_environment_access_is_blocked_at_every_class() {
+        for sql in [
+            "SELECT * FROM read_text('/etc/passwd')",
+            "FROM '/Users/x/.ssh/id_rsa'",
+            "SELECT * FROM 'https://evil/x.csv'",
+            "COPY t TO '/tmp/x.csv'",
+            "COPY t FROM '/tmp/x.csv'",
+            "ATTACH '/other.db'",
+            "INSTALL httpfs",
+            "LOAD httpfs",
+            "CREATE SECRET s (TYPE s3)",
+            "EXPORT DATABASE '/tmp/d'",
+            "EXPLAIN ANALYZE COPY t TO '/tmp/x.csv'",
+            "INSERT INTO t SELECT * FROM read_csv('/etc/hosts')",
+        ] {
+            assert!(duck(sql).blocked_function.is_some(), "{sql}");
         }
     }
 }

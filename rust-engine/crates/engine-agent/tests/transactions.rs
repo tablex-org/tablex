@@ -278,21 +278,22 @@ fn begin_needs_read_write_and_an_approver_that_would_take_writes() {
 }
 
 #[test]
-fn only_postgresql_and_sqlite_connections_without_a_read_only_type_can_begin() {
+fn only_sql_connections_with_a_session_of_their_own_and_no_read_only_type_can_begin() {
     let fx = fixture(Options {
         connections: vec![
             (PG, ConnectionKind::PostgreSql),
             (LITE, ConnectionKind::Sqlite),
             ("my", ConnectionKind::MySql),
+            ("duck", ConnectionKind::DuckDb),
             ("ch", ConnectionKind::ClickHouse),
             ("rd", ConnectionKind::Redis),
         ],
         ..Options::default()
     });
-    for id in ["my", "ch", "rd"] {
+    for id in ["ch", "rd"] {
         let outcome = fx.call("begin_transaction", json!({"connection_id": id}));
         assert_eq!(code(&outcome), "agent.unsupported", "{id}");
-        assert!(message(&outcome).contains("available on PostgreSQL and SQLite"), "{id}");
+        assert!(message(&outcome).contains("available on PostgreSQL, MySQL, MariaDB, SQLite and DuckDB"), "{id}");
         assert!(fx.own(id).control_calls().is_empty());
     }
     // A read-only type refuses BEGIN: unsupported (its access is capped at `read` anyway).
@@ -310,6 +311,7 @@ fn only_postgresql_and_sqlite_connections_without_a_read_only_type_can_begin() {
     *fx.provider.transactions_unavailable.lock().unwrap() = None;
     fx.begin(PG);
     fx.begin(LITE);
+    fx.begin("duck");
     // A connection with access `off` is not described at all.
     fx.catalog.update("my", |info| info.agent_access = Some(AgentAccess::Off));
     assert_eq!(
@@ -1279,4 +1281,126 @@ fn a_write_still_running_when_the_commit_is_approved_stops_the_commit() {
     // Cancelled, so aborted: only a rollback is left.
     assert_eq!(code(&fx.call("commit_transaction", json!({"transaction_id": tx}))), "agent.transaction_aborted");
     fx.ok("rollback_transaction", json!({"transaction_id": tx}));
+}
+
+// ------------------------------------------------- reads that call a function, in a MySQL transaction
+
+#[test]
+fn a_read_that_calls_a_stored_function_in_a_mysql_transaction_is_a_change_on_the_commit_list() {
+    for kind in [ConnectionKind::MySql, ConnectionKind::MariaDb] {
+        let fx = fixture(Options {
+            connections: vec![("my", kind)],
+            ..Options::default()
+        });
+        let tx = fx.begin("my");
+        let asked = || fx.approver.asked.lock().unwrap().len();
+        // Built-in functions only compute: a read, nobody is asked.
+        for statement in [
+            "SELECT count(*), UPPER(name), COALESCE(a, 0) FROM t WHERE id IN (1, 2) AND NOT EXISTS (SELECT 1 FROM u)",
+            "SELECT DATE_FORMAT(now(), '%Y'), JSON_EXTRACT(doc, '$.a'), CAST(x AS CHAR) FROM t GROUP BY (x) ORDER BY 1 LIMIT 5",
+            "WITH x AS (SELECT 1) SELECT * FROM x",
+            "SELECT * FROM (SELECT 1) AS d",
+        ] {
+            let outcome = fx.run_in("my", &tx, statement);
+            assert_eq!(code(&outcome), "ok", "{kind:?}: {statement}: {outcome:?}");
+        }
+        assert_eq!(asked(), 0, "{kind:?}");
+        // A function that is not a known built-in may write: asked, and kept for the commit card.
+        let calls = [
+            "SELECT app.next_invoice_no()",
+            "SELECT next_invoice_no()",
+            "SELECT `next_invoice_no`()",
+            "SELECT * FROM t WHERE id = f(1)",
+            "SELECT count(*), upper(app . f(x)) FROM t",
+        ];
+        for (at, statement) in calls.iter().enumerate() {
+            let outcome = fx.run_in("my", &tx, statement);
+            assert_eq!(code(&outcome), "ok", "{kind:?}: {statement}: {outcome:?}");
+            assert_eq!(asked(), at + 1, "{kind:?}: {statement} was put to the user");
+        }
+        let commit = fx.ok("commit_transaction", json!({"transaction_id": tx}));
+        assert_eq!(commit["changes"], calls.len(), "{commit}");
+        let transactions = fx.approver.transactions.lock().unwrap();
+        let listed = transactions.last().unwrap().as_ref().unwrap().1.clone().unwrap();
+        assert_eq!(listed, calls.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>(), "{kind:?}");
+    }
+}
+
+#[test]
+fn the_same_reads_outside_a_transaction_and_on_other_engines_are_still_reads() {
+    // Outside a transaction a read runs in a READ ONLY scope, and PostgreSQL has its own.
+    let fx = fixture(Options {
+        connections: vec![("my", ConnectionKind::MySql), (PG, ConnectionKind::PostgreSql)],
+        ..Options::default()
+    });
+    fx.ok("open_session", json!({"connection_id": "my"}));
+    assert_eq!(code(&fx.call("execute_query", json!({"connection_id": "my", "statement": "SELECT app.f(1)"}))), "ok");
+    let tx = fx.begin(PG);
+    assert_eq!(code(&fx.run_in(PG, &tx, "SELECT app.f(1)")), "ok");
+    assert!(fx.approver.asked.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_script_in_a_mysql_transaction_lists_its_function_calling_reads_as_changes() {
+    let fx = fixture(Options {
+        connections: vec![("my", ConnectionKind::MySql)],
+        ..Options::default()
+    });
+    fx.ok("open_session", json!({"connection_id": "my"}));
+    // A script of reads only is refused as a transaction... unless one of them calls a function.
+    let only_reads = fx.call(
+        "execute_batch",
+        json!({"connection_id": "my", "use_transaction": true, "script": "SELECT count(*) FROM t; SELECT 1"}),
+    );
+    assert_eq!(code(&only_reads), "agent.invalid_arguments", "{only_reads:?}");
+    let outcome = fx.call(
+        "execute_batch",
+        json!({"connection_id": "my", "use_transaction": true, "script": "SELECT count(*) FROM t; SELECT app.next_invoice_no()"}),
+    );
+    assert_eq!(code(&outcome), "ok", "{outcome:?}");
+    let asked = fx.approver.asked.lock().unwrap().clone();
+    assert_eq!(asked.len(), 1);
+    assert!(asked[0].0.contains("app.next_invoice_no") && !asked[0].0.contains("count(*)"), "{}", asked[0].0);
+}
+
+// ------------------------------------------------------------------------------ caps per client
+
+#[test]
+fn the_transaction_cap_is_per_client_and_one_client_does_not_lock_the_others_out() {
+    let ids = ["c1", "c2", "c3", "c4", "c5", "c6"];
+    let fx = fixture(Options {
+        connections: ids.iter().map(|id| (*id, ConnectionKind::PostgreSql)).collect(),
+        ..Options::default()
+    });
+    let as_owner = |owner: &str, id: &str| {
+        fx.layer.call_as(owner, "begin_transaction", json!({"connection_id": id}), &CancelToken::new())
+    };
+    for id in &ids[..4] {
+        assert_eq!(code(&as_owner("a", id)), "ok", "{id}");
+    }
+    let fifth = as_owner("a", "c5");
+    assert_eq!(code(&fifth), "agent.limit", "{fifth:?}");
+    assert!(message(&fifth).contains("the most one client holds"), "{}", message(&fifth));
+    // Another client still gets its own.
+    assert_eq!(code(&as_owner("b", "c5")), "ok");
+}
+
+#[test]
+fn ending_a_client_rolls_back_its_transactions_and_closes_its_sessions_and_only_its_own() {
+    let fx = fixture(Options {
+        connections: vec![("c1", ConnectionKind::PostgreSql), ("c2", ConnectionKind::PostgreSql)],
+        ..Options::default()
+    });
+    let as_owner = |owner: &str, tool: &str, args: Value| fx.layer.call_as(owner, tool, args, &CancelToken::new());
+    assert_eq!(code(&as_owner("a", "open_session", json!({"connection_id": "c1"}))), "ok");
+    assert_eq!(code(&as_owner("a", "begin_transaction", json!({"connection_id": "c1"}))), "ok");
+    assert_eq!(code(&as_owner("b", "begin_transaction", json!({"connection_id": "c2"}))), "ok");
+    assert!(fx.layer.holds_client("a") && fx.layer.holds_client("b") && !fx.layer.holds_client("zz"));
+    fx.layer.end_client("a");
+    assert!(!fx.layer.holds_client("a") && fx.layer.holds_client("b"));
+    assert!(fx.own("c1").disconnects.load(Ordering::SeqCst) >= 1, "a's transaction session is closed");
+    assert_eq!(fx.own("c2").disconnects.load(Ordering::SeqCst), 0, "b's is not");
+    assert!(fx.audit().iter().any(|entry| entry.statement.as_deref() == Some("ROLLBACK (client ended)")));
+    // Its connection is free again.
+    assert_eq!(code(&as_owner("c", "begin_transaction", json!({"connection_id": "c1"}))), "ok");
 }

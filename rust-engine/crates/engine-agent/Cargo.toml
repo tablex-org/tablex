@@ -13,8 +13,13 @@ serde = { version = "1.0", features = ["derive"] }
 # command, a sort is its keys in order), in every build.
 serde_json = { version = "1.0", features = ["preserve_order"] }
 bson = "2.13"
+# The shell value parser (`src/shell_value.rs` is the one of engine-mongo-script, included by path as the
+# MongoDB Shell plugin does, so tree-sitter stays out of the MCP server) needs this.
+base64 = "0.22"
 thiserror = "2.0"
 zeroize = "1"
+# Unguessable ids of transactions and pinned sessions.
+getrandom = "0.3"
 
 [target.'cfg(unix)'.dependencies]
 # O_NOFOLLOW for the audit file (already in the lock file).

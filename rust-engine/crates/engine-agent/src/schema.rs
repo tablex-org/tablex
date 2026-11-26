@@ -42,6 +42,9 @@ fn document(description: &str) -> Value {
     json!({"type": "object", "description": description})
 }
 
+/// The `lock_timeout_secs` property of `execute_query` and `execute_batch`.
+const LOCK_TIMEOUT_TEXT: &str = "Seconds (1 to 600, and below the connection's statement timeout, 30 by default) to wait for a lock another session holds before the call fails with a lock-timeout error you can retry later. tablex applies it for this call only and puts the session back afterwards: PostgreSQL, MySQL and MariaDB only (other databases reject it). Use it to run an ALTER on a busy table; `SET lock_timeout` itself is refused. On PostgreSQL the statement runs in a transaction of its own (BEGIN, SET LOCAL, COMMIT) so nothing can leak; one that cannot run in a transaction block (CREATE INDEX CONCURRENTLY, VACUUM, CREATE DATABASE, ...) gets a plain session setting instead, which a pooler in transaction mode (PgBouncer, Supavisor) may not keep on one connection.";
+
 fn boolean(description: &str) -> Value {
     json!({"type": "boolean", "description": description})
 }
@@ -70,7 +73,7 @@ fn object(properties: Vec<(&str, Value)>, required: &[&str]) -> Value {
 const CONNECTION_ID: &str = "Connection id from list_connections.";
 const ACCESS_LEVELS: [&str; 4] = ["off", "schema_only", "read", "read_write"];
 const ROUTINE_KINDS: [&str; 4] = ["function", "procedure", "trigger", "event"];
-const KINDS: [&str; 7] = [
+const KINDS: [&str; 8] = [
     "postgresql",
     "mysql",
     "mariadb",
@@ -78,6 +81,7 @@ const KINDS: [&str; 7] = [
     "clickhouse",
     "mongodb",
     "redis",
+    "duckdb",
 ];
 
 fn name_item() -> Value {
@@ -88,6 +92,7 @@ fn name_item() -> Value {
                 "kind",
                 string("database, schema, table, view, materialized_view, ..."),
             ),
+            ("comment", string("The comment of a table or view, where the database has one (PostgreSQL, MySQL, MariaDB, ClickHouse).")),
         ],
         &["name", "kind"],
     )
@@ -238,30 +243,118 @@ const MONGO_JSON: &str = "JSON as MongoDB takes it; typed values use Extended JS
 /// Every tool, in a stable order, with the transaction tools, `execute_query`'s `transaction_id`,
 /// the tools that show things in the app and the ones that manage the saved connections.
 pub fn tool_specs() -> Vec<ToolSpec> {
-    tool_specs_for(true, true, true)
+    tool_specs_for(true, true, true, true)
 }
 
 /// The tools a layer offers: the transaction tools (and `execute_query`'s `transaction_id`)
 /// only when `transactions` is true, `open_table` and `execute_and_show` only when `app` is, and
-/// `add_connection`, `duplicate_connection` and `remove_connection` only when `admin` is.
-pub fn tool_specs_for(transactions: bool, app: bool, admin: bool) -> Vec<ToolSpec> {
+/// `add_connection`, `duplicate_connection` and `remove_connection` only when `admin` is, and
+/// `open_session`'s `pinned` and the `session_id` of the statement tools only when `pinned` is.
+pub fn tool_specs_for(transactions: bool, app: bool, admin: bool, pinned: bool) -> Vec<ToolSpec> {
     ToolName::ALL
         .into_iter()
         .filter(|tool| transactions || !tool.is_transaction_tool())
         .filter(|tool| app || !tool.is_app_tool())
         .filter(|tool| admin || !tool.is_admin_tool())
         .map(|tool| spec_for(tool, transactions))
+        .map(|spec| if pinned { with_pinned(tool_of(&spec), spec) } else { spec })
         .collect()
 }
 
-/// The spec with every optional part (`transaction_id`).
-pub fn spec(tool: ToolName) -> ToolSpec {
-    spec_for(tool, true)
+fn tool_of(spec: &ToolSpec) -> ToolName {
+    ToolName::parse(spec.name).expect("a spec is named like its tool")
 }
+
+/// The spec with every optional part (`transaction_id`, pinned sessions).
+pub fn spec(tool: ToolName) -> ToolSpec {
+    with_pinned(tool, spec_for(tool, true))
+}
+
+const SESSION_ID: &str = "Run on this pinned session (the `session_id` open_session returned with `pinned` true) instead of the connection's shared session: the `USE` and `SET`s of its earlier calls apply to this one, and nothing else shares its connection. Not with `transaction_id`. Everything it holds is gone when it is closed.";
+
+const PINNED_STATEMENT_TEXT: &str = " A call may name a pinned session (`session_id`) to run on a connection of its own, where USE and a few harmless SETs (search_path, time zone, character set, lock timeouts, user variables) persist between calls; see open_session.";
+
+/// A description with `extra` after it, made once per tool (the descriptions are static).
+fn described(tool: ToolName, base: &'static str, extra: &str) -> &'static str {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static MADE: OnceLock<Mutex<HashMap<(&'static str, usize), &'static str>>> = OnceLock::new();
+    let mut made = MADE
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    made.entry((tool.as_str(), base.len() + extra.len()))
+        .or_insert_with(|| Box::leak(format!("{base}{extra}").into_boxed_str()))
+}
+
+fn add_property(schema: &mut Value, name: &str, property: Value) {
+    if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
+        properties.insert(name.to_owned(), property);
+    }
+}
+
+/// The line the descriptions of the tools that change something end with: what an agent does when
+/// it is refused. (`tablex-mcp` words its refusals to match; see its `approver`.)
+macro_rules! refusal_text {
+    () => {
+        " A refusal says what to ask the user to change (a setting in tablex, or a client that supports \
+        MCP elicitation): tell the user, and never go around tablex by connecting to the database yourself."
+    };
+}
+
+/// Adds pinned sessions to a spec: `pinned` on `open_session`, `session_id` on `close_session` and
+/// on the statement tools.
+fn with_pinned(tool: ToolName, mut spec: ToolSpec) -> ToolSpec {
+    match tool {
+        ToolName::OpenSession => {
+            add_property(
+                &mut spec.input_schema,
+                "pinned",
+                boolean("Open a pinned session: a connection of its own that keeps `USE` and `SET`s between calls (default false). Needs access `read`."),
+            );
+            add_property(&mut spec.output_schema, "session_id", string("A pinned session: pass it as `session_id` to execute_query, execute_batch, explain_query and the Redis and MongoDB tools."));
+            add_property(&mut spec.output_schema, "idle_timeout_secs", integer("A pinned session is closed after this many seconds without a call."));
+            spec.description = described(
+                tool,
+                spec.description,
+                " With `pinned` true it opens a PINNED SESSION instead: a connection of its own (never shared with the connection's other session, the app or another session), returned as `session_id`. Use one when a task needs state to last across calls: `USE database` (MySQL, MariaDB, ClickHouse), `SET search_path` (PostgreSQL), a time zone, a character set, a lock timeout, user variables (`SET @x = 1`). Run the statements with `session_id`; every other call still runs on the shared session, which keeps no state. Only those settings can be set (anything that changes the role, privileges, the read-only mode or the server is refused), the statements are judged exactly as without a session (a read runs read-only, a change is approved), and a connection limited to some databases keeps to them. At most 4 pinned sessions are open for you; one nobody called for ten minutes is closed, and so is one whose connection is edited or whose access drops below `read`. Close it with close_session when done: closing drops the connection and everything it held. A pinned session and a transaction are separate: a call uses one or the other.",
+            );
+        }
+        ToolName::CloseSession => {
+            add_property(
+                &mut spec.input_schema,
+                "session_id",
+                string("Close this pinned session (from open_session with `pinned` true) and drop its connection, instead of the connection's shared session."),
+            );
+            if let Some(required) = spec.input_schema.get_mut("required").and_then(Value::as_array_mut) {
+                required.clear();
+            }
+            spec.description = described(
+                tool,
+                spec.description,
+                " Give `connection_id` for the connection's shared session or `session_id` for one pinned session (exactly one of them). Closing a pinned session drops its connection: every `USE` and `SET` it held is gone.",
+            );
+            add_property(&mut spec.output_schema, "session_id", string("The pinned session that was closed."));
+            if let Some(required) = spec.output_schema.get_mut("required").and_then(Value::as_array_mut) {
+                required.retain(|name| name != "connection_id");
+            }
+        }
+        tool if tool.takes_session() => {
+            add_property(&mut spec.input_schema, "session_id", string(SESSION_ID));
+            spec.description = described(tool, spec.description, PINNED_STATEMENT_TEXT);
+        }
+        _ => {}
+    }
+    spec
+}
+
+/// The cell window of `execute_query` and `execute_batch`.
+const CELL_OFFSET: &str = "Characters to skip at the start of every string cell (default 0, at most 1000000): read a long value in pieces, following the `next cell_char_offset` its marker names; narrow the query to the one row and column first.";
+const CELL_LIMIT: &str = "Characters of every string cell to return (default 2048 when only the offset is given, at most 4000). Larger or smaller values are clamped.";
 
 macro_rules! execute_query_text {
     () => {
-        "Run exactly one SQL statement. Needs access `read` or more; a statement that changes data \
+        concat!("Run exactly one SQL statement. Needs access `read` or more; a statement that changes data \
         needs `read_write` and may be put to the user for approval when the connection allows it. \
         A refusal or a decline is final for this request: do not retry the statement or reword it to get \
         around it, tell the user instead. Multi-statement scripts are refused. At most 1000 rows (default \
@@ -271,13 +364,29 @@ macro_rules! execute_query_text {
         DROP, ALTER or MODIFY COLUMN, RENAME, DELETE or UPDATE without WHERE, ...) are refused unless \
         `dangerous` is true, which puts them to the user with the danger shown; only do that when the \
         user asked for it. The MCP server does that on a connection that is not of a production type; on \
-        a production one it refuses them and the user has to run the statement themselves in the tablex app."
+        a production one it refuses them and the user has to run the statement themselves in the tablex app.", refusal_text!())
+    };
+}
+
+/// What `execute_query` also does on a MongoDB connection (appended to `execute_query_text!`).
+macro_rules! execute_query_mongo_text {
+    () => {
+        " On a MongoDB connection the statement is ONE mongosh-style command instead of SQL, e.g. \
+        db.orders.find({status: \"paid\"}).sort({created: -1}).limit(20), db.getCollection('orders').getIndexes(), \
+        db.orders.aggregate([...]), show collections, db.getSiblingDB('other').orders.countDocuments({}). Reads \
+        (find, findOne, count*, distinct, aggregate without $out or $merge, getIndexes, stats, explain, \
+        show dbs/collections, db.version()) need `read`; each document comes back as one row of relaxed \
+        Extended JSON. insert*, update*, replaceOne, delete*, bulkWrite, findOneAnd* and createIndex need \
+        `read_write` and the user's approval. dropIndex(es), drop, renameCollection, updateMany or deleteMany \
+        with an empty filter and aggregate with $out or $merge are dangerous (refused unless `dangerous` is true). \
+        runCommand and createUser are never run: the user runs them in the tablex app. `database` is the \
+        database to run in (db.getSiblingDB overrides it; `use` switches nothing); no other JavaScript runs."
     };
 }
 
 macro_rules! execute_batch_text {
     () => {
-        "Run several SQL statements in order on one connection, in one call. Needs access `read` or \
+        concat!("Run several SQL statements in order on one connection, in one call. Needs access `read` or \
         more; the script is split into statements and each is judged like execute_query: if one \
         changes data the connection needs `read_write` and the user is asked ONCE to approve all the \
         changes of the script together, before anything runs. A script with a statement that is not \
@@ -289,7 +398,7 @@ macro_rules! execute_batch_text {
         entry per statement that ran (rows, affected rows or the error, with the limits of \
         execute_query and a total size limit for all rows); it stops at the first statement that \
         fails unless `continue_on_error` is true, and `skipped` counts the ones not run. Statements \
-        that ran before a failure stay applied."
+        that ran before a failure stay applied.", refusal_text!())
     };
 }
 
@@ -317,6 +426,10 @@ fn spec_for(tool: ToolName, transactions: bool) -> ToolSpec {
                                 ("production", boolean("A production connection.")),
                                 ("access", string_enum(&ACCESS_LEVELS, "What you may do now.")),
                                 ("configured_access", string_enum(&ACCESS_LEVELS, "The connection's own setting.")),
+                                ("group", names("The folders of the user's sidebar the connection is in, outermost first.")),
+                                ("endpoint", string("Where the connection goes, as host:port/database (never a user, password or file path).")),
+                                ("notes", string("The user's note on the connection.")),
+                                ("allowed_databases", names("The only databases you may use on this connection: the user limited them; every database tool names one of them in `database`.")),
                                 ("open", boolean("A session is open.")),
                             ],
                             &["id", "name", "access", "open"],
@@ -338,7 +451,7 @@ fn spec_for(tool: ToolName, transactions: bool) -> ToolSpec {
                     connection.clone(),
                     ("kind", string_enum(&KINDS, "Database engine.")),
                     ("access", string_enum(&ACCESS_LEVELS, "What you may do now.")),
-                    ("language", string_enum(&["sql", "redis", "mongo", "other"], "Statement language: `sql` runs with execute_query, `redis` with execute_redis_command, `mongo` with mongo_find, mongo_aggregate and mongo_count; `other` is browse only.")),
+                    ("language", string_enum(&["sql", "redis", "mongo", "other"], "Statement language: `sql` runs with execute_query, `redis` with execute_redis_command, `mongo` with execute_query (mongosh-style commands such as db.orders.find({}) or db.orders.getIndexes()) or with mongo_find, mongo_aggregate and mongo_count; `other` is browse only.")),
                     ("supports_schemas", boolean("Tables live in schemas inside databases.")),
                     ("already_open", boolean("The session was already open.")),
                     ("statement_timeout_secs", integer("Statements are cancelled after this many seconds.")),
@@ -406,7 +519,9 @@ fn spec_for(tool: ToolName, transactions: bool) -> ToolSpec {
         ToolName::DescribeTable => ToolSpec {
             name: tool.as_str(),
             description: "Describe a table: columns with type, nullability and comment, primary key, \
-                unique columns, indexes, foreign keys and (when the database provides it) the DDL.",
+                unique columns, indexes, foreign keys and (when the database provides it) the DDL. \
+                On a MongoDB connection `table` is the collection (with `database`): it returns its indexes \
+                (and the createIndex calls that rebuild them in `ddl`); a collection has no columns.",
             input_schema: object(
                 vec![
                     connection.clone(),
@@ -466,13 +581,18 @@ fn spec_for(tool: ToolName, transactions: bool) -> ToolSpec {
             name: tool.as_str(),
             description: "A compact digest of every table of a namespace (columns, keys, foreign keys, \
                 comments) sized to `budget`. Stable between calls for the same schema. Over budget it drops \
-                comments, then non-key columns of the widest tables, then tables, and says what it omitted.",
+                comments, then non-key columns of the widest tables, then tables, and says what it omitted. \
+                `tables` picks the tables to describe and `max_tables` (1 to 20) caps how many. On a MongoDB \
+                connection it needs access `read`: a collection has no declared schema, so its fields and \
+                types are read from a sample of 20 documents of each (at most 20 collections).",
             input_schema: object(
                 vec![
                     connection.clone(),
                     database("Database name."),
                     ("schema", string("Schema name.")),
                     ("budget", integer("Size limit in tokens (estimated; default 4000).")),
+                    ("tables", names("Describe only these tables or collections, by exact name (at most 50).")),
+                    ("max_tables", integer("Describe at most this many tables, from 1 to 20 (clamped).")),
                 ],
                 &["connection_id"],
             ),
@@ -498,10 +618,13 @@ fn spec_for(tool: ToolName, transactions: bool) -> ToolSpec {
         ToolName::ExecuteQuery => {
             let mut properties = vec![
                 connection.clone(),
-                ("statement", string("One SQL statement.")),
+                ("statement", string("One SQL statement, or one MongoDB shell command on a MongoDB connection.")),
                 database("Database to run in."),
                 ("row_limit", integer("Rows to return (default 200, at most 1000).")),
                 ("dangerous", boolean("Ask the user to approve a dangerous statement.")),
+                ("lock_timeout_secs", integer(LOCK_TIMEOUT_TEXT)),
+                ("cell_char_offset", integer(CELL_OFFSET)),
+                ("cell_char_limit", integer(CELL_LIMIT)),
             ];
             if transactions {
                 properties.push((
@@ -514,11 +637,12 @@ fn spec_for(tool: ToolName, transactions: bool) -> ToolSpec {
                 description: if transactions {
                     concat!(
                         execute_query_text!(),
+                        execute_query_mongo_text!(),
                         " With `transaction_id` the statement runs inside that transaction: a change is \
                         approved one statement at a time and is NOT committed until commit_transaction."
                     )
                 } else {
-                    execute_query_text!()
+                    concat!(execute_query_text!(), execute_query_mongo_text!())
                 },
                 input_schema: object(properties, &["connection_id", "statement"]),
                 output_schema: statement_output(),
@@ -532,6 +656,9 @@ fn spec_for(tool: ToolName, transactions: bool) -> ToolSpec {
                 database("Database to run in."),
                 ("row_limit", integer("Rows to return per statement (default 200, at most 1000).")),
                 ("continue_on_error", boolean("Go on with the next statement after one fails (default: stop at the first failure).")),
+                ("lock_timeout_secs", integer(LOCK_TIMEOUT_TEXT)),
+                ("cell_char_offset", integer(CELL_OFFSET)),
+                ("cell_char_limit", integer(CELL_LIMIT)),
             ];
             if transactions {
                 properties.push((
@@ -548,7 +675,7 @@ fn spec_for(tool: ToolName, transactions: bool) -> ToolSpec {
                 description: if transactions {
                     concat!(
                         execute_batch_text!(),
-                        " With `use_transaction` the script is one transaction on a PostgreSQL or SQLite \
+                        " With `use_transaction` the script is one transaction on a PostgreSQL, MySQL, MariaDB, SQLite or DuckDB \
                         connection: it is committed when every statement succeeded, and when one fails \
                         everything is rolled back (`transaction` is `rolled_back`, and the failed \
                         statement is named); the user approves the changes once, with the script. With \
@@ -619,14 +746,14 @@ fn spec_for(tool: ToolName, transactions: bool) -> ToolSpec {
         },
         ToolName::MongoInsert => ToolSpec {
             name: tool.as_str(),
-            description: "Insert documents into a collection of a MongoDB connection. Needs access \
+            description: concat!("Insert documents into a collection of a MongoDB connection. Needs access \
                 `read_write` and the user's permission to change data through this front end; the user is \
                 asked to approve the exact command before anything is sent. A refusal or a decline is \
                 final for this request: do not retry it or reword it to get around it, tell the user \
                 instead. At least 1 and at most 1000 documents, inserted in order (the first failure stops \
                 the rest). `documents` are JSON documents as in mongo_find; typed values use Extended \
                 JSON. Not available inside a transaction. The result has the number inserted (`n`) and \
-                any `write_errors`.",
+                any `write_errors`.", refusal_text!()),
             input_schema: object(
                 vec![
                     connection,
@@ -641,15 +768,15 @@ fn spec_for(tool: ToolName, transactions: bool) -> ToolSpec {
         },
         ToolName::MongoUpdate => ToolSpec {
             name: tool.as_str(),
-            description: "Update documents of a collection of a MongoDB connection. Needs access \
+            description: concat!("Update documents of a collection of a MongoDB connection. Needs access \
                 `read_write` and the user's permission to change data through this front end; the user is \
                 asked to approve the exact command before anything is sent. A refusal or a decline is \
                 final for this request: do not retry it or reword it to get around it, tell the user \
-                instead. `filter` selects the documents (required; an empty filter is refused unless \
+                instead. `filter` selects the documents (required; one that matches every document or cannot be checked (empty, `_id: {$exists: true}`, `$where`, `$expr`, a complementary `$or`) is refused unless \
                 `allow_all` is true, and the MCP server refuses it then on a production connection). Give `update` (update operators such as $set) or `pipeline` \
                 (an update pipeline), not both. Only the first match is updated unless `many` is true; \
                 `upsert` inserts a document when nothing matches. Not available inside a transaction. The \
-                result has `n` (matched), `n_modified`, `upserted` and any `write_errors`.",
+                result has `n` (matched), `n_modified`, `upserted` and any `write_errors`.", refusal_text!()),
             input_schema: object(
                 vec![
                     connection,
@@ -660,7 +787,7 @@ fn spec_for(tool: ToolName, transactions: bool) -> ToolSpec {
                     ("pipeline", array(document("One stage, e.g. {\"$set\": {\"total\": {\"$sum\": \"$lines\"}}}."), "An update pipeline, instead of `update`.")),
                     ("many", boolean("Update every matching document, not only the first (default false).")),
                     ("upsert", boolean("Insert a document when nothing matches (default false).")),
-                    ("allow_all", boolean("Allow an empty `filter`, which matches every document.")),
+                    ("allow_all", boolean("Allow a `filter` that matches every document or cannot be checked (empty, `$where`, `$expr`, `_id: {$exists: true}`, a complementary `$or`).")),
                 ],
                 &["connection_id", "database", "collection", "filter"],
             ),
@@ -669,14 +796,14 @@ fn spec_for(tool: ToolName, transactions: bool) -> ToolSpec {
         },
         ToolName::MongoDelete => ToolSpec {
             name: tool.as_str(),
-            description: "Delete documents from a collection of a MongoDB connection. Needs access \
+            description: concat!("Delete documents from a collection of a MongoDB connection. Needs access \
                 `read_write` and the user's permission to change data through this front end; the user is \
                 asked to approve the exact command before anything is sent. A refusal or a decline is \
                 final for this request: do not retry it or reword it to get around it, tell the user \
-                instead. `filter` selects the documents (required; an empty filter is refused unless \
+                instead. `filter` selects the documents (required; one that matches every document or cannot be checked (empty, `_id: {$exists: true}`, `$where`, `$expr`, a complementary `$or`) is refused unless \
                 `allow_all` is true, and the MCP server refuses it then on a production connection). Only the first match is deleted unless `many` is true. Not \
                 available inside a transaction. The result has the number deleted (`n`) and any \
-                `write_errors`.",
+                `write_errors`.", refusal_text!()),
             input_schema: object(
                 vec![
                     connection,
@@ -684,7 +811,7 @@ fn spec_for(tool: ToolName, transactions: bool) -> ToolSpec {
                     ("collection", string("Collection name.")),
                     ("filter", document(MONGO_JSON)),
                     ("many", boolean("Delete every matching document, not only the first (default false).")),
-                    ("allow_all", boolean("Allow an empty `filter`, which matches every document.")),
+                    ("allow_all", boolean("Allow a `filter` that matches every document or cannot be checked (empty, `$where`, `$expr`, `_id: {$exists: true}`, a complementary `$or`).")),
                 ],
                 &["connection_id", "database", "collection", "filter"],
             ),
@@ -765,13 +892,13 @@ fn spec_for(tool: ToolName, transactions: bool) -> ToolSpec {
         },
         ToolName::BeginTransaction => ToolSpec {
             name: tool.as_str(),
-            description: "Begin a transaction on a PostgreSQL or SQLite connection, on a session of its own. \
+            description: concat!("Begin a transaction on a PostgreSQL, MySQL, MariaDB, SQLite or DuckDB connection, on a session of its own. \
                 Needs access `read_write` and the user's permission to change data through this front end. \
                 Run statements in it with execute_query and `transaction_id`; nothing a write does is \
                 committed until commit_transaction, and the user is asked to approve the commit with the list \
                 of changes. One open transaction per connection, a few in all. A transaction is rolled back \
                 after 5 minutes without a call on it, and when its connection's session is closed. \
-                Always end it with commit_transaction or rollback_transaction.",
+                Always end it with commit_transaction or rollback_transaction.", refusal_text!()),
             input_schema: object(vec![connection.clone()], &["connection_id"]),
             output_schema: object(
                 vec![
@@ -785,11 +912,11 @@ fn spec_for(tool: ToolName, transactions: bool) -> ToolSpec {
         },
         ToolName::CommitTransaction => ToolSpec {
             name: tool.as_str(),
-            description: "Commit an open transaction and close its session. When statements changed data the \
+            description: concat!("Commit an open transaction and close its session. When statements changed data the \
                 user is asked to approve the commit with the list of those statements; a decline is final: \
                 the transaction stays open, nothing is committed, roll it back. A transaction with no changes \
                 is committed without asking. A PostgreSQL transaction that hit an error cannot be committed: \
-                roll it back.",
+                roll it back.", refusal_text!()),
             input_schema: object(vec![("transaction_id", string("From begin_transaction."))], &["transaction_id"]),
             output_schema: object(
                 vec![
@@ -853,7 +980,9 @@ fn spec_for(tool: ToolName, transactions: bool) -> ToolSpec {
                 or read-only connections), and the user answers in tablex. A query that changes data, a \
                 script with several statements or a MongoDB script is not run from here: call with \
                 `run` false to only put it in the editor for the user to run, or use execute_query (a \
-                change is put to the user for approval). No rows are returned: use execute_query when \
+                change is put to the user for approval). On a DuckDB connection the query is never run \
+                from here (DuckDB SQL can reach files): it is only put in the editor, and the answer \
+                says the user has to run it. No rows are returned: use execute_query when \
                 you need the data yourself. The answer means tablex took the request up, not that the \
                 query has finished.",
             input_schema: object(
@@ -870,6 +999,7 @@ fn spec_for(tool: ToolName, transactions: bool) -> ToolSpec {
                     connection.clone(),
                     ("shown", boolean("tablex opened the tab with the query in it.")),
                     ("run", boolean("tablex was asked to run it (it may ask the user first).")),
+                    ("note", string("Present when the query was put in the editor but not run (DuckDB): the user has to run it.")),
                 ],
                 &["connection_id", "shown", "run"],
             ),
@@ -877,10 +1007,10 @@ fn spec_for(tool: ToolName, transactions: bool) -> ToolSpec {
         },
         ToolName::AddConnection => ToolSpec {
             name: tool.as_str(),
-            description: "Add a saved connection to tablex. The user is asked to approve every call \
+            description: concat!("Add a saved connection to tablex. The user is asked to approve every call \
                 and sees the name, kind, address and connection type (never the password); a refusal \
                 or a decline is final: do not retry it, tell the user. Give either `uri` or the \
-                fields (`host`, `port`, `database`, `user`; SQLite: `path`, an absolute file path). \
+                fields (`host`, `port`, `database`, `user`; SQLite and DuckDB: `path`, an absolute file path). \
                 The `uri` must not hold a password and only takes routing and TLS options (e.g. \
                 sslmode, authSource); give the password as `password`, which is saved in the \
                 credential store (without it the connection has none saved and tablex asks for it \
@@ -890,29 +1020,33 @@ fn spec_for(tool: ToolName, transactions: bool) -> ToolSpec {
                 it is what the user's settings give its type (see `agent_access` in the answer, often \
                 `off`). The name must not be in use (case-insensitive). tablex does not need to be \
                 running; a running one reloads its connections. The driver for the kind need not be \
-                installed yet.",
+                installed yet.", refusal_text!()),
             input_schema: object(
                 vec![
                     ("name", string("Display name, at most 128 characters, one line; not used by another connection.")),
                     ("kind", string_enum(&KINDS, "Database engine.")),
                     ("uri", string("Connection URI without a password, instead of the fields (e.g. postgresql://app@db.local:5432/shop).")),
-                    ("host", string("Host name or address (not SQLite).")),
+                    ("host", string("Host name or address (not SQLite or DuckDB).")),
                     ("port", integer("Port, 1 to 65535; leave out for the engine's default.")),
                     ("database", string("Database name (Redis: the database number).")),
                     ("user", string("User name.")),
-                    ("path", string("SQLite: absolute path of the database file.")),
+                    ("path", string("SQLite or DuckDB: absolute path of the database file.")),
                     ("password", string("Password to save in the credential store; never shown to the user or logged.")),
                     ("connection_type", string("Id or name of a connection type; default development.")),
+                    ("ssl", boolean("Encrypt the connection with TLS (true: `require`, on MongoDB `verify_full`) or not (false: `disable`); not SQLite or DuckDB. For the finer choice use `options.tls`; the two must agree when both are given.")),
                     (
                         "options",
                         object(
-                            vec![(
-                                "tls",
-                                string_enum(
-                                    &["disable", "require", "verify_full"],
-                                    "TLS mode (not SQLite). MongoDB takes only disable and verify_full.",
+                            vec![
+                                (
+                                    "tls",
+                                    string_enum(
+                                        &["disable", "require", "verify_full"],
+                                        "TLS mode (not SQLite or DuckDB). MongoDB takes only disable and verify_full.",
+                                    ),
                                 ),
-                            )],
+                                ("ssl", boolean("The same as the request's `ssl`.")),
+                            ],
                             &[],
                         ),
                     ),
@@ -924,13 +1058,13 @@ fn spec_for(tool: ToolName, transactions: bool) -> ToolSpec {
         },
         ToolName::DuplicateConnection => ToolSpec {
             name: tool.as_str(),
-            description: "Copy a saved connection under a new name. The user is asked to approve every \
+            description: concat!("Copy a saved connection under a new name. The user is asked to approve every \
                 call; a refusal or a decline is final. The copy has the same address, options and \
                 type and its saved password (when the original has one); it does not get the \
                 original's own access setting, so what you may do on it follows its connection type, \
                 and the call is refused when that would be more than you may do on the original. The \
                 copy's SSH tunnel secrets are not copied. The name must not be in use \
-                (case-insensitive).",
+                (case-insensitive).", refusal_text!()),
             input_schema: object(
                 vec![
                     connection.clone(),
@@ -943,21 +1077,21 @@ fn spec_for(tool: ToolName, transactions: bool) -> ToolSpec {
         },
         ToolName::RemoveConnection => ToolSpec {
             name: tool.as_str(),
-            description: "Remove a saved connection from tablex, with its saved passwords and pinned \
+            description: concat!("Remove a saved connection from tablex, with its saved passwords and pinned \
                 objects, and close your session on it. The user is asked to approve every call, and \
                 the question says when the connection is a production one; a refusal or a decline is \
-                final. It cannot be undone.",
+                final. It cannot be undone.", refusal_text!()),
             input_schema: object(vec![connection.clone()], &["connection_id"]),
             output_schema: connection_change_output(),
             example: json!({"connection_id": "c1"}),
         },
         ToolName::ExecuteRedisCommand => ToolSpec {
             name: tool.as_str(),
-            description: "Run one Redis command line on a Redis connection. Reads need access `read`; a command \
+            description: concat!("Run one Redis command line on a Redis connection. Reads need access `read`; a command \
                 that changes data needs `read_write` and may be put to the user for approval when the connection \
                 allows it. A refusal or a decline is final for this request: do not retry the command or reword it \
                 to get around it, tell the user instead. Some commands (KEYS, CONFIG, EVAL, FLUSHALL, ...) are \
-                never allowed. FLUSHDB is dangerous: see execute_query.",
+                never allowed. FLUSHDB is dangerous: see execute_query.", refusal_text!()),
             input_schema: object(
                 vec![
                     connection,
@@ -1284,16 +1418,16 @@ mod tests {
             ]
         );
         // Off by default: neither the tools nor `transaction_id` exist for the model.
-        let plain = tool_specs_for(false, false, false);
+        let plain = tool_specs_for(false, false, false, false);
         assert_eq!(plain.len(), 19);
-        assert_eq!(tool_specs_for(true, false, false).len(), 22);
-        let with_app: Vec<_> = tool_specs_for(false, true, false).iter().map(|spec| spec.name).collect();
+        assert_eq!(tool_specs_for(true, false, false, false).len(), 22);
+        let with_app: Vec<_> = tool_specs_for(false, true, false, false).iter().map(|spec| spec.name).collect();
         assert_eq!(with_app.len(), 21);
         assert_eq!(&with_app[19..], ["open_table", "execute_and_show"]);
-        let with_admin: Vec<_> = tool_specs_for(false, false, true).iter().map(|spec| spec.name).collect();
+        let with_admin: Vec<_> = tool_specs_for(false, false, true, false).iter().map(|spec| spec.name).collect();
         assert_eq!(with_admin.len(), 22);
         assert_eq!(&with_admin[19..], ["add_connection", "duplicate_connection", "remove_connection"]);
-        assert_eq!(tool_specs_for(true, true, true).len(), 27);
+        assert_eq!(tool_specs_for(true, true, true, false).len(), 27);
         let execute = plain.iter().find(|spec| spec.name == "execute_query").unwrap();
         assert!(execute.input_schema["properties"].get("transaction_id").is_none());
         assert!(!execute.description.contains("transaction"));
@@ -1327,9 +1461,8 @@ mod tests {
             let example = spec.example.clone();
             match ToolName::parse(spec.name).unwrap() {
                 ToolName::ListConnections => parses::<ListConnectionsRequest>(example),
-                ToolName::OpenSession | ToolName::CloseSession => {
-                    parses::<ConnectionRequest>(example)
-                }
+                ToolName::OpenSession => parses::<OpenSessionRequest>(example),
+                ToolName::CloseSession => parses::<CloseSessionRequest>(example),
                 ToolName::ListNamespaces => parses::<ListNamespacesRequest>(example),
                 ToolName::ListTables => parses::<ListTablesRequest>(example),
                 ToolName::DescribeTable => parses::<DescribeTableRequest>(example),
@@ -1477,6 +1610,8 @@ mod tests {
                     database: Some("d".into()),
                     schema: Some("s".into()),
                     budget: Some(10),
+                    tables: Some(vec!["t".into()]),
+                    max_tables: Some(5),
                 })
                 .unwrap(),
             ),
@@ -1489,6 +1624,9 @@ mod tests {
                     row_limit: Some(1),
                     dangerous: Some(true),
                     transaction_id: Some("tx-1".into()),
+                    lock_timeout_secs: Some(5),
+                    cell_char_offset: Some(2),
+                    cell_char_limit: Some(3),
                 })
                 .unwrap(),
             ),
@@ -1502,6 +1640,9 @@ mod tests {
                     continue_on_error: Some(false),
                     use_transaction: Some(false),
                     transaction_id: Some("tx-1".into()),
+                    lock_timeout_secs: Some(5),
+                    cell_char_offset: Some(2),
+                    cell_char_limit: Some(3),
                 })
                 .unwrap(),
             ),
@@ -1638,10 +1779,12 @@ mod tests {
             validate_request(&spec.input_schema, &request)
                 .unwrap_or_else(|e| panic!("{}: {e}", spec.name));
             let mut have: Vec<&String> = request.as_object().unwrap().keys().collect();
+            // `session_id` is read from the arguments by the layer, not by the typed requests.
             let mut want: Vec<&String> = spec.input_schema["properties"]
                 .as_object()
                 .unwrap()
                 .keys()
+                .filter(|name| name.as_str() != "session_id")
                 .collect();
             have.sort();
             want.sort();

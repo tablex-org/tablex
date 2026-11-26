@@ -50,6 +50,7 @@ struct Live {
     catalog: Arc<FakeCatalog>,
     approver: Arc<ScriptedApprover>,
     raw: Arc<dyn Session>,
+    provider: Arc<DriverProvider>,
     kind: ConnectionKind,
     /// Statements to run (outside the policy) when the test ends, with their database.
     cleanup: Vec<(String, Option<String>)>,
@@ -68,8 +69,9 @@ impl Live {
         let catalog = FakeCatalog::new(vec![connection(ID, kind, Some(access))]);
         let approver = ScriptedApprover::new(ApprovalDecision::Approve, true);
         let layer = Arc::new(
-            ToolLayer::new(catalog.clone(), provider, "live-test")
+            ToolLayer::new(catalog.clone(), provider.clone(), "live-test")
                 .with_transactions()
+                .with_pinned_sessions()
                 .with_approver(approver.clone()),
         );
         Self {
@@ -77,6 +79,7 @@ impl Live {
             catalog,
             approver,
             raw,
+            provider,
             kind,
             cleanup: Vec::new(),
         }
@@ -1033,10 +1036,14 @@ fn mongodb_read_only_tools() {
         "{collections}"
     );
 
-    // The SQL tools point to the MongoDB ones.
+    // SQL is not a MongoDB command (execute_query says what it takes), and the other SQL tools
+    // point to the MongoDB ones.
     let sql = live.sql("SELECT 1", json!({}));
-    assert_eq!(code(&sql), "agent.unsupported");
-    assert!(sql.to_text().contains("mongo_find"), "{}", sql.to_text());
+    assert_eq!(code(&sql), "agent.invalid_arguments");
+    assert!(sql.to_text().contains("starts with `db.`"), "{}", sql.to_text());
+    let batch = live.call("execute_batch", json!({"connection_id": ID, "script": "SELECT 1"}));
+    assert_eq!(code(&batch), "agent.unsupported");
+    assert!(batch.to_text().contains("mongo_find"), "{}", batch.to_text());
 
     // A command the server is still working on stops when the call is cancelled.
     let token = CancelToken::new();
@@ -1199,6 +1206,614 @@ fn mongodb_writes_in_a_throwaway_database() {
     assert_eq!(count(json!({})), 0);
 }
 
+/// The documents of an `execute_query` result on MongoDB (one JSON text per row).
+fn shell_documents(result: &Value) -> Vec<Value> {
+    result["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| serde_json::from_str(row[0].as_str().unwrap()).unwrap())
+        .collect()
+}
+
+#[test]
+#[ignore = "needs TABLEX_TEST_MONGO_URI"]
+fn mongodb_shell_commands_in_a_throwaway_database() {
+    let Ok(uri) = std::env::var("TABLEX_TEST_MONGO_URI") else {
+        return;
+    };
+    let database = unique("tablex_agent_shell");
+    let _drop = DropMongoDatabase {
+        uri: uri.clone(),
+        database: database.clone(),
+    };
+    let live = Live::new(ConnectionKind::MongoDb, "dbengine-mongo", &uri, AgentAccess::ReadWrite);
+    let run = |statement: &str, extra: Value| {
+        let mut args = json!({"connection_id": ID, "database": database, "statement": statement});
+        for (key, value) in extra.as_object().into_iter().flatten() {
+            args[key] = value.clone();
+        }
+        live.call("execute_query", args)
+    };
+    let ok = |statement: &str| match run(statement, json!({})) {
+        ToolOutcome::Success(value) => value,
+        ToolOutcome::Failure(error) => panic!("{statement}: {error:?}"),
+    };
+    let danger = |statement: &str| match run(statement, json!({"dangerous": true})) {
+        ToolOutcome::Success(value) => value,
+        ToolOutcome::Failure(error) => panic!("{statement}: {error:?}"),
+    };
+    let names = |statement: &str| -> Vec<String> {
+        let mut names: Vec<String> = shell_documents(&ok(statement))
+            .iter()
+            .map(|document| document["name"].as_str().unwrap().to_owned())
+            .collect();
+        names.sort();
+        names
+    };
+    let opened = live.ok("open_session", json!({"connection_id": ID}));
+    assert_eq!(opened["language"], "mongo");
+
+    // Writes: insert (typed values); a duplicate key is a write error in the reply.
+    let inserted = ok("db.orders.insertMany([{_id: 1, status: 'open', total: 10, placed: ISODate('2024-01-31T00:00:00Z')}, {_id: 2, status: 'open', total: 20}, {_id: 3, status: 'paid', total: 30}])");
+    assert_eq!(inserted["affected_rows"], 3, "{inserted}");
+    let duplicate = ok("db.orders.insertOne({_id: 1})");
+    assert_eq!(shell_documents(&duplicate)[0]["writeErrors"][0]["code"], 11000, "{duplicate}");
+
+    // Reads: find with a cursor chain, typed values, counts, distinct, a cut.
+    let found = ok("db.orders.find({total: {$gte: 20}}, {total: 1}).sort({total: -1}).limit(5)");
+    assert_eq!(shell_documents(&found), [json!({"_id": 3, "total": 30}), json!({"_id": 2, "total": 20})]);
+    let typed = ok("db.getCollection('orders').findOne({placed: {$lt: ISODate('2025-01-01')}})");
+    assert_eq!(shell_documents(&typed)[0]["_id"], 1);
+    assert_eq!(ok("db.orders.countDocuments({status: 'open'})")["rows"], json!([["2"]]));
+    assert_eq!(ok("db.orders.estimatedDocumentCount()")["rows"], json!([["3"]]));
+    assert_eq!(ok("db.orders.find({}).count()")["rows"], json!([["3"]]));
+    assert_eq!(shell_documents(&ok("db.orders.distinct('status')")).len(), 2);
+    let cut = match run("db.orders.find({}).sort({_id: 1})", json!({"row_limit": 2})) {
+        ToolOutcome::Success(value) => value,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!((cut["row_count"].as_u64(), cut["truncated"].as_bool()), (Some(2), Some(true)), "{cut}");
+    let exact = ok("db.orders.find({}).limit(2)");
+    assert_eq!((exact["row_count"].as_u64(), exact["truncated"].as_bool()), (Some(2), Some(false)), "{exact}");
+    let aggregated = ok("db.orders.aggregate([{$group: {_id: '$status', n: {$sum: 1}}}, {$sort: {_id: 1}}])");
+    assert_eq!(shell_documents(&aggregated), [json!({"_id": "open", "n": 2}), json!({"_id": "paid", "n": 1})]);
+
+    // Indexes: the case that started it. createIndex, getIndexes, describe_table, the plan, the sizes.
+    ok("db.orders.createIndex({status: 1, total: -1})");
+    ok("db.orders.createIndex({total: 1}, {name: 'by_total', unique: true})");
+    assert_eq!(names("db.getCollection('orders').getIndexes()"), ["_id_", "by_total", "status_1_total_-1"]);
+    let described = live.ok("describe_table", json!({"connection_id": ID, "database": database, "table": "orders"}));
+    let mut described_names: Vec<&str> = described["indexes"].as_array().unwrap().iter().map(|i| i["name"].as_str().unwrap()).collect();
+    described_names.sort_unstable();
+    assert_eq!(described_names, ["_id_", "by_total", "status_1_total_-1"], "{described}");
+    assert_eq!(described["unique_columns"], json!(["total"]));
+    assert_eq!(described["primary_key"], json!(["_id"]));
+    assert!(described["ddl"].as_str().unwrap().contains("createIndex"), "{described}");
+    let plan = shell_documents(&ok("db.orders.find({status: 'open'}).explain('queryPlanner')"));
+    assert!(plan[0]["queryPlanner"].is_object(), "{plan:?}");
+    assert!(shell_documents(&ok("db.orders.stats()"))[0]["count"].as_u64().is_some());
+    assert!(shell_documents(&ok("db.orders.storageSize()"))[0]["storageSize"].as_u64().is_some());
+    assert!(names("show collections").contains(&"orders".to_owned()));
+    assert!(shell_documents(&ok("show dbs")).iter().any(|d| d["name"] == "admin"));
+    assert!(shell_documents(&ok("db.version()"))[0]["version"].as_str().unwrap().contains('.'));
+    let versions = ok("db.getSiblingDB('admin').getCollection('system.version').countDocuments({})");
+    assert!(versions["rows"][0][0].as_str().unwrap().parse::<u64>().unwrap() >= 1, "{versions}");
+    assert_eq!(ok("db.stats()")["row_count"], 1);
+
+    // Updates, replace, find-and-modify, bulk write, deletes.
+    let one = ok("db.orders.updateOne({status: 'open'}, {$set: {status: 'paid'}})");
+    assert_eq!(shell_documents(&one)[0], json!({"n": 1, "nModified": 1}), "{one}");
+    let many = ok("db.orders.updateMany({status: 'paid'}, [{$set: {total: {$add: ['$total', 1]}}}])");
+    assert_eq!(shell_documents(&many)[0]["nModified"], 2, "{many}");
+    ok("db.orders.replaceOne({_id: 3}, {status: 'closed', total: 5})");
+    let after = ok("db.orders.findOneAndUpdate({_id: 3}, {$set: {total: 6}}, {returnDocument: 'after'})");
+    assert_eq!(shell_documents(&after)[0]["value"], json!({"_id": 3, "status": "closed", "total": 6}), "{after}");
+    let removed = ok("db.orders.findOneAndDelete({_id: 3})");
+    assert_eq!(shell_documents(&removed)[0]["value"]["_id"], 3);
+    let bulk = ok("db.orders.bulkWrite([{insertOne: {document: {_id: 10, total: 100}}}, {insertOne: {document: {_id: 11, total: 110}}}, {updateOne: {filter: {_id: 10}, update: {$set: {total: 101}}}}, {deleteOne: {filter: {_id: 11}}}])");
+    assert_eq!(shell_documents(&bulk)[0], json!({"n": 4, "nModified": 1}), "{bulk}");
+    assert_eq!(ok("db.orders.countDocuments({_id: {$gte: 10}})")["rows"], json!([["1"]]));
+    assert_eq!(shell_documents(&ok("db.orders.deleteOne({_id: 10})"))[0]["n"], 1);
+
+    // Dangerous: refused without the flag (nothing changes, nobody is asked), asked about with it.
+    let asked_before = live.approver.asked.lock().unwrap().len();
+    for statement in [
+        "db.orders.deleteMany({})",
+        "db.orders.dropIndex('by_total')",
+        "db.orders.drop()",
+        "db.orders.renameCollection('renamed')",
+        "db.orders.aggregate([{$out: 'copy'}])",
+    ] {
+        assert_eq!(code(&run(statement, json!({}))), "agent.dangerous_refused", "{statement}");
+    }
+    assert_eq!(live.approver.asked.lock().unwrap().len(), asked_before, "nobody was asked");
+    assert_eq!(ok("db.orders.countDocuments({})")["rows"], json!([["2"]]));
+    danger("db.orders.aggregate([{$match: {}}, {$out: 'copy'}])");
+    assert_eq!(ok("db.copy.countDocuments({})")["rows"], json!([["2"]]));
+    danger("db.orders.dropIndex('by_total')");
+    assert_eq!(names("db.orders.getIndexes()"), ["_id_", "status_1_total_-1"]);
+    danger("db.copy.renameCollection('renamed')");
+    assert_eq!(names("show collections"), ["orders", "renamed"]);
+    danger("db.renamed.drop()");
+    assert_eq!(names("show collections"), ["orders"]);
+    let wiped = danger("db.orders.deleteMany({})");
+    assert_eq!(shell_documents(&wiped)[0]["n"], 2);
+    let asked = live.approver.asked.lock().unwrap().clone();
+    assert_eq!(asked.iter().filter(|(_, danger)| danger.is_some()).count(), 5, "{asked:?}");
+
+    // A schema digest from a sample, and a filter that matches every document is dangerous.
+    ok("db.digest_probe.insertMany([{_id: 1, status: 'a', n: 1, owner: {name: 'x'}}, {_id: 2, status: 'b'}])");
+    let digest = live.ok("get_schema_context", json!({"connection_id": ID, "database": database}));
+    let text = digest["text"].as_str().unwrap();
+    for part in ["digest_probe", "status", "owner.name", "int", "string"] {
+        assert!(text.contains(part), "{part}: {text}");
+    }
+    let one = live.ok("get_schema_context", json!({"connection_id": ID, "database": database, "tables": ["digest_probe"], "max_tables": 1}));
+    assert_eq!(one["tables_included"], 1, "{one}");
+    for statement in ["db.digest_probe.deleteMany({_id: {$exists: true}})", "db.digest_probe.deleteMany({$expr: {$eq: [1, 1]}})", "db.digest_probe.updateMany({$or: [{n: 1}, {n: {$ne: 1}}]}, {$set: {n: 0}})"] {
+        assert_eq!(code(&run(statement, json!({}))), "agent.dangerous_refused", "{statement}");
+    }
+    assert_eq!(ok("db.digest_probe.countDocuments({})")["rows"], json!([["2"]]));
+    let wiped = danger("db.digest_probe.deleteMany({_id: {$exists: true}})");
+    assert_eq!(shell_documents(&wiped)[0]["n"], 2, "{wiped}");
+
+    // Never run: nothing reaches the server, whatever the flag says.
+    for statement in ["db.runCommand({ping: 1})", "db.createUser({user: 'u', pwd: 'p', roles: []})"] {
+        let refused = run(statement, json!({"dangerous": true}));
+        assert_eq!(code(&refused), "agent.dangerous_refused", "{refused:?}");
+        assert!(refused.to_text().contains("tablex app"), "{}", refused.to_text());
+    }
+    // The server's own error comes back with its name.
+    let bad = run("db.orders.find({$nope: 1})", json!({}));
+    assert_eq!(code(&bad), "query.failed", "{bad:?}");
+
+    // Below `read_write` a change is refused and reads still run; below `read` nothing does,
+    // except describe_table, which needs `schema_only`.
+    live.catalog.update(ID, |info| info.agent_access = Some(AgentAccess::Read));
+    assert_eq!(code(&run("db.orders.insertOne({_id: 7})", json!({}))), "agent.write_refused");
+    assert_eq!(ok("db.orders.countDocuments({})")["rows"], json!([["0"]]));
+    live.catalog.update(ID, |info| info.agent_access = Some(AgentAccess::SchemaOnly));
+    assert_eq!(code(&run("db.orders.find({})", json!({}))), "agent.access_denied");
+    live.ok("describe_table", json!({"connection_id": ID, "database": database, "table": "orders"}));
+}
+
+/// A user holding only the `read` role lists indexes and reads stats: no special role is needed.
+/// Needs a mongod with authentication and two URIs: TABLEX_TEST_MONGO_URI (an administrator) and
+/// TABLEX_TEST_MONGO_READER_URI (a user with the `read` role on the database
+/// `tablex_reader_probe` and nothing else). The administrator creates the data, the reader reads.
+#[test]
+#[ignore = "needs TABLEX_TEST_MONGO_URI and TABLEX_TEST_MONGO_READER_URI"]
+fn mongodb_shell_reads_with_a_read_only_user() {
+    let (Ok(admin), Ok(reader)) = (
+        std::env::var("TABLEX_TEST_MONGO_URI"),
+        std::env::var("TABLEX_TEST_MONGO_READER_URI"),
+    ) else {
+        return;
+    };
+    let database = "tablex_reader_probe";
+    let _drop = DropMongoDatabase {
+        uri: admin.clone(),
+        database: database.into(),
+    };
+    {
+        let setup = Live::new(ConnectionKind::MongoDb, "dbengine-mongo", &admin, AgentAccess::ReadWrite);
+        setup.ok("open_session", json!({"connection_id": ID}));
+        for statement in [
+            "db.orders.insertMany([{a: 1}, {a: 2}])",
+            "db.orders.createIndex({a: 1}, {unique: true})",
+        ] {
+            let outcome = setup.call(
+                "execute_query",
+                json!({"connection_id": ID, "database": database, "statement": statement}),
+            );
+            assert_eq!(code(&outcome), "ok", "{statement}: {outcome:?}");
+        }
+    }
+    let live = Live::new(ConnectionKind::MongoDb, "dbengine-mongo", &reader, AgentAccess::Read);
+    live.ok("open_session", json!({"connection_id": ID}));
+    let run = |statement: &str| {
+        live.call(
+            "execute_query",
+            json!({"connection_id": ID, "database": database, "statement": statement}),
+        )
+    };
+    for statement in [
+        "db.getCollection('orders').getIndexes()",
+        "db.orders.stats()",
+        "db.orders.find({}).explain()",
+        "db.orders.distinct('a')",
+        "show collections",
+        "db.orders.countDocuments({})",
+    ] {
+        let outcome = run(statement);
+        assert_eq!(code(&outcome), "ok", "{statement}: {outcome:?}");
+    }
+    let described = live.ok("describe_table", json!({"connection_id": ID, "database": database, "table": "orders"}));
+    assert_eq!(described["indexes"].as_array().unwrap().len(), 2, "{described}");
+    // With the access raised, the server's role still stops a change.
+    live.catalog.update(ID, |info| info.agent_access = Some(AgentAccess::ReadWrite));
+    let write = run("db.orders.insertOne({a: 3})");
+    assert!(
+        matches!(write, ToolOutcome::Failure(_)) || write.to_text().contains("writeErrors"),
+        "{write:?}"
+    );
+}
+
+/// The value of the one cell of a result (`rows[0][0]`).
+fn cell(outcome: &ToolOutcome) -> String {
+    match outcome {
+        ToolOutcome::Success(value) => value["rows"][0][0].as_str().unwrap_or("NULL").to_owned(),
+        ToolOutcome::Failure(error) => panic!("{error:?}"),
+    }
+}
+
+impl Live {
+    /// Runs `statement` on the pinned session `session` (optionally in `database`).
+    fn in_session(&self, session: &str, statement: &str, database: Option<&str>) -> ToolOutcome {
+        let mut extra = json!({"session_id": session});
+        if let Some(database) = database {
+            extra["database"] = json!(database);
+        }
+        self.sql(statement, extra)
+    }
+
+    fn pin(&self) -> String {
+        self.ok("open_session", json!({"connection_id": ID, "pinned": true}))["session_id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+}
+
+#[test]
+#[ignore = "needs TABLEX_TEST_PG_URI"]
+fn postgresql_pinned_sessions() {
+    let Ok(uri) = std::env::var("TABLEX_TEST_PG_URI") else {
+        return;
+    };
+    let database = database_of(&uri);
+    let schema = unique("tablex_agent_pin");
+    let mut live = Live::new(ConnectionKind::PostgreSql, "dbengine-postgres", &uri, AgentAccess::ReadWrite);
+    live.cleanup = vec![(format!("DROP SCHEMA IF EXISTS {schema} CASCADE"), None)];
+    live.ok("open_session", json!({"connection_id": ID}));
+    for statement in [
+        format!("CREATE SCHEMA {schema}"),
+        format!("CREATE TABLE {schema}.t(a integer)"),
+        format!("INSERT INTO {schema}.t VALUES (1), (2)"),
+    ] {
+        let outcome = live.sql(&statement, json!({"database": database}));
+        assert_eq!(code(&outcome), "ok", "{statement}: {outcome:?}");
+    }
+    let (a, b) = (live.pin(), live.pin());
+    let on = |session: &str, statement: &str| live.in_session(session, statement, Some(&database));
+    let default_schema = cell(&on(&b, "SELECT current_schema()"));
+    assert_eq!(default_schema, "public");
+
+    // SET persists in its session across calls, and is invisible to the others and to the shared one.
+    assert_eq!(code(&on(&a, &format!("SET search_path TO {schema}, public"))), "ok");
+    assert_eq!(cell(&on(&a, "SELECT current_schema()")), schema);
+    assert_eq!(cell(&on(&a, "SELECT count(*) FROM t")), "2", "an unqualified name finds the table");
+    assert_eq!(cell(&on(&b, "SELECT current_schema()")), "public");
+    assert_ne!(code(&on(&b, "SELECT count(*) FROM t")), "ok", "the other session has no such table in its path");
+    assert_eq!(cell(&live.sql("SELECT current_schema()", json!({"database": database}))), "public");
+    // A time zone and a lock timeout too, each its own session's.
+    assert_eq!(code(&on(&a, "SET TIME ZONE 'Asia/Tokyo'")), "ok");
+    assert_eq!(code(&on(&a, "SET lock_timeout = '7s'")), "ok");
+    assert_eq!(cell(&on(&a, "SHOW TimeZone")), "Asia/Tokyo");
+    assert_eq!(cell(&on(&a, "SHOW lock_timeout")), "7s");
+    assert_ne!(cell(&on(&b, "SHOW TimeZone")), "Asia/Tokyo");
+    assert_eq!(cell(&on(&b, "SHOW lock_timeout")), "0");
+    // RESET puts one back to what the session started with, not to another's value.
+    assert_eq!(code(&on(&a, "RESET lock_timeout")), "ok");
+    assert_eq!(cell(&on(&a, "SHOW lock_timeout")), "0");
+    assert_eq!(code(&on(&a, "SET lock_timeout = '3s'")), "ok");
+    assert_eq!(cell(&on(&a, "SHOW lock_timeout")), "3s");
+
+    // Nothing that changes identity, privilege or the read-only mode reaches the server.
+    for statement in [
+        "SET ROLE postgres",
+        "SET SESSION AUTHORIZATION postgres",
+        "RESET ROLE",
+        "SET default_transaction_read_only = off",
+        "SET SESSION transaction_read_only = off",
+        "SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE",
+        "SET session_replication_role = replica",
+        "RESET ALL",
+        // PostgreSQL nests block comments: the server reads this as `SET ROLE postgres`.
+        "SET /* /* */ search_path TO x /* */ */ ROLE postgres",
+        "SET /* /* */ search_path TO x /* */ */ default_transaction_read_only = off",
+    ] {
+        let outcome = on(&a, statement);
+        assert_eq!(code(&outcome), "agent.dangerous_refused", "{statement}: {outcome:?}");
+    }
+    assert_eq!(cell(&on(&a, "SELECT current_user = session_user")), "true");
+    let hidden = on(&a, "SELECT set_config('default_transaction_read_only', 'off', false)");
+    assert_eq!(code(&hidden), "agent.blocked_function", "{hidden:?}");
+    // The session still has what it set (nothing was reset by the refusals).
+    assert_eq!(cell(&on(&a, "SHOW lock_timeout")), "3s");
+
+    // Reads stay read-only inside the session, whatever the session set; a write is approved.
+    let read = on(&a, &format!("SELECT count(*) FROM {schema}.t"));
+    assert_eq!(read.to_json()["read_only_enforced"], true, "{read:?}");
+    let hidden_write = live.raw_run("SELECT 1", Some(&database), true);
+    assert!(hidden_write.is_ok());
+    live.catalog.update(ID, |info| info.agent_access = Some(AgentAccess::Read));
+    let refused = on(&a, &format!("INSERT INTO {schema}.t VALUES (3)"));
+    assert_eq!(code(&refused), "agent.write_refused", "{refused:?}");
+    assert_eq!(code(&on(&a, "SET search_path TO public")), "ok", "a SET needs only `read`");
+    assert_eq!(cell(&on(&a, &format!("SELECT count(*) FROM {schema}.t"))), "2");
+    live.catalog.update(ID, |info| info.agent_access = Some(AgentAccess::ReadWrite));
+    let asked = live.approver.asked.lock().unwrap().len();
+    assert_eq!(code(&on(&a, &format!("INSERT INTO {schema}.t VALUES (3)"))), "ok");
+    assert_eq!(live.approver.asked.lock().unwrap().len(), asked + 1);
+
+    // A long cell is read in windows.
+    let window = live.sql("SELECT repeat('0123456789', 500)", json!({"database": database, "cell_char_offset": 4990, "cell_char_limit": 20}));
+    assert_eq!(cell(&window), "0123456789… [chars 4990-5000 of 5000]");
+    let window = live.sql("SELECT repeat('0123456789', 500)", json!({"database": database, "cell_char_offset": 10, "cell_char_limit": 5}));
+    assert_eq!(cell(&window), "01234… [chars 10-15 of 5000; next cell_char_offset 15]");
+
+    // Closing drops the connection: a new session starts from the defaults, nothing leaks.
+    live.ok("close_session", json!({"session_id": a}));
+    let c = live.pin();
+    assert_eq!(cell(&on(&c, "SHOW lock_timeout")), "0");
+    assert_eq!(cell(&on(&c, "SHOW search_path")), "\"$user\", public");
+    assert!(live.sql("SELECT 1", json!({"database": database, "session_id": a})).to_text().contains("unknown session"));
+    // The audit of the session statements is the layer's; the server saw each session as a connection.
+    let sessions = cell(&live.sql("SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()", json!({"database": database})));
+    assert!(sessions.parse::<u32>().unwrap() >= 3, "{sessions}");
+}
+
+#[test]
+#[ignore = "needs TABLEX_TEST_PG_URI"]
+fn postgresql_lists_the_comment_of_each_table_with_the_table() {
+    let Ok(uri) = std::env::var("TABLEX_TEST_PG_URI") else {
+        return;
+    };
+    let database = database_of(&uri);
+    let schema = unique("tablex_agent_comment");
+    let mut live = Live::new(ConnectionKind::PostgreSql, "dbengine-postgres", &uri, AgentAccess::ReadWrite);
+    live.cleanup = vec![(format!("DROP SCHEMA IF EXISTS {schema} CASCADE"), None)];
+    live.ok("open_session", json!({"connection_id": ID}));
+    for statement in [
+        format!("CREATE SCHEMA {schema}"),
+        format!("CREATE TABLE {schema}.commented(a integer)"),
+        format!("CREATE TABLE {schema}.plain(a integer)"),
+        format!("CREATE VIEW {schema}.v AS SELECT a FROM {schema}.commented"),
+        format!("COMMENT ON TABLE {schema}.commented IS 'one row per order'"),
+        format!("COMMENT ON VIEW {schema}.v IS 'the view'"),
+    ] {
+        let outcome = live.sql(&statement, json!({"database": database}));
+        assert_eq!(code(&outcome), "ok", "{statement}: {outcome:?}");
+    }
+    let listed = live.ok("list_tables", json!({"connection_id": ID, "database": database, "schema": schema}));
+    let tables = listed["tables"].as_array().unwrap();
+    let comment = |name: &str| tables.iter().find(|t| t["name"] == name).unwrap_or_else(|| panic!("{name}: {listed}")).get("comment").cloned();
+    assert_eq!(comment("commented"), Some(json!("one row per order")));
+    assert_eq!(comment("v"), Some(json!("the view")));
+    assert_eq!(comment("plain"), None);
+}
+
+#[test]
+#[ignore = "needs TABLEX_TEST_MARIADB_URI"]
+fn mariadb_pinned_sessions_transactions_and_comments() {
+    mysql_family_pinned(ConnectionKind::MariaDb, "dbengine-mariadb", "TABLEX_TEST_MARIADB_URI");
+}
+
+#[test]
+#[ignore = "needs TABLEX_TEST_MYSQL_URI"]
+fn mysql_pinned_sessions_transactions_and_comments() {
+    mysql_family_pinned(ConnectionKind::MySql, "dbengine-mysql", "TABLEX_TEST_MYSQL_URI");
+}
+
+fn mysql_family_pinned(kind: ConnectionKind, package: &'static str, env: &str) {
+    let Ok(uri) = std::env::var(env) else {
+        return;
+    };
+    let scratch = unique("tablex_agent_pin");
+    let mut live = Live::new(kind, package, &uri, AgentAccess::ReadWrite);
+    live.cleanup = vec![(format!("DROP DATABASE IF EXISTS {scratch}"), None)];
+    live.ok("open_session", json!({"connection_id": ID}));
+    for statement in [
+        format!("CREATE DATABASE {scratch}"),
+        format!("CREATE TABLE {scratch}.t(a int PRIMARY KEY, b varchar(20)) COMMENT 'one row per thing'"),
+        format!("CREATE TABLE {scratch}.u(a int)"),
+        format!("INSERT INTO {scratch}.t VALUES (1, 'x'), (2, 'y')"),
+        format!("CREATE VIEW {scratch}.v AS SELECT a FROM {scratch}.t"),
+    ] {
+        let outcome = live.sql(&statement, json!({}));
+        assert_eq!(code(&outcome), "ok", "{statement}: {outcome:?}");
+    }
+
+    // The comment of a table comes with the list, and a view has none.
+    let listed = live.ok("list_tables", json!({"connection_id": ID, "database": scratch}));
+    let tables = listed["tables"].as_array().unwrap();
+    let find = |name: &str| tables.iter().find(|t| t["name"] == name).unwrap_or_else(|| panic!("{name}: {listed}"));
+    assert_eq!(find("t")["comment"], "one row per thing");
+    assert!(find("u").get("comment").is_none());
+    assert!(find("v").get("comment").is_none(), "a view's column holds the word VIEW: {listed}");
+
+    // USE and SET persist in their session only.
+    let (a, b) = (live.pin(), live.pin());
+    let on = |session: &str, statement: &str| live.in_session(session, statement, None);
+    assert_eq!(code(&on(&a, &format!("USE {scratch}"))), "ok");
+    assert_eq!(cell(&on(&a, "SELECT DATABASE()")), scratch);
+    assert_eq!(cell(&on(&a, "SELECT count(*) FROM t")), "2", "an unqualified name finds the table");
+    assert_ne!(cell(&on(&b, "SELECT DATABASE()")), scratch);
+    assert_ne!(code(&on(&b, "SELECT count(*) FROM t")), "ok");
+    assert_eq!(code(&on(&a, "SET @n = 41")), "ok");
+    assert_eq!(cell(&on(&a, "SELECT @n + 1")), "42");
+    assert_eq!(cell(&on(&b, "SELECT @n")), "NULL");
+    assert_eq!(cell(&live.sql("SELECT @n", json!({}))), "NULL");
+    assert_eq!(code(&on(&a, "SET time_zone = '+05:00'")), "ok");
+    assert_eq!(cell(&on(&a, "SELECT @@session.time_zone")), "+05:00");
+    assert_ne!(cell(&on(&b, "SELECT @@session.time_zone")), "+05:00");
+    assert_eq!(code(&on(&a, "SET lock_wait_timeout = 9")), "ok");
+    assert_eq!(cell(&on(&a, "SELECT @@session.lock_wait_timeout")), "9");
+    assert_eq!(cell(&on(&a, "SELECT @@global.lock_wait_timeout")), cell(&on(&b, "SELECT @@session.lock_wait_timeout")));
+    // The SET is not the server's own change: GLOBAL, PERSIST and the rest are refused before the server.
+    for statement in [
+        "SET GLOBAL lock_wait_timeout = 1",
+        "SET @@global.lock_wait_timeout = 1",
+        "SET SESSION TRANSACTION READ WRITE",
+        "SET SESSION TRANSACTION READ ONLY",
+        "SET sql_log_bin = 0",
+        "SET sql_mode = ''",
+        "SET autocommit = 0",
+        "SET ROLE admin",
+        "SET PASSWORD = 'x'",
+        "SET foreign_key_checks = 0",
+        "SET @@session.transaction_read_only = 0",
+    ] {
+        let outcome = on(&a, statement);
+        assert_eq!(code(&outcome), "agent.dangerous_refused", "{statement}: {outcome:?}");
+    }
+    assert_eq!(cell(&on(&a, "SELECT @@global.lock_wait_timeout")), cell(&on(&b, "SELECT @@session.lock_wait_timeout")), "the server's own value is unchanged");
+    assert_eq!(cell(&on(&a, "SELECT @n")), "41", "the refusals did not disturb the session");
+
+    // Reads stay read-only in the session; a write is approved; at `read` it is refused.
+    let read = on(&a, "SELECT count(*) FROM t");
+    assert_eq!(read.to_json()["read_only_enforced"], true, "{read:?}");
+    live.catalog.update(ID, |info| info.agent_access = Some(AgentAccess::Read));
+    assert_eq!(code(&on(&a, "INSERT INTO t VALUES (3, 'z')")), "agent.write_refused");
+    assert_eq!(code(&on(&a, "SET @m = 1")), "ok");
+    live.catalog.update(ID, |info| info.agent_access = Some(AgentAccess::ReadWrite));
+    assert_eq!(code(&on(&a, "INSERT INTO t VALUES (3, 'z')")), "ok");
+    assert_eq!(cell(&live.sql(&format!("SELECT count(*) FROM {scratch}.t"), json!({}))), "3");
+
+    // Closing drops the connection: the next session has nothing of it.
+    live.ok("close_session", json!({"session_id": a}));
+    let c = live.pin();
+    assert_eq!(cell(&on(&c, "SELECT @n")), "NULL");
+    assert_ne!(cell(&on(&c, "SELECT DATABASE()")), scratch);
+
+    // Transactions: begin, a change that only the transaction sees, the commit question, a rollback.
+    let tx = live.ok("begin_transaction", json!({"connection_id": ID}))["transaction_id"].as_str().unwrap().to_owned();
+    let in_tx = |statement: &str| live.sql(statement, json!({"transaction_id": tx}));
+    assert_eq!(code(&in_tx(&format!("INSERT INTO {scratch}.t VALUES (10, 'tx')"))), "ok");
+    assert_eq!(cell(&in_tx(&format!("SELECT count(*) FROM {scratch}.t"))), "4", "the transaction sees its own change");
+    assert_eq!(cell(&live.sql(&format!("SELECT count(*) FROM {scratch}.t"), json!({}))), "3", "nobody else does");
+    let ddl = in_tx(&format!("CREATE TABLE {scratch}.w(a int)"));
+    assert_eq!(code(&ddl), "agent.unsupported", "{ddl:?}");
+    assert!(ddl.to_text().contains("COMMIT"), "{}", ddl.to_text());
+    let asked = live.approver.asked.lock().unwrap().len();
+    let committed = live.ok("commit_transaction", json!({"transaction_id": tx}));
+    assert_eq!(committed["committed"], true, "{committed}");
+    assert_eq!(live.approver.asked.lock().unwrap().len(), asked + 1, "the commit was put to the user");
+    assert_eq!(cell(&live.sql(&format!("SELECT count(*) FROM {scratch}.t"), json!({}))), "4");
+    let tx = live.ok("begin_transaction", json!({"connection_id": ID}))["transaction_id"].as_str().unwrap().to_owned();
+    assert_eq!(code(&live.sql(&format!("DELETE FROM {scratch}.t WHERE a = 10"), json!({"transaction_id": tx}))), "ok");
+    assert_eq!(cell(&live.sql(&format!("SELECT count(*) FROM {scratch}.t"), json!({"transaction_id": tx}))), "3");
+    let rolled = live.ok("rollback_transaction", json!({"transaction_id": tx}));
+    assert_eq!(rolled["rolled_back"], true);
+    assert_eq!(cell(&live.sql(&format!("SELECT count(*) FROM {scratch}.t"), json!({}))), "4", "the rollback undid the delete");
+    // A script as one transaction: committed, and rolled back on an error.
+    let script = live.ok("execute_batch", json!({"connection_id": ID, "use_transaction": true, "script": format!("INSERT INTO {scratch}.t VALUES (20, 'a'); INSERT INTO {scratch}.t VALUES (21, 'b')")}));
+    assert_eq!(script["transaction"], "committed", "{script}");
+    let failing = live.ok("execute_batch", json!({"connection_id": ID, "use_transaction": true, "script": format!("INSERT INTO {scratch}.t VALUES (30, 'a'); INSERT INTO {scratch}.t VALUES (1, 'duplicate key')")}));
+    assert_eq!(failing["transaction"], "rolled_back", "{failing}");
+    assert_eq!(cell(&live.sql(&format!("SELECT count(*) FROM {scratch}.t WHERE a = 30"), json!({}))), "0");
+}
+
+#[test]
+#[ignore = "needs TABLEX_TEST_MARIADB_URI"]
+fn mariadb_pinned_set_is_literal_only_and_functions_in_a_transaction_are_changes() {
+    mysql_family_set_and_functions(ConnectionKind::MariaDb, "dbengine-mariadb", "TABLEX_TEST_MARIADB_URI");
+}
+
+#[test]
+#[ignore = "needs TABLEX_TEST_MYSQL_URI"]
+fn mysql_pinned_set_is_literal_only_and_functions_in_a_transaction_are_changes() {
+    mysql_family_set_and_functions(ConnectionKind::MySql, "dbengine-mysql", "TABLEX_TEST_MYSQL_URI");
+}
+
+/// The review's attack strings against the real server: a `SET` that carries a second assignment
+/// after `NAMES`, a `--` that is no comment, a stored function in a `SET` value and in a read of a
+/// transaction. None of them changes the server; the function that writes is only reached with an
+/// approval, and is on the list of the commit question.
+fn mysql_family_set_and_functions(kind: ConnectionKind, package: &'static str, env: &str) {
+    let Ok(uri) = std::env::var(env) else {
+        return;
+    };
+    let scratch = unique("tablex_agent_fn");
+    let mut live = Live::new(kind, package, &uri, AgentAccess::ReadWrite);
+    live.cleanup = vec![(format!("DROP DATABASE IF EXISTS {scratch}"), None)];
+    live.ok("open_session", json!({"connection_id": ID}));
+    for statement in [
+        format!("CREATE DATABASE {scratch}"),
+        format!("CREATE TABLE {scratch}.counter(n int)"),
+        format!("INSERT INTO {scratch}.counter VALUES (0)"),
+    ] {
+        let outcome = live.sql(&statement, json!({}));
+        assert_eq!(code(&outcome), "ok", "{statement}: {outcome:?}");
+    }
+    // A function that writes: created outside the policy (the user's own database objects).
+    live.raw(
+        Language::Sql,
+        &format!("CREATE FUNCTION {scratch}.next_no() RETURNS int MODIFIES SQL DATA BEGIN UPDATE {scratch}.counter SET n = n + 1; RETURN (SELECT n FROM {scratch}.counter); END"),
+        None,
+    );
+    let counter = |live: &Live| cell(&live.sql(&format!("SELECT n FROM {scratch}.counter"), json!({})));
+    let function_exists = live
+        .raw_run(&format!("SELECT {scratch}.next_no()"), None, false)
+        .is_ok();
+    let session = live.pin();
+    let on = |statement: &str| live.in_session(&session, statement, None);
+    let foreign_key_checks = cell(&on("SELECT @@session.foreign_key_checks"));
+    let sql_log_bin = cell(&on("SELECT @@session.sql_log_bin"));
+
+    // The attack strings never reach the server, whatever the access.
+    for statement in [
+        "SET NAMES utf8mb4, foreign_key_checks = 0",
+        "SET NAMES utf8mb4, sql_log_bin = 0",
+        "SET NAMES utf8mb4, GLOBAL max_connections = 1",
+        "SET @a = 1--1, GLOBAL max_connections = 1",
+        r#"SET @x = "\" , @y = ", foreign_key_checks = 0, @z = "x""#,
+    ] {
+        let outcome = on(statement);
+        assert_eq!(code(&outcome), "agent.dangerous_refused", "{statement}: {outcome:?}");
+    }
+    for statement in ["SET NAMES gbk", "SET character_set_client = sjis"] {
+        assert_eq!(code(&on(statement)), "agent.unsupported", "{statement}");
+    }
+    assert_eq!(cell(&on("SELECT @@session.foreign_key_checks")), foreign_key_checks);
+    assert_eq!(cell(&on("SELECT @@session.sql_log_bin")), sql_log_bin);
+    // A function in a SET value is refused before the server: the counter does not move.
+    let before = counter(&live);
+    for statement in [format!("SET @n = {scratch}.next_no()"), "SET @n = (SELECT 1)".to_owned(), "SET @n = 1 + 1".to_owned()] {
+        let outcome = on(&statement);
+        assert_eq!(code(&outcome), "agent.unsupported", "{statement}: {outcome:?}");
+    }
+    assert_eq!(counter(&live), before);
+    assert_eq!(code(&on("SET NAMES utf8mb4, @n = 5")), "ok");
+    assert_eq!(cell(&on("SELECT @n")), "5");
+
+    // In a transaction a read that calls a function that is not a built-in is a change: asked, and
+    // on the commit list. A built-in read is not.
+    let tx = live.ok("begin_transaction", json!({"connection_id": ID}))["transaction_id"].as_str().unwrap().to_owned();
+    let asked = || live.approver.asked.lock().unwrap().len();
+    let start = asked();
+    assert_eq!(first_cell(&tx_sql(&live, &tx, &format!("SELECT upper('a'), count(*) FROM {scratch}.counter"))), "A");
+    assert_eq!(asked(), start, "a built-in is a read");
+    assert!(function_exists, "the test user can create a function in its scratch database");
+    {
+        let probed = counter(&live).parse::<u32>().unwrap();
+        let call = format!("SELECT {scratch}.next_no()");
+        assert_eq!(code(&tx_sql(&live, &tx, &call)), "ok");
+        assert_eq!(asked(), start + 1, "the function call was put to the user");
+        let before_commit = live.approver.transactions.lock().unwrap().len();
+        let committed = live.ok("commit_transaction", json!({"transaction_id": tx}));
+        assert_eq!(committed["committed"], true, "{committed}");
+        let transactions = live.approver.transactions.lock().unwrap();
+        assert_eq!(transactions.len(), before_commit + 1);
+        let listed = transactions.last().unwrap().as_ref().unwrap().1.clone().unwrap();
+        assert_eq!(listed, [call], "the commit question lists the call");
+        drop(transactions);
+        assert_eq!(counter(&live).parse::<u32>().unwrap(), probed + 1, "it ran once, in the transaction, and committed");
+    }
+}
+
 fn tx_sql(live: &Live, tx: &str, statement: &str) -> ToolOutcome {
     live.sql(statement, json!({"transaction_id": tx}))
 }
@@ -1208,6 +1823,40 @@ fn first_cell(outcome: &ToolOutcome) -> String {
         ToolOutcome::Success(value) => value["rows"][0][0].as_str().unwrap().to_owned(),
         ToolOutcome::Failure(error) => panic!("{error:?}"),
     }
+}
+
+/// `lock_timeout_secs` in a pinned session leaves the session's own `lock_timeout` as it was, on the
+/// path of a transaction block and on the one of a statement that cannot run in one.
+#[test]
+#[ignore = "needs TABLEX_TEST_PG_URI"]
+fn postgresql_lock_timeout_in_a_pinned_session() {
+    let Ok(uri) = std::env::var("TABLEX_TEST_PG_URI") else {
+        return;
+    };
+    let mut live = Live::new(ConnectionKind::PostgreSql, "dbengine-postgres", &uri, AgentAccess::ReadWrite);
+    let table = unique("tablex_agent_pinlt");
+    live.cleanup = vec![(format!("DROP TABLE IF EXISTS {table}"), None)];
+    live.ok("open_session", json!({"connection_id": ID}));
+    let created = live.sql(&format!("CREATE TABLE {table}(id integer)"), json!({}));
+    assert_eq!(code(&created), "ok", "{created:?}");
+    let session = live.pin();
+    let run = |statement: &str, extra: Value| {
+        let mut args = json!({"connection_id": ID, "statement": statement, "session_id": session});
+        for (key, value) in extra.as_object().into_iter().flatten() {
+            args[key] = value.clone();
+        }
+        live.call("execute_query", args)
+    };
+    assert_eq!(code(&run("SET lock_timeout = '2s'", json!({}))), "ok");
+    for statement in [
+        format!("ALTER TABLE {table} ADD COLUMN c text"),
+        format!("CREATE INDEX CONCURRENTLY {table}_i ON {table} (id)"),
+    ] {
+        let outcome = run(&statement, json!({"lock_timeout_secs": 5}));
+        assert_eq!(code(&outcome), "ok", "{statement}: {outcome:?}");
+        assert_eq!(cell(&run("SHOW lock_timeout", json!({}))), "2s", "after {statement}");
+    }
+    assert_eq!(cell(&live.sql("SHOW lock_timeout", json!({}))), "0", "the shared session never had it");
 }
 
 #[test]
@@ -1303,4 +1952,367 @@ fn postgresql_transactions() {
         live.ok("rollback_transaction", json!({"transaction_id": tx}))["rolled_back"],
         false
     );
+}
+
+/// A second session of the live connection, outside the layer, that holds a lock for a test: it
+/// is rolled back when the guard is dropped, so the test's cleanup never waits for it.
+struct Holder(Arc<dyn Session>);
+
+impl Holder {
+    fn new(live: &Live, setup: &[&str], database: Option<&str>) -> Self {
+        let holder = Self(live.provider.raw_session(ID));
+        for statement in setup {
+            holder.run(statement, database);
+        }
+        holder
+    }
+
+    fn run(&self, statement: &str, database: Option<&str>) {
+        let limits = Limits::default();
+        self.0
+            .run(
+                &engine_agent::ports::RunRequest {
+                    language: Language::Sql,
+                    text: statement,
+                    database,
+                    limits: &limits,
+                    row_limit: 10,
+                    confirmed: true,
+                    read_only: false,
+                },
+                &CancelToken::new(),
+            )
+            .unwrap_or_else(|error| panic!("{statement}: {error:?}"));
+    }
+
+    fn release(&self, database: Option<&str>) {
+        self.run("ROLLBACK", database);
+    }
+}
+
+impl Drop for Holder {
+    fn drop(&mut self) {
+        let limits = Limits::default();
+        let _ = self.0.run(
+            &engine_agent::ports::RunRequest {
+                language: Language::Sql,
+                text: "ROLLBACK",
+                database: None,
+                limits: &limits,
+                row_limit: 1,
+                confirmed: true,
+                read_only: false,
+            },
+            &CancelToken::new(),
+        );
+        self.0.disconnect();
+    }
+}
+
+/// The message of a failed call.
+fn failure_text(outcome: &ToolOutcome) -> String {
+    match outcome {
+        ToolOutcome::Failure(error) => error.message.clone(),
+        ToolOutcome::Success(value) => panic!("expected a failure, got {value}"),
+    }
+}
+
+#[test]
+#[ignore = "needs TABLEX_TEST_PG_URI"]
+fn postgresql_lock_timeout_applies_fires_and_is_restored() {
+    let Ok(uri) = std::env::var("TABLEX_TEST_PG_URI") else {
+        return;
+    };
+    let mut live = Live::new(
+        ConnectionKind::PostgreSql,
+        "dbengine-postgres",
+        &uri,
+        AgentAccess::ReadWrite,
+    );
+    let table = unique("tablex_agent_lock");
+    live.cleanup = vec![(format!("DROP TABLE IF EXISTS {table}"), None)];
+    live.ok("open_session", json!({"connection_id": ID}));
+    let created = live.sql(&format!("CREATE TABLE {table}(id integer PRIMARY KEY, v text)"), json!({}));
+    assert_eq!(code(&created), "ok", "{created:?}");
+    let setting = |live: &Live| first_cell(&live.sql("SHOW lock_timeout", json!({})));
+    let before = setting(&live);
+    let alter = format!("ALTER TABLE {table} ADD COLUMN c text");
+
+    // Another session holds the table; the agent's ALTER gives up after the timeout it asked for.
+    let holder = Holder::new(
+        &live,
+        &["BEGIN", &format!("LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE")],
+        None,
+    );
+    let started = std::time::Instant::now();
+    let outcome = live.sql(&alter, json!({"lock_timeout_secs": 1}));
+    let waited = started.elapsed();
+    let text = failure_text(&outcome);
+    assert!(text.contains("The lock timeout was hit") && text.contains("Retry later"), "{text}");
+    assert!(
+        waited >= std::time::Duration::from_millis(900) && waited < std::time::Duration::from_secs(8),
+        "{waited:?}"
+    );
+    assert!(matches!(&outcome, ToolOutcome::Failure(error) if error.retryable));
+    // A read waits on the lock too, and the same timeout ends it.
+    let read = live.sql(&format!("SELECT count(*) FROM {table}"), json!({"lock_timeout_secs": 1}));
+    assert!(failure_text(&read).contains("The lock timeout was hit"), "{read:?}");
+    // A script: the statement that waits fails by name, and nothing is left set.
+    let script = live.call(
+        "execute_batch",
+        json!({"connection_id": ID, "script": alter, "lock_timeout_secs": 1}),
+    );
+    let ToolOutcome::Success(script) = script else {
+        panic!("{script:?}")
+    };
+    assert_eq!(script["ok"], false);
+    assert!(script["statements"][0]["error"]["message"].as_str().unwrap().contains("The lock timeout was hit"));
+    // The session has its own value back, and is the same working session.
+    assert_eq!(setting(&live), before);
+
+    // Without the parameter nothing changed: the call waits for the lock until the connection's
+    // statement timeout cancels it, and the error is that one.
+    live.catalog.update(ID, |connection| connection.statement_timeout_secs = Some(2));
+    let outcome = live.sql(&alter, json!({}));
+    let text = failure_text(&outcome);
+    assert!(text.contains("statement timeout"), "{text}");
+    assert!(!text.contains("lock timeout was hit"), "{text}");
+    live.catalog.update(ID, |connection| connection.statement_timeout_secs = None);
+    assert_eq!(setting(&live), before);
+
+    // Once the lock is free the same call, with the parameter, goes through and the setting is
+    // put back: the column is there, and a later statement has no timeout of its own.
+    holder.release(None);
+    let outcome = live.sql(&alter, json!({"lock_timeout_secs": 5}));
+    assert_eq!(code(&outcome), "ok", "{outcome:?}");
+    assert_eq!(first_cell(&live.sql(&format!("SELECT count(c) FROM {table}"), json!({}))), "0");
+    assert_eq!(setting(&live), before);
+    // It ran in a transaction of its own and committed: a different session sees the column.
+    let seen = live
+        .raw_run(&format!("SELECT count(c) FROM {table}"), None, false)
+        .expect("another session reads the column");
+    assert_eq!(seen.rows[0][0], "0");
+    // The database of the call goes along to every step.
+    let outcome = live.sql(
+        &format!("ALTER TABLE {table} ADD COLUMN f text"),
+        json!({"lock_timeout_secs": 5, "database": database_of(&uri)}),
+    );
+    assert_eq!(code(&outcome), "ok", "{outcome:?}");
+    // A statement that cannot run in a transaction block takes the session path, and works.
+    let index = unique("tablex_agent_idx");
+    let outcome = live.sql(
+        &format!("CREATE INDEX CONCURRENTLY {index} ON {table} (id)"),
+        json!({"lock_timeout_secs": 5}),
+    );
+    assert_eq!(code(&outcome), "ok", "{outcome:?}");
+    live.cleanup.push((format!("DROP INDEX IF EXISTS {index}"), None));
+    assert_eq!(setting(&live), before, "RESET put the session value back");
+
+    // In a transaction it is local to the transaction, lifted after the call, and gone at its end.
+    let tx = live.ok("begin_transaction", json!({"connection_id": ID}))["transaction_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let inside = tx_sql(&live, &tx, &format!("ALTER TABLE {table} ADD COLUMN d text"));
+    assert_eq!(code(&inside), "ok");
+    let with = live.sql(
+        &format!("ALTER TABLE {table} ADD COLUMN e text"),
+        json!({"transaction_id": tx, "lock_timeout_secs": 9}),
+    );
+    assert_eq!(code(&with), "ok", "{with:?}");
+    assert_eq!(first_cell(&tx_sql(&live, &tx, "SHOW lock_timeout")), before);
+    live.ok("rollback_transaction", json!({"transaction_id": tx}));
+    assert_eq!(setting(&live), before);
+
+    // A lock timeout inside a transaction aborts it: the message says to roll back, and after the
+    // rollback the session works as before.
+    let holder = Holder::new(
+        &live,
+        &["BEGIN", &format!("LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE")],
+        None,
+    );
+    let tx = live.ok("begin_transaction", json!({"connection_id": ID}))["transaction_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let outcome = live.sql(
+        &format!("ALTER TABLE {table} ADD COLUMN g text"),
+        json!({"transaction_id": tx, "lock_timeout_secs": 1}),
+    );
+    let text = failure_text(&outcome);
+    assert!(text.contains("The lock timeout was hit"), "{text}");
+    assert!(text.contains("roll it back, then retry the transaction"), "{text}");
+    assert_eq!(code(&tx_sql(&live, &tx, "SELECT 1")), "agent.transaction_aborted");
+    live.ok("rollback_transaction", json!({"transaction_id": tx}));
+    holder.release(None);
+    assert_eq!(first_cell(&live.sql("SELECT 1", json!({}))), "1");
+    assert_eq!(setting(&live), before);
+}
+
+#[test]
+#[ignore = "needs TABLEX_TEST_MARIADB_URI"]
+fn mariadb_lock_timeout_applies_fires_and_is_restored() {
+    mysql_family_lock_timeout(ConnectionKind::MariaDb, "dbengine-mariadb", "TABLEX_TEST_MARIADB_URI");
+}
+
+#[test]
+#[ignore = "needs TABLEX_TEST_MYSQL_URI"]
+fn mysql_lock_timeout_applies_fires_and_is_restored() {
+    mysql_family_lock_timeout(ConnectionKind::MySql, "dbengine-mysql", "TABLEX_TEST_MYSQL_URI");
+}
+
+fn mysql_family_lock_timeout(kind: ConnectionKind, package: &'static str, env: &str) {
+    let Ok(uri) = std::env::var(env) else {
+        return;
+    };
+    let database = database_of(&uri);
+    let database = Some(database.as_str());
+    let mut live = Live::new(kind, package, &uri, AgentAccess::ReadWrite);
+    let table = unique("tablex_agent_lock");
+    live.cleanup = vec![(format!("DROP TABLE IF EXISTS {table}"), database.map(str::to_owned))];
+    live.ok("open_session", json!({"connection_id": ID}));
+    let extra = json!({"database": database});
+    let created = live.sql(
+        &format!("CREATE TABLE {table}(id integer PRIMARY KEY, v varchar(20)) ENGINE=InnoDB"),
+        extra.clone(),
+    );
+    assert_eq!(code(&created), "ok", "{created:?}");
+    assert_eq!(code(&live.sql(&format!("INSERT INTO {table} VALUES (1, 'a')"), extra.clone())), "ok");
+    let settings = |live: &Live| {
+        let outcome = live.sql(
+            "SELECT @@SESSION.lock_wait_timeout, @@SESSION.innodb_lock_wait_timeout",
+            extra.clone(),
+        );
+        match outcome {
+            ToolOutcome::Success(value) => value["rows"][0].to_string(),
+            ToolOutcome::Failure(error) => panic!("{error:?}"),
+        }
+    };
+    let before = settings(&live);
+    let with = |secs: u64| {
+        let mut args = extra.clone();
+        args["lock_timeout_secs"] = json!(secs);
+        args
+    };
+    let alter = format!("ALTER TABLE {table} ADD COLUMN c text");
+
+    // Another session has the table open in a transaction (a metadata lock) and a row locked.
+    let holder = Holder::new(
+        &live,
+        &[
+            "START TRANSACTION",
+            &format!("SELECT * FROM {table}"),
+            &format!("UPDATE {table} SET v = 'held' WHERE id = 1"),
+        ],
+        database,
+    );
+    let started = std::time::Instant::now();
+    let outcome = live.sql(&alter, with(1));
+    let waited = started.elapsed();
+    let text = failure_text(&outcome);
+    assert!(text.contains("The lock timeout was hit") && text.contains("Retry later"), "{text}");
+    assert!(
+        waited >= std::time::Duration::from_millis(900) && waited < std::time::Duration::from_secs(8),
+        "{waited:?}"
+    );
+    // A row lock: the InnoDB timeout is the one that fires.
+    let started = std::time::Instant::now();
+    let row = live.sql(&format!("UPDATE {table} SET v = 'agent' WHERE id = 1"), with(1));
+    assert!(failure_text(&row).contains("The lock timeout was hit"), "{row:?}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(8));
+    assert_eq!(settings(&live), before, "both settings are back");
+
+    // Without the parameter: the statement timeout of the connection is what ends the wait.
+    live.catalog.update(ID, |connection| connection.statement_timeout_secs = Some(2));
+    let text = failure_text(&live.sql(&alter, extra.clone()));
+    assert!(text.contains("statement timeout"), "{text}");
+    assert!(!text.contains("lock timeout was hit"), "{text}");
+    live.catalog.update(ID, |connection| connection.statement_timeout_secs = None);
+    assert_eq!(settings(&live), before);
+
+    // The holder's row was never changed, and with the lock free the call goes through.
+    holder.release(database);
+    assert_eq!(
+        first_cell(&live.sql(&format!("SELECT v FROM {table} WHERE id = 1"), extra.clone())),
+        "a"
+    );
+    let outcome = live.sql(&alter, with(5));
+    assert_eq!(code(&outcome), "ok", "{outcome:?}");
+    assert_eq!(settings(&live), before);
+    // Nothing was kept in user variables (a statement of the agent could overwrite those) ...
+    let leftover = match live.sql("SELECT @tablex_lock_wait_timeout, @tablex_innodb_lock_wait_timeout", extra.clone()) {
+        ToolOutcome::Success(value) => value["rows"][0].to_string(),
+        ToolOutcome::Failure(error) => panic!("{error:?}"),
+    };
+    assert_eq!(leftover, r#"["NULL","NULL"]"#);
+    // ... and an agent cannot assign one to bend the restore.
+    let assign = live.sql("SELECT @tablex_lock_wait_timeout := 31536000", extra.clone());
+    assert_eq!(code(&assign), "agent.unsupported", "{assign:?}");
+    assert_eq!(settings(&live), before);
+}
+
+#[test]
+#[ignore = "needs TABLEX_TEST_PG_URI"]
+fn postgresql_lock_timeout_commit_errors_and_statements_refused_in_a_block() {
+    let Ok(uri) = std::env::var("TABLEX_TEST_PG_URI") else {
+        return;
+    };
+    let mut live = Live::new(
+        ConnectionKind::PostgreSql,
+        "dbengine-postgres",
+        &uri,
+        AgentAccess::ReadWrite,
+    );
+    let parent = unique("tablex_agent_fkp");
+    let child = unique("tablex_agent_fkc");
+    let schema = unique("tablex_agent_sch");
+    let partitioned = unique("tablex_agent_part");
+    live.cleanup = vec![
+        (format!("DROP SCHEMA IF EXISTS {schema} CASCADE"), None),
+        (format!("DROP TABLE IF EXISTS {partitioned}"), None),
+        (format!("DROP TABLE IF EXISTS {child}"), None),
+        (format!("DROP TABLE IF EXISTS {parent}"), None),
+    ];
+    live.ok("open_session", json!({"connection_id": ID}));
+    for statement in [
+        format!("CREATE TABLE {parent}(id integer PRIMARY KEY)"),
+        format!("CREATE TABLE {child}(id integer, pid integer REFERENCES {parent}(id) DEFERRABLE INITIALLY DEFERRED)"),
+        format!("CREATE SCHEMA {schema}"),
+        format!("CREATE TABLE {schema}.t(a integer PRIMARY KEY)"),
+        format!("CREATE TABLE {partitioned}(a integer) PARTITION BY RANGE (a)"),
+        format!("CREATE TABLE {partitioned}_1 PARTITION OF {partitioned} FOR VALUES FROM (0) TO (10)"),
+        format!("CREATE INDEX ON {partitioned}(a)"),
+    ] {
+        let outcome = live.sql(&statement, json!({}));
+        assert_eq!(code(&outcome), "ok", "{statement}: {outcome:?}");
+    }
+    live.cleanup.insert(1, (format!("DROP TABLE IF EXISTS {partitioned}_1"), None));
+
+    // A deferred constraint fails at the COMMIT of the wrapping transaction: that is the
+    // statement's error, with nothing left of it, and the session is the same working one.
+    let outcome = live.sql(&format!("INSERT INTO {child} VALUES (1, 99)"), json!({"lock_timeout_secs": 5}));
+    let text = failure_text(&outcome);
+    assert!(text.contains("foreign key"), "{text}");
+    assert!(!text.contains("session was closed"), "{text}");
+    assert!(live.layer.is_open(ID));
+    assert_eq!(first_cell(&live.sql(&format!("SELECT count(*) FROM {child}"), json!({}))), "0");
+    let outcome = live.sql(&format!("INSERT INTO {parent} VALUES (1)"), json!({"lock_timeout_secs": 5}));
+    assert_eq!(code(&outcome), "ok", "{outcome:?}");
+
+    // REINDEX (VERBOSE) SCHEMA is one the lexer does not list: PostgreSQL refuses it in a block,
+    // and it is retried once on the session path.
+    let outcome = live.sql(&format!("REINDEX (VERBOSE) SCHEMA {schema}"), json!({"lock_timeout_secs": 5}));
+    assert_eq!(code(&outcome), "ok", "{outcome:?}");
+    assert_eq!(first_cell(&live.sql("SHOW lock_timeout", json!({}))), "0");
+
+    // Whether this server refuses REINDEX of a partitioned table in a block (PG 17 here).
+    let refused = live
+        .raw_run("BEGIN", None, false)
+        .and_then(|_| live.raw_run(&format!("REINDEX TABLE {partitioned}"), None, false))
+        .err();
+    live.raw(Language::Sql, "ROLLBACK", None);
+    eprintln!("REINDEX of a partitioned table inside a block: {refused:?}");
+    let outcome = live.sql(&format!("REINDEX TABLE {partitioned}"), json!({"lock_timeout_secs": 5}));
+    assert_eq!(code(&outcome), "ok", "{outcome:?}");
+    assert_eq!(first_cell(&live.sql("SHOW lock_timeout", json!({}))), "0");
 }

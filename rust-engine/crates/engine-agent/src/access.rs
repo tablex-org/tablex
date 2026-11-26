@@ -41,18 +41,17 @@ impl AgentAccess {
     /// type's preset, capped by the type.
     ///
     /// * An explicit connection setting wins over the type's preset.
-    /// * Without one, a production type is [`Off`](Self::Off); other types use
-    ///   their preset, which can never grant more than [`Read`](Self::Read)
-    ///   (writes need an explicit setting on the connection).
+    /// * Without one, a production type is [`Off`](Self::Off) (it never grants
+    ///   access by default: the connection has to say so itself); other types
+    ///   use their preset, which may be [`ReadWrite`](Self::ReadWrite): each
+    ///   write is still approved by the front end.
     /// * A `read_only` type caps the result at [`Read`](Self::Read), whatever
     ///   the setting says.
     pub fn effective(explicit: Option<Self>, connection_type: &ConnectionTypeInfo) -> Self {
         let base = match explicit {
             Some(access) => access,
             None if connection_type.production => Self::Off,
-            None => connection_type
-                .default_agent_access
-                .map_or(Self::Off, |preset| preset.min(Self::Read)),
+            None => connection_type.default_agent_access.unwrap_or(Self::Off),
         };
         if connection_type.read_only {
             base.min(Self::Read)
@@ -138,12 +137,14 @@ mod tests {
     }
 
     #[test]
-    fn a_type_preset_never_grants_more_than_read_and_never_on_production() {
-        let expected_without_explicit = |preset: AgentAccess, production: bool| {
+    fn a_type_preset_applies_up_to_read_write_except_on_production_and_read_only_types() {
+        let expected_without_explicit = |preset: AgentAccess, read_only: bool, production: bool| {
             if production {
                 Off
-            } else {
+            } else if read_only {
                 preset.min(Read)
+            } else {
+                preset
             }
         };
         for preset in AgentAccess::ALL {
@@ -152,7 +153,7 @@ mod tests {
                     let ty = kind(read_only, production, Some(preset));
                     assert_eq!(
                         AgentAccess::effective(None, &ty),
-                        expected_without_explicit(preset, production),
+                        expected_without_explicit(preset, read_only, production),
                         "preset {preset}, read_only {read_only}, production {production}"
                     );
                     // An explicit setting overrides the preset, subject to the cap.

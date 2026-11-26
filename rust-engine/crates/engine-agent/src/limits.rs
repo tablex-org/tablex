@@ -32,6 +32,55 @@ pub struct Limits {
     pub max_context_tables: usize,
     /// Bytes of DDL `describe_table` returns.
     pub max_ddl_bytes: usize,
+    /// The part of every string cell to return instead of its start (`cell_char_offset` and
+    /// `cell_char_limit` of the statement tools); set for one call, never by a front end.
+    pub cell_window: Option<CellWindow>,
+}
+
+/// Which characters of a cell a call asks for, to read one long value in pieces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CellWindow {
+    /// Characters to skip.
+    pub offset: usize,
+    /// Characters to return.
+    pub limit: usize,
+}
+
+impl CellWindow {
+    /// Most characters one window starts after.
+    pub const MAX_OFFSET: usize = 1_000_000;
+    /// Most characters one window holds.
+    pub const MAX_LIMIT: usize = 4000;
+
+    /// The window of a request, `None` when it names neither value. Out-of-range values are
+    /// clamped (the offset to [`Self::MAX_OFFSET`], the limit to `1..=`[`Self::MAX_LIMIT`]); a
+    /// missing limit is `default_limit`.
+    pub fn of(offset: Option<usize>, limit: Option<usize>, default_limit: usize) -> Option<Self> {
+        if offset.is_none() && limit.is_none() {
+            return None;
+        }
+        Some(Self {
+            offset: offset.unwrap_or(0).min(Self::MAX_OFFSET),
+            limit: limit.unwrap_or(default_limit).clamp(1, Self::MAX_LIMIT),
+        })
+    }
+
+    /// `text` when it is all in the window, else the window of it with a marker that says which
+    /// characters these are and where the next window starts.
+    pub fn apply(&self, text: &str) -> Option<String> {
+        let total = text.chars().count();
+        if self.offset == 0 && total <= self.limit {
+            return None;
+        }
+        let shown: String = text.chars().skip(self.offset).take(self.limit).collect();
+        let end = (self.offset + shown.chars().count()).min(total);
+        let next = if end < total {
+            format!("; next cell_char_offset {end}")
+        } else {
+            String::new()
+        };
+        Some(format!("{shown}… [chars {}-{end} of {total}{next}]", self.offset.min(total)))
+    }
 }
 
 impl Default for Limits {
@@ -47,6 +96,7 @@ impl Default for Limits {
             max_list_items: 500,
             max_context_tables: 400,
             max_ddl_bytes: 8 * 1024,
+            cell_window: None,
         }
     }
 }
@@ -94,6 +144,7 @@ pub struct RowCollector {
     rows: Vec<Vec<String>>,
     row_limit: usize,
     max_cell_bytes: usize,
+    cell_window: Option<CellWindow>,
     max_result_bytes: usize,
     bytes: usize,
     cells_truncated: usize,
@@ -108,6 +159,7 @@ impl RowCollector {
             rows: Vec::with_capacity(row_limit.min(256)),
             row_limit,
             max_cell_bytes: limits.max_cell_bytes,
+            cell_window: limits.cell_window,
             max_result_bytes: limits.max_result_bytes,
             bytes,
             cells_truncated: 0,
@@ -138,7 +190,11 @@ impl RowCollector {
         let mut cut = 0;
         for cell in cells {
             let cell = cell.as_ref();
-            let text = match truncate_text(cell, self.max_cell_bytes) {
+            let cut_cell = match &self.cell_window {
+                Some(window) => window.apply(cell),
+                None => truncate_text(cell, self.max_cell_bytes),
+            };
+            let text = match cut_cell {
                 Some(shortened) => {
                     cut += 1;
                     shortened
@@ -215,6 +271,40 @@ mod tests {
         let cut = truncate_text(&long, 2048).unwrap();
         assert!(cut.starts_with(&"x".repeat(2048)));
         assert!(cut.ends_with("[truncated, 5000 bytes in total]"));
+    }
+
+    #[test]
+    fn a_window_returns_the_asked_characters_and_says_where_the_next_one_starts() {
+        let window = CellWindow::of(Some(2), Some(3), 10).unwrap();
+        assert_eq!(window.apply("abcdefgh").unwrap(), "cde… [chars 2-5 of 8; next cell_char_offset 5]");
+        assert_eq!(window.apply("abcd").unwrap(), "cd… [chars 2-4 of 4]");
+        // Past the end: nothing, still marked.
+        assert_eq!(window.apply("ab").unwrap(), "… [chars 2-2 of 2]");
+        // Characters, not bytes.
+        assert_eq!(CellWindow::of(Some(1), Some(2), 10).unwrap().apply("éèàü").unwrap(), "èà… [chars 1-3 of 4; next cell_char_offset 3]");
+        // A cell that is all inside the first window is returned as it is.
+        assert_eq!(CellWindow::of(None, Some(5), 10).unwrap().apply("abc"), None);
+        assert_eq!(CellWindow::of(None, None, 10), None);
+        // Clamped: at least one character, at most the maximum, the offset capped.
+        let wide = CellWindow::of(Some(usize::MAX), Some(1_000_000), 10).unwrap();
+        assert_eq!((wide.offset, wide.limit), (CellWindow::MAX_OFFSET, CellWindow::MAX_LIMIT));
+        assert_eq!(CellWindow::of(None, Some(0), 10).unwrap().limit, 1);
+        assert_eq!(CellWindow::of(Some(7), None, 10).unwrap().limit, 10);
+    }
+
+    #[test]
+    fn the_collector_applies_the_window_to_every_cell_instead_of_the_byte_cut() {
+        let limits = Limits {
+            cell_window: CellWindow::of(Some(3), Some(4), 10),
+            ..Limits::default()
+        };
+        let mut collector = RowCollector::new(columns(2), 10, &limits);
+        let long = "0123456789".repeat(1000);
+        assert!(collector.push_row([long.as_str(), "ab"]).is_continue());
+        let result = collector.finish(false, None);
+        assert_eq!(result.rows[0][0], "3456… [chars 3-7 of 10000; next cell_char_offset 7]");
+        assert_eq!(result.rows[0][1], "… [chars 2-2 of 2]");
+        assert_eq!(result.cells_truncated, 2);
     }
 
     #[test]

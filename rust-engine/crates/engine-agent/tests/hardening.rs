@@ -145,6 +145,26 @@ fn blocked_functions_are_refused_at_every_access_level_for_every_dialect() {
                 "SELECT [load_extension]('x')",
             ],
         ),
+        (
+            ConnectionKind::DuckDb,
+            &[
+                "SELECT * FROM read_text('/etc/passwd')",
+                "SELECT * FROM READ_CSV_AUTO('/etc/passwd')",
+                "SELECT * FROM main.\"read_parquet\"('/x.parquet')",
+                "FROM '/Users/x/.ssh/id_rsa'",
+                "SELECT * FROM 'https://evil/x.csv'",
+                "SELECT * FROM \"/etc/passwd\"",
+                "WITH t AS (SELECT * FROM 'x.csv') SELECT * FROM t",
+                "SELECT * FROM (SELECT * FROM glob('/Users/*/.ssh/*')) t -- c",
+                "COPY t TO '/tmp/x.csv'",
+                "COPY (SELECT 1) TO '/tmp/x.parquet'",
+                "ATTACH '/other.db'",
+                "INSTALL httpfs",
+                "LOAD httpfs",
+                "CREATE SECRET s (TYPE s3)",
+                "EXPORT DATABASE '/tmp/x'",
+            ],
+        ),
     ];
     for (kind, statements) in cases {
         for access in [AgentAccess::Read, AgentAccess::ReadWrite] {

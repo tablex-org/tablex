@@ -159,11 +159,12 @@ fn table(kind: ConnectionKind) -> &'static [Pattern] {
         ConnectionKind::PostgreSql => POSTGRESQL,
         ConnectionKind::MySql | ConnectionKind::MariaDb => MYSQL,
         ConnectionKind::Sqlite => SQLITE,
-        ConnectionKind::MongoDb | ConnectionKind::Redis => &[],
+        // Judged by `crate::duckdb`, not by a list of names.
+        ConnectionKind::DuckDb | ConnectionKind::MongoDb | ConnectionKind::Redis => &[],
     }
 }
 
-fn glob_matches(pattern: &str, name: &str) -> bool {
+pub(crate) fn glob_matches(pattern: &str, name: &str) -> bool {
     let pattern = pattern.to_ascii_lowercase();
     let name = name.to_ascii_lowercase();
     let mut parts = pattern.split('*');
@@ -301,6 +302,8 @@ impl<'a> Scanner<'a> {
             let byte = self.peek(0)?;
             match byte {
                 b' ' | b'\t' | b'\r' | b'\n' | 0x0c => self.at += 1,
+                // DuckDB's tokenizer reads a vertical tab as white space too.
+                0x0b if self.options.duckdb_tokenizer => self.at += 1,
                 b'-' if self.peek(1) == Some(b'-')
                     && (!self.options.dash_comment_needs_space
                         || self
@@ -462,6 +465,9 @@ pub fn blocked_function(
     kind: ConnectionKind,
     options: &SqlLexOptions,
 ) -> Option<String> {
+    if kind == ConnectionKind::DuckDb {
+        return crate::duckdb::blocked(sql, options);
+    }
     let patterns = table(kind);
     if patterns.is_empty() {
         return None;
@@ -520,6 +526,76 @@ pub fn blocked_function(
                 crate::sanitize::MAX_NAME_CHARS,
             ));
         }
+    }
+    None
+}
+
+/// MySQL / MariaDB: words that are followed by `(` in a read without calling anything.
+const MYSQL_KEYWORDS: &[&str] = &[
+    "select", "from", "where", "and", "or", "xor", "not", "in", "exists", "on", "using", "join", "as", "over",
+    "partition", "by", "order", "group", "having", "union", "intersect", "except", "all", "distinct", "any",
+    "some", "between", "case", "when", "then", "else", "end", "like", "regexp", "rlike", "limit", "offset",
+    "values", "with", "recursive", "is", "interval", "row", "match", "against", "escape", "filter", "within",
+    "rows", "range", "table", "lateral", "for", "into", "set", "div", "returning",
+];
+
+/// MySQL / MariaDB: the built-in functions that only compute a value from their arguments (and the
+/// session's own state): aggregate, window, control flow, cast, math, string, date and time, JSON.
+/// A function that is not here may be a stored function or a UDF, which can write.
+const MYSQL_BUILTINS: &[&str] = &[
+    "count", "sum", "avg", "min", "max", "group_concat", "std", "stddev", "stddev_pop", "stddev_samp", "var_pop",
+    "var_samp", "variance", "bit_and", "bit_or", "bit_xor", "json_arrayagg", "json_objectagg", "any_value",
+    "row_number", "rank", "dense_rank", "percent_rank", "cume_dist", "ntile", "lag", "lead", "first_value",
+    "last_value", "nth_value",
+    "coalesce", "ifnull", "nullif", "if", "greatest", "least", "isnull", "cast", "convert",
+    "abs", "ceil", "ceiling", "floor", "round", "truncate", "mod", "pow", "power", "sqrt", "exp", "ln", "log",
+    "log2", "log10", "sign", "rand", "pi", "sin", "cos", "tan", "atan", "atan2", "asin", "acos", "cot",
+    "degrees", "radians", "crc32", "conv", "bit_count",
+    "length", "char_length", "character_length", "octet_length", "bit_length", "lower", "upper", "lcase",
+    "ucase", "trim", "ltrim", "rtrim", "substr", "substring", "substring_index", "mid", "left", "right",
+    "concat", "concat_ws", "replace", "repeat", "reverse", "lpad", "rpad", "locate", "instr", "position",
+    "format", "hex", "unhex", "ascii", "char", "ord", "space", "strcmp", "field", "find_in_set", "elt", "quote",
+    "md5", "sha1", "sha2", "to_base64", "from_base64", "regexp_like", "regexp_replace", "regexp_substr",
+    "regexp_instr", "soundex",
+    "now", "current_timestamp", "current_date", "current_time", "curdate", "curtime", "utc_timestamp",
+    "utc_date", "utc_time", "localtime", "localtimestamp", "date", "time", "timestamp", "year", "month", "day",
+    "dayofmonth", "dayofweek", "dayofyear", "hour", "minute", "second", "microsecond", "week", "weekday",
+    "yearweek", "quarter", "monthname", "dayname", "date_format", "time_format", "date_add", "date_sub",
+    "adddate", "subdate", "datediff", "timediff", "timestampdiff", "timestampadd", "extract", "str_to_date",
+    "unix_timestamp", "from_unixtime", "last_day", "makedate", "maketime", "from_days", "to_days", "to_seconds",
+    "sec_to_time", "time_to_sec", "convert_tz", "addtime", "subtime",
+    "json_extract", "json_unquote", "json_object", "json_array", "json_length", "json_contains",
+    "json_contains_path", "json_keys", "json_type", "json_value", "json_valid", "json_search", "json_depth",
+    "json_pretty", "json_quote", "json_overlaps",
+    "database", "schema", "version", "user", "current_user", "session_user", "system_user", "last_insert_id",
+    "row_count", "found_rows", "connection_id", "uuid", "bin_to_uuid", "uuid_to_bin", "inet_aton", "inet_ntoa",
+    "inet6_aton", "inet6_ntoa", "charset", "collation",
+];
+
+/// MySQL / MariaDB: the first function `sql` calls that is not a known built-in, as written (a
+/// name with a schema in front, a quoted name and a stored function are all "not known"). Inside a
+/// transaction such a call in a read can write, and the commit question would not list it.
+pub fn calls_unknown_function(sql: &str, options: &SqlLexOptions) -> Option<String> {
+    use engine_driver_kit::sql::{tokens, SqlTokenKind};
+    let scan = tokens(sql, options);
+    let list = &scan.tokens;
+    for (at, token) in list.iter().enumerate() {
+        if list.get(at + 1).map(|next| next.kind) != Some(SqlTokenKind::Open) {
+            continue;
+        }
+        let text = &sql[token.range.clone()];
+        let qualified = at > 0 && list[at - 1].kind == SqlTokenKind::Other && sql.as_bytes()[list[at - 1].range.start] == b'.';
+        match token.kind {
+            SqlTokenKind::Word if !qualified => {
+                let lower = text.to_ascii_lowercase();
+                if MYSQL_KEYWORDS.contains(&lower.as_str()) || MYSQL_BUILTINS.contains(&lower.as_str()) {
+                    continue;
+                }
+            }
+            SqlTokenKind::Word | SqlTokenKind::Quoted => {}
+            _ => continue,
+        }
+        return Some(crate::sanitize::clean_name(text, crate::sanitize::MAX_NAME_CHARS));
     }
     None
 }
@@ -921,6 +997,15 @@ mod tests {
             hit(ClickHouse, "SELECT * FROM s3Cluster('a')").as_deref(),
             Some("s3Cluster")
         );
+    }
+
+    /// DuckDB's tokenizer reads a vertical tab as white space: two words, not a word, a symbol and a word.
+    #[test]
+    fn a_vertical_tab_is_white_space_in_duckdb_mode_only() {
+        let duck = options(DuckDb);
+        assert_eq!(tokens("a\x0bb", &duck).len(), 2);
+        assert_eq!(tokens("read_text\x0b('x')", &duck)[..2], [Token::Word("read_text".into()), Token::Open]);
+        assert_eq!(tokens("a\x0bb", &options(PostgreSql)).len(), 3);
     }
 
     #[test]

@@ -108,9 +108,54 @@ pub struct AuditEntry {
     /// only; this is for the person reading the log.)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<String>,
+    /// The pinned session (`session_id`) the call ran in, when it ran in one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// How the client reached the front end (`stdio`, `http`); absent for a front end that has
+    /// no such notion and in lines written before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
+    /// The name the client gave itself at the handshake (MCP `clientInfo.name`). The client says
+    /// it, nothing verifies it: a hint for the person reading the log, never an identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client: Option<String>,
+}
+
+/// Where a call came from, for the audit line (see [`AuditEntry::transport`] and
+/// [`AuditEntry::client`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CallOrigin {
+    transport: Option<String>,
+    client: Option<String>,
+}
+
+/// The longest client name kept in a line.
+const MAX_CLIENT_NAME_CHARS: usize = 64;
+
+impl CallOrigin {
+    /// `client` is what the other side claims, so it is made safe to log: characters without a
+    /// shape of their own are spelled out and the name is cut. An empty name is no name.
+    pub fn new(transport: &str, client: Option<&str>) -> Self {
+        let client = client
+            .map(|name| crate::sanitize::spell_out(name, false).0)
+            .map(|name| name.trim().chars().take(MAX_CLIENT_NAME_CHARS).collect::<String>())
+            .filter(|name| !name.is_empty());
+        Self {
+            transport: Some(transport.to_owned()),
+            client,
+        }
+    }
 }
 
 impl AuditEntry {
+    /// This entry with the origin of the call it records.
+    #[must_use]
+    pub fn with_origin(mut self, origin: &CallOrigin) -> Self {
+        self.transport.clone_from(&origin.transport);
+        self.client.clone_from(&origin.client);
+        self
+    }
+
     /// An entry stamped now.
     pub fn now(front_end: &str, tool: &str) -> Self {
         Self {
@@ -123,6 +168,9 @@ impl AuditEntry {
             rows: None,
             duration_ms: 0,
             approval: None,
+            session_id: None,
+            transport: None,
+            client: None,
         }
     }
 }

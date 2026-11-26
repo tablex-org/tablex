@@ -39,7 +39,7 @@ pub enum AgentError {
     /// A function or clause that reaches outside the tables (files, network,
     /// server state). Refused at every access level.
     #[error(
-        "`{0}` is blocked for agents: it can read server files, reach the network or change server state"
+        "`{0}` is blocked for agents: it can read or write files, reach the network or change server state. An agent cannot use files through SQL: the user can open a file in tablex instead"
     )]
     BlockedFunction(String),
     /// The audit record of a write could not be written, so the write was not run.

@@ -1,7 +1,7 @@
 //! [`ToolLayer`]: the single dispatch entry both front ends call.
 
 use crate::access::AgentAccess;
-use crate::audit::{AuditEntry, AuditLog};
+use crate::audit::{AuditEntry, AuditLog, CallOrigin};
 use crate::cancel::{CancelToken, Watchdog};
 use crate::classify::{classify_redis, classify_sql, first_keyword, Classified, StatementClass};
 use crate::context::{
@@ -9,8 +9,9 @@ use crate::context::{
 };
 use crate::error::{self, AgentError, ToolError};
 use crate::limits::Limits;
+use crate::lock_timeout::{Call, LockTimeout};
 use crate::mongo;
-use crate::policy::{check_statement, Need};
+use crate::policy::{check_statement, session_state_refusal, Need};
 use crate::ports::{
     AppShow, ApprovalDecision, ConnectionAdmin, ConnectionCatalog, ConnectionChange,
     ConnectionChanged, ConnectionInfo, ConnectionKind, Language, NodeLevel,
@@ -26,18 +27,43 @@ use crate::schema::{self, ToolSpec};
 use crate::secret::SecretText;
 use crate::tools::*;
 use engine_driver_api::sql::SchemaObjectRef;
-use engine_driver_kit::sql::Keyword;
+use engine_driver_kit::sql::{Keyword, SqlLexOptions};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-/// Open transactions in all (one per connection at most).
+mod shell;
+
+/// The first words of the statements that make MySQL and MariaDB commit the open transaction.
+const MYSQL_IMPLICIT_COMMIT: &[&str] = &[
+    "ALTER", "ANALYZE", "CACHE", "CALL", "CHANGE", "CHECK", "CREATE", "DROP", "FLUSH", "GRANT",
+    "INSTALL", "LOAD", "OPTIMIZE", "RENAME", "REPAIR", "RESET", "REVOKE", "TRUNCATE", "UNINSTALL",
+    "XA",
+];
+
+/// Tables a `get_schema_context` call may name in `tables`.
+/// What `execute_and_show` says when it only put a DuckDB query in the editor (see there).
+const DUCKDB_NOT_RUN: &str = "The query is in an editor tab but was not run: DuckDB SQL can read and write files and reach the network, so it is never run from here. Tell the user to run it in tablex (the Run button), or use execute_query, which runs it with file access turned off.";
+
+const MAX_SELECTED_TABLES: usize = 50;
+/// The most tables `max_tables` of `get_schema_context` asks for.
+const MAX_CONTEXT_TABLES_REQUESTED: usize = 20;
+
+/// Open transactions one client (see [`ToolLayer::call_as`]) may hold (one per connection at most).
 pub const MAX_OPEN_TRANSACTIONS: usize = 4;
+/// Pinned sessions and transactions together, across every client: each is a connection of its own
+/// to the user's database server, and a front end that several clients share must not let them
+/// take all of them.
+pub const MAX_SESSIONS_IN_ALL: usize = 16;
 /// A transaction nobody has called for this long is rolled back.
 pub const DEFAULT_TRANSACTION_IDLE: Duration = Duration::from_secs(300);
+/// Pinned sessions one client (see [`ToolLayer::call_as`]) may hold open at once.
+pub const MAX_PINNED_SESSIONS: usize = 4;
+/// A pinned session nobody has called for this long is closed.
+pub const DEFAULT_SESSION_IDLE: Duration = Duration::from_secs(600);
 /// How long the ROLLBACK the layer sends on its own (idle timer, closed session, shutdown) waits
 /// for the server of a session with nothing running on it; then the session is dropped, which ends
 /// the transaction on the server. This bounds the ROLLBACK only: closing the session after it is
@@ -226,6 +252,11 @@ impl Drop for BusyGuard<'_> {
 struct Transaction {
     id: String,
     connection_id: String,
+    /// The caller that opened it (see [`ToolLayer::call_as`]): nobody else may use or end it.
+    owner: String,
+    /// A pinned session (`open_session` with `pinned`), not a transaction: the same table, the
+    /// same idle sweep and teardown, but no `BEGIN`, no list of writes and no commit question.
+    pinned: bool,
     slot: Arc<OpenSession>,
     state: Mutex<TxState>,
     /// Calls using the transaction now (taken under the table lock): the idle sweep leaves it.
@@ -234,6 +265,8 @@ struct Transaction {
 
 struct TxState {
     last_used: Instant,
+    /// A pinned session: the database its last `USE` switched to (shown on approval cards).
+    database: Option<String>,
     /// Every write statement sent in the transaction, in order (what the commit question shows).
     writes: Vec<String>,
     write_bytes: usize,
@@ -264,8 +297,9 @@ enum Ended {
 #[derive(Default)]
 struct TxTable {
     open: HashMap<String, Arc<Transaction>>,
-    /// Connections with a `begin_transaction` in progress (they count against the limits).
-    beginning: HashSet<String>,
+    /// Connections with a `begin_transaction` in progress, with the client that began it (they
+    /// count against the limits).
+    beginning: HashMap<String, String>,
     ended: VecDeque<(String, Ended)>,
 }
 
@@ -277,6 +311,11 @@ impl TxTable {
         }
         self.ended.push_back((id.to_owned(), why));
         Some(tx)
+    }
+
+    /// Pinned sessions, transactions and begins in progress, of every client.
+    fn held_in_all(&self) -> usize {
+        self.open.len() + self.beginning.len()
     }
 
     fn take_where(
@@ -328,6 +367,23 @@ impl Drop for AbortOnUnwind<'_> {
     }
 }
 
+/// Closes the connection's session if dropped while a panic unwinds: a statement that panicked
+/// between a lock timeout being set and taken off leaves a session of unknown state, which must
+/// not be reused (the closing goes through the layer, so the provider's tunnel goes too).
+struct CloseOnUnwind<'a> {
+    layer: &'a ToolLayer,
+    info: &'a ConnectionInfo,
+    slot: &'a OpenSession,
+}
+
+impl Drop for CloseOnUnwind<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.layer.close_session_of(self.info, self.slot);
+        }
+    }
+}
+
 /// A commit question open on a transaction: statements are refused while it lives.
 struct Committing<'a>(&'a Transaction);
 
@@ -370,7 +426,21 @@ struct Trace {
     secrets: Vec<SecretText>,
     /// What the approver decided, for the audit line.
     approval: Option<String>,
+    /// The part of every string cell this call asked for (`cell_char_offset`, `cell_char_limit`).
+    window: Option<crate::limits::CellWindow>,
+    /// The caller (see [`ToolLayer::call_as`]).
+    owner: String,
+    /// The pinned session the call runs in: its id (for the audit line), and that session-state
+    /// statements (`USE`, a `SET` of an allowed setting) are allowed in it.
+    session: Option<String>,
+    /// The `session_id` the call named, taken out of its arguments before they are validated.
+    requested_session: Option<String>,
+    /// Where the call came from, for the audit line.
+    origin: CallOrigin,
 }
+
+/// Where the tools the user allows are read from, at every call: `None` allows them all.
+pub type ToolAllowlist = Arc<dyn Fn() -> Option<Vec<String>> + Send + Sync>;
 
 /// Builder-style configuration, then [`call`](Self::call).
 pub struct ToolLayer {
@@ -399,12 +469,30 @@ pub struct ToolLayer {
     /// [`with_connection_admin`](Self::with_connection_admin)).
     admin: Option<Arc<dyn ConnectionAdmin>>,
     transaction_idle: Duration,
+    /// The tools the user allows, read at every call (`None` from it: all).
+    tool_allowlist: Option<ToolAllowlist>,
+    /// `open_session` takes `pinned` (see [`with_pinned_sessions`](Self::with_pinned_sessions)).
+    pinned_enabled: bool,
+    session_idle: Duration,
     txs: Mutex<TxTable>,
     /// `close_all` calls in progress: a transaction is not begun meanwhile (and one that got in
     /// is rolled back by its own begin).
     closing_all: AtomicUsize,
-    /// The number of the last transaction (its id is `tx-<number>`).
-    tx_numbers: AtomicU64,
+}
+
+/// `prefix` and 128 random bits in hex: an id nobody can guess, so one client's transaction or
+/// pinned session cannot be found by another.
+fn random_id(prefix: &str) -> Result<String, AgentError> {
+    use std::fmt::Write as _;
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes)
+        .map_err(|_| AgentError::Internal("the system has no source of random numbers".into()))?;
+    let mut id = String::with_capacity(prefix.len() + 32);
+    id.push_str(prefix);
+    for byte in bytes {
+        let _ = write!(id, "{byte:02x}");
+    }
+    Ok(id)
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -429,7 +517,7 @@ impl ToolLayer {
             audit: None,
             limits: Limits::default(),
             front_end: front_end.into(),
-            specs: schema::tool_specs_for(false, false, false),
+            specs: schema::tool_specs_for(false, false, false, false),
             sessions: Mutex::new(HashMap::new()),
             opening: Mutex::new(HashMap::new()),
             generations: AtomicU64::new(0),
@@ -437,9 +525,11 @@ impl ToolLayer {
             app: None,
             admin: None,
             transaction_idle: DEFAULT_TRANSACTION_IDLE,
+            tool_allowlist: None,
+            pinned_enabled: false,
+            session_idle: DEFAULT_SESSION_IDLE,
             txs: Mutex::new(TxTable::default()),
             closing_all: AtomicUsize::new(0),
-            tx_numbers: AtomicU64::new(0),
         }
     }
 
@@ -460,7 +550,7 @@ impl ToolLayer {
     #[must_use]
     pub fn with_transactions(mut self) -> Self {
         self.transactions_enabled = true;
-        self.specs = schema::tool_specs_for(true, self.app.is_some(), self.admin.is_some());
+        self.specs = schema::tool_specs_for(true, self.app.is_some(), self.admin.is_some(), self.pinned_enabled);
         self
     }
 
@@ -476,7 +566,7 @@ impl ToolLayer {
     #[must_use]
     pub fn with_app(mut self, app: Arc<dyn AppShow>) -> Self {
         self.app = Some(app);
-        self.specs = schema::tool_specs_for(self.transactions_enabled, true, self.admin.is_some());
+        self.specs = schema::tool_specs_for(self.transactions_enabled, true, self.admin.is_some(), self.pinned_enabled);
         self
     }
 
@@ -493,13 +583,65 @@ impl ToolLayer {
     #[must_use]
     pub fn with_connection_admin(mut self, admin: Arc<dyn ConnectionAdmin>) -> Self {
         self.admin = Some(admin);
-        self.specs = schema::tool_specs_for(self.transactions_enabled, self.app.is_some(), true);
+        self.specs = schema::tool_specs_for(self.transactions_enabled, self.app.is_some(), true, self.pinned_enabled);
         self
     }
 
     #[must_use]
     pub fn with_transaction_idle_timeout(mut self, idle: Duration) -> Self {
         self.transaction_idle = idle;
+        self
+    }
+
+    /// Offers pinned sessions: `open_session` with `pinned` opens a connection of its own whose
+    /// `USE` and `SET` (of the allowed settings) persist across calls, and `session_id` on the
+    /// statement tools runs a call on it. Off by default. Safety rules, all enforced here:
+    ///
+    /// * A pinned session is a physical connection of its own, opened through the
+    ///   [`SessionProvider`] and never shared with another session, the shared one or the app. It
+    ///   needs access `read` or more; its statements are judged exactly like the shared
+    ///   session's (a read runs read-only, a write is approved), and what only it may do on top is
+    ///   `USE` and an allow-list of harmless `SET`s (see [`crate::session_sql`]); a statement that
+    ///   changes identity, privilege or the read-only mode is refused at every access level.
+    /// * Only the caller that opened it ([`call_as`](Self::call_as)) can use or close it. At most
+    ///   [`MAX_PINNED_SESSIONS`] are open; one nobody called for the idle timeout
+    ///   ([`with_session_idle_timeout`](Self::with_session_idle_timeout), default ten minutes) is
+    ///   closed, and so is one whose connection is edited, removed or whose access drops below
+    ///   `read`. Closing drops the connection, so none of its state survives.
+    /// * A transaction is not a pinned session: `begin_transaction` has its own session, and a
+    ///   call names a `transaction_id` or a `session_id`, not both.
+    #[must_use]
+    pub fn with_pinned_sessions(mut self) -> Self {
+        self.pinned_enabled = true;
+        self.specs = schema::tool_specs_for(
+            self.transactions_enabled,
+            self.app.is_some(),
+            self.admin.is_some(),
+            true,
+        );
+        self
+    }
+
+    /// Limits the tools to the names `allowed` returns, asked at every call (so a change the user
+    /// makes takes effect at once); `None` from it allows all of them. Any other tool is refused
+    /// with `agent.access_denied`, whatever the connection's access.
+    #[must_use]
+    pub fn with_tool_allowlist(mut self, allowed: ToolAllowlist) -> Self {
+        self.tool_allowlist = Some(allowed);
+        self
+    }
+
+    /// Whether the user's tool allowlist lets `name` through now (a front end lists only these).
+    pub fn tool_allowed(&self, name: &str) -> bool {
+        self.tool_allowlist
+            .as_ref()
+            .and_then(|allowed| allowed())
+            .is_none_or(|allowed| allowed.iter().any(|tool| tool == name))
+    }
+
+    #[must_use]
+    pub fn with_session_idle_timeout(mut self, idle: Duration) -> Self {
+        self.session_idle = idle;
         self
     }
 
@@ -576,6 +718,27 @@ impl ToolLayer {
         }
     }
 
+    /// Whether the client `owner` holds a pinned session or a transaction.
+    pub fn holds_client(&self, owner: &str) -> bool {
+        (self.transactions_enabled || self.pinned_enabled)
+            && lock(&self.txs).open.values().any(|tx| tx.owner == owner)
+    }
+
+    /// Closes the pinned sessions and rolls back the transactions that the client `owner` (see
+    /// [`call_as`](Self::call_as)) holds. A front end that serves several clients calls it when
+    /// one of them is gone (its HTTP session ended or expired): what it opened can be used by
+    /// nobody else, and would only hold a connection to the database until the idle timeout.
+    pub fn end_client(&self, owner: &str) {
+        if !self.transactions_enabled && !self.pinned_enabled {
+            return;
+        }
+        let doomed = lock(&self.txs).take_where(|tx| tx.owner == owner, Ended::Closed);
+        for tx in &doomed {
+            let tool = if tx.pinned { "close_session" } else { "rollback_transaction" };
+            self.rollback_abandoned(tx, tool, "client ended");
+        }
+    }
+
     /// Closes the connection's agent session (and what the front end built around it, via
     /// [`SessionProvider::close_generation`]) if one is open. Call it when the connection is edited,
     /// deleted or its access changes; the layer itself calls it when a call finds the effective
@@ -589,7 +752,7 @@ impl ToolLayer {
         let _gate = self.enter_uncancellable(&id);
         self.close_locked(&id, None);
         // The transactions of the connection go with it, rolled back.
-        self.end_transactions_of(&id, Ended::Closed, "session closed");
+        self.end_transactions_of(&id, None, Ended::Closed, "session closed");
     }
 
     /// The gate of `connection_id`, waiting for it; `None`: the call was cancelled while waiting.
@@ -671,6 +834,26 @@ impl ToolLayer {
         self.close_locked(connection_id, Some(slot));
     }
 
+    /// Closes the session `slot` belongs to: the connection's shared session if it is still the
+    /// registered one, or the pinned session that holds it (taken out of the table first, so no
+    /// call finds it again).
+    fn close_session_of(&self, info: &ConnectionInfo, slot: &OpenSession) {
+        let registered = lock(&self.sessions)
+            .get(&info.id)
+            .filter(|current| std::ptr::eq(Arc::as_ptr(current), slot))
+            .cloned();
+        if let Some(registered) = registered {
+            self.close_slot(&info.id, &registered);
+        }
+        let pinned = lock(&self.txs).take_where(
+            |tx| tx.pinned && std::ptr::eq(Arc::as_ptr(&tx.slot), slot),
+            Ended::Closed,
+        );
+        for session in pinned {
+            self.rollback_abandoned(&session, "close_session", "session state unknown");
+        }
+    }
+
     /// Disconnects a session that is no longer wanted: a statement it is running is cancelled first
     /// (best effort, through the token the statement was started with). A statement the server
     /// already executed cannot be undone by this; it only stops waiting for the rest. The provider
@@ -703,7 +886,7 @@ impl ToolLayer {
                 AgentError::InvalidArguments(format!("the arguments are not valid JSON: {error}"))
             })
         };
-        self.call_parsed(name, parsed, &CancelToken::new())
+        self.call_parsed("", name, parsed, &CancelToken::new(), CallOrigin::default())
     }
 
     /// Like [`call`](Self::call), with a token the caller cancels when the
@@ -715,17 +898,64 @@ impl ToolLayer {
         arguments: Value,
         cancel: &CancelToken,
     ) -> ToolOutcome {
-        self.call_parsed(name, Ok(arguments), cancel)
+        self.call_parsed("", name, Ok(arguments), cancel, CallOrigin::default())
+    }
+
+    /// [`call_cancellable`](Self::call_cancellable) for the MCP client `owner` (an opaque id the
+    /// front end gives each client of a server that several clients share, e.g. one per HTTP
+    /// session). A transaction or pinned session can only be used, committed, rolled back or
+    /// closed by the owner that opened it; for anyone else it does not exist. The other calls
+    /// (`call`, `call_json`, `call_cancellable`) are the one owner `""`, which is what a server
+    /// with a single client (stdio) is.
+    pub fn call_as(
+        &self,
+        owner: &str,
+        name: &str,
+        arguments: Value,
+        cancel: &CancelToken,
+    ) -> ToolOutcome {
+        self.call_parsed(owner, name, Ok(arguments), cancel, CallOrigin::default())
+    }
+
+    /// [`call_as`](Self::call_as) for a call whose transport and client the audit lines of this
+    /// call (the `started` line of a write included) record.
+    pub fn call_as_from(
+        &self,
+        owner: &str,
+        name: &str,
+        arguments: Value,
+        cancel: &CancelToken,
+        origin: &CallOrigin,
+    ) -> ToolOutcome {
+        self.call_parsed(owner, name, Ok(arguments), cancel, origin.clone())
+    }
+
+    /// [`call_cancellable`](Self::call_cancellable) for a call whose transport and client the
+    /// audit lines of this call (the `started` line of a write included) record.
+    pub fn call_cancellable_from(
+        &self,
+        name: &str,
+        arguments: Value,
+        cancel: &CancelToken,
+        origin: &CallOrigin,
+    ) -> ToolOutcome {
+        self.call_parsed("", name, Ok(arguments), cancel, origin.clone())
     }
 
     fn call_parsed(
         &self,
+        owner: &str,
         name: &str,
         arguments: Result<Value, AgentError>,
         cancel: &CancelToken,
+        origin: CallOrigin,
     ) -> ToolOutcome {
         let started = Instant::now();
-        let mut trace = Trace::default();
+        let mut trace = Trace {
+            owner: owner.to_owned(),
+            origin,
+            ..Trace::default()
+        };
         let dispatched = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.dispatch(name, arguments, cancel, &mut trace)
         }));
@@ -754,12 +984,14 @@ impl ToolLayer {
         let Some(audit) = &self.audit else {
             return;
         };
-        let mut entry = AuditEntry::now(&self.front_end, &sanitize_tool_name(name));
+        let mut entry = AuditEntry::now(&self.front_end, &sanitize_tool_name(name))
+            .with_origin(&trace.origin);
         entry.connection_id = trace.connection_id;
         entry.statement = trace.statement.map(|text| redact(&text, &trace.secrets));
         entry.outcome = outcome.to_owned();
         entry.rows = trace.rows;
         entry.approval = trace.approval;
+        entry.session_id = trace.session;
         entry.duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         audit.record(entry);
     }
@@ -776,6 +1008,12 @@ impl ToolLayer {
             .filter(|tool| self.app.is_some() || !tool.is_app_tool())
             .filter(|tool| self.admin.is_some() || !tool.is_admin_tool())
             .ok_or_else(|| AgentError::UnknownTool(sanitize_tool_name(name)))?;
+        if !self.tool_allowed(tool.as_str()) {
+            return Err(AgentError::AccessDenied(format!(
+                "the tool `{}` is not allowed by the user's MCP settings (`ai.mcp_tools` in tablex's settings.json); only the user can change that",
+                tool.as_str()
+            )));
+        }
         // Before the call looks at any transaction: one that sat idle too long is gone already
         // (its session is closed without a ROLLBACK round trip: see `expire_idle_transactions`).
         self.expire_idle(false);
@@ -790,18 +1028,43 @@ impl ToolLayer {
         if let Some(id) = arguments.get("connection_id").and_then(Value::as_str) {
             trace.connection_id = Some(id.chars().take(128).collect());
         }
+        self.check_database_scope(tool, &arguments)?;
+        // `session_id` of the statement tools is read here and not by their typed requests: it
+        // means the same everywhere (see `session_slot`). Without pinned sessions it is left in
+        // the arguments, where the schema refuses it like any unknown property.
+        if self.pinned_enabled && tool.takes_session() {
+            if let Some(id) = arguments.as_object_mut().and_then(|map| map.remove("session_id")) {
+                match id {
+                    Value::Null => {}
+                    Value::String(id) if !id.is_empty() && id.len() <= 128 => {
+                        trace.requested_session = Some(id);
+                    }
+                    _ => return Err(AgentError::invalid("`session_id` is the id open_session returned")),
+                }
+            }
+        }
         match tool {
             ToolName::ListConnections => {
                 let _: ListConnectionsRequest = self.parse(tool, arguments)?;
                 to_value(self.list_connections())
             }
             ToolName::OpenSession => {
-                let request: ConnectionRequest = self.parse(tool, arguments)?;
-                to_value(self.open_session(&request.connection_id, cancel, trace)?)
+                let request: OpenSessionRequest = self.parse(tool, arguments)?;
+                if request.pinned == Some(true) {
+                    to_value(self.open_pinned(&request.connection_id, cancel, trace)?)
+                } else {
+                    to_value(self.open_session(&request.connection_id, cancel, trace)?)
+                }
             }
             ToolName::CloseSession => {
-                let request: ConnectionRequest = self.parse(tool, arguments)?;
-                to_value(self.close_session(&request.connection_id, trace))
+                let request: CloseSessionRequest = self.parse(tool, arguments)?;
+                match (&request.connection_id, &request.session_id) {
+                    (Some(connection_id), None) => to_value(self.close_session(connection_id, trace)),
+                    (None, Some(session_id)) => to_value(self.close_pinned(session_id, trace)?),
+                    _ => Err(AgentError::invalid(
+                        "give `connection_id` (the connection's shared session) or `session_id` (a pinned session), not both and not neither",
+                    )),
+                }
             }
             ToolName::ListNamespaces => {
                 let request: ListNamespacesRequest = self.parse(tool, arguments)?;
@@ -927,6 +1190,56 @@ impl ToolLayer {
 
     // ------------------------------------------------------------- access
 
+    /// The databases of the connection a call may use (`ConnectionInfo::allowed_databases`): a
+    /// tool that works inside a database names it, and it is one of them. Checked before the
+    /// call, for a connection the agent may use at all (one at `off` is not described).
+    fn check_database_scope(&self, tool: ToolName, arguments: &Value) -> Result<(), AgentError> {
+        if !tool.is_database_scoped() {
+            return Ok(());
+        }
+        let Some(id) = arguments.get("connection_id").and_then(Value::as_str) else {
+            return Ok(());
+        };
+        let Some(info) = self.catalog.get(id) else {
+            return Ok(());
+        };
+        if info.effective_access() == AgentAccess::Off {
+            return Ok(());
+        }
+        let Some(allowed) = &info.allowed_databases else {
+            return Ok(());
+        };
+        match arguments.get("database").and_then(Value::as_str) {
+            Some(database) => Self::check_allowed_database(&info, database),
+            None if tool == ToolName::ListNamespaces => Ok(()),
+            None => Err(AgentError::AccessDenied(format!(
+                "connection `{}` is limited to the databases {}: name one with `database`. Only the user can change that in tablex (the connection's `agent.databases` override)",
+                info.name,
+                Self::shown_databases(allowed)
+            ))),
+        }
+    }
+
+    fn shown_databases(allowed: &[String]) -> String {
+        let names: Vec<String> = allowed.iter().take(20).map(|name| format!("`{}`", clean_name(name, 64))).collect();
+        names.join(", ")
+    }
+
+    /// `database` is one of the databases agents may use on `info`.
+    fn check_allowed_database(info: &ConnectionInfo, database: &str) -> Result<(), AgentError> {
+        match &info.allowed_databases {
+            Some(allowed) if !allowed.iter().any(|name| name == database) => {
+                Err(AgentError::AccessDenied(format!(
+                    "database `{}` is not one of the databases agents may use on connection `{}` ({}). Only the user can change that in tablex (the connection's `agent.databases` override)",
+                    clean_name(database, 64),
+                    info.name,
+                    Self::shown_databases(allowed)
+                )))
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// The connection, and whether its effective access allows `tool`.
     fn authorize(
         &self,
@@ -945,13 +1258,15 @@ impl ToolLayer {
         if access == AgentAccess::Off {
             // Access was lowered to `off` while a session was open: close it, then refuse.
             self.revoke(connection_id);
-        } else if self.transactions_enabled {
-            // A transaction needs `read_write` and the connection it was begun for.
+        } else if self.transactions_enabled || self.pinned_enabled {
+            // A transaction needs `read_write` (a pinned session `read`) and the connection it was
+            // opened for.
             let revision = info.revision;
             let doomed = lock(&self.txs).take_where(
                 |tx| {
+                    let needed = if tx.pinned { AgentAccess::Read } else { AgentAccess::ReadWrite };
                     tx.connection_id == connection_id
-                        && (access < AgentAccess::ReadWrite || tx.slot.revision.differs_from(revision))
+                        && (access < needed || tx.slot.revision.differs_from(revision))
                 },
                 Ended::Changed,
             );
@@ -1092,7 +1407,7 @@ impl ToolLayer {
         for (id, slot) in stale {
             self.close_slot(&id, &slot);
         }
-        if self.transactions_enabled {
+        if self.transactions_enabled || self.pinned_enabled {
             let doomed = lock(&self.txs).take_where(
                 |tx| {
                     usable
@@ -1121,6 +1436,25 @@ impl ToolLayer {
                     connection_type: visible
                         .then(|| clean_name(&info.connection_type.name, MAX_NAME_CHARS)),
                     kind: visible.then_some(info.kind),
+                    group: if visible {
+                        info.group.iter().map(|name| clean_name(name, MAX_NAME_CHARS)).collect()
+                    } else {
+                        Vec::new()
+                    },
+                    endpoint: info
+                        .endpoint
+                        .as_deref()
+                        .filter(|_| visible)
+                        .map(|endpoint| clean_name(endpoint, 200)),
+                    notes: info
+                        .notes
+                        .as_deref()
+                        .filter(|_| visible)
+                        .map(|notes| clean(notes, 1000))
+                        .filter(|notes| !notes.is_empty()),
+                    allowed_databases: info.allowed_databases.clone().filter(|_| visible).map(|names| {
+                        names.iter().map(|name| clean_name(name, MAX_NAME_CHARS)).collect()
+                    }),
                     name: clean_name(&info.name, MAX_NAME_CHARS),
                     id: clean_name(&info.id, MAX_NAME_CHARS),
                 }
@@ -1146,6 +1480,8 @@ impl ToolLayer {
             supports_schemas: slot.info.supports_schemas,
             already_open,
             statement_timeout_secs: timeout,
+            session_id: None,
+            idle_timeout_secs: None,
         };
         // One open or close per connection at a time: a second call waits here (and gives up when
         // its own call is cancelled) and then sees what the first left. Only one open of the
@@ -1215,7 +1551,10 @@ impl ToolLayer {
     fn close_session(&self, connection_id: &str, trace: &mut Trace) -> CloseSessionResult {
         let _gate = self.enter_uncancellable(connection_id);
         let slot = self.close_locked(connection_id, None);
-        self.end_transactions_of(connection_id, Ended::Closed, "session closed");
+        // The transactions and pinned sessions of the caller go with the shared session; those of
+        // another client of a shared server stay (they are not the caller's to end).
+        let owner = trace.owner.clone();
+        self.end_transactions_of(connection_id, Some(&owner), Ended::Closed, "session closed");
         let closed = slot.is_some();
         if let Some(slot) = slot {
             trace.secrets.clone_from(&slot.secrets);
@@ -1223,6 +1562,206 @@ impl ToolLayer {
         CloseSessionResult {
             connection_id: connection_id.to_owned(),
             closed,
+            session_id: None,
+        }
+    }
+
+    /// `open_session` with `pinned`: a connection of its own, kept for `session_id` calls.
+    fn open_pinned(
+        &self,
+        connection_id: &str,
+        cancel: &CancelToken,
+        trace: &mut Trace,
+    ) -> Result<OpenSessionResult, AgentError> {
+        Self::check_not_cancelled(cancel)?;
+        Self::check_not_closing(&self.closing_all)?;
+        let (info, access) = self.authorize(ToolName::OpenSession, connection_id)?;
+        if access < AgentAccess::Read {
+            return Err(AgentError::AccessDenied(denial_message(
+                &info,
+                access,
+                ToolName::OpenSession,
+                AgentAccess::Read,
+            ) + " (a pinned session runs statements, so it needs `read`)"));
+        }
+        let Some(_gate) = self.enter(&info.id, Some(cancel)) else {
+            return Err(AgentError::Cancelled);
+        };
+        let id = random_id("ses-")?;
+        // The cap is per client: one that holds its four does not stop another from opening.
+        let owner = trace.owner.clone();
+        let pinned_open =
+            |table: &TxTable| table.open.values().filter(|tx| tx.pinned && tx.owner == owner).count();
+        {
+            let table = lock(&self.txs);
+            if pinned_open(&table) >= MAX_PINNED_SESSIONS {
+                return Err(AgentError::Limit(format!(
+                    "{MAX_PINNED_SESSIONS} pinned sessions are open already (the most one client holds); close one with close_session first"
+                )));
+            }
+            if table.held_in_all() >= MAX_SESSIONS_IN_ALL {
+                return Err(Self::too_many_sessions());
+            }
+        }
+        let slot = self.connect_slot(&info, trace)?;
+        if let Err(error) = Self::require_locked_file_access(&slot, ToolName::OpenSession) {
+            self.disconnect(&slot);
+            return Err(error);
+        }
+        let still = self.catalog.get(&info.id).filter(|now| {
+            !now.revision.differs_from(info.revision) && now.effective_access() >= AgentAccess::Read
+        });
+        if still.is_none() {
+            self.disconnect(&slot);
+            return Err(AgentError::NotConnected(
+                "the connection was edited, removed or its access lowered while the session was being opened; no session was opened"
+                    .into(),
+            ));
+        }
+        let session = Arc::new(Transaction {
+            id: id.clone(),
+            connection_id: info.id.clone(),
+            owner: trace.owner.clone(),
+            pinned: true,
+            slot: Arc::clone(&slot),
+            state: Mutex::new(TxState {
+                last_used: Instant::now(),
+                database: None,
+                writes: Vec::new(),
+                write_bytes: 0,
+                aborted: false,
+                committing: false,
+            }),
+            in_use: AtomicUsize::new(0),
+        });
+        {
+            let mut table = lock(&self.txs);
+            if pinned_open(&table) >= MAX_PINNED_SESSIONS || table.held_in_all() >= MAX_SESSIONS_IN_ALL {
+                let all = table.held_in_all() >= MAX_SESSIONS_IN_ALL;
+                drop(table);
+                self.disconnect(&slot);
+                return Err(if all {
+                    Self::too_many_sessions()
+                } else {
+                    AgentError::Limit(format!(
+                        "{MAX_PINNED_SESSIONS} pinned sessions are open already (the most one client holds); close one with close_session first"
+                    ))
+                });
+            }
+            table.open.insert(id.clone(), session);
+        }
+        if self.closing_all.load(Ordering::SeqCst) > 0 {
+            let taken = lock(&self.txs).take(&id, Ended::Closed);
+            if let Some(tx) = taken {
+                self.rollback_abandoned(&tx, "close_session", "layer closing");
+            }
+            return Err(Self::closing_error());
+        }
+        trace.session = Some(id.clone());
+        let statement_timeout_secs = info.statement_timeout(&self.limits).as_secs();
+        Ok(OpenSessionResult {
+            connection_id: info.id,
+            kind: slot.info.kind,
+            access,
+            language: slot.info.language,
+            supports_schemas: slot.info.supports_schemas,
+            already_open: false,
+            statement_timeout_secs,
+            session_id: Some(id),
+            idle_timeout_secs: Some(self.session_idle.as_secs()),
+        })
+    }
+
+    fn too_many_sessions() -> AgentError {
+        AgentError::Limit(format!(
+            "{MAX_SESSIONS_IN_ALL} pinned sessions and transactions are open already (the most in all, across every client); try again when one is closed"
+        ))
+    }
+
+    /// `close_session` with `session_id`: only the caller that opened it can.
+    fn close_pinned(&self, id: &str, trace: &mut Trace) -> Result<CloseSessionResult, AgentError> {
+        let session = {
+            let mut table = lock(&self.txs);
+            let owned = table
+                .open
+                .get(id)
+                .is_some_and(|tx| tx.pinned && tx.owner == trace.owner);
+            if !owned {
+                return Err(self.no_session(&table, id));
+            }
+            table.take(id, Ended::RolledBack).ok_or_else(|| self.no_session(&table, id))?
+        };
+        trace.connection_id = Some(session.connection_id.chars().take(128).collect());
+        trace.session = Some(session.id.clone());
+        trace.secrets.clone_from(&session.slot.secrets);
+        trace.statement = Some("close_session".into());
+        // Closing the connection drops everything the session set.
+        let _ = self.rollback_and_close(&session, ABANDON_TIMEOUT, false);
+        Ok(CloseSessionResult {
+            connection_id: session.connection_id.clone(),
+            closed: true,
+            session_id: Some(session.id.clone()),
+        })
+    }
+
+    /// The pinned session `id` of the caller, for a call on connection `info`, counted as in use.
+    fn use_session(
+        &self,
+        id: &str,
+        info: &ConnectionInfo,
+        trace: &Trace,
+    ) -> Result<TxUse, AgentError> {
+        let table = lock(&self.txs);
+        let Some(tx) = table.open.get(id).filter(|tx| tx.pinned && tx.owner == trace.owner) else {
+            return Err(self.no_session(&table, id));
+        };
+        if tx.connection_id != info.id {
+            return Err(AgentError::invalid(format!(
+                "session `{}` belongs to another connection; pass the connection_id it was opened for",
+                clean(id, 64)
+            )));
+        }
+        tx.in_use.fetch_add(1, Ordering::SeqCst);
+        Ok(TxUse { tx: Arc::clone(tx) })
+    }
+
+    /// The error for a pinned session that is not open (or is not the caller's: the same words,
+    /// so one client cannot tell another's id from none).
+    fn no_session(&self, table: &TxTable, id: &str) -> AgentError {
+        let shown = clean(id, 64);
+        AgentError::NotConnected(match table.why_ended(id) {
+            Some(Ended::Idle) => format!(
+                "unknown session `{shown}`: it was closed after {} s without a call; open_session with pinned true opens a new one",
+                self.session_idle.as_secs()
+            ),
+            Some(Ended::Changed) => format!(
+                "unknown session `{shown}`: its connection was edited or removed, or the access dropped below `read`, so it was closed; open_session with pinned true opens a new one"
+            ),
+            Some(_) => format!(
+                "unknown session `{shown}`: it was closed; open_session with pinned true opens a new one"
+            ),
+            None => format!(
+                "unknown session `{shown}`; open_session with pinned true returns the ids"
+            ),
+        })
+    }
+
+    /// The session a call runs on: the pinned one it names (`session_id`), else the connection's
+    /// shared one. The pinned one is held (counted as in use) for as long as the returned guard
+    /// lives, and the call is traced to it.
+    fn session_slot(
+        &self,
+        info: &ConnectionInfo,
+        trace: &mut Trace,
+    ) -> Result<(Arc<OpenSession>, Option<TxUse>), AgentError> {
+        match trace.requested_session.clone() {
+            Some(id) => {
+                let used = self.use_session(&id, info, trace)?;
+                trace.secrets.clone_from(&used.tx.slot.secrets);
+                trace.session = Some(used.tx.id.clone());
+                Ok((Arc::clone(&used.tx.slot), Some(used)))
+            }
+            None => Ok((self.open_slot(info, trace)?, None)),
         }
     }
 
@@ -1253,9 +1792,18 @@ impl ToolLayer {
             namespaces: page
                 .nodes
                 .into_iter()
+                // Databases the user did not allow are not listed.
+                .filter(|n| {
+                    level != NodeLevel::Databases
+                        || info
+                            .allowed_databases
+                            .as_ref()
+                            .is_none_or(|allowed| allowed.contains(&n.name))
+                })
                 .map(|n| NameItem {
                     name: clean_name(&n.name, MAX_NAME_CHARS),
                     kind: clean(&n.kind, 40),
+                    comment: None,
                 })
                 .collect(),
             next_cursor: page.next_cursor,
@@ -1315,7 +1863,7 @@ impl ToolLayer {
                 tool.as_str()
             ))),
             Language::Mongo => Err(AgentError::Unsupported(format!(
-                "`{}` is for SQL databases; this is MongoDB, use mongo_find, mongo_aggregate or mongo_count to read documents and mongo_insert, mongo_update or mongo_delete to change them (list_tables lists the collections)",
+                "`{}` is for SQL databases; this is MongoDB, use mongo_find, mongo_aggregate or mongo_count to read documents and mongo_insert, mongo_update or mongo_delete to change them, or execute_query with a shell command such as db.orders.find({{}}) (list_tables lists the collections)",
                 tool.as_str()
             ))),
             Language::Other => Err(AgentError::Unsupported(format!(
@@ -1324,6 +1872,22 @@ impl ToolLayer {
                 slot.info.kind.driver_id()
             ))),
         }
+    }
+
+    /// DuckDB SQL reads and writes files on this computer (`read_text`, `COPY`, `FROM 'x.csv'`,
+    /// `ATTACH`, and more with every release), and no scan of the text can be complete. So SQL runs
+    /// on a DuckDB session only when the engine itself refuses all of it (file access off,
+    /// configuration locked: what the MCP server opens). The app shares its DuckDB instance with
+    /// the user's own connection, which needs file access, so the assistant has no SQL there.
+    /// Browsing the schema goes through the driver's catalog calls, not agent SQL, and stays.
+    fn require_locked_file_access(slot: &OpenSession, tool: ToolName) -> Result<(), AgentError> {
+        if slot.info.kind == ConnectionKind::DuckDb && !slot.info.file_access_locked {
+            return Err(AgentError::Unsupported(format!(
+                "`{}` is not available on this DuckDB connection here: DuckDB SQL can read files on this computer, and this connection's DuckDB runs with file access on (it is shared with your own connection in the app). The assistant in the app cannot run SQL on DuckDB connections; use an MCP client (tablex-mcp), which opens DuckDB with file access turned off. Listing and describing tables still works.",
+                tool.as_str()
+            )));
+        }
+        Ok(())
     }
 
     /// The MongoDB twin of [`require_sql`](Self::require_sql).
@@ -1371,6 +1935,10 @@ impl ToolLayer {
                 .map(|n| NameItem {
                     name: clean_name(&n.name, MAX_NAME_CHARS),
                     kind: clean(&n.kind, 40),
+                    comment: n
+                        .comment
+                        .map(|text| clean(&slot.masks.redact(&text), crate::sanitize::MAX_COMMENT_CHARS))
+                        .filter(|text| !text.is_empty()),
                 })
                 .collect(),
             next_cursor: page.next_cursor,
@@ -1488,6 +2056,9 @@ impl ToolLayer {
         Self::check_not_cancelled(cancel)?;
         let (info, _) = self.authorize(ToolName::DescribeTable, &request.connection_id)?;
         let slot = self.open_slot(&info, trace)?;
+        if slot.info.language == Language::Mongo {
+            return self.describe_mongo_collection(request, &info, &slot, cancel, trace);
+        }
         Self::require_sql(&slot, ToolName::DescribeTable)?;
         let (database, schema) = self.resolve_namespace(&slot, request.database, request.schema)?;
         let mut description = slot.session.describe_table(&TableRef {
@@ -1507,9 +2078,40 @@ impl ToolLayer {
         trace: &mut Trace,
     ) -> Result<GetSchemaContextResult, AgentError> {
         Self::check_not_cancelled(cancel)?;
-        let (info, _) = self.authorize(ToolName::GetSchemaContext, &request.connection_id)?;
+        let (info, access) = self.authorize(ToolName::GetSchemaContext, &request.connection_id)?;
         let slot = self.open_slot(&info, trace)?;
-        Self::require_sql(&slot, ToolName::GetSchemaContext)?;
+        let is_mongo = slot.info.language == Language::Mongo;
+        if !is_mongo {
+            Self::require_sql(&slot, ToolName::GetSchemaContext)?;
+        } else if access < AgentAccess::Read {
+            // A collection has no schema: what it holds is read from a sample of its documents.
+            return Err(AgentError::AccessDenied(format!(
+                "{} A MongoDB collection has no declared schema, so its fields are read from a sample of its documents, which needs `read`.",
+                denial_message(&info, access, ToolName::GetSchemaContext, AgentAccess::Read)
+            )));
+        }
+        // The tables asked for by name, else every table of the namespace.
+        let selected: Option<Vec<String>> = match request.tables {
+            Some(names) if !names.is_empty() => {
+                if names.len() > MAX_SELECTED_TABLES {
+                    return Err(AgentError::invalid(format!(
+                        "`tables` names at most {MAX_SELECTED_TABLES} tables; ask for the rest in another call"
+                    )));
+                }
+                for name in &names {
+                    Self::check_database(Some(name))?;
+                }
+                let mut names = names;
+                names.sort();
+                names.dedup();
+                Some(names)
+            }
+            _ => None,
+        };
+        let table_cap = request
+            .max_tables
+            .map_or(self.limits.max_context_tables, |most| most.clamp(1, MAX_CONTEXT_TABLES_REQUESTED))
+            .min(self.limits.max_context_tables);
         let (database, schema) = self.resolve_namespace(&slot, request.database, request.schema)?;
         let part = |name: &String| name_form(&clean_name(name, MAX_NAME_CHARS));
         let label = match (&database, &schema) {
@@ -1520,9 +2122,9 @@ impl ToolLayer {
         // Every table name (bounded), then the first `max_context_tables` described.
         const NAME_PAGE: usize = 500;
         const MAX_NAMES: usize = 5000;
-        let mut names: Vec<String> = Vec::new();
+        let mut names: Vec<String> = selected.clone().unwrap_or_default();
         let mut cursor = None;
-        loop {
+        while selected.is_none() {
             let page = slot.session.list_nodes(
                 NodeLevel::Tables,
                 &NodeQuery {
@@ -1544,13 +2146,22 @@ impl ToolLayer {
         }
         names.sort();
         names.dedup();
+        let budget = request
+            .budget
+            .filter(|budget| *budget > 0)
+            .unwrap_or(DEFAULT_BUDGET);
+        if is_mongo {
+            return self.mongo_schema_context(
+                &info, &slot, database.as_deref().unwrap_or_default(), &label, names, table_cap, budget, cancel, trace,
+            );
+        }
         let mut described = Vec::new();
         let mut undescribed = Vec::new();
         for (index, name) in names.into_iter().enumerate() {
             if cancel.is_cancelled() {
                 return Err(AgentError::Cancelled);
             }
-            if index >= self.limits.max_context_tables {
+            if index >= table_cap {
                 undescribed.push(name);
                 continue;
             }
@@ -1572,10 +2183,6 @@ impl ToolLayer {
                 Err(_) => undescribed.push(name),
             }
         }
-        let budget = request
-            .budget
-            .filter(|budget| *budget > 0)
-            .unwrap_or(DEFAULT_BUDGET);
         Ok(build_schema_context(
             &ContextInput {
                 label: &label,
@@ -1596,9 +2203,24 @@ impl ToolLayer {
     ) -> Result<StatementResult, AgentError> {
         let (info, access) = self.authorize(ToolName::ExecuteQuery, &request.connection_id)?;
         Self::check_database(request.database.as_deref())?;
+        let lock_timeout = LockTimeout::parse(
+            info.kind,
+            request.lock_timeout_secs,
+            info.statement_timeout(&self.limits),
+        )?;
+        trace.window = crate::limits::CellWindow::of(
+            request.cell_char_offset,
+            request.cell_char_limit,
+            self.limits.max_cell_bytes,
+        );
+        if request.transaction_id.is_some() && trace.requested_session.is_some() {
+            return Err(Self::session_and_transaction());
+        }
         // A statement of a transaction runs on the transaction's own session.
         let transaction = match &request.transaction_id {
-            Some(id) if self.transactions_enabled => Some(self.use_transaction(id, &info)?),
+            Some(id) if self.transactions_enabled => {
+                Some(self.use_transaction(id, &info, &trace.owner)?)
+            }
             Some(_) => {
                 return Err(AgentError::invalid(
                     "transactions are not available in this front end",
@@ -1606,14 +2228,19 @@ impl ToolLayer {
             }
             None => None,
         };
-        let slot = match &transaction {
-            Some(used) => Arc::clone(&used.tx.slot),
-            None => self.open_slot(&info, trace)?,
+        // A statement of a pinned session runs on that session's connection.
+        let (slot, _pinned) = match &transaction {
+            Some(used) => (Arc::clone(&used.tx.slot), None),
+            None => self.session_slot(&info, trace)?,
         };
         if transaction.is_some() {
             trace.secrets.clone_from(&slot.secrets);
         }
+        if slot.info.language == Language::Mongo && transaction.is_none() {
+            return self.execute_mongo_shell(&request, &info, access, &slot, cancel, trace);
+        }
         Self::require_sql(&slot, ToolName::ExecuteQuery)?;
+        Self::require_locked_file_access(&slot, ToolName::ExecuteQuery)?;
         if transaction.is_some() {
             Self::check_transaction_database(&slot, request.database.as_deref())?;
         }
@@ -1632,13 +2259,10 @@ impl ToolLayer {
             .info
             .lex
             .ok_or_else(|| AgentError::Internal("a SQL session without lexer settings".into()))?;
-        let classified = classify_sql(&request.statement, slot.info.kind, &lex);
-        // `COPY` reads or writes server files and programs, which a rollback does not undo.
-        if transaction.is_some() && classified.verb == "COPY" {
-            return Err(AgentError::Unsupported(
-                "COPY is not available inside a transaction: what it does to files and programs on the server is not undone by a rollback"
-                    .into(),
-            ));
+        let mut classified = classify_sql(&request.statement, slot.info.kind, &lex);
+        if transaction.is_some() {
+            Self::check_in_transaction(slot.info.kind, &classified)?;
+            Self::treat_function_calls_as_changes(slot.info.kind, &lex, &request.statement, &mut classified);
         }
         self.run_policy_checked(
             ToolName::ExecuteQuery,
@@ -1653,6 +2277,7 @@ impl ToolLayer {
             request.row_limit,
             request.dangerous.unwrap_or(false),
             transaction.as_ref(),
+            lock_timeout,
             cancel,
             trace,
         )
@@ -1671,6 +2296,16 @@ impl ToolLayer {
         let started = Instant::now();
         let (info, access) = self.authorize(ToolName::ExecuteBatch, &request.connection_id)?;
         Self::check_database(request.database.as_deref())?;
+        let lock_timeout = LockTimeout::parse(
+            info.kind,
+            request.lock_timeout_secs,
+            info.statement_timeout(&self.limits),
+        )?;
+        trace.window = crate::limits::CellWindow::of(
+            request.cell_char_offset,
+            request.cell_char_limit,
+            self.limits.max_cell_bytes,
+        );
         let continue_on_error = request.continue_on_error.unwrap_or(false);
         let own_transaction = request.use_transaction.unwrap_or(false);
         let in_transaction = own_transaction || request.transaction_id.is_some();
@@ -1689,19 +2324,23 @@ impl ToolLayer {
                 "transactions are not available in this front end",
             ));
         }
+        if (in_transaction) && trace.requested_session.is_some() {
+            return Err(Self::session_and_transaction());
+        }
         // A script of an open transaction runs on the transaction's own session.
         let existing = match &request.transaction_id {
-            Some(id) => Some(self.use_transaction(id, &info)?),
+            Some(id) => Some(self.use_transaction(id, &info, &trace.owner)?),
             None => None,
         };
-        let slot = match &existing {
-            Some(used) => Arc::clone(&used.tx.slot),
-            None => self.open_slot(&info, trace)?,
+        let (slot, _pinned) = match &existing {
+            Some(used) => (Arc::clone(&used.tx.slot), None),
+            None => self.session_slot(&info, trace)?,
         };
         if existing.is_some() {
             trace.secrets.clone_from(&slot.secrets);
         }
         Self::require_sql(&slot, ToolName::ExecuteBatch)?;
+        Self::require_locked_file_access(&slot, ToolName::ExecuteBatch)?;
         if in_transaction {
             Self::check_transaction_database(&slot, request.database.as_deref())?;
         }
@@ -1737,19 +2376,32 @@ impl ToolLayer {
                 parts.len()
             )));
         }
+        let classes: Vec<Classified> = parts
+            .iter()
+            .map(|text| classify_sql(text, slot.info.kind, &lex))
+            .collect();
+        // Every statement that sets session state is named at once, so one retry drops them all.
+        let session_statements: Vec<(Option<usize>, &str)> = classes
+            .iter()
+            .enumerate()
+            .filter(|(_, classified)| classified.session_state && classified.statements == 1)
+            .map(|(at, classified)| {
+                (
+                    Some(at + 1),
+                    classified.session_statement.as_deref().unwrap_or(&classified.verb),
+                )
+            })
+            .collect();
+        if !session_statements.is_empty() && access >= AgentAccess::Read {
+            return Err(session_state_refusal(access, "SQL statement", &session_statements));
+        }
         let mut plan = Vec::with_capacity(parts.len());
-        for (at, text) in parts.iter().enumerate() {
+        for (at, (text, mut classified)) in parts.iter().zip(classes).enumerate() {
             let number = at + 1;
-            let classified = classify_sql(text, slot.info.kind, &lex);
-            // `COPY` reads or writes server files and programs, which a rollback does not undo.
-            if in_transaction && classified.verb == "COPY" {
-                return Err(Self::in_script(
-                    AgentError::Unsupported(
-                        "COPY is not available inside a transaction: what it does to files and programs on the server is not undone by a rollback"
-                            .into(),
-                    ),
-                    number,
-                ));
+            if in_transaction {
+                Self::check_in_transaction(slot.info.kind, &classified)
+                    .map_err(|error| Self::in_script(error, number))?;
+                Self::treat_function_calls_as_changes(slot.info.kind, &lex, text, &mut classified);
             }
             // Flagged as dangerous so that a dangerous statement comes back as `Approval` with its
             // reason: a script never runs one, whatever the front end allows.
@@ -1777,12 +2429,6 @@ impl ToolLayer {
             if writes.is_empty() {
                 return Err(AgentError::invalid(
                     "`use_transaction` is for scripts that change data; this one only reads, so run it without it",
-                ));
-            }
-            if matches!(info.kind, ConnectionKind::MySql | ConnectionKind::MariaDb) {
-                return Err(AgentError::Unsupported(
-                    "a script cannot be made one transaction on MySQL or MariaDB: DDL statements commit implicitly there. Run it without `use_transaction`, or split it"
-                        .into(),
                 ));
             }
             if let Some(reason) = Self::transactions_unsupported(&info) {
@@ -1873,7 +2519,7 @@ impl ToolLayer {
         let own = if own_transaction {
             let began = self.begin_transaction(&info.id, cancel, trace)?;
             trace.statement = Some(request.script.clone());
-            let used = self.use_transaction_by_id(&began.transaction_id)?;
+            let used = self.use_transaction_by_id(&began.transaction_id, &trace.owner)?;
             trace.secrets.clone_from(&used.tx.slot.secrets);
             Some(used)
         } else {
@@ -1899,11 +2545,11 @@ impl ToolLayer {
                     .inspect_err(|error| stop = Some(error.clone()))
                     .and_then(|()| {
                         self.run_in_script(
-                            &info, run_slot, text, classified, true, &request, remaining_bytes, transaction, cancel, trace,
+                            &info, run_slot, text, classified, true, &request, remaining_bytes, transaction, lock_timeout, cancel, trace,
                         )
                     }),
                 _ => self.run_in_script(
-                    &info, run_slot, text, classified, *is_write, &request, remaining_bytes, transaction, cancel, trace,
+                    &info, run_slot, text, classified, *is_write, &request, remaining_bytes, transaction, lock_timeout, cancel, trace,
                 ),
             };
             let preview = clean(text, 200);
@@ -1999,6 +2645,7 @@ impl ToolLayer {
         request: &ExecuteBatchRequest,
         remaining_bytes: usize,
         transaction: Option<&TxUse>,
+        lock_timeout: Option<LockTimeout>,
         cancel: &CancelToken,
         trace: &mut Trace,
     ) -> Result<QueryResult, AgentError> {
@@ -2021,6 +2668,7 @@ impl ToolLayer {
             is_write,
             false,
             transaction,
+            lock_timeout,
             cancel,
             trace,
         )
@@ -2066,8 +2714,9 @@ impl ToolLayer {
     ) -> Result<StatementResult, AgentError> {
         let (info, access) = self.authorize(ToolName::ExplainQuery, &request.connection_id)?;
         Self::check_database(request.database.as_deref())?;
-        let slot = self.open_slot(&info, trace)?;
+        let (slot, _pinned) = self.session_slot(&info, trace)?;
         Self::require_sql(&slot, ToolName::ExplainQuery)?;
+        Self::require_locked_file_access(&slot, ToolName::ExplainQuery)?;
         self.check_length(&request.statement)?;
         let lex = slot
             .info
@@ -2116,6 +2765,7 @@ impl ToolLayer {
             None,
             false,
             None,
+            None,
             cancel,
             trace,
         )
@@ -2130,7 +2780,7 @@ impl ToolLayer {
         let (info, access) =
             self.authorize(ToolName::ExecuteRedisCommand, &request.connection_id)?;
         Self::check_database(request.database.as_deref())?;
-        let slot = self.open_slot(&info, trace)?;
+        let (slot, _pinned) = self.session_slot(&info, trace)?;
         if slot.info.language != Language::Redis {
             return Err(AgentError::Unsupported(format!(
                 "execute_redis_command is for Redis connections; this is {}",
@@ -2156,6 +2806,7 @@ impl ToolLayer {
             request.database.as_deref(),
             request.row_limit,
             request.dangerous.unwrap_or(false),
+            None,
             None,
             cancel,
             trace,
@@ -2193,6 +2844,27 @@ impl ToolLayer {
         trace: &mut Trace,
     ) -> Result<MongoDocumentsResult, AgentError> {
         mongo::check_limit(request.limit)?;
+        // `$lookup` and `$unionWith` can read another database (`{db, coll}`): it must be one the
+        // agent may use. (`$out` and `$merge` are refused by the read-only run of this tool.)
+        if let Some(info) = self.catalog.get(&request.connection_id) {
+            // A stage that cannot be read as BSON is refused, not skipped: a skipped stage is one
+            // whose databases were never looked at.
+            let stages = request
+                .pipeline
+                .iter()
+                .enumerate()
+                .map(|(index, stage)| match bson::Bson::try_from(Value::Object(stage.clone())) {
+                    Ok(bson::Bson::Document(stage)) => Ok(stage),
+                    _ => Err(AgentError::invalid(format!(
+                        "stage {} of the pipeline cannot be read as a BSON document",
+                        index + 1
+                    ))),
+                })
+                .collect::<Result<Vec<bson::Document>, AgentError>>()?;
+            for database in crate::mongo_shell::pipeline_databases(&stages) {
+                Self::check_allowed_database(&info, &database)?;
+            }
+        }
         let rows = self.limits.rows_for(request.limit);
         let command = mongo::aggregate_command(&request, rows);
         let call = MongoCall {
@@ -2346,13 +3018,30 @@ impl ToolLayer {
         if write {
             Self::check_collection(call.collection)?;
         }
-        let slot = self.open_slot(&info, trace)?;
+        let (slot, _pinned) = self.session_slot(&info, trace)?;
         Self::require_mongo(&slot, call.tool)?;
+        self.run_mongo_slot(call, write, &info, &slot, cancel, trace, run)
+    }
+
+    /// The part of [`run_mongo`](Self::run_mongo) after the session is found: the approval of a
+    /// write, the busy flag, the audit line, the statement timeout and the run. `execute_query`
+    /// on a MongoDB connection comes in here with its own policy already applied.
+    #[allow(clippy::too_many_arguments)]
+    fn run_mongo_slot<T>(
+        &self,
+        call: &MongoCall<'_>,
+        write: bool,
+        info: &ConnectionInfo,
+        slot: &OpenSession,
+        cancel: &CancelToken,
+        trace: &mut Trace,
+        run: impl FnOnce(&mongo::Target<'_>) -> Result<T, AgentError>,
+    ) -> Result<T, AgentError> {
         let text = call.command.to_string();
         self.check_length(&text)?;
         trace.statement = Some(format!("{} {text}", call.database));
         if write {
-            self.approve_mongo_write(call, &info, cancel, trace)?;
+            self.approve_mongo_write(call, info, cancel, trace)?;
         }
         let Some(_busy) = BusyGuard::acquire(&slot.busy) else {
             return Err(AgentError::Limit(
@@ -2360,11 +3049,12 @@ impl ToolLayer {
                     .into(),
             ));
         };
-        let _active = ActiveStatement::begin(&slot, cancel)?;
+        let _active = ActiveStatement::begin(slot, cancel)?;
         // A write is audited BEFORE it is sent: if the record cannot be written, it is not sent.
         if write {
             if let Some(audit) = &self.audit {
-                let mut entry = AuditEntry::now(&self.front_end, call.tool.as_str());
+                let mut entry = AuditEntry::now(&self.front_end, call.tool.as_str())
+                    .with_origin(&trace.origin);
                 entry.connection_id = Some(info.id.chars().take(128).collect());
                 entry.statement = trace.statement.as_ref().map(|text| slot.masks.redact(text));
                 entry.outcome = "started".into();
@@ -2376,11 +3066,22 @@ impl ToolLayer {
         }
         let timeout = info.statement_timeout(&self.limits);
         let watchdog = Watchdog::arm(cancel, timeout);
+        let windowed;
+        let limits = match trace.window {
+            Some(window) => {
+                windowed = Limits {
+                    cell_window: Some(window),
+                    ..self.limits.clone()
+                };
+                &windowed
+            }
+            None => &self.limits,
+        };
         let outcome = run(&mongo::Target {
             session: slot.session.as_ref(),
             database: call.database,
             collection: call.collection,
-            limits: &self.limits,
+            limits,
             timeout,
             cancel,
             write,
@@ -2555,18 +3256,41 @@ impl ToolLayer {
         row_limit: Option<usize>,
         flagged_dangerous: bool,
         transaction: Option<&TxUse>,
+        lock_timeout: Option<LockTimeout>,
         cancel: &CancelToken,
         trace: &mut Trace,
     ) -> Result<QueryResult, AgentError> {
         // A front end that never runs dangerous statements must say so at once, not ask the model
         // to call again with the flag (the retry would be refused too): treating every dangerous
         // statement as flagged sends it to the refusal below, with the front end's own words.
-        let need = check_statement(
-            access,
-            classified,
-            flagged_dangerous || !self.approver.allows_dangerous(info),
-            what,
-        )?;
+        // `USE` and a few `SET`s run in a pinned session, judged by the allow-list; they change the
+        // session and nothing else, so they ask nobody (the access `read` they need is checked
+        // first, by `check_statement`, when it is not met).
+        let session_statement = trace.session.is_some()
+            && transaction.is_none()
+            && classified.session_state
+            && classified.statements == 1
+            && access >= AgentAccess::Read;
+        let mut used_database = None;
+        let need = if session_statement {
+            used_database = self.allow_session_statement(info, slot, text, classified)?;
+            Need::Nothing
+        } else {
+            check_statement(
+                access,
+                classified,
+                flagged_dangerous || !self.approver.allows_dangerous(info),
+                what,
+            )
+            .map_err(|error| match error {
+                AgentError::Unsupported(message) if classified.session_state && self.pinned_enabled => {
+                    AgentError::Unsupported(format!(
+                        "{message}. To keep `USE` and a few `SET`s across calls, open a pinned session (open_session with pinned true) and pass its session_id"
+                    ))
+                }
+                error => error,
+            })?
+        };
         let is_write = matches!(need, Need::Approval { .. });
         let confirmed = match need {
             Need::Nothing => false,
@@ -2606,7 +3330,12 @@ impl ToolLayer {
                 let resolved_database = if transaction.is_some() {
                     None
                 } else {
-                    self.approval_database(slot, database)
+                    // After a `USE` of a pinned session the statement runs in that database.
+                    database
+                        .is_none()
+                        .then(|| self.used_database(trace))
+                        .flatten()
+                        .or_else(|| self.approval_database(slot, database))
                 };
                 let request = WriteApproval {
                     connection_id: &info.id,
@@ -2637,7 +3366,7 @@ impl ToolLayer {
                 dangerous.is_some() || language == Language::Redis
             }
         };
-        self.run_statement(
+        let result = self.run_statement(
             tool,
             info,
             slot,
@@ -2650,9 +3379,64 @@ impl ToolLayer {
             is_write,
             confirmed,
             transaction,
+            lock_timeout,
             cancel,
             trace,
-        )
+        );
+        // The pinned session keeps the database of its `USE`, for the approval cards that follow.
+        if let (Ok(_), Some(database), Some(id)) = (&result, used_database, &trace.session) {
+            if let Some(tx) = lock(&self.txs).open.get(id) {
+                lock(&tx.state).database = Some(clean_name(&database, MAX_NAME_CHARS));
+            }
+        }
+        result
+    }
+
+    /// The database the pinned session of the call switched to with `USE`, if it did.
+    fn used_database(&self, trace: &Trace) -> Option<String> {
+        let id = trace.session.as_ref()?;
+        let table = lock(&self.txs);
+        let tx = table.open.get(id)?;
+        let database = lock(&tx.state).database.clone();
+        database
+    }
+
+    /// Whether `text`, a session statement of a pinned session, may run: see
+    /// [`crate::session_sql`]. `Err` is what the model is told; `Ok` carries the database a `USE`
+    /// switches to.
+    fn allow_session_statement(
+        &self,
+        info: &ConnectionInfo,
+        slot: &OpenSession,
+        text: &str,
+        classified: &Classified,
+    ) -> Result<Option<String>, AgentError> {
+        if let Some(function) = &classified.blocked_function {
+            return Err(AgentError::BlockedFunction(function.clone()));
+        }
+        if let Some(clause) = &classified.unsupported_clause {
+            return Err(AgentError::Unsupported(format!(
+                "the {clause} clause is not available to agents; send the SQL statement without it"
+            )));
+        }
+        // (A session without a SQL dialect, MongoDB or Redis, has nothing to allow: the verdict is a
+        // refusal whatever the lexer.)
+        let lex = slot.info.lex.or(slot.info.kind.lex_options()).unwrap_or(SqlLexOptions::postgres());
+        match crate::session_sql::judge(slot.info.kind, text, &lex) {
+            crate::session_sql::Verdict::Setting => Ok(None),
+            crate::session_sql::Verdict::Use(database) => {
+                Self::check_database(Some(&database))?;
+                Self::check_allowed_database(info, &database)?;
+                Ok(Some(database))
+            }
+            crate::session_sql::Verdict::Refused {
+                escalation: true,
+                message,
+            } => Err(AgentError::DangerousRefused(format!(
+                "{message}; do not retry it or reword it to get around it, tell the user instead"
+            ))),
+            crate::session_sql::Verdict::Refused { message, .. } => Err(AgentError::Unsupported(message)),
+        }
     }
 
     /// Runs one statement the policy and the approval have already let through: the checks of its
@@ -2673,6 +3457,7 @@ impl ToolLayer {
         is_write: bool,
         confirmed: bool,
         transaction: Option<&TxUse>,
+        lock_timeout: Option<LockTimeout>,
         cancel: &CancelToken,
         trace: &mut Trace,
     ) -> Result<QueryResult, AgentError> {
@@ -2708,7 +3493,8 @@ impl ToolLayer {
         // write does not happen.
         if is_write {
             if let Some(audit) = &self.audit {
-                let mut entry = AuditEntry::now(&self.front_end, tool.as_str());
+                let mut entry = AuditEntry::now(&self.front_end, tool.as_str())
+                    .with_origin(&trace.origin);
                 entry.connection_id = Some(info.id.chars().take(128).collect());
                 entry.statement = Some(slot.masks.redact(text));
                 entry.outcome = "started".into();
@@ -2733,27 +3519,78 @@ impl ToolLayer {
             state.write_bytes += text.len();
             state.writes.push(text.to_owned());
         }
-        let read_only = classified.class == StatementClass::Read && !is_write;
+        // A `USE` or `SET` of a pinned session is neither a read nor a write: not wrapped in the
+        // READ ONLY scope (that would undo a `SET` with the scope's rollback).
+        // Inside a transaction of MySQL or MariaDB the driver cannot narrow the mode of the open
+        // transaction (`query.read_only_unavailable`): the statement runs in it as it is, judged by
+        // the classifier alone. The transaction needs `read_write` and its writes are approved.
+        let mysql_transaction = transaction.is_some()
+            && matches!(slot.info.kind, ConnectionKind::MySql | ConnectionKind::MariaDb);
+        let read_only = classified.class == StatementClass::Read
+            && !is_write
+            && !classified.session_state
+            && !mysql_transaction;
+        let windowed;
+        let limits = match trace.window {
+            Some(window) => {
+                windowed = Limits {
+                    cell_window: Some(window),
+                    ..limits.clone()
+                };
+                &windowed
+            }
+            None => limits,
+        };
         let timeout = info.statement_timeout(limits);
         let watchdog = Watchdog::arm(cancel, timeout);
         let started = Instant::now();
         // A driver that panics inside `run` leaves a statement of unknown fate: the transaction is
         // aborted then too (a caller catches the panic; nothing else would say so).
         let unwinding = transaction.map(|used| AbortOnUnwind(&used.tx));
-        let outcome = slot.session.run(
-            &RunRequest {
-                language,
-                text,
-                database,
-                limits,
-                row_limit: limits.rows_for(row_limit),
-                // Additive DDL the driver still asks to confirm: the approval of the write is
-                // the confirmation.
-                confirmed: confirmed || (is_write && classified.driver_confirms),
-                read_only,
-            },
-            cancel,
-        );
+        let run = || {
+            slot.session.run(
+                &RunRequest {
+                    language,
+                    text,
+                    database,
+                    limits,
+                    row_limit: limits.rows_for(row_limit),
+                    // Additive DDL the driver still asks to confirm: the approval of the write is
+                    // the confirmation.
+                    confirmed: confirmed || (is_write && classified.driver_confirms),
+                    read_only,
+                },
+                cancel,
+            )
+        };
+        // The lock timeout is put on the session just before the statement and taken off again
+        // right after it, on every path, still inside this statement's busy window.
+        let outcome = match lock_timeout {
+            None => run(),
+            Some(lock_timeout) => {
+                let call = Call {
+                    session: &*slot.session,
+                    database,
+                    in_transaction: transaction.is_some(),
+                    pinned: trace.session.is_some() && transaction.is_none(),
+                    statement: text,
+                    lex: slot.info.lex,
+                    budget: timeout,
+                };
+                let _unwinding = transaction.is_none().then(|| CloseOnUnwind {
+                    layer: self,
+                    info,
+                    slot,
+                });
+                let (outcome, close) = lock_timeout.run(&call, cancel, run);
+                if close {
+                    // Taking the timeout off failed: the session is closed through the layer (its
+                    // tunnel goes too), not left in the map to be found "already open".
+                    self.close_session_of(info, slot);
+                }
+                outcome
+            }
+        };
         drop(watchdog);
         if let Some(unwinding) = unwinding {
             unwinding.disarm();
@@ -2946,7 +3783,7 @@ impl ToolLayer {
     }
 
     fn expire_idle(&self, send_rollback: bool) -> usize {
-        if !self.transactions_enabled {
+        if !self.transactions_enabled && !self.pinned_enabled {
             return 0;
         }
         let expired = {
@@ -2955,9 +3792,9 @@ impl ToolLayer {
                 return 0;
             }
             let now = Instant::now();
-            let idle = self.transaction_idle;
             table.take_where(
                 |tx| {
+                    let idle = if tx.pinned { self.session_idle } else { self.transaction_idle };
                     tx.in_use.load(Ordering::SeqCst) == 0
                         && now.saturating_duration_since(lock(&tx.state).last_used) >= idle
                 },
@@ -2966,14 +3803,20 @@ impl ToolLayer {
         };
         let count = expired.len();
         for tx in expired {
-            self.abandon(&tx, "expire_transaction", "idle timeout", send_rollback);
+            let tool = if tx.pinned { "expire_session" } else { "expire_transaction" };
+            self.abandon(&tx, tool, "idle timeout", send_rollback);
         }
         count
     }
 
     /// The open transaction `id` of the connection `info`, counted as in use.
-    fn use_transaction(&self, id: &str, info: &ConnectionInfo) -> Result<TxUse, AgentError> {
-        let used = self.use_transaction_by_id(id)?;
+    fn use_transaction(
+        &self,
+        id: &str,
+        info: &ConnectionInfo,
+        owner: &str,
+    ) -> Result<TxUse, AgentError> {
+        let used = self.use_transaction_by_id(id, owner)?;
         if used.tx.connection_id != info.id {
             return Err(AgentError::invalid(format!(
                 "transaction `{}` belongs to another connection; pass the connection_id it was begun for",
@@ -3007,6 +3850,12 @@ impl ToolLayer {
         )
     }
 
+    fn session_and_transaction() -> AgentError {
+        AgentError::invalid(
+            "a call runs in a pinned session (`session_id`) or in a transaction (`transaction_id`), not both: a transaction has a session of its own, and a pinned session holds no transaction (BEGIN is refused in it)",
+        )
+    }
+
     fn committing(id: &str) -> AgentError {
         AgentError::Limit(format!(
             "a commit of transaction `{id}` is waiting for the user's answer; no statement runs in it until that is decided"
@@ -3033,10 +3882,52 @@ impl ToolLayer {
         Ok(())
     }
 
+    /// What a rollback cannot undo, so what a transaction does not take: `COPY` reads or writes
+    /// server files and programs; on MySQL and MariaDB every statement that defines or administers
+    /// something (DDL, `GRANT`, `ANALYZE`, `LOCK` ...) first COMMITS the transaction by itself.
+    fn check_in_transaction(kind: ConnectionKind, classified: &Classified) -> Result<(), AgentError> {
+        if classified.verb == "COPY" {
+            return Err(AgentError::Unsupported(
+                "COPY is not available inside a transaction: what it does to files and programs on the server is not undone by a rollback"
+                    .into(),
+            ));
+        }
+        if matches!(kind, ConnectionKind::MySql | ConnectionKind::MariaDb)
+            && MYSQL_IMPLICIT_COMMIT.contains(&classified.verb.as_str())
+        {
+            return Err(AgentError::Unsupported(format!(
+                "{} is not available inside a transaction on {}: it makes the server COMMIT the transaction by itself, which a rollback cannot undo. Run it outside a transaction",
+                classified.verb,
+                kind.driver_id()
+            )));
+        }
+        Ok(())
+    }
+
+    /// Inside a transaction of MySQL or MariaDB a read runs as it is (the mode of the open
+    /// transaction cannot be narrowed), so a read that calls a function that is not a known
+    /// built-in (a stored function can write) is treated as a change: approved on its own and on
+    /// the list the commit question shows.
+    fn treat_function_calls_as_changes(kind: ConnectionKind, lex: &SqlLexOptions, text: &str, classified: &mut Classified) {
+        if matches!(kind, ConnectionKind::MySql | ConnectionKind::MariaDb)
+            && classified.class == StatementClass::Read
+            && crate::functions::calls_unknown_function(text, lex).is_some()
+        {
+            classified.class = StatementClass::Write;
+        }
+    }
+
     /// Why a connection cannot have a transaction, whatever its access.
     fn transactions_unsupported(info: &ConnectionInfo) -> Option<&'static str> {
-        const ONLY: &str = "transactions are available on PostgreSQL and SQLite connections";
-        if !matches!(info.kind, ConnectionKind::PostgreSql | ConnectionKind::Sqlite) {
+        const ONLY: &str = "transactions are available on PostgreSQL, MySQL, MariaDB, SQLite and DuckDB connections";
+        if !matches!(
+            info.kind,
+            ConnectionKind::PostgreSql
+                | ConnectionKind::Sqlite
+                | ConnectionKind::MySql
+                | ConnectionKind::MariaDb
+                | ConnectionKind::DuckDb
+        ) {
             return Some(ONLY);
         }
         if info.connection_type.read_only {
@@ -3083,8 +3974,17 @@ impl ToolLayer {
         if request.query.trim().is_empty() {
             return Err(AgentError::invalid("the query is empty"));
         }
-        let run = request.run.unwrap_or(true);
+        let mut run = request.run.unwrap_or(true);
+        let mut note = None;
         trace.statement = Some(request.query.clone());
+        if run && info.kind == ConnectionKind::DuckDb {
+            // DuckDB SQL reads and writes files and URLs (`read_csv('https://…' || read_text(…))`
+            // is an exfiltration, a `COPY` a file write), and the app runs it on the instance of
+            // the user's own connection, with file access on: no text is judged safe enough, so
+            // the query is only put in the editor and the user runs it.
+            run = false;
+            note = Some(DUCKDB_NOT_RUN.to_owned());
+        }
         if run {
             Self::check_runs_as_read(&info, access, &request.query)?;
         }
@@ -3102,6 +4002,7 @@ impl ToolLayer {
             connection_id: info.id,
             shown: true,
             run,
+            note,
         })
     }
 
@@ -3118,11 +4019,20 @@ impl ToolLayer {
                 .lex_options()
                 .map(|lex| classify_sql(query, info.kind, &lex)),
             Language::Redis => Some(classify_redis(query)),
-            Language::Mongo | Language::Other => None,
+            // One shell command that reads (the parser accepts nothing else in the text).
+            Language::Mongo => {
+                return match crate::mongo_shell::parse(query) {
+                    Ok(parsed) if parsed.command.class() == crate::mongo_shell::Class::Read => Ok(()),
+                    _ => Err(AgentError::WriteRefused(
+                        "this MongoDB script cannot be judged to be one read (find, count, aggregate without $out or $merge, getIndexes, ...), so it is not run from here; call with run false to put it in the editor and let the user run it".into(),
+                    )),
+                };
+            }
+            Language::Other => None,
         };
         let Some(classified) = classified else {
             return Err(AgentError::WriteRefused(
-                "a MongoDB script cannot be judged to be a read, so it is not run from here; call with run false to put it in the editor and let the user run it".into(),
+                "this query cannot be judged to be a read, so it is not run from here; call with run false to put it in the editor and let the user run it".into(),
             ));
         };
         match check_statement(access, &classified, false, "query")? {
@@ -3328,31 +4238,37 @@ impl ToolLayer {
         let Some(_gate) = self.enter(&info.id, Some(cancel)) else {
             return Err(AgentError::Cancelled);
         };
-        let id = format!("tx-{}", self.tx_numbers.fetch_add(1, Ordering::Relaxed) + 1);
+        let id = random_id("tx-")?;
         let beginning = {
             let mut table = lock(&self.txs);
             if let Some(open) = table
                 .open
                 .values()
-                .find(|tx| tx.connection_id == info.id)
+                .find(|tx| tx.connection_id == info.id && !tx.pinned)
             {
                 return Err(AgentError::Limit(format!(
                     "this connection already has the open transaction `{}`; commit it or roll it back first (one per connection)",
                     open.id
                 )));
             }
-            if table.beginning.contains(&info.id) {
+            if table.beginning.contains_key(&info.id) {
                 return Err(AgentError::Limit(
                     "a transaction is being begun on this connection already (one per connection)"
                         .into(),
                 ));
             }
-            if table.open.len() + table.beginning.len() >= MAX_OPEN_TRANSACTIONS {
+            // The cap is per client: one that holds its four does not lock another out.
+            let mine = table.open.values().filter(|tx| !tx.pinned && tx.owner == trace.owner).count()
+                + table.beginning.values().filter(|owner| **owner == trace.owner).count();
+            if mine >= MAX_OPEN_TRANSACTIONS {
                 return Err(AgentError::Limit(format!(
-                    "{MAX_OPEN_TRANSACTIONS} transactions are open already (the most in all); commit or roll one back first"
+                    "{MAX_OPEN_TRANSACTIONS} transactions are open already (the most one client holds); commit or roll one back first"
                 )));
             }
-            table.beginning.insert(info.id.clone());
+            if table.held_in_all() >= MAX_SESSIONS_IN_ALL {
+                return Err(Self::too_many_sessions());
+            }
+            table.beginning.insert(info.id.clone(), trace.owner.clone());
             Beginning {
                 layer: self,
                 connection_id: info.id.clone(),
@@ -3361,6 +4277,10 @@ impl ToolLayer {
         // A session of its own: the connection's shared one runs statements read-only and one at
         // a time for everything else, and a transaction lives on one session.
         let slot = self.connect_slot(&info, trace)?;
+        if let Err(error) = Self::require_locked_file_access(&slot, ToolName::BeginTransaction) {
+            self.disconnect(&slot);
+            return Err(error);
+        }
         let after_connect = self.catalog.get(&info.id).filter(|now| {
             !now.revision.differs_from(info.revision)
                 && now.effective_access() >= AgentAccess::ReadWrite
@@ -3390,9 +4310,12 @@ impl ToolLayer {
         let transaction = Arc::new(Transaction {
             id: id.clone(),
             connection_id: info.id.clone(),
+            owner: trace.owner.clone(),
+            pinned: false,
             slot,
             state: Mutex::new(TxState {
                 last_used: Instant::now(),
+                database: None,
                 writes: Vec::new(),
                 write_bytes: 0,
                 aborted: false,
@@ -3445,7 +4368,7 @@ impl ToolLayer {
         trace: &mut Trace,
     ) -> Result<CommitTransactionResult, AgentError> {
         Self::check_not_cancelled(cancel)?;
-        let used = self.use_transaction_by_id(id)?;
+        let used = self.use_transaction_by_id(id, &trace.owner)?;
         let tx = Arc::clone(&used.tx);
         let slot = &tx.slot;
         trace.connection_id = Some(tx.connection_id.chars().take(128).collect());
@@ -3581,7 +4504,8 @@ impl ToolLayer {
         }
         if changes > 0 {
             if let Some(audit) = &self.audit {
-                let mut entry = AuditEntry::now(&self.front_end, ToolName::CommitTransaction.as_str());
+                let mut entry = AuditEntry::now(&self.front_end, ToolName::CommitTransaction.as_str())
+                    .with_origin(&trace.origin);
                 entry.connection_id = Some(info.id.chars().take(128).collect());
                 entry.statement = Some(TxControl::Commit.sql().into());
                 entry.outcome = "started".into();
@@ -3646,9 +4570,10 @@ impl ToolLayer {
     }
 
     /// An open transaction by id alone (`commit_transaction`), counted as in use.
-    fn use_transaction_by_id(&self, id: &str) -> Result<TxUse, AgentError> {
+    fn use_transaction_by_id(&self, id: &str, owner: &str) -> Result<TxUse, AgentError> {
         let table = lock(&self.txs);
-        match table.open.get(id) {
+        // A transaction of another caller, or a pinned session, is not one the caller has.
+        match table.open.get(id).filter(|tx| !tx.pinned && tx.owner == owner) {
             Some(tx) => {
                 tx.in_use.fetch_add(1, Ordering::SeqCst);
                 Ok(TxUse {
@@ -3666,6 +4591,13 @@ impl ToolLayer {
     ) -> Result<RollbackTransactionResult, AgentError> {
         let tx = {
             let mut table = lock(&self.txs);
+            let owned = table
+                .open
+                .get(id)
+                .is_some_and(|tx| !tx.pinned && tx.owner == trace.owner);
+            if table.open.contains_key(id) && !owned {
+                return Err(self.gone(&table, id));
+            }
             match table.take(id, Ended::RolledBack) {
                 Some(tx) => tx,
                 // Gone already (idle, closed with its session, committed, rolled back): nothing
@@ -3732,13 +4664,18 @@ impl ToolLayer {
     }
 
     fn abandon(&self, tx: &Transaction, tool: &str, reason: &str, send_rollback: bool) {
-        let result = self.rollback_and_close(tx, ABANDON_TIMEOUT, send_rollback);
+        let result = self.rollback_and_close(tx, ABANDON_TIMEOUT, send_rollback && !tx.pinned);
         let Some(audit) = &self.audit else {
             return;
         };
         let mut entry = AuditEntry::now(&self.front_end, tool);
         entry.connection_id = Some(tx.connection_id.chars().take(128).collect());
-        entry.statement = Some(format!("ROLLBACK ({reason})"));
+        entry.statement = Some(if tx.pinned {
+            format!("close pinned session ({reason})")
+        } else {
+            format!("ROLLBACK ({reason})")
+        });
+        entry.session_id = tx.pinned.then(|| tx.id.clone());
         entry.outcome = match result {
             Ok(()) => "ok".into(),
             // The session was closed all the same.
@@ -3750,11 +4687,14 @@ impl ToolLayer {
 
     /// Rolls back every open transaction of the connection (the caller holds its gate or needs
     /// none: the transactions are out of the table before they are touched).
-    fn end_transactions_of(&self, connection_id: &str, why: Ended, reason: &str) {
-        if !self.transactions_enabled {
+    fn end_transactions_of(&self, connection_id: &str, owner: Option<&str>, why: Ended, reason: &str) {
+        if !self.transactions_enabled && !self.pinned_enabled {
             return;
         }
-        let doomed = lock(&self.txs).take_where(|tx| tx.connection_id == connection_id, why);
+        let doomed = lock(&self.txs).take_where(
+            |tx| tx.connection_id == connection_id && owner.is_none_or(|owner| tx.owner == owner),
+            why,
+        );
         for tx in doomed {
             self.rollback_abandoned(&tx, "rollback_transaction", reason);
         }

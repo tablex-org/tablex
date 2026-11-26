@@ -665,13 +665,18 @@ fn use_transaction_is_refused_where_the_script_cannot_be_atomic() {
         (outcome, rig)
     };
     let tx = json!({"use_transaction": true});
-    // MySQL and MariaDB commit implicitly at DDL: refused, whatever the script holds.
+    // MySQL and MariaDB commit implicitly at DDL: a script that holds one is refused as a whole,
+    // and one of plain changes is a transaction like any other.
     for kind in [ConnectionKind::MySql, ConnectionKind::MariaDb] {
-        let (outcome, rig) = call(kind, tx.clone(), "CREATE TABLE a (id int); INSERT INTO a VALUES (1)");
+        let (outcome, rig) = call(kind, tx.clone(), "INSERT INTO a VALUES (1); CREATE TABLE b (id int)");
         assert_eq!(code(&outcome), "agent.unsupported", "{kind:?}");
-        assert!(outcome.to_text().contains("DDL"), "{}", outcome.to_text());
+        assert!(outcome.to_text().contains("COMMIT") && outcome.to_text().contains("statement 2"), "{}", outcome.to_text());
         assert!(rig.shared_ran().is_empty() && rig.own_ran().is_empty());
         assert!(rig.approver.asked().is_empty(), "nobody is asked about what cannot run");
+        let (outcome, rig) = call(kind, tx.clone(), "INSERT INTO a VALUES (1); UPDATE a SET b = 2 WHERE id = 1");
+        assert_eq!(code(&outcome), "ok", "{kind:?}: {outcome:?}");
+        assert_eq!(rig.own.control_calls(), [TxControl::Begin, TxControl::Commit]);
+        assert_eq!(rig.approver.asked().len(), 1);
     }
     let (outcome, rig) = call(ConnectionKind::ClickHouse, tx.clone(), "INSERT INTO a VALUES (1)");
     assert_eq!(code(&outcome), "agent.unsupported");

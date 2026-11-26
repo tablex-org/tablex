@@ -1849,6 +1849,46 @@ fn every_spelling_of_an_id_reaches_the_same_session() {
 }
 
 #[test]
+fn the_audit_line_records_the_transport_and_a_cleaned_client_name() {
+    let fx = fixture(Some(AgentAccess::Read));
+    let hostile = format!("evil\u{202e}client\n{}", "x".repeat(200));
+    let origin = engine_agent::CallOrigin::new("http", Some(&hostile));
+    fx.layer.call_cancellable_from(
+        "open_session",
+        json!({"connection_id": SQL}),
+        &CancelToken::new(),
+        &origin,
+    );
+    // A call without an origin (a front end with no transport) writes neither field.
+    fx.call("list_connections", json!({}));
+    let entries = fx.audit();
+    let open = entries
+        .iter()
+        .find(|entry| entry.tool == "open_session")
+        .expect("audited");
+    assert_eq!(open.transport.as_deref(), Some("http"));
+    let client = open.client.as_deref().expect("a client name");
+    assert!(client.starts_with("evil<U+202E>client"), "{client}");
+    assert!(client.chars().count() <= 64 && !client.contains('\n'), "{client}");
+    let list = entries
+        .iter()
+        .find(|entry| entry.tool == "list_connections")
+        .expect("audited");
+    assert_eq!((&list.transport, &list.client), (&None, &None));
+    let file = std::fs::read_to_string(&fx.audit_path).unwrap();
+    let plain = file
+        .lines()
+        .find(|line| line.contains("list_connections"))
+        .unwrap();
+    assert!(!plain.contains("transport") && !plain.contains("client"), "{plain}");
+    // An empty name is no name.
+    assert_eq!(
+        engine_agent::CallOrigin::new("stdio", Some("  ")),
+        engine_agent::CallOrigin::new("stdio", None)
+    );
+}
+
+#[test]
 fn a_call_that_panics_still_leaves_an_audit_line_without_the_payload() {
     let fx = fixture(Some(AgentAccess::Read));
     fx.ok("open_session", json!({"connection_id": SQL}));

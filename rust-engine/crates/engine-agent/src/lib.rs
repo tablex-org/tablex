@@ -36,11 +36,19 @@ pub mod cancel;
 pub mod classify;
 pub mod context;
 pub mod driver_session;
+mod duckdb;
 pub mod error;
 pub mod functions;
 mod layer;
 pub mod limits;
+mod lock_timeout;
 mod mongo;
+mod mongo_filter;
+mod mongo_shell;
+mod session_sql;
+#[allow(dead_code)]
+#[path = "../../engine-mongo-script/src/shell_value.rs"]
+mod shell_value;
 pub mod policy;
 pub mod ports;
 pub mod redact;
@@ -53,7 +61,7 @@ pub mod testing;
 pub mod tools;
 
 pub use access::{AgentAccess, ConnectionTypeInfo};
-pub use audit::{read_entries, AuditConfig, AuditEntry, AuditLog, AuditRead, SyncPolicy};
+pub use audit::{read_entries, AuditConfig, AuditEntry, CallOrigin, AuditLog, AuditRead, SyncPolicy};
 pub use cancel::{CancelOnDrop, CancelToken};
 pub use context::{CharsPerThree, SchemaContext, TokenEstimator};
 pub use driver_session::DriverSessionAdapter;

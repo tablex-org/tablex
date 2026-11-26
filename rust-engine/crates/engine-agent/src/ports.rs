@@ -26,6 +26,7 @@ pub enum ConnectionKind {
     ClickHouse,
     MongoDb,
     Redis,
+    DuckDb,
 }
 
 impl ConnectionKind {
@@ -38,6 +39,7 @@ impl ConnectionKind {
             Self::ClickHouse => "clickhouse",
             Self::MongoDb => "mongodb",
             Self::Redis => "redis",
+            Self::DuckDb => "duckdb",
         }
     }
 
@@ -50,6 +52,7 @@ impl ConnectionKind {
             "clickhouse" => Self::ClickHouse,
             "mongodb" => Self::MongoDb,
             "redis" => Self::Redis,
+            "duckdb" => Self::DuckDb,
             _ => return None,
         })
     }
@@ -57,9 +60,12 @@ impl ConnectionKind {
     /// The statement language the agent tools speak for this engine.
     pub const fn language(self) -> Language {
         match self {
-            Self::PostgreSql | Self::MySql | Self::MariaDb | Self::Sqlite | Self::ClickHouse => {
-                Language::Sql
-            }
+            Self::PostgreSql
+            | Self::MySql
+            | Self::MariaDb
+            | Self::Sqlite
+            | Self::ClickHouse
+            | Self::DuckDb => Language::Sql,
             Self::Redis => Language::Redis,
             Self::MongoDb => Language::Mongo,
         }
@@ -68,11 +74,14 @@ impl ConnectionKind {
     /// Lexer settings of the dialect, for the statement classifier.
     pub const fn lex_options(self) -> Option<SqlLexOptions> {
         Some(match self {
-            Self::PostgreSql => SqlLexOptions::postgres(),
             Self::MySql => SqlLexOptions::mysql(),
             Self::MariaDb => SqlLexOptions::mariadb(),
             Self::Sqlite => SqlLexOptions::sqlite(),
             Self::ClickHouse => SqlLexOptions::clickhouse(),
+            Self::PostgreSql => SqlLexOptions::postgres(),
+            // DuckDB's own PEG tokenizer: dollar quotes, `E'..'` strings, nested block comments and
+            // `` `..` `` names (a lexer that missed them could be made to read a `'` as a string).
+            Self::DuckDb => SqlLexOptions::duckdb(),
             Self::MongoDb | Self::Redis => return None,
         })
     }
@@ -84,8 +93,9 @@ impl ConnectionKind {
 pub enum Language {
     Sql,
     Redis,
-    /// MongoDB: `mongo_find`, `mongo_aggregate` and `mongo_count` read; `mongo_insert`,
-    /// `mongo_update` and `mongo_delete` write.
+    /// MongoDB: `execute_query` takes shell commands (`db.orders.find({})`); `mongo_find`,
+    /// `mongo_aggregate` and `mongo_count` read; `mongo_insert`, `mongo_update` and `mongo_delete`
+    /// write.
     Mongo,
     /// Browse only (no execute tool). No engine has it today.
     Other,
@@ -153,6 +163,20 @@ pub struct ConnectionInfo {
     /// The connection's effective query timeout, when it has one.
     #[serde(default)]
     pub statement_timeout_secs: Option<u64>,
+    /// The databases agents may use on this connection (`None`: every one). Set by the user on the
+    /// connection (override `agent.databases`); see [`ToolLayer`](crate::ToolLayer).
+    #[serde(default)]
+    pub allowed_databases: Option<Vec<String>>,
+    /// Where the connection goes, as `host:port/database` (no user, password or path), for the
+    /// engines that have a host.
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    /// The folders of the sidebar the connection is in, outermost first.
+    #[serde(default)]
+    pub group: Vec<String>,
+    /// The user's note on the connection.
+    #[serde(default)]
+    pub notes: Option<String>,
     /// See [`Revision`].
     #[serde(skip)]
     pub revision: Revision,
@@ -277,6 +301,12 @@ pub struct SessionInfo {
     /// `describe_table` is backed by the driver's table-properties call (else
     /// by the column nodes of the navigator, without keys).
     pub rich_describe: bool,
+    /// DuckDB only (not looked at for the other engines): the instance this session runs on has
+    /// file access turned off and its configuration locked (`?external_access=off`), so the engine
+    /// itself refuses every file, URL, `ATTACH` and `COPY` in agent SQL. Without it no statement
+    /// tool runs on a DuckDB session: DuckDB SQL reads files, and a text scan cannot be made
+    /// complete.
+    pub file_access_locked: bool,
 }
 
 /// Which level of the navigator to list.
@@ -301,6 +331,9 @@ pub struct Node {
     pub name: String,
     /// `database`, `schema`, `table`, `view`, `materialized_view`, ...
     pub kind: String,
+    /// The comment of a table or view, when the engine has one and the driver lists it with the
+    /// table (PostgreSQL, MySQL, MariaDB, ClickHouse).
+    pub comment: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -409,7 +442,9 @@ pub trait Session: Send + Sync {
     }
 
     /// [`mongo_command`](Self::mongo_command) without the read-only guard, for the `insert`,
-    /// `update` and `delete` commands of `mongo_insert`, `mongo_update` and `mongo_delete`
+    /// `update` and `delete` commands of `mongo_insert`, `mongo_update` and `mongo_delete`, and
+    /// the writing shell commands of `execute_query` (`findAndModify`, `createIndexes`,
+    /// `dropIndexes`, `drop`, `renameCollection`, an `aggregate` with `$out`)
     /// (`agent.unsupported` by default). The tool layer calls it only after the write was approved.
     fn mongo_write(
         &self,

@@ -108,7 +108,7 @@ fn malformed() -> AgentError {
 }
 
 /// Runs one command and returns the reply document, or the error the server reported in it.
-fn run(target: &Target<'_>, command: &Value) -> Result<Document, AgentError> {
+pub(crate) fn run(target: &Target<'_>, command: &Value) -> Result<Document, AgentError> {
     if target.cancel.is_cancelled() {
         return Err(AgentError::Cancelled);
     }
@@ -200,7 +200,10 @@ impl<'a> Collector<'a> {
             return ControlFlow::Break(());
         }
         let mut value = document.into_relaxed_extjson();
-        let mut cut = cut_strings(&mut value, self.limits.max_cell_bytes);
+        let mut cut = match &self.limits.cell_window {
+            Some(window) => window_strings(&mut value, window),
+            None => cut_strings(&mut value, self.limits.max_cell_bytes),
+        };
         let mut size = value.to_string().len();
         // A document that alone is over the byte cap is replaced by the start of its text, so the
         // first one is never what blows the cap.
@@ -222,6 +225,23 @@ impl<'a> Collector<'a> {
     }
 }
 
+/// The window of every string of the document (see [`crate::limits::CellWindow`]); how many
+/// were changed.
+fn window_strings(value: &mut Value, window: &crate::limits::CellWindow) -> usize {
+    match value {
+        Value::String(text) => match window.apply(text) {
+            Some(shown) => {
+                *text = shown;
+                1
+            }
+            None => 0,
+        },
+        Value::Array(items) => items.iter_mut().map(|item| window_strings(item, window)).sum(),
+        Value::Object(fields) => fields.values_mut().map(|field| window_strings(field, window)).sum(),
+        _ => 0,
+    }
+}
+
 /// Cuts every string longer than `max` bytes (see [`truncate_text`]); returns how many were cut.
 fn cut_strings(value: &mut Value, max: usize) -> usize {
     match value {
@@ -238,6 +258,31 @@ fn cut_strings(value: &mut Value, max: usize) -> usize {
             .map(|field| cut_strings(field, max))
             .sum(),
         _ => 0,
+    }
+}
+
+/// Documents the server sent in one reply (a `distinct` list, a `stats` document), within the
+/// limits of a result.
+pub(crate) fn from_values(
+    limits: &Limits,
+    rows: usize,
+    values: impl IntoIterator<Item = Bson>,
+) -> MongoDocumentsResult {
+    let started = Instant::now();
+    let mut collector = Collector::new(rows, limits);
+    for value in values {
+        if collector.push(value).is_break() {
+            break;
+        }
+    }
+    MongoDocumentsResult {
+        document_count: collector.documents.len(),
+        documents: collector.documents,
+        truncated: collector.stopped.is_some(),
+        truncation: collector.stopped,
+        cells_truncated: collector.cells_truncated,
+        limit: rows,
+        elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
     }
 }
 
@@ -345,24 +390,29 @@ pub(crate) struct WriteCommand {
     pub dangerous: Option<String>,
 }
 
-const EMPTY_FILTER: &str = "the filter is empty, so it applies to every document of the collection";
-
-/// `allow_all` is how the model says the user asked for every document: an empty filter without
-/// it is a mistake to refuse, with it a dangerous change to put to the user.
+/// `allow_all` is how the model says the user asked for every document: a filter that is empty, or
+/// that matches every document or cannot be checked (`$where`, `$expr`, `_id: {$exists: true}`, a
+/// complementary `$or`; see [`crate::mongo_filter`]), without it is a mistake to refuse, with it a
+/// dangerous change to put to the user.
 fn check_filter(
     filter: &Map<String, Value>,
     allow_all: Option<bool>,
 ) -> Result<Option<String>, AgentError> {
-    if !filter.is_empty() {
+    let reason = match Bson::try_from(Value::Object(filter.clone())) {
+        Ok(Bson::Document(document)) => crate::mongo_filter::danger(&document),
+        // Not Extended JSON: the driver refuses it before it is sent.
+        _ => None,
+    };
+    let Some(reason) = reason else {
         return Ok(None);
-    }
+    };
     if allow_all == Some(true) {
-        return Ok(Some(EMPTY_FILTER.into()));
+        return Ok(Some(reason));
     }
-    Err(AgentError::invalid(
-        "`filter` is empty, which would apply to every document of the collection; give a filter, \
-         or pass `allow_all` true only when the user asked for every document",
-    ))
+    Err(AgentError::invalid(format!(
+        "`filter` is not safe to run on its own: {reason}; give a filter that names the documents, \
+         or pass `allow_all` true only when the user asked for every document"
+    )))
 }
 
 pub(crate) fn insert_command(request: &MongoInsertRequest) -> Result<WriteCommand, AgentError> {
