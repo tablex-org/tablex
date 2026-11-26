@@ -5,6 +5,7 @@
 //! TABLEX_TEST_MYSQL_URI=mysql://tablex:tablex@127.0.0.1:53306/tablex \
 //! TABLEX_TEST_MARIADB_URI=mariadb://tablex:tablex@127.0.0.1:53307/tablex \
 //! TABLEX_TEST_CLICKHOUSE_URI=clickhouse://tablex:tablex@127.0.0.1:58123/tablex \
+//! TABLEX_TEST_MSSQL_URI='sqlserver://sa:<password>@127.0.0.1:1433/master?trustServerCertificate=true' \
 //!   cargo test -p engine-driver-conformance --test live -- --ignored --nocapture --test-threads=1
 //! ```
 //!
@@ -13,7 +14,7 @@
 //! fail the test. `TABLEX_CONFORMANCE_ONLY=a,b` limits the scenarios.
 
 use engine_driver_conformance::fixtures::{
-    ClickHouseFixture, MysqlFixture, PostgresFixture, SqliteFixture,
+    ClickHouseFixture, MssqlFixture, MysqlFixture, PostgresFixture, SqliteFixture,
 };
 use engine_driver_conformance::{build_release_dylib, run_sql_conformance_report, SqlFixture};
 use std::path::Path;
@@ -95,5 +96,17 @@ fn clickhouse() {
         "dbengine_clickhouse",
         &[],
         &ClickHouseFixture,
+    );
+}
+
+#[test]
+#[ignore = "needs TABLEX_TEST_MSSQL_URI (dedicated SQL Server)"]
+fn mssql() {
+    run(
+        "TABLEX_TEST_MSSQL_URI",
+        "dbengine-mssql",
+        "dbengine_mssql",
+        &[],
+        &MssqlFixture,
     );
 }

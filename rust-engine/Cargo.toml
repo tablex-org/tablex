@@ -25,8 +25,15 @@ members = [
     "crates/dbengine-mariadb",
     "crates/dbengine-redis",
     "crates/dbengine-clickhouse",
+    "crates/dbengine-duckdb",
+    "crates/dbengine-mssql",
     "crates/dbengine",
 ]
+
+# tiberius (the SQL Server driver's TDS client) with two patches: ring instead of aws-lc, and a
+# cancel that keeps the session. See vendor/tiberius/PATCHES.md.
+[patch.crates-io]
+tiberius = { path = "vendor/tiberius" }
 
 # Faster, smaller dev/test builds: dependencies carry no debug info, our
 # crates keep line tables (panics and backtraces still show file:line).

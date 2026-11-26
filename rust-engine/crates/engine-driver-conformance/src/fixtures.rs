@@ -1,4 +1,4 @@
-//! Ready-made fixtures for PostgreSQL, MySQL/MariaDB, SQLite and ClickHouse.
+//! Ready-made fixtures for PostgreSQL, MySQL/MariaDB, SQLite, DuckDB, ClickHouse and SQL Server.
 
 use crate::fixture::{MutationTarget, Scratch, SqlFixture};
 use engine_driver_api::sql::SqlObjectRef;
@@ -524,6 +524,128 @@ impl SqlFixture for SqliteFixture {
     }
 }
 
+/// DuckDB: the scratch is a schema in the file's database. The connection URI must point at a
+/// *file* (the suite opens several connections; each `:memory:` connection is its own database).
+/// Applies in full except what DuckDB has no SQL for: `CREATE DATABASE`, interrupting another
+/// session, triggers (so no slow or zero-row mutation can be set up), data-modifying CTEs, and
+/// joining a user transaction after a failed statement (it aborts the whole transaction, and
+/// there are no savepoints to undo only that statement).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct DuckdbFixture;
+
+impl SqlFixture for DuckdbFixture {
+    fn label(&self) -> &str {
+        "duckdb"
+    }
+    fn driver_id(&self) -> &str {
+        "duckdb"
+    }
+    fn identifier_quote(&self) -> &str {
+        "\""
+    }
+    fn supports_schemas(&self) -> bool {
+        true
+    }
+    fn supports_create_database(&self) -> bool {
+        false
+    }
+    fn supports_external_interrupt(&self) -> bool {
+        false
+    }
+    fn supports_transactions(&self) -> bool {
+        false
+    }
+    fn current_database_query(&self) -> String {
+        "SELECT current_database()".into()
+    }
+    fn create_scratch(&self, scratch: &Scratch) -> Vec<String> {
+        vec![format!("CREATE SCHEMA {}", scratch.name)]
+    }
+    fn drop_scratch(&self, scratch: &Scratch) -> Vec<String> {
+        vec![format!("DROP SCHEMA IF EXISTS {} CASCADE", scratch.name)]
+    }
+    fn create_tables(&self, scratch: &Scratch) -> Vec<String> {
+        let s = &scratch.name;
+        vec![
+            format!("CREATE TABLE {s}.items (tenant INT NOT NULL, id INT NOT NULL, name VARCHAR(100) NULL, qty INT NULL, PRIMARY KEY (tenant, id))"),
+            format!("CREATE TABLE {s}.refs (id INT PRIMARY KEY, tenant INT NOT NULL, item_id INT NOT NULL, FOREIGN KEY (tenant, item_id) REFERENCES {s}.items (tenant, id))"),
+            format!("CREATE TABLE {s}.notes (owner VARCHAR(20) NULL, body VARCHAR(50) NULL)"),
+            format!("CREATE TABLE {s}.dups (k INT, v INT)"),
+        ]
+    }
+    fn table(&self, scratch: &Scratch, table: &str) -> String {
+        format!("{}.{table}", scratch.name)
+    }
+    fn numbers(&self, n: u64) -> String {
+        format!("SELECT i AS n FROM range(1, {n} + 1) t(i) ORDER BY n")
+    }
+    fn slow_query(&self, seconds: u32) -> String {
+        // A cross join of two ranges: about half a billion pairs a second on a desktop, so
+        // `seconds` s; interruptible, and finite on its own.
+        let side = (f64::from(seconds).sqrt() * 23_000.0) as u64;
+        format!("SELECT sum(a.range * b.range) FROM range({side}) a, range({side}) b")
+    }
+    fn backend_id_query(&self) -> String {
+        "SELECT 1".into()
+    }
+    fn interrupt_backend_statement(&self, _: &str) -> String {
+        "SELECT 1".into()
+    }
+    fn write_statements(&self, scratch: &Scratch) -> Vec<String> {
+        let items = self.table(scratch, "items");
+        (1..=3)
+            .map(|i| format!("INSERT INTO {items} (tenant, id, name, qty) VALUES (9, {i}, 'w{i}', {i})"))
+            .collect()
+    }
+    fn write_returning_statements(&self, scratch: &Scratch) -> Vec<String> {
+        vec![format!(
+            "INSERT INTO {} (tenant, id, name, qty) VALUES (8, 1, 'r1', 1) RETURNING tenant, id",
+            self.table(scratch, "items")
+        )]
+    }
+    fn grant_statement(&self, scratch: &Scratch) -> String {
+        format!("GRANT SELECT ON {} TO nobody", self.table(scratch, "items"))
+    }
+    fn bulk_object_statements(&self, scratch: &Scratch, count: u32) -> Option<Vec<String>> {
+        let mut statements = vec!["BEGIN".to_owned()];
+        statements.extend((1..=count).map(|i| format!("CREATE TABLE {}.b{i} (c INT)", scratch.name)));
+        statements.push("COMMIT".into());
+        Some(statements)
+    }
+    fn returning_write(&self, scratch: &Scratch, tenant: u32) -> Option<String> {
+        Some(format!(
+            "INSERT INTO {} (tenant, id, name, qty) VALUES ({tenant}, 1, 'a', 1), ({tenant}, 2, 'b', 2), ({tenant}, 3, 'c', 3) RETURNING tenant, id",
+            self.table(scratch, "items")
+        ))
+    }
+    fn navigator_tables_request(&self, scratch: &Scratch) -> Value {
+        json!({
+            "parent": null,
+            "database": scratch.database,
+            "payload": {"database": scratch.database, "schema": scratch.name},
+            "cursor": null,
+            "limit": 0
+        })
+    }
+    fn object_ref(&self, scratch: &Scratch, table: &str) -> SqlObjectRef {
+        SqlObjectRef {
+            database: Some(scratch.database.clone()),
+            schema: Some(scratch.name.clone()),
+            object: table.into(),
+        }
+    }
+    fn mutation_target(&self, scratch: &Scratch, table: &str) -> MutationTarget {
+        MutationTarget {
+            database: None,
+            object: table.into(),
+            identity: json!({"schema": scratch.name}),
+        }
+    }
+    fn drop_database(&self, _: &str) -> Vec<String> {
+        Vec::new()
+    }
+}
+
 /// ClickHouse: the scratch is a database. There are no transactions, foreign
 /// keys or data-modifying CTEs; `items` is created with the block-number column
 /// lightweight `UPDATE` needs, and `notes`/`dups` have a sorting key because
@@ -662,5 +784,183 @@ impl SqlFixture for ClickHouseFixture {
     }
     fn drop_database(&self, name: &str) -> Vec<String> {
         vec![format!("DROP DATABASE IF EXISTS {name} SYNC")]
+    }
+}
+
+/// SQL Server: the scratch is a schema in the connection's database.
+///
+/// The test database must read committed data from a snapshot (`READ_COMMITTED_SNAPSHOT ON`,
+/// which [`admin_setup`](SqlFixture::admin_setup) switches on): a plain `READ COMMITTED` reader
+/// *waits* for another session's uncommitted row, and the suite's checks that "another
+/// connection does not see the mutation before COMMIT" would block instead of count. No SQL
+/// statement interrupts one running query of another session without ending the session
+/// (`KILL` ends it), so the interrupt scenario is skipped. An `INSTEAD OF INSERT` trigger still
+/// reports the rows the insert would have written, so the zero-row insert scenario is skipped
+/// too, and T-SQL has no data-modifying CTE.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct MssqlFixture;
+
+impl SqlFixture for MssqlFixture {
+    fn label(&self) -> &str {
+        "mssql"
+    }
+    fn driver_id(&self) -> &str {
+        "mssql"
+    }
+    fn identifier_quote(&self) -> &str {
+        "\""
+    }
+    fn supports_schemas(&self) -> bool {
+        true
+    }
+    fn supports_external_interrupt(&self) -> bool {
+        false
+    }
+    fn begin(&self) -> &str {
+        "BEGIN TRANSACTION"
+    }
+    fn admin_uri(&self, uri: &str) -> Option<String> {
+        Some(uri.to_owned())
+    }
+    fn admin_setup(&self, _uri: &str) -> Vec<String> {
+        // A system database cannot be altered; use a dedicated one (see the module docs).
+        vec!["IF DB_ID() > 4 EXEC('ALTER DATABASE CURRENT SET READ_COMMITTED_SNAPSHOT ON WITH ROLLBACK IMMEDIATE')".into()]
+    }
+    fn current_database_query(&self) -> String {
+        "SELECT DB_NAME()".into()
+    }
+    fn create_scratch(&self, scratch: &Scratch) -> Vec<String> {
+        vec![format!("CREATE SCHEMA {}", scratch.name)]
+    }
+    fn drop_scratch(&self, scratch: &Scratch) -> Vec<String> {
+        let s = &scratch.name;
+        // No `DROP SCHEMA .. CASCADE`: the tables go first (`refs` before `items`).
+        let mut statements: Vec<String> = ["refs", "items", "notes", "dups", "slow", "swallow"]
+            .iter()
+            .map(|table| format!("DROP TABLE IF EXISTS {s}.{table}"))
+            .collect();
+        statements.push(format!("DROP SCHEMA IF EXISTS {s}"));
+        statements
+    }
+    fn create_tables(&self, scratch: &Scratch) -> Vec<String> {
+        let s = &scratch.name;
+        vec![
+            format!("CREATE TABLE {s}.items (tenant INT NOT NULL, id INT NOT NULL, name VARCHAR(100) NULL, qty INT NULL, PRIMARY KEY (tenant, id))"),
+            format!("CREATE TABLE {s}.refs (id INT PRIMARY KEY, tenant INT NOT NULL, item_id INT NOT NULL, FOREIGN KEY (tenant, item_id) REFERENCES {s}.items (tenant, id))"),
+            format!("CREATE TABLE {s}.notes (owner VARCHAR(20) NULL, body VARCHAR(50) NULL)"),
+            format!("CREATE TABLE {s}.dups (k INT, v INT)"),
+        ]
+    }
+    fn table(&self, scratch: &Scratch, table: &str) -> String {
+        format!("{}.{table}", scratch.name)
+    }
+    fn numbers(&self, n: u64) -> String {
+        // Three catalog views cross joined: far more than 100 005 rows. `TOP` makes the
+        // `ORDER BY` legal inside a CTE or a derived table, where the suite also uses it.
+        format!(
+            "SELECT TOP ({n}) n FROM (SELECT ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n \
+             FROM sys.all_objects a CROSS JOIN sys.all_objects b CROSS JOIN sys.all_objects c) AS numbers ORDER BY n"
+        )
+    }
+    fn slow_query(&self, seconds: u32) -> String {
+        format!(
+            "WAITFOR DELAY '{:02}:{:02}:{:02}'",
+            seconds / 3600,
+            seconds / 60 % 60,
+            seconds % 60
+        )
+    }
+    fn backend_id_query(&self) -> String {
+        "SELECT @@SPID".into()
+    }
+    fn interrupt_backend_statement(&self, id: &str) -> String {
+        format!("KILL {id}")
+    }
+    fn write_statements(&self, scratch: &Scratch) -> Vec<String> {
+        let t = self.table(scratch, "items");
+        vec![
+            format!("INSERT INTO {t} (tenant, id, name, qty) VALUES (9, 1, 'w1', 1)"),
+            format!("INSERT INTO {t} (tenant, id, name, qty) VALUES (9, 2, 'w2', 2)"),
+            format!("INSERT INTO {t} (tenant, id, name, qty) VALUES (9, 3, 'w3', 3)"),
+        ]
+    }
+    fn write_returning_statements(&self, scratch: &Scratch) -> Vec<String> {
+        let t = self.table(scratch, "items");
+        vec![
+            format!("INSERT INTO {t} (tenant, id, name, qty) OUTPUT inserted.tenant, inserted.id VALUES (8, 1, 'r1', 1)"),
+            format!("INSERT INTO {t} (tenant, id, name, qty) OUTPUT inserted.tenant, inserted.id SELECT 8, 2, 'r2', 2"),
+        ]
+    }
+    fn grant_statement(&self, scratch: &Scratch) -> String {
+        format!("GRANT SELECT ON {} TO PUBLIC", self.table(scratch, "items"))
+    }
+    fn returning_write(&self, scratch: &Scratch, tenant: u32) -> Option<String> {
+        let t = self.table(scratch, "items");
+        Some(format!(
+            "INSERT INTO {t} (tenant, id, name, qty) VALUES ({tenant}, 1, 'a', 1), ({tenant}, 2, 'b', 2), ({tenant}, 3, 'c', 3); \
+             SELECT tenant, id FROM {t} WHERE tenant = {tenant} ORDER BY id"
+        ))
+    }
+    fn bulk_object_statements(&self, scratch: &Scratch, count: u32) -> Option<Vec<String>> {
+        let s = &scratch.name;
+        // One loop per 1 000 tables keeps every batch short.
+        Some(
+            (1..=count)
+                .step_by(1000)
+                .map(|from| {
+                    let to = (from + 999).min(count);
+                    format!(
+                        "DECLARE @i INT = {from}; WHILE @i <= {to} BEGIN \
+                         EXEC('CREATE TABLE {s}.b' + @i + ' (c INT)'); SET @i += 1; END"
+                    )
+                })
+                .collect(),
+        )
+    }
+    fn bulk_object_cleanup(&self, scratch: &Scratch, count: u32) -> Vec<String> {
+        let s = &scratch.name;
+        (1..=count)
+            .step_by(1000)
+            .map(|from| {
+                let to = (from + 999).min(count);
+                format!(
+                    "DECLARE @i INT = {from}; WHILE @i <= {to} BEGIN \
+                     EXEC('DROP TABLE IF EXISTS {s}.b' + @i); SET @i += 1; END"
+                )
+            })
+            .collect()
+    }
+    fn slow_mutation_setup(&self, scratch: &Scratch, _uri: &str) -> Option<Vec<String>> {
+        let s = &scratch.name;
+        Some(vec![
+            format!("CREATE TABLE {s}.slow (id INT)"),
+            format!("CREATE TRIGGER {s}.slow_insert ON {s}.slow AFTER INSERT AS WAITFOR DELAY '00:00:20'"),
+        ])
+    }
+    fn navigator_tables_request(&self, scratch: &Scratch) -> Value {
+        json!({
+            "parent": null,
+            "database": scratch.database,
+            "payload": {"database": scratch.database, "schema": scratch.name},
+            "cursor": null,
+            "limit": 0
+        })
+    }
+    fn object_ref(&self, scratch: &Scratch, table: &str) -> SqlObjectRef {
+        SqlObjectRef {
+            database: Some(scratch.database.clone()),
+            schema: Some(scratch.name.clone()),
+            object: table.into(),
+        }
+    }
+    fn mutation_target(&self, scratch: &Scratch, table: &str) -> MutationTarget {
+        MutationTarget {
+            database: None,
+            object: table.into(),
+            identity: json!({"schema": scratch.name}),
+        }
+    }
+    fn drop_database(&self, name: &str) -> Vec<String> {
+        vec![format!("DROP DATABASE IF EXISTS {name}")]
     }
 }

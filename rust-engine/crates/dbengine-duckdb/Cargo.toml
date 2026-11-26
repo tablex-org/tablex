@@ -1,0 +1,26 @@
+[package]
+name = "dbengine-duckdb"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+name = "dbengine_duckdb"
+
+[dependencies]
+arrow-array = { version = "60", features = ["ffi"] }
+arrow-buffer = "60"
+arrow-cast = "60"
+arrow-schema = "60"
+arrow-select = "60"
+engine-driver-kit = { path = "../engine-driver-kit" }
+# The DuckDB library is compiled into this plugin only (`bundled`); the app never links it. No default
+# features: they would look for a prebuilt library to download or a system one. duckdb 1.20001 returns
+# arrow 60 batches, the version of the rest of the workspace, so a result crosses without conversion.
+# `parquet` and `json` link DuckDB's own extensions in statically, so opening a Parquet, JSON or NDJSON
+# file never installs or downloads anything (CSV is core).
+duckdb = { version = "1.20001", default-features = false, features = ["bundled", "parquet", "json"] }
+serde_json = "1.0"
+
+[dev-dependencies]
+tempfile = "3.14"

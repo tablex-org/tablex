@@ -161,7 +161,8 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    fn connect_to(&self, uri: &str) -> Result<Conn<'_>, Failure> {
+    /// A connection over `uri` (another user, another port).
+    pub fn connect_to(&self, uri: &str) -> Result<Conn<'_>, Failure> {
         let session = self
             .handle
             .connect(&json!({ "uri": uri }).to_string())
@@ -250,6 +251,22 @@ impl Conn<'_> {
         let operation = self.session.begin_operation()?;
         self.session
             .open_query(&query_request(operation.id(), sql, offset, limit, confirmed).to_string())
+    }
+
+    /// Like [`open_page`](Self::open_page), with extra `payload` keys (`read_only`, `run_to_end`).
+    pub fn open_page_with(
+        &mut self,
+        sql: &str,
+        offset: u64,
+        limit: u64,
+        extra: Value,
+    ) -> Result<QueryPage, LoaderError> {
+        let operation = self.session.begin_operation()?;
+        let mut request = query_request(operation.id(), sql, offset, limit, false);
+        if let (Some(payload), Some(extra)) = (request["payload"].as_object_mut(), extra.as_object()) {
+            payload.extend(extra.clone());
+        }
+        self.session.open_query(&request.to_string())
     }
 
     /// Runs `sql` as setup: confirmed, page discarded.

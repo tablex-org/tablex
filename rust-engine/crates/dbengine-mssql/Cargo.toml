@@ -1,0 +1,32 @@
+[package]
+name = "dbengine-mssql"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+name = "dbengine_mssql"
+
+[dependencies]
+arrow-array = { version = "60", features = ["ffi"] }
+arrow-schema = "60"
+engine-driver-kit = { path = "../engine-driver-kit" }
+futures-util = { version = "0.3", default-features = false }
+percent-encoding = "2"
+serde = "1.0"
+serde_json = "1.0"
+socket2 = "0.6"
+# TDS over a rustls TLS stream on the `ring` provider, like every other driver (no OpenSSL, no
+# aws-lc, no CMake). The crates.io tiberius falls back to aws-lc-rs and cannot keep the session
+# after a cancel, so the workspace patches it with vendor/tiberius (see vendor/tiberius/PATCHES.md).
+tiberius = { version = "0.13", default-features = false, features = ["rustls", "tds73", "tds80"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio = { version = "1.42", features = ["rt-multi-thread", "net", "time", "sync", "macros"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+url = "2"
+uuid = "1"
+
+[dev-dependencies]
+engine-driver-api = { path = "../engine-driver-api" }
+engine-driver-conformance = { path = "../engine-driver-conformance" }
+engine-driver-host = { path = "../engine-driver-host" }
