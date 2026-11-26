@@ -1190,6 +1190,7 @@ impl PostgresConn {
         Ok(affected)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn execute_query_in_schema(
         &self,
         db: &str,
@@ -1264,6 +1265,7 @@ impl PostgresConn {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn export_query_page(
         &self,
         db: &str,
@@ -1541,7 +1543,7 @@ impl PostgresConn {
 }
 
 fn create_database_sql(name: &str) -> Result<String, String> {
-    if name.is_empty() || name.trim() != name || name.as_bytes().len() > 63 || name.contains('\0') {
+    if name.is_empty() || name.trim() != name || name.len() > 63 || name.contains('\0') {
         return Err("Invalid PostgreSQL database name".into());
     }
     Ok(format!("CREATE DATABASE \"{}\"", name.replace('"', "\"\"")))

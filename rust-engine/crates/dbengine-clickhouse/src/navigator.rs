@@ -14,6 +14,10 @@
 //! * A column's `primary_key` is `system.columns.is_in_primary_key`; `nullable`
 //!   comes from the `Nullable(...)` type; `MATERIALIZED`/`ALIAS`/`EPHEMERAL`
 //!   columns are `is_generated` and carry their default expression.
+//! * `payload.columns == true` (with a `database`, capability `metadata.schema_columns`) lists the
+//!   columns of every table and view of the database in one `system.columns` statement per page,
+//!   keyset-paged by `engine_driver_api::sql::schema_columns_cursor` (table name, then `position`),
+//!   with the same [`ColumnRow`] details as the per-table request.
 //! * The catalog runs on the catalog pool, never behind a running user
 //!   statement. `payload.filter` is a case-insensitive literal substring
 //!   (`positionCaseInsensitiveUTF8`, so `_` and `%` are not wildcards); `limit`
@@ -23,7 +27,9 @@ use crate::http::Area;
 use crate::sql::escape_param;
 use crate::types::ChType;
 use crate::ChConnection;
-use engine_driver_kit::api::sql::{SqlColumnNode, SqlObjectRef, TableColumn};
+use engine_driver_kit::api::sql::{
+    parse_schema_columns_cursor, schema_columns_cursor, SqlColumnNode, SqlObjectRef, TableColumn,
+};
 use engine_driver_kit::api::{NavigatorNode, NavigatorPage, NavigatorRequest};
 use engine_driver_kit::BackendError;
 use serde_json::{json, Value};
@@ -96,11 +102,94 @@ pub(crate) fn nav_rows(limit: u64) -> u64 {
     }
 }
 
+/// `payload.columns == true` with a database and no `object`: the schema-wide column listing.
+fn schema_columns_database(request: &NavigatorRequest) -> Option<String> {
+    let payload = request.payload.as_ref()?;
+    if payload.get("columns") != Some(&Value::Bool(true)) || text(Some(payload), "object").is_some() {
+        return None;
+    }
+    text(Some(payload), "database")
+        .map(str::to_owned)
+        .or_else(|| request.database.clone().filter(|database| !database.is_empty()))
+}
+
+/// The statement for one page of the database's columns: `limit + 1` rows (the lookahead) after the
+/// column `after` names (a table and a `position`), if any. Cells: the six of [`COLUMNS_SQL`], then
+/// the table and the `position`.
+pub(crate) fn schema_columns_query(
+    database: &str,
+    after: Option<(&str, i64)>,
+    limit: u64,
+) -> (String, Vec<(String, String)>) {
+    let mut sql = String::from(
+        "SELECT name, type, is_in_primary_key, default_kind, default_expression, comment, table, position \
+         FROM system.columns WHERE database = {db:String}",
+    );
+    let mut params = vec![("db".to_owned(), escape_param(database))];
+    if let Some((table, position)) = after {
+        sql.push_str(
+            " AND (table > {after:String} OR (table = {after:String} AND position > {position:UInt64}))",
+        );
+        params.push(("after".to_owned(), escape_param(table)));
+        params.push(("position".to_owned(), position.to_string()));
+    }
+    let _ = write!(sql, " ORDER BY table, position LIMIT {}", limit.saturating_add(1));
+    (sql, params)
+}
+
+/// A number cell: ClickHouse's JSON output quotes 64-bit integers.
+fn number(value: Option<&Value>) -> i64 {
+    match value {
+        Some(Value::Number(number)) => number.as_i64().unwrap_or_default(),
+        Some(Value::String(text)) => text.parse().unwrap_or_default(),
+        _ => 0,
+    }
+}
+
+fn schema_columns_page(
+    connection: &ChConnection,
+    database: String,
+    request: &NavigatorRequest,
+) -> Result<NavigatorPage, BackendError> {
+    let after = match request.cursor.as_deref().filter(|cursor| !cursor.is_empty()) {
+        None => None,
+        Some(cursor) => Some(parse_schema_columns_cursor(cursor).ok_or_else(|| {
+            BackendError::with_code("navigator.bad_request", "invalid navigator cursor")
+        })?),
+    };
+    let limit = nav_rows(request.limit);
+    let (sql, params) = schema_columns_query(&database, after, limit);
+    let mut rows = connection
+        .client
+        .rows(&sql, &params)
+        .map_err(|error| error.into_backend(Area::Navigator, false))?;
+    let next_cursor = (rows.len() as u64 > limit).then(|| {
+        rows.truncate(limit as usize);
+        rows.last().map(|row| {
+            let table = row.get(6).and_then(Value::as_str).unwrap_or_default();
+            schema_columns_cursor(table, number(row.get(7)))
+        })
+    });
+    Ok(NavigatorPage {
+        nodes: rows
+            .iter()
+            .map(|row| {
+                let table = row.get(6).and_then(Value::as_str).unwrap_or_default();
+                column_node(&database, table, ColumnRow::from(row))
+            })
+            .collect(),
+        next_cursor: next_cursor.flatten(),
+    })
+}
+
 pub(crate) fn list_nav_nodes(
     connection: &ChConnection,
     request: &NavigatorRequest,
 ) -> Result<NavigatorPage, BackendError> {
     connection.check_open(Area::Navigator)?;
+    if let Some(database) = schema_columns_database(request) {
+        return schema_columns_page(connection, database, request);
+    }
     let offset = match request.cursor.as_deref() {
         None | Some("") => 0,
         Some(cursor) => cursor.parse::<u64>().map_err(|_| {
@@ -126,7 +215,9 @@ pub(crate) fn list_nav_nodes(
         .iter()
         .map(|row| match &target {
             Target::Databases => database_node(str_at(row, 0)),
-            Target::Objects { database } => object_node(database, str_at(row, 0), &str_at(row, 1)),
+            Target::Objects { database } => {
+                object_node(database, str_at(row, 0), &str_at(row, 1), &str_at(row, 2))
+            }
             Target::Columns { database, table } => {
                 column_node(database, table, ColumnRow::from(row))
             }
@@ -163,7 +254,7 @@ pub(crate) fn query_for(
             " WHERE",
         ),
         Target::Objects { database } => (
-            "SELECT name, engine FROM system.tables WHERE database = {db:String}".to_owned(),
+            "SELECT name, engine, comment FROM system.tables WHERE database = {db:String}".to_owned(),
             vec![("db".to_owned(), escape_param(database))],
             "name",
             " AND",
@@ -218,8 +309,15 @@ pub(crate) fn object_kind(engine: &str) -> &'static str {
     }
 }
 
-fn object_node(database: &str, name: String, engine: &str) -> NavigatorNode {
+/// A table or view. Its `comment` (`system.tables.comment`, listed with the table: no query per
+/// table) is in the payload under `comment`, where a client that reads the payload as an object
+/// reference ignores it.
+fn object_node(database: &str, name: String, engine: &str, comment: &str) -> NavigatorNode {
     let kind = object_kind(engine);
+    let mut payload = serde_json::to_value(object_ref(database, &name)).unwrap_or(Value::Null);
+    if let (false, Some(payload)) = (comment.is_empty(), payload.as_object_mut()) {
+        payload.insert("comment".into(), comment.into());
+    }
     NavigatorNode {
         id: format!("{kind}:{database}:{name}"),
         kind: kind.into(),
@@ -227,7 +325,7 @@ fn object_node(database: &str, name: String, engine: &str) -> NavigatorNode {
         subtitle: (!engine.is_empty()).then(|| engine.to_owned()),
         icon: Some(kind.into()),
         has_children: true,
-        payload: serde_json::to_value(object_ref(database, &name)).unwrap_or(Value::Null),
+        payload,
         actions: vec!["open_query".into(), "describe".into(), "refresh".into()],
     }
 }
@@ -326,6 +424,24 @@ mod tests {
             cursor: None,
             limit: 0,
         }
+    }
+
+    #[test]
+    fn schema_columns_ask_for_a_keyset_page_with_the_per_table_cells() {
+        let mut request = request(Some("database:app"), Some(json!({"database": "app", "columns": true})));
+        assert_eq!(schema_columns_database(&request).as_deref(), Some("app"));
+        request.payload = Some(json!({"database": "app", "columns": true, "object": "t"}));
+        assert_eq!(schema_columns_database(&request), None);
+        let (sql, params) = schema_columns_query("app", None, 50);
+        assert!(sql.ends_with("FROM system.columns WHERE database = {db:String} ORDER BY table, position LIMIT 51"), "{sql}");
+        assert_eq!(params.len(), 1);
+        // The first six cells are the per-table statement's.
+        assert!(sql.starts_with(&COLUMNS_SQL[..COLUMNS_SQL.find(" FROM").unwrap()]), "{sql}");
+        let (sql, params) = schema_columns_query("app", Some(("t", 3)), 5);
+        assert!(sql.contains("table = {after:String} AND position > {position:UInt64}"), "{sql}");
+        assert_eq!(params.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(), ["db", "after", "position"]);
+        assert_eq!(params[2].1, "3");
+        assert_eq!((number(Some(&json!("12"))), number(Some(&json!(7))), number(None)), (12, 7, 0));
     }
 
     #[test]
@@ -439,7 +555,7 @@ mod tests {
         ] {
             assert_eq!(object_kind(engine), kind, "{engine}");
         }
-        let node = object_node("app", "mv".into(), "MaterializedView");
+        let node = object_node("app", "mv".into(), "MaterializedView", "");
         assert_eq!(node.id, "materialized_view:app:mv");
         assert_eq!(node.payload, json!({"database": "app", "object": "mv"}));
         assert_eq!(node.subtitle.as_deref(), Some("MaterializedView"));

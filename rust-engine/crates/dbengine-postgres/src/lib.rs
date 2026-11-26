@@ -270,6 +270,8 @@ pub mod db {
         pub cursor: Option<CursorState>,
     }
 
+    // `async_trait` puts `#[must_use]` on the boxed futures it returns.
+    #[allow(clippy::double_must_use)]
     #[async_trait]
     pub trait DatabaseConnection: Send + Sync {
         fn db_type(&self) -> DbType;
@@ -500,6 +502,10 @@ pub extern "C" fn dbengine_shutdown() -> *mut c_char {
 
 #[cfg(not(feature = "abi-v2"))]
 #[no_mangle]
+/// # Safety
+///
+/// `uri` and `name` must each be null or point to a NUL-terminated string that stays valid for
+/// the call.
 pub unsafe extern "C" fn dbengine_connect(uri: *const c_char, name: *const c_char) -> *mut c_char {
     let uri_str = match c_string(uri, "uri") {
         Ok(value) => value,
@@ -623,11 +629,10 @@ pub extern "C" fn dbengine_highlight_syntax(
 #[cfg(not(feature = "abi-v2"))]
 #[no_mangle]
 pub extern "C" fn dbengine_get_sql_completions(request_json: *const c_char) -> *mut c_char {
-    if request_json.is_null() {
-        return error_json("null parameter");
-    }
-
-    let request_str = unsafe { CStr::from_ptr(request_json).to_string_lossy().into_owned() };
+    let request_str = match c_string(request_json, "request") {
+        Ok(value) => value,
+        Err(error) => return error_json(&error),
+    };
     let request = match serde_json::from_str::<sql_completion::CompletionRequest>(&request_str) {
         Ok(request) => request,
         Err(error) => return error_json(&format!("invalid SQL completion request: {error}")),
@@ -1356,6 +1361,10 @@ pub extern "C" fn dbengine_postgres_drop_function(
 
 #[cfg(not(feature = "abi-v2"))]
 #[no_mangle]
+/// # Safety
+///
+/// Every string argument must be null or point to a NUL-terminated string that stays valid for
+/// the call.
 pub unsafe extern "C" fn dbengine_preview_postgres_sql(
     _database: *const c_char,
     schema: *const c_char,
@@ -1387,6 +1396,9 @@ pub unsafe extern "C" fn dbengine_preview_postgres_sql(
 
 #[cfg(not(feature = "abi-v2"))]
 #[no_mangle]
+/// # Safety
+///
+/// `sql` must be null or point to a NUL-terminated string that stays valid for the call.
 pub unsafe extern "C" fn dbengine_postgres_sql_editability(sql: *const c_char) -> *mut c_char {
     let sql = match c_string(sql, "sql") {
         Ok(value) => value,
@@ -1488,12 +1500,18 @@ pub extern "C" fn dbengine_batch_update_postgres_rows(
 
 #[cfg(not(feature = "abi-v2"))]
 #[no_mangle]
+/// # Safety
+///
+/// `s` must be null or a string this library returned that has not been freed yet.
 pub unsafe extern "C" fn dbengine_free_cursor_string(s: *mut c_char) {
     unsafe { engine_ffi_util::free_string(s) };
 }
 
 #[cfg(not(feature = "abi-v2"))]
 #[no_mangle]
+/// # Safety
+///
+/// Each pointer must be null or one this library returned that has not been freed yet.
 pub unsafe extern "C" fn dbengine_free_arrow_cdata(
     schema_ptr: *mut arrow_array::ffi::FFI_ArrowSchema,
     array_ptr: *mut arrow_array::ffi::FFI_ArrowArray,

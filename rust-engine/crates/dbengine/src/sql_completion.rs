@@ -588,7 +588,7 @@ fn build_alias_map<'a>(
 
                 // Check for optional alias: FROM users [AS] alias
                 let alias_idx = if i + 2 < tokens.len()
-                    && tokens[i + 2].to_ascii_uppercase() == "AS"
+                    && tokens[i + 2].eq_ignore_ascii_case("AS")
                     && i + 3 < tokens.len()
                 {
                     i + 3

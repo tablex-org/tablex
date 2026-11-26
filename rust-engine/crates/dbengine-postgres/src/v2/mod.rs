@@ -110,6 +110,7 @@ impl DriverBackend for PostgresBackend {
                 Capability::MutationBatch,
                 Capability::DatabaseCreate,
                 Capability::MetadataTableProperties,
+                Capability::MetadataSchemaColumns,
                 Capability::QueryReadOnly,
                 Capability::QueryRunToEnd,
             ]
@@ -244,6 +245,7 @@ mod tests {
             Capability::MutationBatch,
             Capability::DatabaseCreate,
             Capability::MetadataTableProperties,
+            Capability::MetadataSchemaColumns,
             Capability::QueryReadOnly,
         ] {
             assert!(parsed.has(capability), "{capability}");

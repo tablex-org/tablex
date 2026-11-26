@@ -6,7 +6,8 @@
 /// One page of tables/views/materialized views, with an optional
 /// case-insensitive literal name filter pushed into SQL (both `LIMIT` and
 /// `OFFSET` are bound) and an optional `relkind` (`m`: only materialized views). Same predicate and order as [`POSTGRES_SQL_OBJECTS_SQL`].
-const POSTGRES_V2_OBJECTS_PAGE_SQL: &str = "SELECT c.relname::text, c.relkind::text
+const POSTGRES_V2_OBJECTS_PAGE_SQL: &str = "SELECT c.relname::text, c.relkind::text,
+            obj_description(c.oid, 'pg_class')::text
      FROM pg_class c
      JOIN pg_namespace n ON n.oid = c.relnamespace
      WHERE n.nspname = $1
@@ -16,6 +17,36 @@ const POSTGRES_V2_OBJECTS_PAGE_SQL: &str = "SELECT c.relname::text, c.relkind::t
        AND ($5::text IS NULL OR c.relkind::text = $5::text)
      ORDER BY c.relkind, c.relname
      LIMIT $3 OFFSET $4";
+
+/// One page of the columns of every table-like object of a schema, ordered by table name (binary
+/// collation) then `attnum`, continuing after the `($2, $3)` column when `$2` is not NULL. The
+/// column expressions are those of [`POSTGRES_TABLE_COLUMNS_SQL`]; the objects are those
+/// [`POSTGRES_V2_OBJECTS_PAGE_SQL`] lists.
+const POSTGRES_V2_SCHEMA_COLUMNS_SQL: &str = "SELECT c.relname::text, a.attnum::int4,
+            a.attname::text,
+            pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type,
+            NOT a.attnotnull AS nullable,
+            pg_get_expr(ad.adbin, ad.adrelid) AS default_value,
+            a.attgenerated <> '' AS is_generated,
+            a.attidentity <> '' OR COALESCE(pg_get_expr(ad.adbin, ad.adrelid) LIKE 'nextval(%', false) AS auto_increment,
+            EXISTS (
+                SELECT 1 FROM pg_index idx
+                WHERE idx.indrelid = c.oid AND idx.indisprimary AND a.attnum = ANY(idx.indkey)
+            ) AS is_primary_key
+     FROM pg_attribute a
+     JOIN pg_class c ON c.oid = a.attrelid
+     JOIN pg_namespace n ON n.oid = c.relnamespace
+     LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
+     WHERE n.nspname = $1
+       AND c.relkind IN ('r', 'p', 'v', 'm')
+       AND has_table_privilege(c.oid, 'SELECT')
+       AND a.attnum > 0
+       AND NOT a.attisdropped
+       AND ($2::text IS NULL
+            OR c.relname::text COLLATE \"C\" > $2::text
+            OR (c.relname::text COLLATE \"C\" = $2::text AND a.attnum::int4 > $3::int4))
+     ORDER BY c.relname::text COLLATE \"C\", a.attnum
+     LIMIT $4";
 
 /// The session settings every connection of the v2 driver gets, sent as `SET`s
 /// right after the connection opens and before anything else runs on it (not as
@@ -118,6 +149,45 @@ impl PostgresConn {
         self.client_for_database(db).await
     }
 
+    /// One page (at most `limit` rows) of [`POSTGRES_V2_SCHEMA_COLUMNS_SQL`]: `(table, attnum,
+    /// column)`, after `after` (a table and an `attnum`) when given.
+    pub(crate) async fn v2_list_schema_columns_page(
+        &self,
+        db: &str,
+        schema: &str,
+        after: Option<(&str, i32)>,
+        limit: i64,
+    ) -> Result<Vec<(String, i32, SqlColumn)>, String> {
+        let (table, ordinal) = match after {
+            Some((table, ordinal)) => (Some(table), ordinal),
+            None => (None, 0),
+        };
+        let rows = self
+            .client_for_database(db)
+            .await?
+            .query(POSTGRES_V2_SCHEMA_COLUMNS_SQL, &[&schema, &table, &ordinal, &limit])
+            .await
+            .map_err(|error| postgres_error_detail(&error))?;
+        rows.iter()
+            .map(|row| {
+                Ok((
+                    catalog_cell(row, 0)?,
+                    catalog_cell(row, 1)?,
+                    SqlColumn {
+                        name: catalog_cell(row, 2)?,
+                        data_type: catalog_cell(row, 3)?,
+                        nullable: catalog_cell(row, 4)?,
+                        default_expression: catalog_cell(row, 5)?,
+                        is_generated: Some(catalog_cell(row, 6)?),
+                        auto_increment: Some(catalog_cell(row, 7)?),
+                        primary_key: catalog_cell(row, 8)?,
+                        comment: None,
+                    },
+                ))
+            })
+            .collect()
+    }
+
     pub(crate) async fn v2_list_objects_page(
         &self,
         db: &str,
@@ -126,7 +196,7 @@ impl PostgresConn {
         relkind: Option<&str>,
         offset: i64,
         limit: i64,
-    ) -> Result<Vec<SqlObject>, String> {
+    ) -> Result<Vec<(SqlObject, Option<String>)>, String> {
         let pattern = filter
             .filter(|filter| !filter.is_empty())
             .map(pg_like_contains_pattern);
@@ -145,8 +215,11 @@ impl PostgresConn {
         for row in &rows {
             let name: String = catalog_cell(row, 0)?;
             let relkind: String = catalog_cell(row, 1)?;
+            // The comment of `COMMENT ON TABLE`, listed with the table: no query per table.
+            let comment: Option<String> = row.try_get(2).map_err(|error| postgres_error_detail(&error))?;
             objects.extend(
-                SqlObjectKind::from_postgres_relkind(&relkind).map(|kind| SqlObject { name, kind }),
+                SqlObjectKind::from_postgres_relkind(&relkind)
+                    .map(|kind| (SqlObject { name, kind }, comment.filter(|text| !text.is_empty()))),
             );
         }
         Ok(objects)

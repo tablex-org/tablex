@@ -297,6 +297,7 @@ impl DriverBackend for SqliteBackend {
                 Capability::MutationDelete,
                 Capability::MutationBatch,
                 Capability::MetadataTableProperties,
+                Capability::MetadataSchemaColumns,
                 Capability::QueryReadOnly,
                 Capability::QueryRunToEnd,
             ]
@@ -1090,6 +1091,7 @@ mod tests {
                 "mutation.delete",
                 "mutation.batch",
                 "metadata.table_properties",
+                "metadata.schema_columns",
                 "query.read_only",
                 "query.run_to_end"
             ])

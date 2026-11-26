@@ -12,13 +12,22 @@
 //! sequences; see [`super::schema_objects`]); a kind the server has none of is an
 //! empty page, an unknown one `navigator.bad_request`.
 //!
-//! An offset cursor, not a keyset one: `information_schema` name columns use
+//! `payload.columns == true` (with a `database`, capability `metadata.schema_columns`) lists the
+//! columns of every table and view of the database in one statement per page: the same
+//! `information_schema.COLUMNS` columns as the per-table request, ordered by the binary table
+//! name then `ORDINAL_POSITION`, continuing after the column of the keyset cursor
+//! (`engine_driver_api::sql::schema_columns_cursor`). Binary, because the case-insensitive
+//! collation of the name column would interleave the columns of `T` and `t`.
+//!
+//! The other listings use an offset cursor, not a keyset one: `information_schema` name columns use
 //! case-insensitive collations on MariaDB, where a `name > ?` keyset would skip
 //! tables that differ only by case.
 
 use super::conn::describe_error;
 use super::{schema_objects, Dialect, MyConnection};
-use engine_driver_kit::api::sql::{SchemaObjectKind, SqlColumnNode, SqlObjectRef, TableColumn};
+use engine_driver_kit::api::sql::{
+    parse_schema_columns_cursor, schema_columns_cursor, SchemaObjectKind, SqlColumnNode, SqlObjectRef, TableColumn,
+};
 use engine_driver_kit::api::{NavigatorNode, NavigatorPage, NavigatorRequest};
 use engine_driver_kit::BackendError;
 use mysql_async::prelude::Queryable;
@@ -112,11 +121,85 @@ fn filter_of(request: &NavigatorRequest) -> Option<&str> {
     text(request.payload.as_ref(), "filter")
 }
 
+/// `payload.columns == true` with a database: the schema-wide column listing.
+fn schema_columns_database(request: &NavigatorRequest) -> Option<String> {
+    let payload = request.payload.as_ref()?;
+    if payload.get("columns") != Some(&Value::Bool(true)) || text(Some(payload), "object").is_some() {
+        return None;
+    }
+    text(Some(payload), "database")
+        .map(str::to_owned)
+        .or_else(|| request.database.clone().filter(|database| !database.is_empty()))
+}
+
+/// The statement for one page of [`schema_columns_database`]: `limit + 1` rows (the lookahead) after
+/// the column `after` names, if any.
+fn schema_columns_query(
+    database: &str,
+    after: Option<(&str, i64)>,
+    limit: u64,
+) -> (String, Vec<mysql_async::Value>) {
+    let mut sql = String::from(
+        "SELECT TABLE_NAME, ORDINAL_POSITION, COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY \
+         FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ?",
+    );
+    let mut params: Vec<mysql_async::Value> = vec![database.into()];
+    if let Some((table, ordinal)) = after {
+        sql.push_str(
+            " AND (CAST(TABLE_NAME AS BINARY) > CAST(? AS BINARY) \
+             OR (CAST(TABLE_NAME AS BINARY) = CAST(? AS BINARY) AND ORDINAL_POSITION > ?))",
+        );
+        params.extend([table.into(), table.into(), ordinal.into()]);
+    }
+    let _ = write!(
+        sql,
+        " ORDER BY CAST(TABLE_NAME AS BINARY), ORDINAL_POSITION LIMIT {}",
+        limit.saturating_add(1)
+    );
+    (sql, params)
+}
+
+fn schema_columns_page(
+    connection: &MyConnection,
+    database: String,
+    request: &NavigatorRequest,
+) -> Result<NavigatorPage, BackendError> {
+    let after = match request.cursor.as_deref().filter(|cursor| !cursor.is_empty()) {
+        None => None,
+        Some(cursor) => Some(parse_schema_columns_cursor(cursor).ok_or_else(|| {
+            BackendError::with_code("navigator.bad_request", "invalid navigator cursor")
+        })?),
+    };
+    let limit = nav_rows(request.limit);
+    let (sql, params) = schema_columns_query(&database, after, limit);
+    let failed = |error: mysql_async::Error| BackendError::new(describe_error(&error));
+    let mut rows: Vec<(String, i64, String, String, String, String)> = connection
+        .with_meta("navigator.not_connected", async |conn| {
+            conn.exec(sql, params).await.map_err(failed)
+        })?;
+    let next_cursor = (rows.len() as u64 > limit).then(|| {
+        rows.truncate(limit as usize);
+        rows.last().map(|(table, ordinal, ..)| schema_columns_cursor(table, *ordinal))
+    });
+    Ok(NavigatorPage {
+        nodes: rows
+            .into_iter()
+            .map(|(table, _, name, data_type, nullable, key)| {
+                column_node(&database, &table, name, data_type, &nullable, &key)
+            })
+            .collect(),
+        next_cursor: next_cursor.flatten(),
+    })
+}
+
 pub(super) fn list_nav_nodes(
     connection: &MyConnection,
     dialect: Dialect,
     request: &NavigatorRequest,
 ) -> Result<NavigatorPage, BackendError> {
+    if let Some(database) = schema_columns_database(request) {
+        return schema_columns_page(connection, database, request);
+    }
     if let Some(name) = text(request.payload.as_ref(), "kind") {
         let Some(kind) = SchemaObjectKind::parse(name) else {
             return Err(BackendError::with_code(
@@ -147,10 +230,10 @@ pub(super) fn list_nav_nodes(
             Ok(names.into_iter().map(database_node).collect())
         }
         Target::Objects { database } => {
-            let rows: Vec<(String, String)> = conn.exec(sql, params).await.map_err(failed)?;
+            let rows: Vec<(String, String, Option<String>)> = conn.exec(sql, params).await.map_err(failed)?;
             Ok(rows
                 .into_iter()
-                .map(|(name, kind)| object_node(database, name, &kind))
+                .map(|(name, kind, comment)| object_node(database, name, &kind, comment.as_deref()))
                 .collect())
         }
         Target::SchemaObjects { database, kind, .. } => {
@@ -200,7 +283,7 @@ fn query_for(
         ),
         // MariaDB sequences are rows of `TABLES` too; they have their own group.
         Target::Objects { database } => (
-            "SELECT TABLE_NAME, TABLE_TYPE FROM information_schema.TABLES \
+            "SELECT TABLE_NAME, TABLE_TYPE, TABLE_COMMENT FROM information_schema.TABLES \
              WHERE TABLE_SCHEMA = ? AND TABLE_TYPE <> 'SEQUENCE'"
                 .to_owned(),
             vec![database.as_str().into()],
@@ -255,12 +338,20 @@ fn database_node(name: String) -> NavigatorNode {
     }
 }
 
-fn object_node(database: &str, name: String, table_type: &str) -> NavigatorNode {
+/// A table or view. `comment` (`TABLE_COMMENT`, listed with the table: no query per table) is in
+/// the payload under `comment`, where a client that reads the payload as an object reference
+/// ignores it. A view's comment column holds the word `VIEW`, which is no comment.
+fn object_node(database: &str, name: String, table_type: &str, comment: Option<&str>) -> NavigatorNode {
     let kind = if table_type.contains("VIEW") {
         "view"
     } else {
         "table"
     };
+    let mut payload = object_payload(database, &name);
+    let comment = comment.filter(|text| !text.is_empty() && !(kind == "view" && *text == "VIEW"));
+    if let (Some(comment), Some(payload)) = (comment, payload.as_object_mut()) {
+        payload.insert("comment".into(), comment.into());
+    }
     NavigatorNode {
         id: format!("{kind}:{database}:{name}"),
         kind: kind.into(),
@@ -268,7 +359,7 @@ fn object_node(database: &str, name: String, table_type: &str) -> NavigatorNode 
         subtitle: None,
         icon: Some(kind.into()),
         has_children: true,
-        payload: object_payload(database, &name),
+        payload,
         actions: vec!["open_query".into(), "describe".into(), "refresh".into()],
     }
 }
@@ -426,6 +517,24 @@ mod tests {
     }
 
     #[test]
+    fn schema_columns_ask_for_a_binary_keyset_page() {
+        let mut request = request(
+            Some("database:app"),
+            Some(json!({"database": "app", "columns": true})),
+        );
+        assert_eq!(schema_columns_database(&request).as_deref(), Some("app"));
+        // A table's own request (`object`) is a per-table listing, whatever else it carries.
+        request.payload = Some(json!({"database": "app", "columns": true, "object": "t"}));
+        assert_eq!(schema_columns_database(&request), None);
+        let (sql, params) = schema_columns_query("app", None, 50);
+        assert!(sql.ends_with("ORDER BY CAST(TABLE_NAME AS BINARY), ORDINAL_POSITION LIMIT 51"), "{sql}");
+        assert_eq!(params.len(), 1);
+        let (sql, params) = schema_columns_query("app", Some(("t:x", 3)), 50);
+        assert!(sql.contains("ORDINAL_POSITION > ?"), "{sql}");
+        assert_eq!(params.len(), 4);
+    }
+
+    #[test]
     fn navigator_page_size_defaults_and_caps() {
         assert_eq!(nav_rows(0), 500);
         assert_eq!(nav_rows(2), 2);
@@ -447,14 +556,20 @@ mod tests {
 
     #[test]
     fn nodes_describe_their_kind_and_payload() {
-        let view = object_node("app", "v".into(), "VIEW");
+        let view = object_node("app", "v".into(), "VIEW", Some("VIEW"));
         assert_eq!(view.kind, "view");
         assert_eq!(view.id, "view:app:v");
         // Table and view nodes carry exactly a SqlObjectRef (no `table` key, no schema).
         assert_eq!(view.payload, json!({"database": "app", "object": "v"}));
         assert_eq!(view.actions, ["open_query", "describe", "refresh"]);
-        assert_eq!(object_node("app", "t".into(), "BASE TABLE").kind, "table");
-        assert_eq!(object_node("app", "s".into(), "SYSTEM VIEW").kind, "view");
+        assert_eq!(object_node("app", "t".into(), "BASE TABLE", None).kind, "table");
+        // The comment rides in the payload; a view's column holds the word VIEW, which is none.
+        let commented = object_node("app", "t".into(), "BASE TABLE", Some("one row per order"));
+        assert_eq!(commented.payload["comment"], "one row per order");
+        assert!(object_node("app", "t".into(), "BASE TABLE", Some("")).payload.get("comment").is_none());
+        assert!(object_node("app", "v".into(), "VIEW", Some("VIEW")).payload.get("comment").is_none());
+        assert_eq!(object_node("app", "v".into(), "VIEW", Some("a view")).payload["comment"], "a view");
+        assert_eq!(object_node("app", "s".into(), "SYSTEM VIEW", None).kind, "view");
         let column = column_node("app", "t", "id".into(), "int".into(), "NO", "PRI");
         // The payload is a SqlColumnNode and round-trips through the shared type.
         let typed: SqlColumnNode = serde_json::from_value(column.payload.clone()).unwrap();

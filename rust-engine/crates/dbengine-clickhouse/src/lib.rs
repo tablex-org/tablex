@@ -417,6 +417,7 @@ fn capabilities() -> DriverCapabilities {
             Capability::MutationBatch,
             Capability::DatabaseCreate,
             Capability::MetadataTableProperties,
+            Capability::MetadataSchemaColumns,
             Capability::QueryReadOnly,
         ]
         .map(|capability| capability.as_str().to_owned())
@@ -570,6 +571,7 @@ mod tests {
             Capability::MutationBatch,
             Capability::DatabaseCreate,
             Capability::MetadataTableProperties,
+            Capability::MetadataSchemaColumns,
             Capability::QueryReadOnly,
         ] {
             assert!(capabilities.has(capability), "{capability}");

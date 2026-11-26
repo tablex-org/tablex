@@ -11,10 +11,14 @@
 //! | `database` + `schema`                | tables, views, materialized views  |
 //! | `database` + `schema` + `kind`       | the objects of one `SchemaObjectKind` |
 //! | `database` + `schema` + `object`     | columns of that object             |
+//! | `database` + `schema` + `columns: true` | the columns of every table-like object of the schema |
 //!
 //! The databases level lists every database that accepts connections, also those the user holds
 //! no CONNECT privilege on: their nodes carry `"can_connect": false` in the payload (absent =
 //! connectable).
+//!
+//! `columns: true` (capability `metadata.schema_columns`) pages by the keyset cursor of
+//! `engine_driver_api::sql::schema_columns_cursor`, in SQL, one statement per page.
 //!
 //! Extra payload key `filter`: case-insensitive literal substring on object
 //! names (object level only), pushed into SQL with bound parameters.
@@ -45,7 +49,9 @@
 use super::connection::PgConnection;
 use super::schema_objects;
 use crate::db::postgres::SqlObjectKind;
-use engine_driver_kit::api::sql::{SchemaObjectKind, SqlColumnNode, SqlObjectRef};
+use engine_driver_kit::api::sql::{
+    parse_schema_columns_cursor, schema_columns_cursor, SchemaObjectKind, SqlColumnNode, SqlObjectRef,
+};
 use engine_driver_kit::api::{NavigatorNode, NavigatorPage, NavigatorRequest};
 use engine_driver_kit::BackendError;
 use serde_json::{json, Value};
@@ -85,6 +91,11 @@ enum Level<'a> {
         schema: &'a str,
         object: &'a str,
     },
+    /// The columns of every table-like object of the schema.
+    SchemaColumns {
+        database: &'a str,
+        schema: &'a str,
+    },
 }
 
 fn payload_str<'a>(request: &'a NavigatorRequest, key: &str) -> Option<&'a str> {
@@ -113,6 +124,15 @@ fn level(request: &NavigatorRequest) -> Result<Level<'_>, BackendError> {
     Ok(match (database, schema, object) {
         (None, None, None) => Level::Databases,
         (Some(database), None, _) => Level::Schemas { database },
+        (Some(database), Some(schema), None)
+            if request
+                .payload
+                .as_ref()
+                .and_then(|payload| payload.get("columns"))
+                == Some(&Value::Bool(true)) =>
+        {
+            Level::SchemaColumns { database, schema }
+        }
         (Some(database), Some(schema), None) => Level::Objects {
             database,
             schema,
@@ -178,6 +198,9 @@ pub(crate) fn list(
     request: &NavigatorRequest,
 ) -> Result<NavigatorPage, BackendError> {
     let level = level(request)?;
+    if let Level::SchemaColumns { database, schema } = level {
+        return schema_columns(connection, request, database, schema);
+    }
     let (offset, limit) = window(request)?;
     // On the metadata connection: never behind a running user query.
     connection.with_metadata(
@@ -224,7 +247,9 @@ pub(crate) fn list(
                                 .v2_list_objects_page(database, schema, filter, relkind, offset, fetch)
                                 .await?
                                 .iter()
-                                .map(|object| object_node(database, schema, object.kind, &object.name))
+                                .map(|(object, comment)| {
+                                    object_node(database, schema, object.kind, &object.name, comment.as_deref())
+                                })
                                 .collect()
                         }
                         Some(kind) => {
@@ -236,6 +261,7 @@ pub(crate) fn list(
                     nodes.truncate(limit);
                     Ok(NavigatorPage { nodes, next_cursor })
                 }
+                Level::SchemaColumns { .. } => Err("schema columns are answered before the page window".into()),
                 Level::Columns {
                     database,
                     schema,
@@ -255,6 +281,52 @@ pub(crate) fn list(
                     })
                 }
             }
+        },
+    )
+}
+
+/// One page of the schema's columns, keyset-paged: one extra row tells whether another page
+/// exists, and the cursor names the last column kept.
+fn schema_columns(
+    connection: &PgConnection,
+    request: &NavigatorRequest,
+    database: &str,
+    schema: &str,
+) -> Result<NavigatorPage, BackendError> {
+    let limit = match request.limit {
+        0 => DEFAULT_PAGE,
+        limit => limit.min(MAX_PAGE),
+    } as usize;
+    let after = match request.cursor.as_deref().filter(|cursor| !cursor.is_empty()) {
+        None => None,
+        Some(cursor) => Some(
+            parse_schema_columns_cursor(cursor)
+                .and_then(|(table, ordinal)| Some((table, i32::try_from(ordinal).ok()?)))
+                .ok_or_else(|| {
+                    BackendError::with_code("navigator.bad_request", "invalid navigator cursor")
+                })?,
+        ),
+    };
+    connection.with_metadata(
+        "navigator",
+        "navigator request",
+        |_| false,
+        |inner| async move {
+            let mut rows = inner
+                .v2_list_schema_columns_page(database, schema, after, i64::try_from(limit + 1).unwrap_or(i64::MAX))
+                .await?;
+            let next_cursor = (rows.len() > limit).then(|| {
+                rows.truncate(limit);
+                let (table, ordinal, _) = &rows[limit - 1];
+                schema_columns_cursor(table, i64::from(*ordinal))
+            });
+            Ok(NavigatorPage {
+                nodes: rows
+                    .into_iter()
+                    .map(|(table, _, column)| column_node(database, schema, &table, column))
+                    .collect(),
+                next_cursor,
+            })
         },
     )
 }
@@ -312,8 +384,20 @@ fn payload_of(value: &impl serde::Serialize) -> Value {
     serde_json::to_value(value).unwrap_or(Value::Null)
 }
 
-fn object_node(database: &str, schema: &str, kind: SqlObjectKind, name: &str) -> NavigatorNode {
+/// A table, view or materialized view. `comment` (its `COMMENT ON`) is in the payload under
+/// `comment`, where a client that reads the payload as an object reference ignores it.
+fn object_node(
+    database: &str,
+    schema: &str,
+    kind: SqlObjectKind,
+    name: &str,
+    comment: Option<&str>,
+) -> NavigatorNode {
     let kind = kind_name(kind);
+    let mut payload = payload_of(&object_ref(database, schema, name));
+    if let (Some(comment), Some(payload)) = (comment, payload.as_object_mut()) {
+        payload.insert("comment".into(), comment.into());
+    }
     NavigatorNode {
         id: format!("{kind}:{database}:{schema}:{name}"),
         kind: kind.into(),
@@ -321,7 +405,7 @@ fn object_node(database: &str, schema: &str, kind: SqlObjectKind, name: &str) ->
         subtitle: None,
         icon: Some(kind.into()),
         has_children: true,
-        payload: payload_of(&object_ref(database, schema, name)),
+        payload,
         actions: vec!["open_query".into(), "describe".into(), "refresh".into()],
     }
 }
@@ -471,7 +555,7 @@ mod tests {
 
     #[test]
     fn object_nodes_carry_a_reusable_payload() {
-        let node = object_node("app", "public", SqlObjectKind::MaterializedView, "mv");
+        let node = object_node("app", "public", SqlObjectKind::MaterializedView, "mv", None);
         assert_eq!(node.kind, "materialized_view");
         assert_eq!(node.id, "materialized_view:app:public:mv");
         assert_eq!(
@@ -481,6 +565,11 @@ mod tests {
         let reference: SqlObjectRef = serde_json::from_value(node.payload.clone()).unwrap();
         assert_eq!(reference, object_ref("app", "public", "mv"));
         assert!(node.has_children);
+        // A comment rides in the payload and does not stop it from reading as a reference.
+        let commented = object_node("app", "public", SqlObjectKind::Table, "t", Some("the orders"));
+        assert_eq!(commented.payload["comment"], "the orders");
+        let reference: SqlObjectRef = serde_json::from_value(commented.payload).unwrap();
+        assert_eq!(reference, object_ref("app", "public", "t"));
     }
 
     #[test]

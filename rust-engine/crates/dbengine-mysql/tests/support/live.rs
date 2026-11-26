@@ -723,6 +723,75 @@ fn navigator_lists_databases_objects_and_columns_with_cursor_paging() {
     session.disconnect().unwrap();
 }
 
+/// `metadata.schema_columns`: the schema-wide listing gives each table the columns the
+/// per-table listing gives it, also at page sizes that cut a table in two and for two tables
+/// whose names differ only by case.
+#[test]
+#[ignore = "needs a live server (see module docs)"]
+fn schema_columns_equal_the_per_table_columns() {
+    let database = database_name();
+    let tables = [unique("scA"), unique("sca"), unique("scb")];
+    let view = unique("scview");
+    let _cleanup = Cleanup(tables.iter().cloned().chain([view.clone()]).collect());
+    admin_exec(&[
+        &format!("CREATE TABLE `{database}`.`{}` (id INT NOT NULL PRIMARY KEY, name VARCHAR(20) NULL, qty INT NOT NULL DEFAULT 0)", tables[0]),
+        &format!("CREATE TABLE `{database}`.`{}` (z TEXT, y DECIMAL(10,2) NOT NULL, x INT, PRIMARY KEY (y, x))", tables[1]),
+        &format!("CREATE TABLE `{database}`.`{}` (only_one BIGINT UNSIGNED)", tables[2]),
+        &format!("CREATE VIEW `{database}`.`{view}` AS SELECT id, name FROM `{database}`.`{}`", tables[0]),
+    ]);
+    let mut session = connect();
+    assert!(env().handle.capabilities().has(Capability::MetadataSchemaColumns));
+    let mine: Vec<String> = tables.iter().cloned().chain([view.clone()]).collect();
+    let mut expected: Vec<(String, Value)> = Vec::new();
+    for table in &mine {
+        let page = nav(
+            &mut session,
+            Some(json!({ "database": database, "object": table })),
+            None,
+            None,
+            0,
+        );
+        expected.extend(page.nodes.into_iter().map(|node| (table.clone(), node.payload)));
+    }
+    assert_eq!(expected.len(), 3 + 3 + 1 + 2);
+    expected.sort_by(|a, b| a.0.cmp(&b.0));
+    for limit in [1u64, 2, 4, 0] {
+        let mut got: Vec<(String, Value)> = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut every_table: Vec<String> = Vec::new();
+        loop {
+            let page = nav(
+                &mut session,
+                Some(json!({ "database": database, "columns": true })),
+                None,
+                cursor.as_deref(),
+                limit,
+            );
+            for node in page.nodes {
+                let column: SqlColumnNode = serde_json::from_value(node.payload.clone()).unwrap();
+                every_table.push(column.object.object.clone());
+                if mine.contains(&column.object.object) {
+                    got.push((column.object.object, node.payload));
+                }
+            }
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        // The columns of a table are one run (no interleaving with the table that differs by case).
+        let mut runs = every_table.clone();
+        runs.dedup();
+        let mut distinct = runs.clone();
+        distinct.sort();
+        distinct.dedup();
+        assert_eq!(runs.len(), distinct.len(), "limit {limit}: {runs:?}");
+        got.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(got, expected, "limit {limit}");
+    }
+    session.disconnect().unwrap();
+}
+
 /// `run`, with `payload.run_to_end` (capability `query.run_to_end`).
 fn run_to_end(session: &mut DriverSession, sql: &str, limit: u64) -> Result<QueryPage, LoaderError> {
     let operation = session.begin_operation()?;

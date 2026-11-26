@@ -43,8 +43,7 @@ pub fn rows_to_record_batch(rows: &[Row]) -> Result<RecordBatch, String> {
     let schema = Arc::new(Schema::new(fields));
     let mut arrays: Vec<Arc<dyn arrow_array::Array>> = Vec::with_capacity(num_cols);
 
-    for col_idx in 0..num_cols {
-        let pg_type = col_types[col_idx];
+    for (col_idx, &pg_type) in col_types.iter().enumerate() {
         let arrow_type = schema.field(col_idx).data_type().clone();
         let array = build_column_array(rows, col_idx, pg_type, &arrow_type)?;
         arrays.push(array);

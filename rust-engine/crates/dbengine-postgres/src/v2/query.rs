@@ -89,7 +89,7 @@
 //! `query.interrupted`.
 
 use super::connection::{
-    batch_execute_uninterrupted, session_scope, ArmedCancel, PgConnection, Scope,
+    batch_execute_uninterrupted, session_scope, Abandoned, ArmedCancel, PgConnection, Scope, CANCEL_GRACE,
 };
 use super::convert::{retype, BatchBuilder, ColumnPlan, ConvertError, Kind, Raw};
 use super::runtime;
@@ -458,15 +458,6 @@ async fn run(
         .await
         .map_err(BackendError::new)?;
     connection.restore_settings(&client, database).await;
-    let armed = connection.cancel.arm(operation, client.cancel_token());
-    // A cancel that arrived before the token was armed reached nobody.
-    if cancel_requested() {
-        return Err(cancelled("query"));
-    }
-    let run = Run {
-        client: &client,
-        armed: &armed,
-    };
     // Re-paging a read (offset > 0) runs it again: do it READ ONLY so a function
     // with side effects (`nextval`, a user function that writes) cannot write.
     // `payload.read_only == true` (an agent's read) runs ANY plan READ ONLY: a
@@ -475,8 +466,28 @@ async fn run(
     let rerun_read_only = force_read_only
         || (offset > 0 && matches!(decision.plan, Plan::Wrapped | Plan::ClientPaged));
     let result = if rerun_read_only {
-        read_only_page(connection, &run, decision, limit, offset, force_read_only).await
+        // Armed inside: the cancel must not reach the probe or the savepoint (see `read_only_page`).
+        read_only_page(
+            connection,
+            &client,
+            operation,
+            decision,
+            limit,
+            offset,
+            force_read_only,
+            cancel_requested,
+        )
+        .await
     } else {
+        let armed = connection.cancel.arm(operation, client.cancel_token());
+        // A cancel that arrived before the token was armed reached nobody.
+        if cancel_requested() {
+            return Err(cancelled("query"));
+        }
+        let run = Run {
+            client: &client,
+            armed: &armed,
+        };
         let Ok(result) = armed.watch(execute(&run, decision, limit, offset)).await else {
             return Err(connection.abandoned("query"));
         };
@@ -542,42 +553,90 @@ const READ_SAVEPOINT: &str = "tablex_read";
 /// server does: the interrupted statement is rolled back to the savepoint (or,
 /// when the cancel hit the savepoint itself or the probe, the transaction is
 /// aborted until the user rolls back).
+///
+/// The cancel is armed only once the scope is open: the probe and the `SAVEPOINT` batch are not
+/// cancellable. A cancel that interrupted either inside a transaction of the user's would abort
+/// it (there is no savepoint yet to roll back to) and lose their uncommitted work; one that
+/// arrives meanwhile reaches nobody, and is looked at before the statement starts.
+#[allow(clippy::too_many_arguments)]
 async fn read_only_page(
     connection: &PgConnection,
-    run: &Run<'_>,
+    client: &Client,
+    operation: OperationId,
     decision: &Decision<'_>,
     limit: u64,
     offset: u64,
     force_read_only: bool,
+    cancel_requested: &dyn Fn() -> bool,
 ) -> Result<Outcome, Failure> {
-    let mut entered = None;
-    let mut begun = false;
-    let work = async {
-        let scope = session_scope(run.client).await?;
-        run.check()?;
-        let (begin, _) = read_only_scope(scope, force_read_only);
+    // Not cancellable, but not unbounded either: on a server that stopped answering, the wait
+    // ends `CANCEL_GRACE` after the cancel was first seen (nothing is sent to cancel it).
+    let opened = unarmed_within(CANCEL_GRACE, cancel_requested, async {
+        let scope = session_scope(client).await?;
+        let (begin, end) = read_only_scope(scope, force_read_only);
         // From here the scope may exist on the server, even if `begin` fails.
-        entered = Some(scope);
-        run.client.batch_execute(&begin).await?;
-        begun = true;
-        run.check()?;
-        execute(run, decision, limit, offset).await
+        let begun = client.batch_execute(&begin).await;
+        Ok::<_, tokio_postgres::Error>((scope, end, begun))
+    })
+    .await;
+    let (scope, end, begun) = match opened {
+        Err(Abandoned) => return Err(Failure::Other(connection.abandoned("query"))),
+        Ok(Err(error)) => return Err(Failure::Pg(error)),
+        Ok(Ok(opened)) => opened,
     };
-    let Ok(result) = run.armed.watch(work).await else {
+    let armed = connection.cancel.arm(operation, client.cancel_token());
+    let run = Run {
+        client,
+        armed: &armed,
+    };
+    let began = begun.is_ok();
+    let work = async {
+        begun?;
+        // A cancel that came while the scope was opened stops here, before the statement.
+        if cancel_requested() {
+            return Err(Failure::Other(cancelled("query")));
+        }
+        run.check()?;
+        execute(&run, decision, limit, offset).await
+    };
+    let Ok(result) = armed.watch(work).await else {
         // Nothing more is sent: the leave-the-scope clean-up would wait for the same dead server.
         return Err(Failure::Other(connection.abandoned("query")));
     };
-    run.armed.disarm();
-    if let Some(scope) = entered {
-        let (_, end) = read_only_scope(scope, force_read_only);
-        let left = batch_execute_uninterrupted(run.client, &end).await;
-        // A savepoint that was never opened leaves the user's (aborted)
-        // transaction to the user; everything else must be undone.
-        if left.is_err() && (begun || scope == Scope::Own) {
-            connection.mark_broken();
-        }
+    armed.disarm();
+    let left = batch_execute_uninterrupted(client, &end).await;
+    // A savepoint that was never opened leaves the user's (aborted)
+    // transaction to the user; everything else must be undone.
+    if left.is_err() && (began || scope == Scope::Own) {
+        connection.mark_broken();
     }
     result
+}
+
+/// Runs `work`, a part of an operation that cannot be cancelled (a cancel there would fail a
+/// statement inside the user's transaction). A cancel is not sent for it: once `cancel_requested`
+/// is seen, `work` has `grace` more to end, and then it is dropped ([`Abandoned`]: the server is
+/// not answering, and the session cannot be used again).
+async fn unarmed_within<T>(
+    grace: std::time::Duration,
+    cancel_requested: &dyn Fn() -> bool,
+    work: impl std::future::Future<Output = T>,
+) -> Result<T, Abandoned> {
+    let mut work = std::pin::pin!(work);
+    let mut seen = None;
+    loop {
+        tokio::select! {
+            biased;
+            out = &mut work => return Ok(out),
+            () = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
+        }
+        if cancel_requested() {
+            let since = *seen.get_or_insert_with(std::time::Instant::now);
+            if since.elapsed() >= grace {
+                return Err(Abandoned);
+            }
+        }
+    }
 }
 
 /// The statements that open and close the READ ONLY scope. `payload.read_only` text
@@ -1073,6 +1132,45 @@ async fn script_plans(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The probe and the scope's opening of a read-only run are not cancellable, and not unbounded: a
+    /// server that stopped answering ends them `grace` after the cancel was first seen, and nothing
+    /// is sent for it.
+    #[test]
+    fn the_unarmed_part_of_a_read_only_run_gives_up_on_a_dead_server_after_the_grace_period() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+        let requested = AtomicBool::new(false);
+        let flag = || requested.load(Ordering::Acquire);
+        // Work that ends is returned, cancelled or not.
+        let done = runtime::block_on(unarmed_within(Duration::from_millis(100), &flag, async { 5 })).unwrap();
+        assert_eq!(done.ok(), Some(5));
+        requested.store(true, Ordering::Release);
+        let slow = runtime::block_on(unarmed_within(Duration::from_secs(5), &flag, async {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            6
+        }))
+        .unwrap();
+        assert_eq!(slow.ok(), Some(6), "a server that answers inside the grace period is not abandoned");
+        // No cancel: the wait is as long as the server takes.
+        requested.store(false, Ordering::Release);
+        let waited = runtime::block_on(unarmed_within(Duration::from_millis(50), &flag, async {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            7
+        }))
+        .unwrap();
+        assert_eq!(waited.ok(), Some(7));
+        // A cancel and a server that never answers: dropped after the grace period, not before.
+        requested.store(true, Ordering::Release);
+        let started = Instant::now();
+        let dead = runtime::block_on(unarmed_within(Duration::from_millis(300), &flag, std::future::pending::<()>())).unwrap();
+        assert!(dead.is_err(), "the work was not dropped");
+        assert!(
+            started.elapsed() >= Duration::from_millis(300) && started.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
+    }
 
     #[test]
     fn a_lost_connection_is_not_connected_and_a_server_refusal_is_not() {

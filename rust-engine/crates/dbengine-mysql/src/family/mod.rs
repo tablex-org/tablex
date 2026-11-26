@@ -112,6 +112,7 @@ pub fn capabilities<F: Flavor>() -> DriverCapabilities {
             Capability::MutationBatch,
             Capability::DatabaseCreate,
             Capability::MetadataTableProperties,
+            Capability::MetadataSchemaColumns,
             Capability::QueryReadOnly,
             Capability::QueryRunToEnd,
         ]
@@ -268,6 +269,7 @@ mod tests {
             Capability::MutationBatch,
             Capability::DatabaseCreate,
             Capability::MetadataTableProperties,
+            Capability::MetadataSchemaColumns,
             Capability::QueryReadOnly,
         ] {
             assert!(capabilities.has(capability), "{capability}");

@@ -6,7 +6,7 @@
 //! parameters (`pragma_*` table-valued functions), never interpolated.
 
 use engine_driver_kit::api::sql::{
-    codes, ConstraintKind, SchemaObjectKind, SchemaObjectRef, SchemaObjectSource, SqlColumnNode,
+    codes, parse_schema_columns_cursor, schema_columns_cursor, ConstraintKind, SchemaObjectKind, SchemaObjectRef, SchemaObjectSource, SqlColumnNode,
     SqlObjectRef, TableColumn, TableConstraint, TableForeignKey, TableIndex, TableProperties,
     TableTrigger,
 };
@@ -38,12 +38,14 @@ pub(crate) fn database_node() -> NavigatorNode {
 /// `root` -> `main` database; `database:main` -> tables and views (`payload.filter`,
 /// `limit`, `cursor`); a table-like payload (`object`) -> its columns. `payload.kind`
 /// lists one `SchemaObjectKind` instead: SQLite has triggers only, every other kind is
-/// an empty page and an unknown one `navigator.bad_request`.
+/// an empty page and an unknown one `navigator.bad_request`. `payload.columns == true` lists
+/// the columns of every table and view at once (`metadata.schema_columns`).
 pub(crate) fn list(
     conn: &Connection,
     request: &NavigatorRequest,
 ) -> Result<NavigatorPage, BackendError> {
     let payload = request.payload.as_ref();
+    let schema_wide = payload.and_then(|payload| payload.get("columns")) == Some(&serde_json::Value::Bool(true));
     if let Some(object) = payload
         .and_then(|payload| payload.get("object"))
         .and_then(serde_json::Value::as_str)
@@ -64,6 +66,9 @@ pub(crate) fn list(
     if let Some(database) = database {
         require_main(database)
             .map_err(|message| BackendError::with_code("navigator.bad_request", message))?;
+    }
+    if schema_wide {
+        return schema_columns(conn, request.cursor.as_deref(), request.limit);
     }
     if let Some(table) = ["table:", "view:"]
         .iter()
@@ -240,8 +245,20 @@ struct ColumnInfo {
 /// Columns of a table or view (`table_xinfo`: generated columns included,
 /// hidden virtual-table columns excluded).
 fn column_infos(conn: &Connection, object: &str) -> Result<Vec<ColumnInfo>, BackendError> {
-    let without_rowid = table_sql(conn, object)?
-        .is_some_and(|sql| sql.to_ascii_lowercase().contains("without rowid"));
+    let without_rowid = table_sql(conn, object)?.is_some_and(|sql| is_without_rowid(&sql));
+    column_infos_of(conn, object, without_rowid)
+}
+
+fn is_without_rowid(sql: &str) -> bool {
+    sql.to_ascii_lowercase().contains("without rowid")
+}
+
+/// [`column_infos`] of a table whose `WITHOUT ROWID`-ness is known.
+fn column_infos_of(
+    conn: &Connection,
+    object: &str,
+    without_rowid: bool,
+) -> Result<Vec<ColumnInfo>, BackendError> {
     let mut statement = conn
         .prepare_cached(
             "SELECT name, type, \"notnull\", dflt_value, pk, hidden \
@@ -266,29 +283,134 @@ fn column_infos(conn: &Connection, object: &str) -> Result<Vec<ColumnInfo>, Back
     Ok(raw
         .into_iter()
         .map(|(name, data_type, not_null, default, pk, hidden)| {
-            // `INTEGER PRIMARY KEY` aliases the rowid: never NULL, auto-assigned.
-            let rowid_alias = !without_rowid
-                && pk_columns == 1
-                && pk > 0
-                && data_type.eq_ignore_ascii_case("integer");
-            let implicitly_not_null = pk > 0 && (rowid_alias || without_rowid);
-            ColumnInfo {
-                pk_index: pk,
-                column: TableColumn {
-                    name,
-                    data_type,
-                    nullable: not_null == 0 && !implicitly_not_null,
-                    primary_key: pk > 0,
-                    is_generated: (hidden >= 2).then_some(true),
-                    default_expression: default,
-                    auto_increment: rowid_alias.then_some(true),
-                    // SQLite has no column comments.
-                    comment: None,
-                    attributes: None,
-                },
-            }
+            column_info(name, data_type, not_null, default, pk, hidden, without_rowid, pk_columns)
         })
         .collect())
+}
+
+/// One `table_xinfo` row as the contract's column. Shared by the per-table and the
+/// schema-wide listing, so both give the same details.
+#[allow(clippy::too_many_arguments)]
+fn column_info(
+    name: String,
+    data_type: String,
+    not_null: i64,
+    default: Option<String>,
+    pk: i64,
+    hidden: i64,
+    without_rowid: bool,
+    pk_columns: usize,
+) -> ColumnInfo {
+    // `INTEGER PRIMARY KEY` aliases the rowid: never NULL, auto-assigned.
+    let rowid_alias =
+        !without_rowid && pk_columns == 1 && pk > 0 && data_type.eq_ignore_ascii_case("integer");
+    let implicitly_not_null = pk > 0 && (rowid_alias || without_rowid);
+    ColumnInfo {
+        pk_index: pk,
+        column: TableColumn {
+            name,
+            data_type,
+            nullable: not_null == 0 && !implicitly_not_null,
+            primary_key: pk > 0,
+            is_generated: (hidden >= 2).then_some(true),
+            default_expression: default,
+            auto_increment: rowid_alias.then_some(true),
+            // SQLite has no column comments.
+            comment: None,
+            attributes: None,
+        },
+    }
+}
+
+/// `payload.columns == true`: one page of the columns of every table and view, ordered by
+/// table name then position, continuing after the column `cursor` names (a table and the position
+/// of its last column sent). Each table is read once with [`column_infos_of`], the statement of the
+/// per-table request, so both give the same details; the work is one `table_xinfo` per table.
+fn schema_columns(
+    conn: &Connection,
+    cursor: Option<&str>,
+    limit: u64,
+) -> Result<NavigatorPage, BackendError> {
+    let limit = match limit {
+        0 => DEFAULT_LIMIT,
+        limit => limit.min(MAX_LIMIT),
+    } as usize;
+    let after = match cursor.filter(|cursor| !cursor.is_empty()) {
+        None => None,
+        Some(cursor) => match parse_schema_columns_cursor(cursor) {
+            Some(after) => Some(after),
+            None => {
+                return Err(BackendError::with_code(
+                    "navigator.bad_request",
+                    "invalid navigator cursor",
+                ))
+            }
+        },
+    };
+    let mut statement = conn
+        .prepare_cached(
+            "SELECT name, sql FROM sqlite_schema \
+             WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' \
+               AND (?1 IS NULL OR name >= ?1) \
+             ORDER BY name",
+        )
+        .map_err(sqlite_error)?;
+    let mut tables = statement
+        .query(params![after.map(|(table, _)| table)])
+        .map_err(sqlite_error)?;
+    // One lookahead column tells whether another page follows.
+    let mut found: Vec<(String, usize, TableColumn)> = Vec::with_capacity(limit + 1);
+    'tables: while let Some(row) = tables.next().map_err(sqlite_error)? {
+        let table: String = row.get(0).map_err(sqlite_error)?;
+        let without_rowid = row
+            .get::<_, Option<String>>(1)
+            .map_err(sqlite_error)?
+            .is_some_and(|sql| is_without_rowid(&sql));
+        let first = match after {
+            Some((after_table, position)) if after_table == table => position as usize + 1,
+            _ => 0,
+        };
+        for (position, info) in column_infos_of(conn, &table, without_rowid)?
+            .into_iter()
+            .enumerate()
+            .skip(first)
+        {
+            found.push((table.clone(), position, info.column));
+            if found.len() > limit {
+                break 'tables;
+            }
+        }
+    }
+    let next_cursor = (found.len() > limit).then(|| {
+        found.truncate(limit);
+        let (table, position, _) = &found[limit - 1];
+        schema_columns_cursor(table, *position as i64)
+    });
+    Ok(NavigatorPage {
+        nodes: found
+            .into_iter()
+            .map(|(table, _, column)| column_node(&table, column))
+            .collect(),
+        next_cursor,
+    })
+}
+
+fn column_node(object: &str, column: TableColumn) -> NavigatorNode {
+    let payload = SqlColumnNode {
+        object: object_ref(object),
+        column: column.name.clone(),
+        details: column.clone(),
+    };
+    NavigatorNode {
+        id: format!("column:{MAIN}:{object}:{}", column.name),
+        kind: "column".into(),
+        label: column.name,
+        subtitle: Some(column.data_type),
+        icon: Some("column".into()),
+        has_children: false,
+        payload: serde_json::to_value(&payload).unwrap_or_default(),
+        actions: Vec::new(),
+    }
 }
 
 fn columns(conn: &Connection, object: &str) -> Result<NavigatorPage, BackendError> {
@@ -301,23 +423,7 @@ fn columns(conn: &Connection, object: &str) -> Result<NavigatorPage, BackendErro
     }
     let nodes = infos
         .into_iter()
-        .map(|info| {
-            let payload = SqlColumnNode {
-                object: object_ref(object),
-                column: info.column.name.clone(),
-                details: info.column.clone(),
-            };
-            NavigatorNode {
-                id: format!("column:{MAIN}:{object}:{}", info.column.name),
-                kind: "column".into(),
-                label: info.column.name,
-                subtitle: Some(info.column.data_type),
-                icon: Some("column".into()),
-                has_children: false,
-                payload: serde_json::to_value(&payload).unwrap_or_default(),
-                actions: Vec::new(),
-            }
-        })
+        .map(|info| column_node(object, info.column))
         .collect();
     Ok(NavigatorPage {
         nodes,
@@ -934,6 +1040,63 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(missing.code.as_deref(), Some(codes::DESCRIBE_NOT_FOUND));
+    }
+
+    /// The schema-wide listing gives, table by table, exactly what the per-table request gives,
+    /// across pages that cut a table in two and with a table whose name has odd characters.
+    #[test]
+    fn schema_columns_equal_the_per_table_columns_at_every_page_size() {
+        let conn = db();
+        conn.execute_batch("CREATE TABLE \"a:b\" (x INT, y TEXT DEFAULT 'q'); CREATE TABLE empty_names_last (z)")
+            .unwrap();
+        let tables = tables(&conn, None, None, 0).unwrap();
+        let mut expected: Vec<(String, serde_json::Value)> = Vec::new();
+        for table in &tables.nodes {
+            let page = columns(&conn, &table.label).unwrap();
+            expected.extend(page.nodes.into_iter().map(|node| (table.label.clone(), node.payload)));
+        }
+        assert!(expected.len() > 20);
+        for limit in [1, 2, 3, 7, 0] {
+            let mut got = Vec::new();
+            let mut cursor: Option<String> = None;
+            let mut pages = 0;
+            loop {
+                let page = list(
+                    &conn,
+                    &request(
+                        Some("database:main"),
+                        serde_json::json!({"database": "main", "columns": true}),
+                        cursor.as_deref(),
+                        limit,
+                    ),
+                )
+                .unwrap();
+                pages += 1;
+                got.extend(page.nodes.into_iter().map(|node| {
+                    let column: SqlColumnNode = serde_json::from_value(node.payload.clone()).unwrap();
+                    (column.object.object, node.payload)
+                }));
+                match page.next_cursor {
+                    Some(next) => cursor = Some(next),
+                    None => break,
+                }
+            }
+            assert_eq!(got, expected, "limit {limit}");
+            if limit == 1 {
+                assert_eq!(pages, expected.len());
+            }
+        }
+        let bad = list(
+            &conn,
+            &request(
+                Some("database:main"),
+                serde_json::json!({"database": "main", "columns": true}),
+                Some("nonsense"),
+                0,
+            ),
+        )
+        .unwrap_err();
+        assert_eq!(bad.code.as_deref(), Some("navigator.bad_request"));
     }
 
     fn describe_table(conn: &Connection, table: &str) -> TableProperties {
