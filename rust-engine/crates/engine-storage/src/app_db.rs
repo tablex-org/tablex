@@ -184,6 +184,26 @@ const MIGRATIONS: &[&str] = &[
         position INTEGER NOT NULL,
         PRIMARY KEY (connection_id, node)
     ) WITHOUT ROWID",
+    // 7: how a run of the query history ended and what it was: `status` (`ok` / `failed`; empty in a
+    // row of an older build, which only recorded runs that worked), the `error` of a failed one, the
+    // `duration_ms` the run took and its `kind` (`query`, `data_change`, `schema_change`,
+    // `redis_command`; the rows that exist get it from the first word of their statement).
+    // Additive and nullable: `min_reader_version` stays at 5, an older build ignores the columns and
+    // its inserts leave them empty. The time of a run is the `timestamp` column (indexed by
+    // `idx_history_timestamp`).
+    "ALTER TABLE query_history ADD COLUMN status TEXT;
+    ALTER TABLE query_history ADD COLUMN error TEXT;
+    ALTER TABLE query_history ADD COLUMN duration_ms INTEGER;
+    ALTER TABLE query_history ADD COLUMN kind TEXT;
+    UPDATE query_history SET kind = CASE
+        WHEN ltrim(filter, ' ' || char(9, 10, 13)) LIKE 'create%' OR ltrim(filter, ' ' || char(9, 10, 13)) LIKE 'alter%'
+          OR ltrim(filter, ' ' || char(9, 10, 13)) LIKE 'drop%' OR ltrim(filter, ' ' || char(9, 10, 13)) LIKE 'rename%'
+            THEN 'schema_change'
+        WHEN ltrim(filter, ' ' || char(9, 10, 13)) LIKE 'insert%' OR ltrim(filter, ' ' || char(9, 10, 13)) LIKE 'update%'
+          OR ltrim(filter, ' ' || char(9, 10, 13)) LIKE 'delete%' OR ltrim(filter, ' ' || char(9, 10, 13)) LIKE 'merge%'
+          OR ltrim(filter, ' ' || char(9, 10, 13)) LIKE 'replace%' OR ltrim(filter, ' ' || char(9, 10, 13)) LIKE 'truncate%'
+            THEN 'data_change'
+        ELSE 'query' END",
 ];
 
 /// The `user_version` this build writes and understands.
