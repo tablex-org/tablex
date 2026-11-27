@@ -56,23 +56,6 @@ macOS 12 or later: the `.dmg` for your Mac (Apple silicon or Intel) from the [la
 
 The Linux and Windows builds do not update themselves: the app tells you about a new release and opens its page.
 
-### Install with a package manager
-
-> **Draft, not live.** None of this works until the Homebrew tap, the winget entry and the AUR package exist. Remove this note when they do. Until then use the downloads above.
-
-```bash
-# macOS (Homebrew)
-brew install --cask tablex-org/tap/tablex
-
-# Windows 10 or 11 (winget)
-winget install TablexOrg.tablex
-
-# Arch Linux (AUR, with any AUR helper)
-yay -S tablex-bin
-```
-
-The builds are the same files as the release downloads, so the same first-launch notes apply: Homebrew keeps macOS's quarantine flag on the app, so the first launch is blocked until you click **Open Anyway** in System Settings > Privacy & Security (or run `xattr -dr com.apple.quarantine /Applications/tablex.app`); on Windows SmartScreen asks for **More info** > **Run anyway**. The macOS app updates itself (Homebrew leaves that to the app); upgrade the others with `winget upgrade TablexOrg.tablex` or your AUR helper. The files for each manager are written by `scripts/package_managers.py` from the release's `SHA256SUMS`.
-
 ## Building from source
 
 Requirements: a recent stable Rust toolchain; on Linux the usual GPUI system packages (Wayland / X11, fontconfig, Vulkan).
