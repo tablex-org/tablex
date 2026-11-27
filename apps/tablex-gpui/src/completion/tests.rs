@@ -566,10 +566,13 @@ fn table_fragment_editor_completes_columns_of_its_table() {
         identifier_quote: '"',
         keyword_case: KeywordCase::Keep,
         manual: false,
-        fragment_of: Some(Relation {
-            namespace: None,
-            name: "users",
-            view: false,
+        fragment_of: Some(Fragment {
+            table: Relation {
+                namespace: None,
+                name: "users",
+                view: false,
+            },
+            order_by: false,
         }),
     });
     let catalog = shop();
@@ -580,6 +583,98 @@ fn table_fragment_editor_completes_columns_of_its_table() {
         ["id", "name", "email"]
     );
     assert!(run(&editor, "name = 'a|", &catalog).items.is_empty());
+}
+
+fn fragment(flavor: SqlFlavor, order_by: bool) -> Editor<'static> {
+    let Editor::Sql(editor) = sql_editor(flavor) else { unreachable!() };
+    Editor::Sql(SqlEditor {
+        fragment_of: Some(Fragment {
+            table: Relation {
+                namespace: None,
+                name: "t",
+                view: false,
+            },
+            order_by,
+        }),
+        ..editor
+    })
+}
+
+const ALL_FLAVORS: [SqlFlavor; 7] = [
+    SqlFlavor::Postgres,
+    SqlFlavor::Sqlite,
+    SqlFlavor::Mysql,
+    SqlFlavor::Mariadb,
+    SqlFlavor::Clickhouse,
+    SqlFlavor::Duckdb,
+    SqlFlavor::Mssql,
+];
+
+fn bar_table() -> StaticCatalog {
+    StaticCatalog::default().table("t", &["id", "status", "Order Total", "created at"])
+}
+
+#[test]
+fn a_where_fragment_offers_conditions_for_every_dialect_and_no_clauses_or_sort_words() {
+    for flavor in ALL_FLAVORS {
+        let editor = fragment(flavor, false);
+        let catalog = bar_table();
+        assert_eq!(run(&editor, "sta|", &catalog).labels()[0], "status", "{flavor:?}");
+        let words = run(&editor, "id a|", &catalog);
+        assert!(words.has("AND") && !words.has("ASC") && !words.has("ALL"), "{flavor:?} {:?}", words.labels());
+        let words = run(&editor, "id i|", &catalog);
+        assert!(words.has("IN") && words.has("IS NULL"), "{flavor:?} {:?}", words.labels());
+        assert!(!words.has("INNER JOIN"), "{flavor:?} {:?}", words.labels());
+        assert_eq!(words.has("ILIKE"), matches!(flavor, SqlFlavor::Postgres | SqlFlavor::Duckdb | SqlFlavor::Clickhouse), "{flavor:?}");
+        let words = run(&editor, "id o|", &catalog);
+        assert!(words.has("OR") && !words.has("ORDER BY") && !words.has("OVER"), "{flavor:?} {:?}", words.labels());
+        assert!(run(&editor, "id b|", &catalog).has("BETWEEN"), "{flavor:?}");
+        assert!(run(&editor, "id n|", &catalog).has("NOT"), "{flavor:?}");
+        assert!(!run(&editor, "id n|", &catalog).has("NULLS FIRST"), "{flavor:?}");
+    }
+}
+
+#[test]
+fn an_order_by_fragment_offers_columns_and_sort_modifiers_where_the_dialect_has_them() {
+    for flavor in ALL_FLAVORS {
+        let editor = fragment(flavor, true);
+        let catalog = bar_table();
+        assert_eq!(run(&editor, "sta|", &catalog).labels()[0], "status", "{flavor:?}");
+        let words = run(&editor, "id a|", &catalog);
+        assert!(words.has("ASC") && !words.has("AND"), "{flavor:?} {:?}", words.labels());
+        assert!(run(&editor, "id d|", &catalog).has("DESC"), "{flavor:?}");
+        let nulls = run(&editor, "id desc n|", &catalog);
+        let supported = matches!(
+            flavor,
+            SqlFlavor::Postgres | SqlFlavor::Sqlite | SqlFlavor::Duckdb | SqlFlavor::Clickhouse
+        );
+        assert_eq!(nulls.has("NULLS FIRST") && nulls.has("NULLS LAST"), supported, "{flavor:?} {:?}", nulls.labels());
+        assert!(!nulls.has("NOT") && !nulls.has("IN"), "{flavor:?} {:?}", nulls.labels());
+        // A second term starts like the first.
+        assert_eq!(run(&editor, "id desc, sta|", &catalog).labels()[0], "status", "{flavor:?}");
+        assert!(run(&editor, "id desc, |", &catalog).has("status"), "{flavor:?}");
+    }
+}
+
+#[test]
+fn a_fragment_quotes_a_column_name_the_dialects_way_only_when_it_needs_it() {
+    let catalog = bar_table();
+    for (flavor, quoted) in [
+        (SqlFlavor::Postgres, "\"Order Total\""),
+        (SqlFlavor::Mysql, "`Order Total`"),
+        (SqlFlavor::Sqlite, "\"Order Total\""),
+        (SqlFlavor::Clickhouse, "`Order Total`"),
+    ] {
+        let editor = fragment(flavor, false);
+        let out = run(&editor, "ord|", &catalog);
+        assert_eq!(out.labels()[0], "Order Total", "{flavor:?}");
+        assert_eq!(out.insert_of("Order Total"), quoted, "{flavor:?}");
+        assert_eq!(run(&editor, "sta|", &catalog).insert_of("status"), "status", "{flavor:?}");
+    }
+    // PostgreSQL folds an unquoted name to lower case, so a camel-case one is quoted there only.
+    let camel = StaticCatalog::default().table("t", &["createdAt"]);
+    assert_eq!(run(&fragment(SqlFlavor::Postgres, true), "cre|", &camel).insert_of("createdAt"), "\"createdAt\"");
+    assert_eq!(run(&fragment(SqlFlavor::Mysql, true), "cre|", &camel).insert_of("createdAt"), "createdAt");
 }
 
 #[test]

@@ -10,6 +10,7 @@
 //! so there is no per-frame work beyond reading two short strings.
 
 use super::super::*;
+use super::mongo::editors::{empty_hint, inline_editor, single_line_editor, single_line_keys};
 use crate::sql_table::{self, SqlDialect};
 
 
@@ -42,6 +43,19 @@ impl SqlField {
         match self {
             Self::Where => "WHERE Condition",
             Self::OrderBy => "ORDER BY Terms",
+        }
+    }
+
+    fn completion_role(self) -> CompletionRole {
+        CompletionRole::TableFragment {
+            order_by: self == Self::OrderBy,
+        }
+    }
+
+    fn hint_selector(self) -> &'static str {
+        match self {
+            Self::Where => "sql-where-hint",
+            Self::OrderBy => "sql-order-hint",
         }
     }
 
@@ -83,7 +97,7 @@ enum Control {
 
 #[derive(Default)]
 pub(in crate::app) struct SqlTableUiState {
-    inputs: HashMap<(u64, SqlField), gpui::Entity<InputState>>,
+    inputs: HashMap<(u64, SqlField), gpui::Entity<EditorState>>,
     editors: HashMap<(u64, SqlField), gpui::Entity<EditorState>>,
     pub(in crate::app) filter: super::sql_filter::SqlFilterUiState,
     pub(in crate::app) column_search: HashMap<u64, gpui::Entity<InputState>>,
@@ -310,7 +324,7 @@ impl AppRoot {
         field: SqlField,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> gpui::Entity<InputState> {
+    ) -> gpui::Entity<EditorState> {
         if let Some(input) = self.sql_table_ui.inputs.get(&(tab_id, field)) {
             return input.clone();
         }
@@ -321,38 +335,32 @@ impl AppRoot {
             .find(|tab| tab.id == tab_id)
             .map(|tab| single_line(tab_field(tab, field)))
             .unwrap_or_default();
-        let input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder(field.placeholder())
-                .default_value(value)
-        });
+        // One line with the expanded editor's completion; Enter runs (see `single_line_keys`).
+        let completion = TabCompletion::for_tab(cx, tab_id, field.completion_role());
+        let input =
+            cx.new(|cx| single_line_editor(window, cx, "sql", value, completion));
         let input_for_events = input.clone();
         cx.subscribe(
             &input,
             move |this: &mut Self,
-                  _: gpui::Entity<InputState>,
+                  _: gpui::Entity<EditorState>,
                   event: &gpui_component::input::InputEvent,
                   cx: &mut Context<Self>| {
-                match event {
-                    gpui_component::input::InputEvent::Change => {
-                        let expanded = this.workspace.runtime(tab_id).is_some_and(|runtime| {
-                            match field {
-                                SqlField::Where => runtime.sql_table.where_expanded,
-                                SqlField::OrderBy => runtime.sql_table.order_expanded,
-                            }
-                        });
-                        if expanded {
-                            return;
-                        }
-                        let value = input_for_events.read(cx).value().to_string();
-                        this.set_sql_table_field_text(tab_id, field, value);
-                        this.notify_tab(tab_id, cx);
-                    }
-                    gpui_component::input::InputEvent::PressEnter { .. } => {
-                        this.submit_sql_table_query(tab_id, cx);
-                    }
-                    _ => {}
+                if !matches!(event, gpui_component::input::InputEvent::Change) {
+                    return;
                 }
+                let expanded = this.workspace.runtime(tab_id).is_some_and(|runtime| {
+                    match field {
+                        SqlField::Where => runtime.sql_table.where_expanded,
+                        SqlField::OrderBy => runtime.sql_table.order_expanded,
+                    }
+                });
+                if expanded {
+                    return;
+                }
+                let value = input_for_events.read(cx).value().to_string();
+                this.set_sql_table_field_text(tab_id, field, value);
+                this.notify_tab(tab_id, cx);
             },
         )
         .detach();
@@ -402,7 +410,7 @@ impl AppRoot {
             .find(|tab| tab.id == tab_id)
             .map(|tab| tab_field(tab, field).to_string())
             .unwrap_or_default();
-        let completion = TabCompletion::for_tab(cx, tab_id, CompletionRole::TableFragment);
+        let completion = TabCompletion::for_tab(cx, tab_id, field.completion_role());
         let editor = cx.new(|cx| {
             EditorState::new(window, cx)
                 .language("sql")
@@ -881,10 +889,15 @@ impl AppRoot {
                         .child(field.label()),
                 )
                 .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .child(Input::new(&input).appearance(false).disabled(expanded)),
+                    single_line_keys(
+                        div().relative().flex_1().min_w(px(0.0)).h(px(24.0)).overflow_hidden(),
+                        &input,
+                        tab_id,
+                        AppRoot::submit_sql_table_query,
+                        cx,
+                    )
+                    .child(inline_editor(&input, expanded, cx))
+                    .children(empty_hint(&input, field.placeholder(), field.hint_selector(), cx)),
                 )
                 .child(
                     div()

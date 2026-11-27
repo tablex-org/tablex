@@ -193,6 +193,8 @@ fn where_and_order_by_run_against_the_fixture_engine(cx: &mut TestAppContext) {
 
     // ORDER BY + Enter re-orders the filtered rows.
     sql_table_type(visual, "sql-order-field", "id DESC");
+    // `DESC` is a suggestion, so the menu is open: Escape closes it, then Enter runs.
+    visual.simulate_keystrokes("escape");
     visual.simulate_keystrokes("enter");
     settle(visual);
     assert_eq!(sql_table_rows(&app, visual), 40);
@@ -339,6 +341,8 @@ fn semicolon_fragments_are_rejected_inline_without_running(cx: &mut TestAppConte
         this.workspace.runtime(tab_id).unwrap().query.generation()
     });
     sql_table_type(visual, "sql-where-field", "id > 1; DROP TABLE orders");
+    // The last word still matches a suggestion: Escape closes the menu, then Enter runs.
+    visual.simulate_keystrokes("escape");
     visual.simulate_keystrokes("enter");
     settle(visual);
     app.read_with(visual, |this, _| {

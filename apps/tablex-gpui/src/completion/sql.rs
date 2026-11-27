@@ -12,7 +12,7 @@ use super::sql_data_clickhouse;
 use super::sql_data::{self, is_reserved, Place, SNIPPETS};
 use super::sql_lex::{lex, statement_bounds, Tok, Token};
 use super::{
-    render, Catalog, Column, Completions, ForeignKey, Item, Kind, PropertyStyle, Relation,
+    render, Catalog, Column, Completions, ForeignKey, Fragment, Item, Kind, PropertyStyle, Relation,
     SqlEditor, SqlFlavor, Style, MAX_ITEMS,
 };
 
@@ -587,7 +587,7 @@ impl<'a> Query<'a, '_> {
         for range in ranges {
             self.source.collect_refs(range, typing, &mut refs);
         }
-        if let Some(table) = self.editor.fragment_of {
+        if let Some(Fragment { table, .. }) = self.editor.fragment_of {
             refs.push(TableRef {
                 namespace: table.namespace,
                 name: table.name,
@@ -1083,7 +1083,25 @@ impl<'a> Query<'a, '_> {
         self.function_items(ranker);
     }
 
+    /// A table-data bar's `WHERE` condition or `ORDER BY` list: the table's columns, the functions
+    /// and only the expression words that belong there (no `JOIN`, no `ASC` in a condition).
+    fn fragment_items(&self, ranker: &mut Ranker<'a, '_>, order_by: bool) {
+        self.column_items(ranker, &self.refs);
+        self.function_items(ranker);
+        for keyword in sql_data::keywords_for(self.editor.flavor, Place::Expr) {
+            if sql_data::fits_fragment(keyword.text, order_by) {
+                ranker.offer(
+                    Candidate::word(keyword.text, Kind::Keyword, keyword.desc, ""),
+                    BOOST_KEYWORD,
+                );
+            }
+        }
+    }
+
     fn expression_items(&self, ranker: &mut Ranker<'a, '_>, clause: Clause) {
+        if let Some(Fragment { order_by, .. }) = self.editor.fragment_of {
+            return self.fragment_items(ranker, order_by);
+        }
         match clause {
             Clause::Select | Clause::Expr | Clause::Values => {
                 self.column_items(ranker, &self.refs);

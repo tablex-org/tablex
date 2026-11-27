@@ -684,6 +684,21 @@ pub(super) fn functions_for(flavor: SqlFlavor) -> impl Iterator<Item = &'static 
         .filter(move |function| function.available_in(flavor))
 }
 
+/// Whether the expression keyword `text` reads in a table-data bar: a `WHERE` condition takes
+/// operators and literals, an `ORDER BY` list the sort modifiers and `CASE`.
+pub(super) fn fits_fragment(text: &str, order_by: bool) -> bool {
+    let sort = matches!(text, "ASC" | "DESC" | "NULLS FIRST" | "NULLS LAST");
+    if order_by {
+        sort || matches!(text, "CASE" | "WHEN" | "THEN" | "ELSE" | "END")
+    } else {
+        !sort
+            && !matches!(
+                text,
+                "DISTINCT" | "DISTINCT ON" | "ALL" | "OVER" | "PARTITION BY" | "DEFAULT" | "EXCLUDE" | "REPLACE" | "COLUMNS"
+            )
+    }
+}
+
 /// Keywords whose dialect bit matches `flavor`.
 pub(super) fn keywords_for(
     flavor: SqlFlavor,

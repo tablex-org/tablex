@@ -5,18 +5,19 @@ pub(in crate::app) const FILTER_HINT: &str = "{}";
 /// What an empty inline SORT box shows as a hint.
 pub(in crate::app) const SORT_HINT: &str = "{ createdAt: -1 }";
 
-/// The inline FILTER / SORT box: the code editor of the expanded boxes (JSON, completion), kept to one
-/// line. Enter is taken by [`single_line_keys`] and a paste by [`paste_as_single_line`]. It has no
-/// placeholder of its own: the component paints one in the muted foreground, the colour of the
+/// The inline FILTER / SORT box (and the SQL table bar's WHERE / ORDER BY): the code editor of the
+/// expanded boxes (`language`, completion), kept to one line. Enter is taken by [`single_line_keys`]
+/// and a paste by [`paste_as_single_line`]. It has no placeholder of its own: the component paints one in the muted foreground, the colour of the
 /// punctuation of a typed value, so it read as one (see [`empty_hint`]).
-fn single_line_editor(
+pub(in crate::app) fn single_line_editor(
     window: &mut Window,
     cx: &mut Context<EditorState>,
+    language: &'static str,
     value: String,
     completion: TabCompletion,
 ) -> EditorState {
     EditorState::new(window, cx)
-        .language("json")
+        .language(language)
         .line_number(false)
         // One line has nothing to fold, and the fold column would push the text right.
         .folding(false)
@@ -25,13 +26,14 @@ fn single_line_editor(
         .completion(completion, window, cx)
 }
 
-/// Enter in the box runs the query and is never a newline; Shift+Enter does nothing. Taken before the
+/// Enter in the box calls `run` and is never a newline; Shift+Enter does nothing. Taken before the
 /// editor sees it (a submit by the editor itself would also let the key's own "\n" through), except
 /// while its completion menu is open: the menu then accepts the highlighted item.
 pub(in crate::app) fn single_line_keys(
     element: gpui::Div,
     editor: &gpui::Entity<EditorState>,
     tab_id: u64,
+    run: fn(&mut AppRoot, u64, &mut Context<AppRoot>),
     cx: &mut Context<AppRoot>,
 ) -> gpui::Div {
     let editor = editor.clone();
@@ -42,7 +44,7 @@ pub(in crate::app) fn single_line_keys(
             }
             cx.stop_propagation();
             if !action.shift {
-                this.run_tab_query(tab_id, cx);
+                run(this, tab_id, cx);
             }
         }))
         // The key's own "\n" must not reach the editor after its action (one that accepts a completion too).
@@ -54,7 +56,7 @@ pub(in crate::app) fn single_line_keys(
 }
 
 /// The inline box's view: the toolbar's own font (not the code editor's monospace), no frame, no padding.
-pub(in crate::app) fn inline_json_editor(
+pub(in crate::app) fn inline_editor(
     editor: &gpui::Entity<EditorState>,
     disabled: bool,
     cx: &gpui::App,
@@ -163,7 +165,7 @@ impl AppRoot {
         // One line like the expanded editor's twin, with the same completion: Enter runs (it is
         // never a newline), see `single_line_editor`.
         let completion = TabCompletion::for_tab(cx, tab_id, CompletionRole::Filter);
-        let editor = cx.new(|cx| single_line_editor(window, cx, value, completion));
+        let editor = cx.new(|cx| single_line_editor(window, cx, "json", value, completion));
         let editor_for_events = editor.clone();
         cx.subscribe(
             &editor,
@@ -210,7 +212,7 @@ impl AppRoot {
             .map(|runtime| runtime.mongo.sort.clone())
             .unwrap_or_else(|| r#"{"_id":1}"#.into());
         let completion = TabCompletion::for_tab(cx, tab_id, CompletionRole::Sort);
-        let editor = cx.new(|cx| single_line_editor(window, cx, value, completion));
+        let editor = cx.new(|cx| single_line_editor(window, cx, "json", value, completion));
         let editor_for_events = editor.clone();
         cx.subscribe(
             &editor,

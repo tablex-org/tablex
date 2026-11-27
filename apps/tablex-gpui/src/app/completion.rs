@@ -21,7 +21,7 @@ use lsp_types::{
 use super::AppRoot;
 use crate::catalog::TableProperties;
 use crate::completion::{
-    self, Catalog, Column, Completions, Editor, ForeignKey, Kind, MongoEditor, MongoRole,
+    self, Catalog, Column, Completions, Editor, ForeignKey, Fragment, Kind, MongoEditor, MongoRole,
     Relation, SqlEditor, SqlFlavor,
 };
 use crate::connections::ConnectionKind;
@@ -39,8 +39,8 @@ const WINDOW_AFTER: usize = 8 * 1024;
 pub(super) enum Role {
     /// The query editor: SQL, or a Mongo shell script on Mongo tabs.
     Query,
-    /// The `WHERE` / `ORDER BY` fragment editor of a SQL table-data tab.
-    TableFragment,
+    /// The `WHERE` (or, with `order_by`, `ORDER BY`) fragment editor of a SQL table-data tab.
+    TableFragment { order_by: bool },
     /// Expanded Mongo filter / sort (strict JSON) editors.
     Filter,
     Sort,
@@ -766,10 +766,13 @@ fn suggest(
             mongo(MongoRole::Script, false)
         }
         Role::Query => sql(None),
-        Role::TableFragment => sql(Some(Relation {
-            namespace: tab.schema.as_deref().filter(|schema| !schema.is_empty()),
-            name: tab.collection.as_str(),
-            view: false,
+        Role::TableFragment { order_by } => sql(Some(Fragment {
+            table: Relation {
+                namespace: tab.schema.as_deref().filter(|schema| !schema.is_empty()),
+                name: tab.collection.as_str(),
+                view: false,
+            },
+            order_by,
         })),
         Role::Filter => mongo(MongoRole::Filter, true),
         Role::Sort => mongo(MongoRole::Sort, true),
@@ -789,7 +792,7 @@ fn suggest(
         connection: &tab.connection_id,
         database: &tab.database,
         default_namespace: default_namespace(kind, tab),
-        structure: matches!(role, Role::TableFragment)
+        structure: matches!(role, Role::TableFragment { .. })
             .then(|| {
                 runtime.map(|runtime| {
                     (

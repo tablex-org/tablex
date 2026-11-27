@@ -391,10 +391,11 @@ impl AppRoot {
                     div().relative().flex_1().min_w(px(0.0)).h(px(24.0)).overflow_hidden(),
                     &filter_input,
                     tab_id,
+                    AppRoot::run_tab_query,
                     cx,
                 )
                 .child(
-                    super::editors::inline_json_editor(&filter_input, find_expanded, cx),
+                    super::editors::inline_editor(&filter_input, find_expanded, cx),
                 )
                 .children(super::editors::empty_hint(&filter_input, super::editors::FILTER_HINT, "mongo-filter-hint", cx)),
             )
@@ -421,10 +422,11 @@ impl AppRoot {
                     div().relative().flex_1().min_w(px(0.0)).h(px(24.0)).overflow_hidden(),
                     &sort_input,
                     tab_id,
+                    AppRoot::run_tab_query,
                     cx,
                 )
                 .child(
-                    super::editors::inline_json_editor(&sort_input, sort_expanded, cx),
+                    super::editors::inline_editor(&sort_input, sort_expanded, cx),
                 )
                 .children(super::editors::empty_hint(&sort_input, super::editors::SORT_HINT, "mongo-sort-hint", cx)),
             )

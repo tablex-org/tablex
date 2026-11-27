@@ -607,6 +607,275 @@ fn sql_table_where_editor_shift_enter_types_a_newline_instead_of_running(cx: &mu
     });
 }
 
+// ---- The inline WHERE / ORDER BY bar of a SQL table-data tab: the same menu as the expanded editor.
+
+fn bar_column(name: &str, data_type: &str) -> crate::catalog::CatalogColumn {
+    crate::catalog::CatalogColumn {
+        name: name.into(),
+        data_type: data_type.into(),
+        nullable: true,
+        primary_key: false,
+        is_generated: None,
+        default_expression: None,
+        auto_increment: None,
+        comment: None,
+        attributes: None,
+    }
+}
+
+/// The tab's bar editor of `field`, focused by a click where the bar draws it.
+fn focused_bar(
+    app: &gpui::Entity<AppRoot>,
+    visual: &mut gpui::VisualTestContext,
+    tab_id: u64,
+    field: results::sql_table::SqlField,
+) -> gpui::Entity<EditorState> {
+    let editor = app.update_in(visual, |this, window, cx| this.sql_table_input(tab_id, field, window, cx));
+    let selector = match field {
+        results::sql_table::SqlField::Where => "sql-where-field",
+        results::sql_table::SqlField::OrderBy => "sql-order-field",
+    };
+    let bar = visual.debug_bounds(selector).expect("the bar field");
+    visual.simulate_click(bar.center(), Default::default());
+    settle(visual);
+    let focused = visual.update(|window, cx| editor.read(cx).focus_handle(cx).is_focused(window));
+    assert!(focused, "the click focused the {selector} editor");
+    editor
+}
+
+/// Replaces what the focused bar holds with `text`, typed key by key.
+fn bar_retype(visual: &mut gpui::VisualTestContext, text: &str) {
+    visual.simulate_keystrokes("secondary-a");
+    visual.simulate_input(text);
+    settle(visual);
+}
+
+fn bar_labels(editor: &gpui::Entity<EditorState>, visual: &gpui::VisualTestContext) -> Vec<String> {
+    let (open, labels, _) = menu_state(editor, visual);
+    assert!(open, "the menu is open for {:?}", raw_value(editor, visual));
+    labels
+}
+
+fn bar_texts(app: &gpui::Entity<AppRoot>, visual: &gpui::VisualTestContext, tab_id: u64) -> (String, String) {
+    app.read_with(visual, |this, _| {
+        let tab = this.workspace.tab(tab_id).unwrap();
+        (tab.table_where.clone(), tab.applied_where.clone())
+    })
+}
+
+#[gpui::test]
+fn completion_sql_table_where_bar_completes_a_column_enter_accepts_and_a_closed_menu_runs_the_filter(
+    cx: &mut TestAppContext,
+) {
+    let (app, visual, tab_id) = sql_table_app(cx);
+    let total = sql_table_rows(&app, visual);
+    let editor = focused_bar(&app, visual, tab_id, results::sql_table::SqlField::Where);
+    visual.simulate_input("id");
+    settle(visual);
+    let labels = bar_labels(&editor, visual);
+    assert_eq!(labels[0], "id", "{labels:?}");
+    // Enter accepts the highlighted column: it does not run the query and is no newline.
+    visual.simulate_keystrokes("enter");
+    settle(visual);
+    assert_eq!(raw_value(&editor, visual), "id");
+    assert_eq!(bar_texts(&app, visual, tab_id), ("id".into(), String::new()), "accepting did not run");
+    assert_eq!(sql_table_rows(&app, visual), total);
+    visual.simulate_input(" > 200");
+    settle(visual);
+    assert!(!menu_state(&editor, visual).0, "a number opens no menu");
+    // Enter with the menu closed runs the filter and the grid shows the filtered rows.
+    visual.simulate_keystrokes("enter");
+    settle(visual);
+    assert_eq!(bar_texts(&app, visual, tab_id), ("id > 200".into(), "id > 200".into()));
+    assert_eq!(raw_value(&editor, visual), "id > 200");
+    assert_eq!(sql_table_rows(&app, visual), 40, "ids 201..=240");
+    assert_eq!(sql_table_first_id(&app, visual), "201");
+}
+
+#[gpui::test]
+fn completion_sql_table_where_bar_menu_lists_the_columns_with_their_types_and_click_accepts(
+    cx: &mut TestAppContext,
+) {
+    let (app, visual, tab_id) = sql_table_app(cx);
+    app.update(visual, |this, _| {
+        this.workspace.runtime_mut(tab_id).unwrap().structure_columns = vec![
+            bar_column("id", "integer"),
+            bar_column("status", "text"),
+            bar_column("total", "numeric"),
+        ];
+    });
+    let editor = focused_bar(&app, visual, tab_id, results::sql_table::SqlField::Where);
+    visual.simulate_input("t");
+    settle(visual);
+    let (open, labels, details) = menu_state(&editor, visual);
+    assert!(open && labels[0] == "total" && details[0].as_deref() == Some("numeric"), "{labels:?} {details:?}");
+    bar_retype(visual, "sta");
+    assert_eq!(bar_labels(&editor, visual)[0], "status");
+    // The menu hangs below the bar: a click on its first row takes the column.
+    let field = visual.debug_bounds("sql-where-field").expect("the where field");
+    let caret = visual
+        .update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+            editor.read(cx).prepaint_caret_geometry()
+        })
+        .expect("the bar is painted");
+    let row = gpui::point(caret.cursor_bounds().origin.x + gpui::px(40.0), field.bottom() + gpui::px(14.0));
+    visual.simulate_click(row, Default::default());
+    settle(visual);
+    assert_eq!(raw_value(&editor, visual), "status");
+    assert_eq!(bar_texts(&app, visual, tab_id).1, "", "accepting did not run it");
+}
+
+#[gpui::test]
+fn completion_sql_table_where_bar_quotes_a_column_only_when_the_dialect_needs_it(cx: &mut TestAppContext) {
+    let (app, visual, tab_id) = sql_table_app(cx);
+    app.update(visual, |this, _| {
+        this.workspace.runtime_mut(tab_id).unwrap().structure_columns = vec![
+            bar_column("id", "integer"),
+            bar_column("status", "text"),
+            bar_column("Order Total", "numeric"),
+            bar_column("createdAt", "timestamp"),
+        ];
+    });
+    let editor = focused_bar(&app, visual, tab_id, results::sql_table::SqlField::Where);
+    for (typed, label, inserted) in [
+        ("ord", "Order Total", "\"Order Total\""),
+        ("crea", "createdAt", "\"createdAt\""),
+        ("stat", "status", "status"),
+    ] {
+        bar_retype(visual, typed);
+        let labels = bar_labels(&editor, visual);
+        assert_eq!(labels[0], label, "{typed}: {labels:?}");
+        visual.simulate_keystrokes("enter");
+        settle(visual);
+        assert_eq!(raw_value(&editor, visual), inserted, "{typed}");
+    }
+    // MySQL quotes with backticks, and has no case folding: only the name with a space needs them.
+    app.update(visual, |this, _| {
+        let connection = this.workspace.tab(tab_id).unwrap().connection_id.clone();
+        this.saved_connections.iter_mut().find(|saved| saved.matches_id(&connection)).unwrap().kind =
+            crate::connections::ConnectionKind::Mysql;
+    });
+    for (typed, inserted) in [("ord", "`Order Total`"), ("crea", "createdAt")] {
+        bar_retype(visual, typed);
+        bar_labels(&editor, visual);
+        visual.simulate_keystrokes("enter");
+        settle(visual);
+        assert_eq!(raw_value(&editor, visual), inserted, "{typed}");
+    }
+}
+
+#[gpui::test]
+fn completion_sql_table_where_bar_offers_conditions_and_functions_but_no_clauses_or_sort_words(
+    cx: &mut TestAppContext,
+) {
+    let (app, visual, tab_id) = sql_table_app(cx);
+    let editor = focused_bar(&app, visual, tab_id, results::sql_table::SqlField::Where);
+    visual.simulate_input("id i");
+    settle(visual);
+    let labels = bar_labels(&editor, visual);
+    for word in ["IN", "IS NULL", "IS NOT NULL", "ILIKE"] {
+        assert!(labels.iter().any(|label| label == word), "{word} in {labels:?}");
+    }
+    assert!(!labels.iter().any(|label| label == "INNER JOIN"), "{labels:?}");
+    for (typed, word) in [("id a", "AND"), ("id b", "BETWEEN"), ("id l", "LIKE"), ("id n", "NOT")] {
+        bar_retype(visual, typed);
+        assert!(bar_labels(&editor, visual).iter().any(|label| label == word), "{typed} offers {word}");
+    }
+    bar_retype(visual, "id a");
+    assert!(!bar_labels(&editor, visual).iter().any(|label| label == "ASC"), "no sort word in a condition");
+    bar_retype(visual, "id > su");
+    assert!(bar_labels(&editor, visual).iter().any(|label| label == "SUM"), "functions");
+}
+
+#[gpui::test]
+fn completion_sql_table_order_by_bar_offers_columns_and_sort_modifiers_and_enter_runs_the_sort(
+    cx: &mut TestAppContext,
+) {
+    let (app, visual, tab_id) = sql_table_app(cx);
+    assert_eq!(sql_table_first_id(&app, visual), "1");
+    let editor = focused_bar(&app, visual, tab_id, results::sql_table::SqlField::OrderBy);
+    visual.simulate_input("id");
+    settle(visual);
+    assert_eq!(bar_labels(&editor, visual)[0], "id");
+    visual.simulate_keystrokes("enter");
+    settle(visual);
+    visual.simulate_input(" d");
+    settle(visual);
+    let labels = bar_labels(&editor, visual);
+    assert!(labels.iter().any(|label| label == "DESC"), "{labels:?}");
+    assert!(!labels.iter().any(|label| matches!(label.as_str(), "AND" | "IN" | "LIKE")), "{labels:?}");
+    // PostgreSQL has NULLS FIRST / LAST.
+    bar_retype(visual, "id desc n");
+    let labels = bar_labels(&editor, visual);
+    assert!(labels.iter().any(|label| label == "NULLS FIRST") && labels.iter().any(|label| label == "NULLS LAST"), "{labels:?}");
+    assert!(!labels.iter().any(|label| label == "NOT"), "{labels:?}");
+    bar_retype(visual, "id d");
+    visual.simulate_keystrokes("enter");
+    settle(visual);
+    let text = raw_value(&editor, visual);
+    assert!(text.trim_end().eq_ignore_ascii_case("id desc"), "{text:?}");
+    app.read_with(visual, |this, _| assert_eq!(this.workspace.tab(tab_id).unwrap().applied_order_by, "", "accepting did not run"));
+    assert_eq!(sql_table_first_id(&app, visual), "1");
+    // Enter with the menu closed runs it.
+    assert!(!menu_state(&editor, visual).0);
+    visual.simulate_keystrokes("enter");
+    settle(visual);
+    assert_eq!(sql_table_first_id(&app, visual), "240", "sorted by id descending");
+}
+
+#[gpui::test]
+fn completion_sql_table_bar_escape_closes_the_menu_first_and_leaves_the_text_and_the_query(
+    cx: &mut TestAppContext,
+) {
+    let (app, visual, tab_id) = sql_table_app(cx);
+    let editor = focused_bar(&app, visual, tab_id, results::sql_table::SqlField::Where);
+    visual.simulate_input("id");
+    settle(visual);
+    bar_labels(&editor, visual);
+    visual.simulate_keystrokes("escape");
+    settle(visual);
+    assert!(!menu_state(&editor, visual).0, "Escape closed the menu");
+    assert_eq!(raw_value(&editor, visual), "id", "and kept the text");
+    assert_eq!(bar_texts(&app, visual, tab_id), ("id".into(), String::new()));
+    let focused = visual.update(|window, cx| editor.read(cx).focus_handle(cx).is_focused(window));
+    assert!(focused, "the bar keeps the focus");
+    // Typing goes on, and Enter with no menu runs.
+    visual.simulate_input(" > 230");
+    settle(visual);
+    visual.simulate_keystrokes("enter");
+    settle(visual);
+    assert_eq!(sql_table_rows(&app, visual), 10, "ids 231..=240");
+}
+
+#[gpui::test]
+fn completion_sql_table_bar_follows_the_dialect_of_the_connection(cx: &mut TestAppContext) {
+    let (app, visual, tab_id) = sql_table_app(cx);
+    app.update(visual, |this, _| {
+        let connection = this.workspace.tab(tab_id).unwrap().connection_id.clone();
+        this.saved_connections.iter_mut().find(|saved| saved.matches_id(&connection)).unwrap().kind =
+            crate::connections::ConnectionKind::Duckdb;
+    });
+    let editor = focused_bar(&app, visual, tab_id, results::sql_table::SqlField::Where);
+    visual.simulate_input("id i");
+    settle(visual);
+    assert!(bar_labels(&editor, visual).iter().any(|label| label == "ILIKE"));
+    let order = focused_bar(&app, visual, tab_id, results::sql_table::SqlField::OrderBy);
+    visual.simulate_input("id n");
+    settle(visual);
+    assert!(bar_labels(&order, visual).iter().any(|label| label == "NULLS LAST"));
+    // SQL Server has no NULLS FIRST / LAST.
+    app.update(visual, |this, _| {
+        let connection = this.workspace.tab(tab_id).unwrap().connection_id.clone();
+        this.saved_connections.iter_mut().find(|saved| saved.matches_id(&connection)).unwrap().kind =
+            crate::connections::ConnectionKind::Mssql;
+    });
+    bar_retype(visual, "id n");
+    let labels = menu_state(&order, visual).1;
+    assert!(!labels.iter().any(|label| label.starts_with("NULLS")), "{labels:?}");
+}
+
 /// A New Query tab scoped to the fixture schema (warehouse.public) whose tables the sidebar already loaded.
 fn new_query_in_fixture_schema(
     cx: &mut TestAppContext,

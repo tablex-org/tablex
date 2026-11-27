@@ -77,7 +77,15 @@ pub struct SqlEditor<'a> {
     pub manual: bool,
     /// The text is only a `WHERE` / `ORDER BY` fragment of this table (the
     /// table-data bar): no statement structure, one implicit table in scope.
-    pub fragment_of: Option<Relation<'a>>,
+    pub fragment_of: Option<Fragment<'a>>,
+}
+
+/// A `WHERE` condition or `ORDER BY` list typed on its own.
+#[derive(Clone, Copy)]
+pub struct Fragment<'a> {
+    pub table: Relation<'a>,
+    /// An `ORDER BY` list (sort modifiers), not a `WHERE` condition (operators).
+    pub order_by: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
