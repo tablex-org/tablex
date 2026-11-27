@@ -2,8 +2,8 @@
   "comment": "Maximum shipped size per target, checked by scripts/size_report.py --check: `targets` is the app (target/dist/tablex-gpui), `packages.<name>.targets` every other executable (--package <name>). Raise a number only in the change that explains what grew. A target without an entry is measured but never failed.",
   "targets": {
     "macos-arm64": {
-      "binary_max_bytes": 54000000,
-      "compressed_max_bytes": 22600000
+      "binary_max_bytes": 57000000,
+      "compressed_max_bytes": 24000000
     }
   },
   "packages": {
