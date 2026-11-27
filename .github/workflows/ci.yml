@@ -27,6 +27,7 @@ name: CI
 # allowed to fail (continue-on-error) until a first green run flips the flag.
 # macOS (the only fully supported platform) is strict everywhere.
 on:
+  workflow_dispatch:
   # A change that only touches notes or docs runs no build: nothing it changes is compiled or tested.
   pull_request:
     paths-ignore:
