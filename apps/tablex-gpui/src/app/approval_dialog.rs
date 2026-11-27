@@ -259,10 +259,10 @@ impl ApprovalQueue {
         }
     }
 
-    /// How long ago the dialog's last input was.
+    /// When the dialog's last input was: every input sets it to a later instant.
     #[cfg(test)]
-    pub(super) fn since_last_input(&self) -> Option<Duration> {
-        self.opened().map(|opened| opened.gate.since.get().elapsed())
+    pub(super) fn last_input(&self) -> Option<Instant> {
+        self.opened().map(|opened| opened.gate.since.get())
     }
 
     /// The statement box's scroll handle.

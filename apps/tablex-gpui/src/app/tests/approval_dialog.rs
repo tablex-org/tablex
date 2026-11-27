@@ -121,16 +121,26 @@ fn wait_until_armed(visual: &mut gpui::VisualTestContext) {
 const HALF_DELAY: Duration = Duration::from_millis(350);
 
 /// Puts the dialog's last input half the delay in the past, as a pause before the next input would
-/// (no sleep: on a loaded runner a real pause can outlast the delay and arm Approve for real).
-fn input_after_half_the_delay(app: &gpui::Entity<AppRoot>, visual: &mut gpui::VisualTestContext) {
-    app.read_with(visual, |this, _| this.approvals.backdate_last_input(HALF_DELAY));
+/// (no sleep: on a loaded runner a real pause can outlast the delay and arm Approve for real), and
+/// returns that instant for `assert_restarted`.
+fn input_after_half_the_delay(app: &gpui::Entity<AppRoot>, visual: &mut gpui::VisualTestContext) -> std::time::Instant {
+    app.read_with(visual, |this, _| {
+        this.approvals.backdate_last_input(HALF_DELAY);
+        this.approvals.last_input().expect("the dialog is open")
+    })
 }
 
-/// The input just made restarted the quiet period (the last input was backdated, so an input that
-/// did not restart it leaves it at least half the delay old).
-fn assert_restarted(app: &gpui::Entity<AppRoot>, visual: &mut gpui::VisualTestContext, what: &str) {
-    let ago = app.read_with(visual, |this, _| this.approvals.since_last_input()).expect("the dialog is open");
-    assert!(ago < HALF_DELAY, "{what} did not restart the quiet period ({ago:?} ago)");
+/// The input just made restarted the quiet period: the last input is a later instant than the
+/// backdated `before`. An instant compared with an instant, not an age with a margin: a slow runner
+/// can take longer between the input and this check than any margin.
+fn assert_restarted(
+    app: &gpui::Entity<AppRoot>,
+    visual: &mut gpui::VisualTestContext,
+    before: std::time::Instant,
+    what: &str,
+) {
+    let last = app.read_with(visual, |this, _| this.approvals.last_input()).expect("the dialog is open");
+    assert!(last > before, "{what} did not restart the quiet period");
 }
 
 fn first_mouse_click(visual: &mut gpui::VisualTestContext, selector: &'static str) {
@@ -381,26 +391,26 @@ fn repeated_presses_on_a_disarmed_approve_never_approve_however_they_are_spaced(
     // later ones are not a decision either).
     focus_approve(&app, visual);
     for _ in 0..6 {
-        input_after_half_the_delay(&app, visual);
+        let before = input_after_half_the_delay(&app, visual);
         press(visual, "space");
-        assert_restarted(&app, visual, "Space");
+        assert_restarted(&app, visual, before, "Space");
     }
     assert!(approval_open(visual) && answers.try_recv().is_err(), "repeated Space never approved (or declined)");
     // The same with the focus put back on Approve before each press (a Tab each time).
     for _ in 0..6 {
         input_after_half_the_delay(&app, visual);
         focus_approve(&app, visual);
-        input_after_half_the_delay(&app, visual);
+        let before = input_after_half_the_delay(&app, visual);
         press(visual, "space");
-        assert_restarted(&app, visual, "Space");
+        assert_restarted(&app, visual, before, "Space");
     }
     assert!(approval_open(visual) && answers.try_recv().is_err());
     // And Enter every 250 ms, on Approve or on Decline.
     focus_approve(&app, visual);
     for _ in 0..6 {
-        input_after_half_the_delay(&app, visual);
+        let before = input_after_half_the_delay(&app, visual);
         press(visual, "enter");
-        assert_restarted(&app, visual, "Enter");
+        assert_restarted(&app, visual, before, "Enter");
     }
     assert!(approval_open(visual) && answers.try_recv().is_err(), "repeated Enter never decided anything");
 }
@@ -419,10 +429,10 @@ fn a_held_key_never_approves(cx: &mut TestAppContext) {
     let space = gpui::Keystroke::parse("space").unwrap();
     visual.simulate_event(gpui::KeyDownEvent { keystroke: space.clone(), is_held: false, prefer_character_input: false });
     for _ in 0..8 {
-        input_after_half_the_delay(&app, visual);
+        let before = input_after_half_the_delay(&app, visual);
         visual.simulate_event(gpui::KeyDownEvent { keystroke: space.clone(), is_held: true, prefer_character_input: false });
         settle(visual);
-        assert_restarted(&app, visual, "a held Space");
+        assert_restarted(&app, visual, before, "a held Space");
     }
     visual.simulate_event(gpui::KeyUpEvent { keystroke: space });
     settle(visual);
@@ -486,10 +496,10 @@ fn typing_after_the_keyboard_landed_on_approve_ends_on_decline_and_needs_a_quiet
     focus_approve(&app, visual);
     // ... and they go on typing, letters spread over more than the quiet period.
     for letter in ["h", "e", "l", "l", "o"] {
-        input_after_half_the_delay(&app, visual);
+        let before = input_after_half_the_delay(&app, visual);
         visual.simulate_keystrokes(letter);
         settle(visual);
-        assert_restarted(&app, visual, letter);
+        assert_restarted(&app, visual, before, letter);
     }
     assert!(!can_approve(&app, visual), "every key started the quiet period again");
     assert!(decline_focused(&app, visual), "the first letter handed the focus back to Decline");
@@ -533,10 +543,10 @@ fn clicks_on_a_disarmed_approve_the_footer_or_the_backdrop_start_the_quiet_perio
     // input, so the dialog is never quiet for the delay, and none of them approves (the second would,
     // if the clicks that a disabled button swallows did not restart the wait).
     for _ in 0..6 {
-        input_after_half_the_delay(&app, visual);
+        let before = input_after_half_the_delay(&app, visual);
         click_debug_button(visual, "approval-approve");
         settle(visual);
-        assert_restarted(&app, visual, "a click on Approve");
+        assert_restarted(&app, visual, before, "a click on Approve");
     }
     assert!(approval_open(visual) && answers.try_recv().is_err(), "repeated clicks never approved");
     assert!(!can_approve(&app, visual));

@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use engine_agent::testing::{connection, Behavior, FakeCatalog, FakeSession};
+use engine_connect::app_channel::AppClient;
 use engine_agent::{AgentAccess, ConnectionKind, Session, ToolLayer};
 use rmcp::model::{ElicitResult, ElicitationAction, ErrorData as McpError};
 use serde_json::{json, Value};
@@ -58,6 +59,15 @@ impl Said {
             }
         }
     }
+}
+
+/// What a client that cannot ask is told by the layer of `setup::build_layer`, which looks for the
+/// app at its default location: "not running" where that is a socket nobody listens on, "not
+/// available" where the platform has no app channel (Windows). The same lookup as the production
+/// route, so the expected text is never spelled out here.
+fn no_way_to_ask_in_built_layer() -> String {
+    let app = AppClient::at_default_location().and_then(|client| client.reachable().err());
+    no_way_to_ask(app.as_ref())
 }
 
 /// The exact text the model gets for a write that was not asked about.
@@ -181,7 +191,7 @@ fn expected(cell: Cell) -> (&'static str, String, usize, i64) {
         return refused(REASON_PRODUCTION);
     }
     if !cell.capability {
-        return refused(&no_way_to_ask(None));
+        return refused(&no_way_to_ask_in_built_layer());
     }
     match cell.said {
         Said::Yes => ("ok", String::new(), 1, 1),
@@ -287,7 +297,7 @@ async fn with_a_default_of_read_and_write_a_write_on_a_connection_with_no_settin
         fixture.set_default_access("read_write");
         let conn = fixture.typed_connection(None, type_id);
         let no_client = run_on(fixture, conn, false, Said::Yes, type_id.to_owned()).await;
-        assert_eq!(no_client.message, not_asked(&no_way_to_ask(None)));
+        assert_eq!(no_client.message, not_asked(&no_way_to_ask_in_built_layer()));
         assert_eq!(no_client.written, 0);
     }
     // The default is read: a write is refused by the access, before any question.
@@ -389,7 +399,7 @@ async fn the_audit_entries_say_how_each_write_was_decided() {
         unreadable.approval.as_deref(),
         Some(format!("unanswered: {REASON_NO_ANSWER}").as_str())
     );
-    let no_ask = no_way_to_ask(None);
+    let no_ask = no_way_to_ask_in_built_layer();
     for (cell, reason) in [
         (
             Cell {

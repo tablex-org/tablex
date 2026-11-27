@@ -373,15 +373,24 @@ mod tests {
         assert_eq!(verdict(&insert, Postgres), Smart::Modifies);
         assert!(started.elapsed() < std::time::Duration::from_millis(20), "{:?}", started.elapsed());
         // A read is read to its end (a write word could be anywhere): one pass, no allocation per word.
-        let select = format!("SELECT {} 1", "a, ".repeat(1_500_000));
-        let started = std::time::Instant::now();
-        assert_eq!(verdict(&select, Postgres), Smart::No);
-        let one = started.elapsed();
-        let select = format!("SELECT {} 1", "a, ".repeat(3_000_000));
-        let started = std::time::Instant::now();
-        assert_eq!(verdict(&select, Postgres), Smart::No);
-        let two = started.elapsed();
-        assert!(one < std::time::Duration::from_secs(3), "{one:?}");
-        assert!(two < one * 4, "twice the text took {two:?} against {one:?}: not linear");
+        // The best of a few runs of each size, interleaved: a loaded shared runner only ever makes a
+        // run slower, so the minimum is the run it left alone. Twice the text is twice the time when
+        // linear and four times when quadratic; the bound sits between.
+        let (small, large) = (
+            format!("SELECT {} 1", "a, ".repeat(1_500_000)),
+            format!("SELECT {} 1", "a, ".repeat(3_000_000)),
+        );
+        let time = |text: &str| {
+            let started = std::time::Instant::now();
+            assert_eq!(verdict(text, Postgres), Smart::No);
+            started.elapsed()
+        };
+        let (mut one, mut two) = (std::time::Duration::MAX, std::time::Duration::MAX);
+        for _ in 0..5 {
+            one = one.min(time(&small));
+            two = two.min(time(&large));
+        }
+        assert!(one < std::time::Duration::from_secs(10), "{one:?}");
+        assert!(two.as_secs_f64() < one.as_secs_f64() * 3.0, "twice the text took {two:?} against {one:?}: not linear");
     }
 }
