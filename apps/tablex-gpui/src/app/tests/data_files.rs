@@ -278,9 +278,10 @@ fn the_palette_opens_files_with_spaces_quotes_and_unicode_in_their_names(cx: &mu
     let mut rig = df_rig(cx);
     df_install(&mut rig);
     let spaced = df_write(&rig, "my orders (final).csv", "id,name,price\n1,ann,10.5\n2,bob,3.25\n3,cy,7.75\n");
-    let quoted = df_write(&rig, "it's \"mine\".csv", "id,name,price\n1,ann,10.5\n2,bob,3.25\n3,cy,7.75\n");
+    // Windows forbids `"` and `*` in a file name; keep the single quote and the brackets there.
+    let quoted = df_write(&rig, if cfg!(windows) { "it's mine.csv" } else { "it's \"mine\".csv" }, "id,name,price\n1,ann,10.5\n2,bob,3.25\n3,cy,7.75\n");
     let unicode = df_write(&rig, "dữ liệu 😀.csv", "id,name,price\n1,ann,10.5\n2,bob,3.25\n3,cy,7.75\n");
-    let globby = df_write(&rig, "data[1]*.csv", "id,name,price\n1,ann,10.5\n2,bob,3.25\n3,cy,7.75\n");
+    let globby = df_write(&rig, if cfg!(windows) { "data[1].csv" } else { "data[1]*.csv" }, "id,name,price\n1,ann,10.5\n2,bob,3.25\n3,cy,7.75\n");
     let upper = df_write(&rig, "UPPER.CSV", "id,name,price\n1,ann,10.5\n2,bob,3.25\n3,cy,7.75\n");
 
     df_palette_open(&mut rig, &[spaced, quoted, unicode, globby, upper]);

@@ -620,7 +620,7 @@ mod tests {
             port: None,
             database: None,
             user: None,
-            path: Some("/data/shop.db".into()),
+            path: Some(std::env::temp_dir().join("shop.db").to_string_lossy().into_owned()),
             tls: None,
             connection_type: "development".into(),
         };

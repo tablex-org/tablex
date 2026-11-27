@@ -544,6 +544,11 @@ fn reading_the_state_the_pane_draws_does_not_render_it(cx: &mut TestAppContext) 
 const SIDEBAR_WATCHED: [&str; 8] =
     ["navigator", "sidebar", "navigator_ui", "saved_connections", "connection_policy", "settings", "table_stats", "tunnel_ui"];
 
+/// A source file with LF line endings: git checks out CRLF on Windows, and the scans below split on `\n`.
+fn read_lf(path: impl AsRef<std::path::Path>) -> std::io::Result<String> {
+    std::fs::read_to_string(path).map(|text| text.replace("\r\n", "\n"))
+}
+
 fn sidebar_sources() -> Vec<(std::path::PathBuf, String)> {
     fn sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
         for entry in std::fs::read_dir(dir).unwrap() {
@@ -560,12 +565,12 @@ fn sidebar_sources() -> Vec<(std::path::PathBuf, String)> {
     let mut files = Vec::new();
     sources(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files);
     assert!(files.len() > 100, "the scan found the sources");
-    files.into_iter().map(|file| (file.clone(), std::fs::read_to_string(&file).unwrap())).collect()
+    files.into_iter().map(|file| (file.clone(), read_lf(&file).unwrap())).collect()
 }
 
 /// The fields of `AppRoot` as `(name, type)`.
 fn app_root_fields() -> Vec<(String, String)> {
-    let text = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app/mod.rs")).unwrap();
+    let text = read_lf(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app/mod.rs")).unwrap();
     let body = text.split("pub struct AppRoot {\n").nth(1).expect("the struct").split("\n}\n").next().unwrap();
     body.lines()
         .filter(|line| line.starts_with("    ") && !line.starts_with("     ") && !line.trim_start().starts_with("//") && !line.trim_start().starts_with('#'))
@@ -772,7 +777,7 @@ fn the_state_the_sidebar_draws_is_only_written_through_the_watch() {
         (fields, methods)
     }
     let all_sources = sidebar_sources();
-    let render = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app/navigator_ui.rs")).unwrap();
+    let render = read_lf(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app/navigator_ui.rs")).unwrap();
     let render = render.split("fn render_navigator(").nth(1).expect("render_navigator").split("fn apply_navigator_load(").next().unwrap().to_owned();
     let event_time = |name: &str| EVENT_TIME.contains(&name);
     let mut read = std::collections::BTreeSet::new();
@@ -845,7 +850,7 @@ fn the_state_the_sidebar_draws_is_only_written_through_the_watch() {
     }
     let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     for (ty, file) in WATCHED_TYPES {
-        let text = std::fs::read_to_string(workspace.join(file)).unwrap();
+        let text = read_lf(workspace.join(file)).unwrap();
         let header = text.find(&format!("struct {ty} {{")).unwrap_or_else(|| panic!("{file} defines no `struct {ty}`"));
         let body = &text[header..];
         let body = &body[..body.find("\n}").expect("the struct ends")];
@@ -863,7 +868,7 @@ fn the_state_the_sidebar_draws_is_only_written_through_the_watch() {
     }
     for (ty, field, _) in SHARED_FIELDS {
         let file = WATCHED_TYPES.iter().find(|(declared, _)| *declared == ty).unwrap().1;
-        assert!(std::fs::read_to_string(workspace.join(file)).unwrap().contains(&format!("{field}: ")), "SHARED_FIELDS lists `{ty}::{field}`, which is gone");
+        assert!(read_lf(workspace.join(file)).unwrap().contains(&format!("{field}: ")), "SHARED_FIELDS lists `{ty}::{field}`, which is gone");
     }
 
     // 3. Only the notification path says the pane is current, and only `AppRoot::new` builds the guard.

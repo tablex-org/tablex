@@ -248,6 +248,23 @@ impl ApprovalQueue {
         self.opened().is_some_and(|opened| opened.gate.can_approve())
     }
 
+    /// Makes the dialog look as if its last input was `ago` ago, so a test can place the next input
+    /// at a chosen point of the quiet period without sleeping (a sleep races the runner's load).
+    #[cfg(test)]
+    pub(super) fn backdate_last_input(&self, ago: Duration) {
+        if let Some(opened) = self.opened() {
+            let then = Instant::now().checked_sub(ago).expect("the clock is older than the backdating");
+            opened.gate.since.set(then);
+            opened.gate.before_key.set(then);
+        }
+    }
+
+    /// How long ago the dialog's last input was.
+    #[cfg(test)]
+    pub(super) fn since_last_input(&self) -> Option<Duration> {
+        self.opened().map(|opened| opened.gate.since.get().elapsed())
+    }
+
     /// The statement box's scroll handle.
     #[cfg(test)]
     pub(super) fn scroll(&self) -> Option<ScrollHandle> {
