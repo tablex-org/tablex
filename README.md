@@ -27,20 +27,28 @@ PostgreSQL, MySQL, MariaDB, SQL Server, SQLite, DuckDB, MongoDB, Redis and Click
 
 <table>
   <tr>
+    <td><img src=".github/screenshots/assistant-approval.png" alt="The assistant asking before a dangerous statement" /></td>
+    <td><img src=".github/screenshots/data-files.png" alt="CSV, JSON and Parquet files opened as views" /></td>
+  </tr>
+  <tr>
+    <td align="center">The assistant asks before any change, and says what is dangerous</td>
+    <td align="center">CSV, JSON and Parquet files as tables</td>
+  </tr>
+  <tr>
+    <td><img src=".github/screenshots/query-history.png" alt="Query History with a failed run selected" /></td>
+    <td><img src=".github/screenshots/driver-manager.png" alt="Driver Manager listing the database drivers" /></td>
+  </tr>
+  <tr>
+    <td align="center">Query History across every connection</td>
+    <td align="center">Drivers installed and updated from Driver Manager</td>
+  </tr>
+  <tr>
     <td><img src=".github/screenshots/mongodb.png" alt="A MongoDB collection in the grid" /></td>
     <td><img src=".github/screenshots/diagram.png" alt="A database diagram" /></td>
   </tr>
   <tr>
     <td align="center">MongoDB documents in the same grid</td>
     <td align="center">Database diagram</td>
-  </tr>
-  <tr>
-    <td><img src=".github/screenshots/assistant.png" alt="The AI assistant answering from the schema" /></td>
-    <td><img src=".github/screenshots/split-panes.png" alt="Two editors side by side" /></td>
-  </tr>
-  <tr>
-    <td align="center">AI assistant that reads the schema</td>
-    <td align="center">Split panes</td>
   </tr>
 </table>
 
