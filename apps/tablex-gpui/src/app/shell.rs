@@ -189,7 +189,7 @@ impl Render for AppRoot {
             .border_b_1()
             .border_color(theme::border())
             // Window title ("tablex 0.1.0 - <active tab>"),
-            // centred in the space between the window controls and the gear.
+            // centred in the space between the window controls and the Updates and theme buttons.
             .child(
                 div()
                     .debug_selector(|| "window-title".into())
@@ -217,22 +217,7 @@ impl Render for AppRoot {
                     .items_center()
                     .pr(px(8.0))
                     .child(self.render_updates_button(cx))
-                    .child(self.render_theme_button(cx))
-                    .child(
-                        Button::new("open-settings")
-                            .debug_selector(|| "open-settings".into())
-                            .icon(Icon::empty().path("icons/settings.svg").size(px(14.0)))
-                            .compact()
-                            .ghost()
-                            .tooltip(shortcuts::with_label(
-                                &t!("titlebar.settings"),
-                                &self.settings.shortcuts,
-                                "workspace.open_settings",
-                            ))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.open_settings(window, cx);
-                            })),
-                    ),
+                    .child(self.render_theme_button(cx)),
             );
 
         // The left pane replays its last frame unless it was notified (see `SidebarView`). A change that is
@@ -367,6 +352,23 @@ impl Render for AppRoot {
                             ),
                     ),
                     ),
+            )
+            .child(
+                Button::new("open-settings")
+                    .debug_selector(|| "open-settings".into())
+                    .icon(Icon::empty().path("icons/settings.svg").size(px(14.0)))
+                    .label(t!("titlebar.settings"))
+                    .small()
+                    .compact()
+                    .ghost()
+                    .tooltip(shortcuts::with_label(
+                        &t!("titlebar.settings"),
+                        &self.settings.shortcuts,
+                        "workspace.open_settings",
+                    ))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_settings(window, cx);
+                    })),
             );
 
         let root = cx.entity().downgrade();

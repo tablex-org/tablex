@@ -777,15 +777,21 @@ fn the_title_bar_names_the_app_version_and_the_active_tab(cx: &mut TestAppContex
     let (app, visual) = settings_app(cx);
     let title = visual.debug_bounds("window-title").expect("centred title");
     let gear = visual.debug_bounds("open-settings").expect("gear");
-    assert!(title.right() <= gear.left(), "title sits left of the gear");
-    // The title bar carries only the title and the gear.
+    let assistant = visual.debug_bounds("global-assistant").expect("the Assistant button");
+    let theme = visual.debug_bounds("title-theme-button").expect("the theme button");
+    assert!(title.right() <= theme.left(), "title sits left of the theme button");
+    // Settings sits in the toolbar row, right of Assistant, below the title bar.
+    assert_eq!(assistant.center().y, gear.center().y, "the toolbar row");
+    assert!(assistant.right() <= gear.left(), "right of Assistant");
+    assert!(gear.top() >= title.bottom(), "below the title bar");
+    // The title bar carries no editor actions.
     for gone in ["add-query", "run-query", "query-history"] {
         assert!(
             visual.debug_bounds(gone).is_none(),
             "{gone} is not in the title bar"
         );
     }
-    assert_eq!(title.center().y, gear.center().y, "same bar");
+    assert_eq!(title.center().y, theme.center().y, "same bar");
     let version = concat!("tablex ", env!("CARGO_PKG_VERSION"));
     click(visual, "open-settings".into());
     let (shown, os_title) = app.read_with(visual, |this, _| {
@@ -1378,15 +1384,13 @@ fn the_title_bar_theme_menu_switches_the_theme_like_the_settings_page(cx: &mut T
     visual.update(|window, cx| AppRoot::follow_system_appearance(&app, window, cx));
     assert_eq!(theme::mode(), gpui_component::theme::ThemeMode::Dark);
 
-    // The button sits left of the gear, next to it, in the same bar.
+    // The button sits at the right end of the title bar; Settings moved down to the toolbar row.
     let button = visual.debug_bounds("title-theme-button").expect("theme button");
     let gear = visual.debug_bounds("open-settings").expect("gear");
     let title = visual.debug_bounds("window-title").expect("title");
-    assert!(button.right() <= gear.left(), "left of the gear");
-    assert!(gear.left() - button.right() < gpui::px(16.0), "next to the gear");
-    assert!(title.right() <= button.left(), "the title stays left of both");
-    assert_eq!(button.center().y, gear.center().y, "same bar");
-    assert_eq!(button.size.height, gear.size.height, "same height");
+    assert!(title.right() <= button.left(), "the title stays left of it");
+    assert_eq!(button.center().y, title.center().y, "same bar");
+    assert!(gear.top() >= button.bottom(), "the gear is in the row below");
 
     // Opens with the three entries; Escape dismisses without a change.
     open_theme_menu(visual);

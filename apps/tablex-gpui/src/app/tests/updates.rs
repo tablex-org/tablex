@@ -646,9 +646,8 @@ fn the_updates_button_sits_left_of_the_theme_button_opens_the_center_and_escape_
     let mut rig = UpdateRig::new(cx, FakeReleases::tag("v0.1.6"), "0.1.6");
     let updates = rig.visual.debug_bounds("title-updates-button").expect("the Updates button");
     let theme = rig.visual.debug_bounds("title-theme-button").expect("the theme button");
-    let settings = rig.visual.debug_bounds("open-settings").expect("the gear");
     assert_eq!(updates.size, theme.size, "the same size as the theme button");
-    assert!(updates.right() <= theme.left() && theme.right() <= settings.left(), "updates, theme, gear from left to right");
+    assert!(updates.right() <= theme.left(), "updates, then theme, from left to right");
     assert!(!rig.center_open());
 
     rig.open_center();
